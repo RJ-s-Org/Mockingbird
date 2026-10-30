@@ -5,3 +5,4 @@ pub mod bench;
 pub mod corpus;
 pub mod manifest;
 pub mod report;
+pub mod selection;

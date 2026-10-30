@@ -121,6 +121,12 @@ def slug_of(model):
     return model.replace("/", "__")
 
 
+def session_slug(model):
+    """`slug_of(model)` with every character a header value may not carry
+    unquoted (such as the `@` of a variant like `x/y@nojson`) as `-`."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", slug_of(model))
+
+
 class Sink:
     """Appends rows to <out>/server.jsonl; safe across concurrent processes."""
 
@@ -302,7 +308,7 @@ class Server:
 def run_consistency(srv, sink, args):
     stamp = int(time.time())
     for rep in range(args.repeat):
-        session = f"bench-{slug_of(args.model)}-{stamp}-{rep}"
+        session = f"bench-{session_slug(args.model)}-{stamp}-{rep}"
         h = {"x-mockingbird-session": session}
         consistency_stripe(srv, sink, args, rep, h)
         consistency_tmdb(srv, sink, args, rep, h)
@@ -509,7 +515,7 @@ def run_sse(srv, sink, args):
     stamp = int(time.time())
     want = args.stream_items
     for rep in range(args.repeat):
-        session = f"bench-{slug_of(args.model)}-{stamp}-sse-{rep}"
+        session = f"bench-{session_slug(args.model)}-{stamp}-sse-{rep}"
         headers = {"x-mockingbird-session": session, "accept": "text/event-stream",
                    "x-mockingbird-stream-items": str(want)}
         status, ttfe, total, events, error = read_sse(f"{srv.data}/events/ticks", headers, want, args.timeout)

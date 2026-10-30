@@ -114,11 +114,18 @@ from `N_m`, they do not occur in evals):
   `repaired` includes the engine's deterministic patch with no second LLM call)
 - `repair_rate = count(source == "repaired") / N_m`
 - `fallback_rate = count(source == "fallback") / N_m`
+- `fallback_causes`: each fallback counted once, by the engine's reason:
+  `truncated` (cut at `max_tokens`), `non_json` (still not JSON after the
+  repair), `schema` (still invalid after the repair), `timeout` (the LLM
+  timeout), `guard` (token budget, generation slot, size cap) or `other`
 
 Conformance (from `grades.jsonl`, joined on model + sample key), over non-fallback
 samples only (`N'_m = N_m - fallback`):
 
-- `conformance_sample = count(violations == []) / N'_m`
+- `conformance_sample = count(violations == []) / N'_m`. A `format` violation
+  whose value is one of the request's path or query values is an echo (the
+  response repeats the id the client asked for), listed under `echoed` and
+  not counted as a violation
 - `conformance_kw[k] = passed_k / checked_k` for `k in {format, enum, constraint}`
   (constraint = min/max/exclusive*/minLength/maxLength/pattern/minItems/maxItems),
   summed over the model's non-fallback samples.

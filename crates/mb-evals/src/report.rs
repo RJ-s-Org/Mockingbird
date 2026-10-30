@@ -11,11 +11,35 @@ use mb_mcm::{Bundle, Direction, Operation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use mockingbird::file_config::{FileProfile, LimitsConfig};
+
 use crate::corpus::CorpusEntry;
 
-/// The per-request LLM timeout of an eval run. Generous on purpose, so a
-/// slow model shows up in `p95_ms` instead of as fallbacks.
-pub const EVAL_LLM_TIMEOUT: Duration = Duration::from_secs(30);
+/// The engine settings a served mock gets from a default LLM profile and
+/// the default `limits:`: the per-request timeout, completion token limit,
+/// temperature and output budget. An eval run uses them unless told
+/// otherwise, so it measures what a user gets.
+pub fn production_engine_settings() -> EngineSettings {
+    let profile = FileProfile::new("", "");
+    EngineSettings {
+        llm_timeout: profile.timeout,
+        max_tokens: profile.max_tokens,
+        temperature: profile.temperature,
+        output_budget: LimitsConfig::default().output_budget_tokens,
+    }
+}
+
+/// The engine settings of an eval run (see [`production_engine_settings`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EngineSettings {
+    /// The engine's per-request LLM timeout.
+    pub llm_timeout: Duration,
+    /// Completion token limit of each LLM call.
+    pub max_tokens: u32,
+    pub temperature: f32,
+    /// Completion tokens an answer is shaped to (0: off).
+    pub output_budget: u32,
+}
 
 /// The outcome of one eval run.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -253,6 +277,9 @@ pub struct EvalContract {
     /// Set by a manifest; keys `per_domain`.
     pub domain: Option<String>,
     pub targets: Vec<TargetRef>,
+    /// The narrower response schema an operation target is called with, by
+    /// operation id: a GraphQL selection's (see [`crate::selection`]).
+    pub response_schemas: BTreeMap<String, Value>,
 }
 
 impl EvalContract {
@@ -264,6 +291,7 @@ impl EvalContract {
             bundle: Arc::new(entry.bundle.clone()),
             api_type: None,
             domain: None,
+            response_schemas: BTreeMap::new(),
         }
     }
 }
@@ -275,8 +303,7 @@ pub struct RunOptions {
     pub repeat: usize,
     /// Calls in flight at most.
     pub concurrency: usize,
-    /// The engine's per-request LLM timeout.
-    pub llm_timeout: Duration,
+    pub engine: EngineSettings,
 }
 
 impl Default for RunOptions {
@@ -284,7 +311,7 @@ impl Default for RunOptions {
         Self {
             repeat: 1,
             concurrency: 1,
-            llm_timeout: EVAL_LLM_TIMEOUT,
+            engine: production_engine_settings(),
         }
     }
 }
@@ -424,8 +451,15 @@ struct Finished {
     outcome: Result<Done, String>,
 }
 
-/// Makes the call of `job`; `None` when its target index is out of range.
-async fn call(engine: &Engine, bundle: &Bundle, job: Job) -> Option<Finished> {
+/// Makes the call of `job`, an operation's answering `narrowed` when set (a
+/// GraphQL selection's schema); `None` when its target index is out of
+/// range.
+async fn call(
+    engine: &Engine,
+    bundle: &Bundle,
+    job: Job,
+    narrowed: Option<&Value>,
+) -> Option<Finished> {
     let start = Instant::now();
     let (target_id, request, outcome) = match job.target {
         TargetRef::Operation(i) => {
@@ -436,8 +470,12 @@ async fn call(engine: &Engine, bundle: &Bundle, job: Job) -> Option<Finished> {
                 "query": call.query,
                 "body": call.body,
             });
+            let ctx = GenerationContext {
+                response_schema: narrowed,
+                ..GenerationContext::default()
+            };
             let outcome = engine
-                .generate(bundle, op, &call, GenerationContext::default())
+                .generate(bundle, op, &call, ctx)
                 .await
                 .map(|r| Done {
                     source: r.source,
@@ -477,9 +515,23 @@ async fn call(engine: &Engine, bundle: &Bundle, job: Job) -> Option<Finished> {
     })
 }
 
-/// The schema the engine validates `target`'s answers against, with its
+/// The narrower schema `contract` calls operation `target` with, if any.
+fn narrowed_schema(contract: &EvalContract, target: TargetRef) -> Option<Value> {
+    let TargetRef::Operation(i) = target else {
+        return None;
+    };
+    let op = contract.bundle.operations.get(i)?;
+    contract.response_schemas.get(&op.id).cloned()
+}
+
+/// The schema the engine validates `target`'s answers against: the
+/// narrower one `contract` calls it with, else the target's own with its
 /// reachable definitions attached; null when there is none.
-fn validated_schema(bundle: &Bundle, target: TargetRef) -> Value {
+fn validated_schema(contract: &EvalContract, target: TargetRef) -> Value {
+    if let Some(narrowed) = narrowed_schema(contract, target) {
+        return narrowed;
+    }
+    let bundle = &contract.bundle;
     let schema = match target {
         TargetRef::Operation(i) => bundle
             .operations
@@ -581,7 +633,10 @@ pub async fn run_contracts(
     let engine = Arc::new(Engine::new(
         Some(provider),
         EngineConfig {
-            timeout: opts.llm_timeout,
+            timeout: opts.engine.llm_timeout,
+            max_tokens: opts.engine.max_tokens,
+            temperature: opts.engine.temperature,
+            output_budget: opts.engine.output_budget,
             ..EngineConfig::default()
         },
     ));
@@ -626,7 +681,8 @@ pub async fn run_contracts(
             };
             let engine = Arc::clone(&engine);
             let bundle = Arc::clone(&contract.bundle);
-            in_flight.spawn(async move { call(&engine, &bundle, job).await });
+            let narrowed = narrowed_schema(contract, job.target);
+            in_flight.spawn(async move { call(&engine, &bundle, job, narrowed.as_ref()).await });
         }
         let Some(joined) = in_flight.join_next().await else {
             if jobs.peek().is_none() {
@@ -659,7 +715,7 @@ pub async fn run_contracts(
             source: "error".to_owned(),
             latency_ms: finished.latency_ms,
             body: Value::Null,
-            schema: validated_schema(&contract.bundle, finished.job.target),
+            schema: validated_schema(contract, finished.job.target),
             request: finished.request,
             prompt_tokens: 0,
             completion_tokens: 0,

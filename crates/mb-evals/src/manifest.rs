@@ -1,14 +1,16 @@
 //! A workload manifest: an explicit list of contracts, each tagged with its
 //! API type and domain, optionally naming the exact targets to call.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
-use crate::report::{EvalContract, default_targets, select_targets};
+use crate::report::{EvalContract, TargetRef, default_targets, select_targets};
+use crate::selection;
 
 /// The manifest file: `{"entries": [...]}`.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -36,6 +38,11 @@ pub struct ManifestEntry {
     /// The cap of the corpus rule; absent uses the run's default.
     #[serde(default)]
     pub max_ops: Option<usize>,
+    /// GraphQL only: the selection set each operation is called with, by
+    /// operation id (see [`crate::selection`]). Every GraphQL operation
+    /// target needs one: a real client always sends one.
+    #[serde(default)]
+    pub selections: BTreeMap<String, Map<String, Value>>,
 }
 
 /// Parses manifest JSON. Fails on malformed JSON, an empty or duplicate
@@ -92,11 +99,71 @@ pub fn compile_entry(
         }
         _ => default_targets(&bundle, entry.max_ops.unwrap_or(default_max_ops)),
     };
+    let response_schemas = narrowed_schemas(&entry, &bundle, &targets)?;
     Ok(EvalContract {
         name: entry.name,
         bundle: Arc::new(bundle),
         api_type: Some(entry.api_type),
         domain: Some(entry.domain),
         targets,
+        response_schemas,
     })
+}
+
+/// The selection-narrowed response schema of each operation target `entry`
+/// gives a selection for. Fails on a selection for an id that is not an
+/// operation target, a selected field the schema does not have, or a
+/// GraphQL operation target without a selection.
+fn narrowed_schemas(
+    entry: &ManifestEntry,
+    bundle: &mb_mcm::Bundle,
+    targets: &[TargetRef],
+) -> anyhow::Result<BTreeMap<String, Value>> {
+    let ops: Vec<&mb_mcm::Operation> = targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Operation(i) => bundle.operations.get(*i),
+            TargetRef::Channel(_) => None,
+        })
+        .collect();
+    let mut out = BTreeMap::new();
+    for (id, sel) in &entry.selections {
+        let op = ops
+            .iter()
+            .find(|op| &op.id == id)
+            .ok_or_else(|| anyhow!("{}: selection for {id}, which is not a target", entry.name))?;
+        let schema = op
+            .success_output()
+            .and_then(|o| o.schema.as_ref())
+            .map(|s| bundle.with_reachable_defs(s))
+            .ok_or_else(|| anyhow!("{}: {id} has no success schema", entry.name))?;
+        let defs = schema
+            .get("$defs")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let unknown = selection::unknown_fields(&schema, &defs, sel);
+        if !unknown.is_empty() {
+            bail!(
+                "{}: the selection of {id} names fields its schema lacks: {}",
+                entry.name,
+                unknown.join(", ")
+            );
+        }
+        out.insert(id.clone(), selection::narrow(&schema, &defs, sel));
+    }
+    let missing: Vec<&str> = ops
+        .iter()
+        .filter(|op| matches!(op.binding, mb_mcm::Binding::Graphql { .. }))
+        .map(|op| op.id.as_str())
+        .filter(|id| !out.contains_key(*id))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "{}: GraphQL targets need a selection: {}",
+            entry.name,
+            missing.join(", ")
+        );
+    }
+    Ok(out)
 }

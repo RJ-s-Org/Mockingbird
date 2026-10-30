@@ -5,7 +5,12 @@
       "path": "examples/apis/stripe/stripe.openapi.yaml",
       "api_type": "rest",
       "domain": "payments",
-      "operations": ["GetPaymentIntentsIntent", "PostPaymentIntentsIntentConfirm", "GetCustomersCustomer", "PostRefunds"],
+      "operations": [
+        "GetPaymentIntentsIntent",
+        "PostPaymentIntentsIntentConfirm",
+        "GetCustomersCustomer",
+        "PostRefunds"
+      ],
       "max_ops": 4
     },
     {
@@ -13,7 +18,11 @@
       "path": "examples/apis/paypal/paypal-orders.openapi.yaml",
       "api_type": "rest",
       "domain": "payments",
-      "operations": ["orders.create", "orders.get", "orders.capture"],
+      "operations": [
+        "orders.create",
+        "orders.get",
+        "orders.capture"
+      ],
       "max_ops": 3
     },
     {
@@ -21,7 +30,12 @@
       "path": "examples/apis/square/square.openapi.yaml",
       "api_type": "rest",
       "domain": "ecommerce",
-      "operations": ["GetPayment", "ListCatalog", "RetrieveCustomer", "ListLocations"],
+      "operations": [
+        "GetPayment",
+        "ListCatalog",
+        "RetrieveCustomer",
+        "ListLocations"
+      ],
       "max_ops": 4
     },
     {
@@ -29,7 +43,11 @@
       "path": "fixtures/openapi/orders-3.1.yaml",
       "api_type": "rest",
       "domain": "ecommerce",
-      "operations": ["getOrder", "listOrders", "createOrder"],
+      "operations": [
+        "getOrder",
+        "listOrders",
+        "createOrder"
+      ],
       "max_ops": 3
     },
     {
@@ -37,15 +55,152 @@
       "path": "examples/apis/shopify-admin-graphql/shopify-admin.graphql",
       "api_type": "graphql",
       "domain": "ecommerce",
-      "operations": ["Query.shop", "Query.order", "Query.products", "Mutation.productCreate"],
-      "max_ops": 4
+      "operations": [
+        "Query.shop",
+        "Query.order",
+        "Query.products",
+        "Mutation.productCreate"
+      ],
+      "max_ops": 4,
+      "selections": {
+        "Query.shop": {
+          "id": {},
+          "name": {},
+          "email": {},
+          "myshopifyDomain": {},
+          "currencyCode": {},
+          "ianaTimezone": {},
+          "url": {},
+          "plan": {
+            "displayName": {},
+            "shopifyPlus": {}
+          }
+        },
+        "Query.order": {
+          "id": {},
+          "name": {},
+          "createdAt": {},
+          "processedAt": {},
+          "displayFinancialStatus": {},
+          "displayFulfillmentStatus": {},
+          "currencyCode": {},
+          "email": {},
+          "closed": {},
+          "cancelledAt": {},
+          "tags": {},
+          "customer": {
+            "id": {},
+            "displayName": {},
+            "email": {},
+            "numberOfOrders": {}
+          },
+          "totalPriceSet": {
+            "shopMoney": {
+              "amount": {},
+              "currencyCode": {}
+            }
+          },
+          "subtotalPriceSet": {
+            "shopMoney": {
+              "amount": {},
+              "currencyCode": {}
+            }
+          },
+          "totalTaxSet": {
+            "shopMoney": {
+              "amount": {},
+              "currencyCode": {}
+            }
+          },
+          "lineItems": {
+            "@args": {
+              "first": 5
+            },
+            "nodes": {
+              "id": {},
+              "title": {},
+              "quantity": {},
+              "sku": {}
+            },
+            "pageInfo": {
+              "hasNextPage": {},
+              "endCursor": {}
+            }
+          }
+        },
+        "Query.products": {
+          "@args": {
+            "first": 5
+          },
+          "nodes": {
+            "id": {},
+            "title": {},
+            "handle": {},
+            "status": {},
+            "vendor": {},
+            "productType": {},
+            "tags": {},
+            "totalInventory": {},
+            "createdAt": {},
+            "updatedAt": {},
+            "priceRangeV2": {
+              "minVariantPrice": {
+                "amount": {},
+                "currencyCode": {}
+              },
+              "maxVariantPrice": {
+                "amount": {},
+                "currencyCode": {}
+              }
+            },
+            "variants": {
+              "@args": {
+                "first": 3
+              },
+              "nodes": {
+                "id": {},
+                "title": {},
+                "price": {},
+                "sku": {},
+                "inventoryQuantity": {}
+              }
+            }
+          },
+          "pageInfo": {
+            "hasNextPage": {},
+            "endCursor": {}
+          }
+        },
+        "Mutation.productCreate": {
+          "product": {
+            "id": {},
+            "title": {},
+            "handle": {},
+            "status": {},
+            "vendor": {},
+            "productType": {},
+            "tags": {},
+            "createdAt": {},
+            "updatedAt": {}
+          },
+          "userErrors": {
+            "field": {},
+            "message": {}
+          }
+        }
+      }
     },
     {
       "name": "rest/social-tmdb",
       "path": "examples/apis/tmdb/tmdb.openapi.yaml",
       "api_type": "rest",
       "domain": "social-media",
-      "operations": ["movie-details", "movie-credits", "tv-series-details", "person-details"],
+      "operations": [
+        "movie-details",
+        "movie-credits",
+        "tv-series-details",
+        "person-details"
+      ],
       "max_ops": 4
     },
     {
@@ -53,7 +208,11 @@
       "path": "examples/apis/spotify/spotify.openapi.yaml",
       "api_type": "rest",
       "domain": "social-media",
-      "operations": ["get-playlist", "get-an-artists-top-tracks", "get-track"],
+      "operations": [
+        "get-playlist",
+        "get-an-artists-top-tracks",
+        "get-track"
+      ],
       "max_ops": 3
     },
     {
@@ -61,7 +220,11 @@
       "path": "examples/apis/discord/discord.openapi.yaml",
       "api_type": "rest",
       "domain": "social-media",
-      "operations": ["get_message", "list_messages", "get_guild"],
+      "operations": [
+        "get_message",
+        "list_messages",
+        "get_guild"
+      ],
       "max_ops": 3
     },
     {
@@ -69,7 +232,12 @@
       "path": "examples/apis/github-rest/github-rest.openapi.yaml",
       "api_type": "rest",
       "domain": "devtools",
-      "operations": ["repos/get", "pulls/get", "issues/get", "search/repos"],
+      "operations": [
+        "repos/get",
+        "pulls/get",
+        "issues/get",
+        "search/repos"
+      ],
       "max_ops": 4
     },
     {
@@ -77,15 +245,177 @@
       "path": "examples/apis/github-graphql/github.graphql",
       "api_type": "graphql",
       "domain": "devtools",
-      "operations": ["Query.viewer", "Query.repository", "Query.user", "Mutation.createIssue"],
-      "max_ops": 4
+      "operations": [
+        "Query.viewer",
+        "Query.repository",
+        "Query.user",
+        "Mutation.createIssue"
+      ],
+      "max_ops": 4,
+      "selections": {
+        "Query.viewer": {
+          "id": {},
+          "login": {},
+          "name": {},
+          "bio": {},
+          "company": {},
+          "location": {},
+          "email": {},
+          "avatarUrl": {},
+          "url": {},
+          "websiteUrl": {},
+          "createdAt": {},
+          "followers": {
+            "totalCount": {}
+          },
+          "following": {
+            "totalCount": {}
+          },
+          "repositories": {
+            "@args": {
+              "first": 5
+            },
+            "totalCount": {},
+            "nodes": {
+              "name": {},
+              "description": {},
+              "stargazerCount": {},
+              "isPrivate": {},
+              "updatedAt": {}
+            },
+            "pageInfo": {
+              "hasNextPage": {},
+              "endCursor": {}
+            }
+          },
+          "contributionsCollection": {
+            "totalCommitContributions": {},
+            "totalPullRequestContributions": {}
+          }
+        },
+        "Query.user": {
+          "id": {},
+          "login": {},
+          "name": {},
+          "bio": {},
+          "company": {},
+          "location": {},
+          "email": {},
+          "avatarUrl": {},
+          "url": {},
+          "websiteUrl": {},
+          "createdAt": {},
+          "followers": {
+            "totalCount": {}
+          },
+          "following": {
+            "totalCount": {}
+          },
+          "repositories": {
+            "@args": {
+              "first": 5
+            },
+            "totalCount": {},
+            "nodes": {
+              "name": {},
+              "description": {},
+              "stargazerCount": {},
+              "isPrivate": {},
+              "updatedAt": {}
+            },
+            "pageInfo": {
+              "hasNextPage": {},
+              "endCursor": {}
+            }
+          }
+        },
+        "Query.repository": {
+          "id": {},
+          "name": {},
+          "nameWithOwner": {},
+          "description": {},
+          "url": {},
+          "isPrivate": {},
+          "isFork": {},
+          "isArchived": {},
+          "stargazerCount": {},
+          "forkCount": {},
+          "createdAt": {},
+          "pushedAt": {},
+          "updatedAt": {},
+          "owner": {
+            "login": {},
+            "avatarUrl": {},
+            "url": {}
+          },
+          "primaryLanguage": {
+            "name": {},
+            "color": {}
+          },
+          "licenseInfo": {
+            "key": {},
+            "name": {}
+          },
+          "issues": {
+            "@args": {
+              "first": 5,
+              "states": [
+                "OPEN"
+              ]
+            },
+            "totalCount": {},
+            "nodes": {
+              "number": {},
+              "title": {},
+              "state": {},
+              "createdAt": {},
+              "author": {
+                "login": {}
+              }
+            }
+          },
+          "pullRequests": {
+            "@args": {
+              "first": 3
+            },
+            "totalCount": {},
+            "nodes": {
+              "number": {},
+              "title": {},
+              "state": {},
+              "merged": {},
+              "isDraft": {}
+            }
+          }
+        },
+        "Mutation.createIssue": {
+          "clientMutationId": {},
+          "issue": {
+            "id": {},
+            "number": {},
+            "title": {},
+            "body": {},
+            "state": {},
+            "url": {},
+            "createdAt": {},
+            "author": {
+              "login": {}
+            }
+          }
+        }
+      }
     },
     {
       "name": "rest/travel-booking",
       "path": "docs/benchmarks/contracts/travel.openapi.yaml",
       "api_type": "rest",
       "domain": "travel",
-      "operations": ["searchFlights", "getOffer", "createBooking", "getBooking"],
+      "operations": [
+        "searchFlights",
+        "getOffer",
+        "createBooking",
+        "getBooking"
+      ],
       "max_ops": 4
     },
     {
@@ -93,7 +423,10 @@
       "path": "docs/benchmarks/contracts/travel.openapi.yaml",
       "api_type": "rest",
       "domain": "travel",
-      "operations": ["listHotels", "cancelBooking"],
+      "operations": [
+        "listHotels",
+        "cancelBooking"
+      ],
       "max_ops": 2
     },
     {
@@ -101,7 +434,9 @@
       "path": "fixtures/proto/route_guide.proto",
       "api_type": "grpc",
       "domain": "generic",
-      "operations": ["RouteGuide.GetFeature"],
+      "operations": [
+        "RouteGuide.GetFeature"
+      ],
       "max_ops": 1
     },
     {
@@ -109,7 +444,9 @@
       "path": "examples/apis/grpc/otlp_trace_service.proto",
       "api_type": "grpc",
       "domain": "devtools",
-      "operations": ["TraceService.Export"],
+      "operations": [
+        "TraceService.Export"
+      ],
       "max_ops": 1
     },
     {
@@ -117,7 +454,11 @@
       "path": "fixtures/wsdl/calculator.wsdl",
       "api_type": "soap",
       "domain": "generic",
-      "operations": ["Add", "Subtract", "Divide"],
+      "operations": [
+        "Add",
+        "Subtract",
+        "Divide"
+      ],
       "max_ops": 3
     },
     {
@@ -125,7 +466,10 @@
       "path": "fixtures/wsdl/accounts-rpc.wsdl",
       "api_type": "soap",
       "domain": "generic",
-      "operations": ["GetAccount", "CreateAccount"],
+      "operations": [
+        "GetAccount",
+        "CreateAccount"
+      ],
       "max_ops": 2
     },
     {
@@ -133,7 +477,11 @@
       "path": "examples/apis/kafka-events/commerce-events.asyncapi.yaml",
       "api_type": "asyncapi",
       "domain": "ecommerce",
-      "operations": ["orderCreated", "paymentAuthorized", "shipmentDispatched"],
+      "operations": [
+        "orderCreated",
+        "paymentAuthorized",
+        "shipmentDispatched"
+      ],
       "max_ops": 3
     },
     {
@@ -141,7 +489,10 @@
       "path": "fixtures/asyncapi/orders-amqp-2.6.yaml",
       "api_type": "asyncapi",
       "domain": "ecommerce",
-      "operations": ["orderCreated", "orderCancelled"],
+      "operations": [
+        "orderCreated",
+        "orderCancelled"
+      ],
       "max_ops": 2
     }
   ]

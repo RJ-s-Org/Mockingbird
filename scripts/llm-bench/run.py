@@ -289,7 +289,7 @@ class ProxyProc:
         roster = os.path.join(abspath(args.out), "roster.json")
         if os.path.exists(roster):
             cmd += ["--prices", roster]
-        for p in prior:
+        for p in list(prior) + list(args.prior_ledger or []):
             if os.path.exists(p):
                 cmd += ["--prior-ledger", p]
         if args.no_stream_upgrade:
@@ -409,8 +409,13 @@ def run_engine(
         "--samples", os.path.join(outdir, "samples.jsonl"),
         "--out", outdir,
     ]
+    # Unset: mb-evals uses a default LLM profile's settings, as the server does.
     if args.llm_timeout_secs:
         cmd += ["--llm-timeout-secs", str(args.llm_timeout_secs)]
+    if args.max_tokens:
+        cmd += ["--max-tokens", str(args.max_tokens)]
+    if args.output_budget is not None:
+        cmd += ["--output-budget", str(args.output_budget)]
     env = child_env({
         "MB_EVAL_LLM_BASE_URL": proxy.label_url(model, workload),
         "MB_EVAL_LLM_MODEL": model,
@@ -843,7 +848,11 @@ def main() -> int:
         p.add_argument("--budget-usd", type=float, default=9.0)
         p.add_argument("--port", type=int, default=0, help="proxy port (default: a free one)")
         p.add_argument("--concurrency", type=int, default=4, help="mb-evals calls in flight per model")
-        p.add_argument("--llm-timeout-secs", type=int, help="passed to mb-evals")
+        p.add_argument("--llm-timeout-secs", type=int, help="passed to mb-evals (default: the profile default)")
+        p.add_argument("--max-tokens", type=int, help="passed to mb-evals (default: the profile default)")
+        p.add_argument("--output-budget", type=int, help="passed to mb-evals (default: the limits default)")
+        p.add_argument("--prior-ledger", action="append",
+                       help="an earlier run's calls.jsonl(.gz) whose spend counts toward --budget-usd (repeatable)")
         p.add_argument("--repeat", type=int, default=3, help="calls per target in the full run")
         p.add_argument("--server-calls", type=int, default=40, help="estimated server-suite LLM calls per model")
         p.add_argument("--no-stream-upgrade", action="store_true")

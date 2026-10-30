@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use mb_evals::report::{EvalContract, EvalReport, RunOptions, Sample, Thresholds, run_contracts};
+use mb_evals::report::{
+    EngineSettings, EvalContract, EvalReport, RunOptions, Sample, Thresholds,
+    production_engine_settings, run_contracts,
+};
 use mb_evals::{bench, corpus, manifest};
 use mb_llm::{OpenAiCompatible, OpenAiConfig};
 
@@ -60,9 +63,18 @@ struct RunArgs {
     /// source, latency, tokens) to this file.
     #[arg(long)]
     samples: Option<PathBuf>,
-    /// The engine's per-request LLM timeout, in seconds.
-    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
-    llm_timeout_secs: u64,
+    /// The engine's per-request LLM timeout, in seconds (default: a default
+    /// LLM profile's).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    llm_timeout_secs: Option<u64>,
+    /// Completion token limit of each LLM call (default: a default LLM
+    /// profile's).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    max_tokens: Option<u32>,
+    /// Completion tokens an answer is shaped to, 0 for off (default:
+    /// `limits.output_budget_tokens`'s default).
+    #[arg(long)]
+    output_budget: Option<u32>,
     /// Directory `report.json` and `report.md` are written to.
     #[arg(long, default_value = "eval-report")]
     out: PathBuf,
@@ -98,6 +110,21 @@ struct BenchArgs {
     /// Where the JSON report is written.
     #[arg(long, default_value = "bench.json")]
     out: PathBuf,
+}
+
+/// The production engine settings with the overrides `args` sets.
+fn engine_settings(args: &RunArgs) -> EngineSettings {
+    let mut settings = production_engine_settings();
+    if let Some(secs) = args.llm_timeout_secs {
+        settings.llm_timeout = Duration::from_secs(secs);
+    }
+    if let Some(n) = args.max_tokens {
+        settings.max_tokens = n;
+    }
+    if let Some(n) = args.output_budget {
+        settings.output_budget = n;
+    }
+    settings
 }
 
 /// The provider settings `run` takes from the environment.
@@ -210,7 +237,7 @@ async fn run(args: RunArgs, env: EvalEnv) -> anyhow::Result<ExitCode> {
     let opts = RunOptions {
         repeat: args.repeat as usize,
         concurrency: args.concurrency as usize,
-        llm_timeout: Duration::from_secs(args.llm_timeout_secs),
+        engine: engine_settings(&args),
     };
     let mut sink = SampleSink::open(args.samples.as_deref())?;
     let outcome = run_contracts(
