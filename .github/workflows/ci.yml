@@ -19,41 +19,6 @@ env:
 jobs:
   check:
     runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      rabbitmq:
-        image: rabbitmq:3
-        ports:
-          - 5672:5672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
-          --health-interval 10s
-          --health-timeout 10s
-          --health-retries 10
-      kafka:
-        # KRaft single node with the image's default config.
-        image: apache/kafka:3.9.1
-        ports:
-          - 9092:9092
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       MB_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
       MB_TEST_AMQP_URL: amqp://guest:guest@localhost:5672/%2f
@@ -64,6 +29,23 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
+      # The service containers start in the background (image pulls
+      # included) and come up while the toolchain and the build run. "Wait
+      # for the service containers" checks each one just before the tests.
+      # A `services:` block held the job for about 15 s before checkout
+      # (audit CI-4).
+      - name: Start the service containers
+        run: |
+          log="$RUNNER_TEMP/services.log"
+          # Each runs detached from the step's output, so the step ends now.
+          start() {
+            { docker run -d --name "$@" || echo "docker run $1 failed"; } </dev/null >>"$log" 2>&1 &
+          }
+          start postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
+          start rabbitmq -p 5672:5672 rabbitmq:3
+          # KRaft single node with the image's default config.
+          start kafka -p 9092:9092 apache/kafka:3.9.1
+          start redis -p 6379:6379 redis:7
       - name: Free disk space
         if: runner.environment == 'github-hosted'
         run: |
@@ -95,6 +77,28 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-nextest
+      - name: Wait for the service containers
+        timeout-minutes: 4
+        run: |
+          # ready NAME PROBE...: runs PROBE in the container every 2 s for up
+          # to 180 s; on timeout prints the start log and the container's
+          # logs and fails.
+          ready() {
+            name=$1; shift
+            for _ in $(seq 1 90); do
+              if docker exec "$name" "$@" >/dev/null 2>&1; then echo "$name is ready"; return 0; fi
+              sleep 2
+            done
+            echo "::error::$name was not ready within 180 s"
+            cat "$RUNNER_TEMP/services.log" || true
+            docker logs --tail 100 "$name" || true
+            return 1
+          }
+          # Over TCP: the image's init-time server listens on the socket only.
+          ready postgres pg_isready -h 127.0.0.1 -U postgres
+          ready redis redis-cli ping
+          ready rabbitmq rabbitmq-diagnostics -q check_port_connectivity
+          ready kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092
       # Profile and test groups: .config/nextest.toml. nextest skips
       # doctests, so they run on their own.
       - run: cargo nextest run --workspace --all-features --profile ci
@@ -137,7 +141,14 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features
 
   console:
+    # Stays on the 2 vCPU runner: console (116-199 s on PRs) finishes before
+    # e2e and check, so the large runner would cost more for no shorter run
+    # (audit CI-5, measured 2026-10-30).
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    env:
+      # check:api and the local e2e suite only run the binary: without
+      # debuginfo it links faster and the cache is smaller.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     defaults:
       run:
         working-directory: crates/mb-console/web

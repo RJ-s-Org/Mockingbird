@@ -265,10 +265,28 @@ fn ci_gates_present() {
     };
 
     let check = &jobs(&doc)["check"];
+    // The service containers start in the background and are probed just
+    // before the tests (audit CI-4).
     assert!(
-        scalar(&check["services"]["redis"]["image"]).starts_with("redis:7"),
-        "the check job needs a Redis service"
+        runs("check", "start redis -p 6379:6379 redis:7"),
+        "the check job needs a Redis container"
     );
+    let named = |name: &str| {
+        all.iter()
+            .position(|(id, step)| id == "check" && scalar(&step["name"]) == name)
+    };
+    let nextest = all.iter().position(|(id, step)| {
+        id == "check" && scalar(&step["run"]).starts_with("cargo nextest run")
+    });
+    let (start, wait) = (
+        named("Start the service containers"),
+        named("Wait for the service containers"),
+    );
+    assert!(
+        start.is_some() && start < wait && wait < nextest,
+        "the check job starts its containers, then waits for them before nextest"
+    );
+    assert!(runs("check", "ready redis redis-cli ping"));
     assert_eq!(
         scalar(&check["env"]["MB_TEST_REDIS_URL"]),
         "redis://localhost:6379"
