@@ -1,76 +1,66 @@
 # Action note, 2026-10-31
 
-Follow-up to the one bar [simulated-world journeys](../journeys-2026-10-30/README.md) missed: a confirm moved its status on only 3 of 6 times. No context beyond each contract. Spend was $0.13 through `proxy.py`.
+Follow-up to the one bar [simulated-world journeys](../journeys-2026-10-30/README.md) missed: a confirm moved its status on only 3 of 6 times. No context beyond each contract. Spend was $0.55 through `proxy.py`.
 
-**Result:** the bar is met, 6/6 against a bar of 5/6. The same note gave 12/12 captures on a second contract and 12/12 pays on a third. An action that should leave the status alone is no better on the default model: `remind` is 0/4 before and after.
+**Result:** the bar is met. A confirm moves its status on 17 of 18 times, up from 13 of 18 with the old prompt at the same repetitions, and the bar was 5 of 6. Held-out journeys rose from 627 to 635 of 840. The published journeys fell from 497/517 to 488/521, on routes whose prompts did not change.
 
-## Why models missed
+## The change
 
-The failing answers showed two habits:
+Failing answers showed models reasoning from what was missing: shown `payment_method: null`, Luna kept `requires_payment_method` and invented a `last_payment_error`. For a 2xx on an action route, the prompt now ends:
 
-- **Reasoning from what was missing.** Luna saw `payment_method: null`, kept `requires_payment_method` and invented a `last_payment_error`.
-- **Taking the next value in the enum.** Models answered `requires_confirmation` after a confirm, and `awaiting_payment` after paying a draft invoice.
+> \`confirm\` succeeded; it was not refused. If \`confirm\` needs something the resource lacks, that is now there: fill it in.
 
-The prompt said the resource had moved to "the state that follows `confirm`, whatever it needed before". It now ends with this, for any 2xx on an action route:
+This replaces "the resource has moved to the state that follows `confirm`, whatever it needed before", and the words "(an action moves a status on)" are gone. The prompt no longer says anything about a status, so it assumes none: a `preview` or `validate` is not told something moved, and a resource with no status is not told it has one. The verb comes from the route's path. A scenario's instructions override the note.
 
-> \`confirm\` succeeded, so whatever the resource lacked for \`confirm\` is now there (fill it in, with no error), and the answer shows the state a finished \`confirm\` leaves it in, not a status that still waits for \`confirm\` or for something before it.
+## Results
 
-The words "(an action moves a status on)" are gone from the prompt. A scenario's instructions override the note. The verb comes from the route's path, so nothing here names a vendor or adds config.
+Each comparison ran 3 models with the old and new prompts. The published journeys and the invoicing contract had 6 repetitions each. The held-out journeys had 4, and their baseline is [its own run](../heldout-baseline-2026-10-31/README.md).
 
-## The bar
+| Suite | Before | Now |
+| --- | ---: | ---: |
+| `stripe.confirm moves the status on` | 13/18 | **17/18** |
+| Published journeys | 497/517 (96.1%) | 488/521 (93.7%) |
+| Held-out journeys | 627/840 (74.7%) | 635/840 (75.6%) |
+| Invoicing contract | 142/162 | 150/162 |
 
-Three published journeys, 3 models, 2 repetitions, as in the earlier run. `server.jsonl` holds each check.
+**Published journeys.** Most of the fall is in `travel`, and in Lightning most of all. `searchFlights` and `createBooking` send the same prompt template with both versions, so this note cannot have caused it. Lightning's answers failed the schema more often on those routes (8 travel checks judged a faker fallback, up from 2), and its provider mix differed between runs. Treat this as noise, but it was not re-measured.
 
-| Measure | Pass | Before | Now | |
-| --- | --- | ---: | ---: | --- |
-| `stripe.confirm moves the status on` | At least 5/6 | 3/6 | **6/6** | Met |
-| Journey checks passed | No fall from 96% | 164/171 | 169/174 (97%) | Met |
+**Held-out journeys.** Action checks that were strong stayed so, except one: `paypal.capture completes the order` fell from 12/12 to 10/12. Both misses are Luna writing malformed JSON in a long answer. Replaying that prompt 40 times each gave 0 malformed before and 1 now, so the note is not clearly the cause, but it did make these answers about 30% longer (609 to 796 tokens).
 
-| Model | Now |
-| --- | ---: |
-| `deepseek/deepseek-v4.1-flash-1017` (default) | 58/58 |
-| `openai/gpt-6-luna` | 56/58 |
-| `nvidia/nemotron-3.5-lightning` | 55/58 |
+**Actions that should change nothing.** [`invoicing.openapi.yaml`](../contracts/invoicing.openapi.yaml) was written for this: `pay` moves a status, `remind`, `preview` and `validate` do not, and `pin` acts on a resource with no status.
 
-The only other checks that changed are `stripe.a succeeded intent received its amount` (3/3 to 6/6, which only applies to a succeeded intent) and `github.repo counts the new issue` (4/6 to 3/6, which this note does not reach).
+| Check | Before | Now |
+| --- | ---: | ---: |
+| `pay moves the status on` | 18/18 | 18/18 |
+| `preview keeps the status` | 11/18 | 14/18 |
+| `validate keeps the status` | 11/18 | 14/18 |
+| `remind keeps the status` | 12/18 | 14/18 |
+| `pin sets the flag` | 18/18 | 18/18 |
+| `read shows the pinned note` | 18/18 | 18/18 |
 
-## Overfitting
-
-The note was tuned on Stripe's confirm, so it was run on two more contracts: PayPal's order capture, and a new contract written for this check ([`invoicing.openapi.yaml`](../contracts/invoicing.openapi.yaml)) with a `pay` route that moves the status and a `remind` route whose summary says the invoice stays as it is. `actions-before.jsonl` is the code before this change and `actions-after.jsonl` the code with it.
-
-| Check | Luna and Lightning, before | Luna and Lightning, now | Default, before | Default, now |
-| --- | ---: | ---: | ---: | ---: |
-| `stripe.confirm moves the status on` | 7/10 | 8/8 | not run | 4/4 |
-| `paypal.capture moves the status on` | 10/10 | 8/8 | not run | 4/4 |
-| `invoices.pay moves the status on` | 9/10 | 8/8 | 4/4 | 4/4 |
-| `invoices.remind keeps the status` | 7/10 | 6/8 | 0/4 | 0/4 |
-
-Before, confirm passed 7/10 here against 3/6 on the published journeys. So part of the published gap was noise, and the real starting point is probably between the two.
-
-**`remind` is not solved.** Every miss starts from `draft` and answers `awaiting_payment`, on both versions. Reminding someone about a draft invoice is odd, so the model's answer is defensible, but the contract's summary says otherwise. The new note neither causes this nor fixes it.
+The default model is 3/6 on `preview`, `validate` and `remind` both before and after, so this is not solved.
 
 ## What was tried
 
-To compare wordings without a rebuild, the prompts recorded for each action were replayed with their text changed, 10 calls per cell at `max_tokens` 2,500. Each count leaves out answers that could not be read, such as upstream errors. Each cell draws on a few recorded prompts, so it does not replace the journeys.
+To compare wordings without a rebuild, prompts recorded from the journeys were replayed with their text changed at `max_tokens` 2,500. The `preview` prompts were made from recorded `remind` prompts. Counts are out of 20, and answers lost upstream count as misses.
 
-| Variant | Confirm, Luna | Confirm, Lightning | Remind, Luna | Remind, Lightning |
+| Variant, Lightning | Confirm | Pay | Preview keeps | Remind keeps |
 | --- | ---: | ---: | ---: | ---: |
-| Prompt before this change | 4/9 | 9/9 | 9/9 | 3/9 |
-| Rule out waiting statuses, in the first paragraph | 2/8 | 7/10 | 10/10 | 6/10 |
-| The same, at the end of the prompt | 5/10 | 8/10 | 10/10 | 9/10 |
-| The same, in the system message | 0/9 | 3/10 | 10/10 | 7/10 |
-| Also supply what it lacked, in the first paragraph | 10/10 | 10/10 | 10/10 | 3/10 |
-| **Also supply what it lacked, at the end (shipped)** | 10/10 | 10/10 | 10/10 | 7/10 |
-| The same, naming the status's values and its value before | 10/10 | 10/10 | 10/10 | 7/10 |
+| An earlier note ("the state a finished `confirm` leaves it in, not a status that still waits") | 20 | 20 | **3** | 14 |
+| **Says nothing of state (shipped)** | 19 | 20 | 17 | 13 |
+| The same, listing enum values and their value before | 15 | 20 | 16 | 15 |
+| The same, with "with no error" | 16 | 19 | 15 | 15 |
 
-- **Supplying what was lacking is what fixed it.** Ruling out waiting statuses alone did not help Luna.
-- **The system message did worst** for confirm, so the note was not moved there. Only the earlier wording was tried in that position.
-- **Naming the enum's values added nothing**, so no code reads the schema for them.
-- **The end of the prompt beat the first paragraph** on `remind`, which is why the note goes last.
+Luna and the default model passed at least 18 of 20 in every cell here, and their only misses were upstream errors.
+
+- **The earlier note pushed status.** It scored best on confirm, yet moved `preview` off its status 17 times in 20.
+- **Listing the enum's values did not help.** It cost Lightning on confirm and gained little on `remind`, so no code reads the schema for them.
+
+An earlier, smaller replay with 10 calls per cell also tried other positions. In the system message, an earlier wording did worst on confirm (0/9 on Luna, 3/10 on Lightning). In the prompt's first paragraph, a note like the earlier one above matched the end of the prompt on confirm and did worse on `remind` (3/10 against 7/10), which is why the note goes last.
 
 ## Limits
 
-- 6 runs on the bar is small, and 12/12 and 10/10 still leave room for misses on a contract not tried here.
-- The note was chosen on these contracts, and the invoicing contract was written by the author of the note.
-- A 2xx from an action that should report a failure in its body now needs a scenario to say so. Without one, the mock answers the action as done.
-- Some Luna calls failed upstream with a 400 saying the prompt was flagged as potentially violating usage policy (6 in the first replay, none in the second). The cause was not investigated.
+- The wording was chosen on Stripe and invoicing, and the invoicing contract was written by the author of the note.
+- The held-out journeys have now been used once to check this, and did not drive the wording.
+- Held-out `zendesk.update changes status and priority` and `notion.update changes the properties` are 1/12 and 0/12, and this note does not reach them. Models answer the new values, then `reflect` in `crates/mb-engine/src/lib.rs` looks to overlay the stored ones on `PUT` and `PATCH`.
+- A few Luna calls failed upstream with a 400 saying the prompt was flagged as potentially violating usage policy. The cause was not investigated.

@@ -331,8 +331,10 @@ must follow them.\n{}\n</scenario>",
 
 /// What a success of an action route owes its answer, the last thing in the
 /// prompt. Models shown a resource missing what the action needs otherwise
-/// keep it as it was and invent an error, or answer the status before the
-/// action; in the system message or earlier in this one, the note did less.
+/// keep it as it was and invent an error. It says nothing of a status: not
+/// every action moves one or every resource has one, and measured, saying so
+/// moved a status on for actions that leave it, and listing an enum's values
+/// did not help.
 pub(crate) fn action_note(
     op: &Operation,
     status: u16,
@@ -340,9 +342,8 @@ pub(crate) fn action_note(
 ) -> Option<String> {
     let verb = action_verb(op, status)?;
     let mut s = format!(
-        "`{verb}` succeeded, so whatever the resource lacked for `{verb}` is now there (fill it \
-in, with no error), and the answer shows the state a finished `{verb}` leaves it in, not a status \
-that still waits for `{verb}` or for something before it."
+        "`{verb}` succeeded; it was not refused. If `{verb}` needs something the resource lacks, \
+that is now there: fill it in."
     );
     if ctx.scenario.is_some() {
         s.push_str(" <scenario> overrides this.");

@@ -2668,29 +2668,31 @@ fn unpaid_intent() -> StoredResource {
     }
 }
 
-/// A successful action's prompt ends by saying it succeeded, what that
-/// supplies and which state it leaves.
+/// A successful action's prompt ends by saying it succeeded and that what it
+/// needs is there.
 #[tokio::test]
 async fn an_action_prompt_says_it_succeeded() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
     assert!(prompt.contains("requires_payment_method"), "{prompt}");
     assert!(
         prompt.ends_with(
-            "`confirm` succeeded, so whatever the resource lacked for `confirm` is now there \
-             (fill it in, with no error), and the answer shows the state a finished `confirm` \
-             leaves it in, not a status that still waits for `confirm` or for something before \
-             it."
+            "`confirm` succeeded; it was not refused. If `confirm` needs something the resource \
+             lacks, that is now there: fill it in."
         ),
         "{prompt}"
     );
 }
 
-/// The prompt does not say every action moves a status: models then moved
-/// one on for an action that leaves it.
+/// The prompt never tells an action that a status moved: `preview` or
+/// `validate` move none, and a resource may have none.
 #[tokio::test]
-async fn an_action_prompt_does_not_say_every_action_moves_a_status() {
+async fn an_action_prompt_does_not_assume_a_status() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
-    assert!(!prompt.contains("moves a status on"), "{prompt}");
+    let (instructions, _) = prompt.split_once("<now>").unwrap();
+    let (_, note) = prompt.rsplit_once("</shown_resources>").unwrap();
+    for text in [instructions, note] {
+        assert!(!text.contains("status"), "{text}");
+    }
 }
 
 /// A scenario's instructions win over what a success supplies: a mock owner
