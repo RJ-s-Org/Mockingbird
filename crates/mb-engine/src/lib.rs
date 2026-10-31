@@ -1173,6 +1173,18 @@ impl Engine {
     /// `id`) replaced by a different faker value that keeps it valid
     /// against `op`'s success schema; `None` when none is found.
     pub fn fresh_identity(&self, bundle: &Bundle, op: &Operation, body: &Value) -> Option<Value> {
+        self.fresh_identity_at(bundle, op, body, 0)
+    }
+
+    /// [`Engine::fresh_identity`], drawn anew for each `attempt`: a fixed seed
+    /// and the same body otherwise draw the same identity, however taken it is.
+    pub fn fresh_identity_at(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        body: &Value,
+        attempt: u32,
+    ) -> Option<Value> {
         let variant = op.success_output()?;
         let schema = variant.schema.as_ref()?;
         let validator = self
@@ -1183,10 +1195,13 @@ impl Engine {
         let id_schema = consistency::property_schema(bundle, schema, field)?;
         // Seeded by the body whose identity it replaces: the same
         // collision gets the same fresh identity.
+        let retry = Value::from(attempt);
+        let keys = [body, &retry];
+        let keys = if attempt == 0 { &keys[..1] } else { &keys[..] };
         let mut draws = seed::Draws::new(
             self.faker_seed,
             &[&bundle.source_digest, &op.id, "identity"],
-            &[body],
+            keys,
         );
         (0..IDENTITY_DRAWS).find_map(|_| {
             let fresh = self.fake_field(bundle, field, &id_schema, &mut draws);

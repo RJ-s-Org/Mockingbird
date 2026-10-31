@@ -3570,6 +3570,159 @@ components:
     assert_eq!(theirs["name"], "theirs");
 }
 
+/// `actions_of` with a fixed faker seed.
+fn seeded_actions_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions {
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(
+            Engine::new(
+                Some(Arc::clone(&provider) as Arc<dyn Provider>),
+                EngineConfig::default(),
+            )
+            .with_faker_seed(7),
+        ),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    }
+}
+
+/// A new record's number moves past those stored, as a create's does, or a
+/// read by number would find it instead of the record that has that number.
+#[tokio::test]
+async fn a_new_record_from_an_action_takes_a_number_of_its_own() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Issues, version: "1"}
+paths:
+  /issues:
+    post:
+      operationId: createIssue
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /issues/{number}:
+    get:
+      operationId: getIssue
+      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /issues/{number}/duplicate:
+    post:
+      operationId: duplicateIssue
+      parameters: [{name: number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, number]
+      properties: {id: {type: string}, number: {type: integer}}
+"##;
+    let issue = |id: &str, number: i64| Ok(json!({"id": id, "number": number}).to_string());
+    let h = actions_of(
+        contract,
+        vec![issue("i1", 1), issue("i2", 2), issue("i3", 1)],
+    );
+    h.call("POST", "/issues", None).await;
+    h.call("POST", "/issues", None).await;
+    let (_, _, duplicate) = h.call("POST", "/issues/2/duplicate", None).await;
+    assert_eq!(duplicate, json!({"id": "i3", "number": 3}));
+    let (_, _, first) = h.call("GET", "/issues/1", None).await;
+    assert_eq!(first["id"], "i1");
+    let (_, _, third) = h.call("GET", "/issues/3", None).await;
+    assert_eq!(third["id"], "i3");
+}
+
+/// `id` as an enum with every value taken: no fresh id exists. The answer is
+/// served and what is stored stays.
+#[tokio::test]
+async fn an_id_that_cannot_be_freed_stores_nothing() {
+    let contract = SAME_SHAPE.replace(
+        "properties: {id: {type: string}, status: {type: string}}",
+        "properties: {id: {type: string, enum: [o1, o2]}, status: {type: string}}",
+    );
+    let order = |id: &str, status: &str| Ok(json!({"id": id, "status": status}).to_string());
+    let h = actions_of(
+        &contract,
+        vec![
+            order("o1", "first"),
+            order("o2", "second"),
+            order("o2", "from an action"),
+            order("o1", "from a create"),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    h.call("POST", "/orders", None).await;
+    let (status, _, answer) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(answer, json!({"id": "o2", "status": "from an action"}));
+    let (status, _, answer) = h.call("POST", "/orders", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(answer["status"], "from a create");
+    let (_, _, first) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(first["status"], "first");
+    let (_, _, second) = h.call("GET", "/orders/o2", None).await;
+    assert_eq!(second["status"], "second");
+}
+
+/// A fixed seed and the same answer draw the same first fresh id each time, so
+/// a retry has to draw something else.
+#[tokio::test]
+async fn a_seeded_repeat_still_finds_a_fresh_id() {
+    let order = |id: &str, status: &str| Ok(json!({"id": id, "status": status}).to_string());
+    let h = seeded_actions_of(
+        SAME_SHAPE,
+        vec![
+            order("o1", "open"),
+            order("o2", "same"),
+            order("o2", "same"),
+            order("o2", "same"),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let (_, _, answer) = h.call("POST", "/orders/o1/capture", None).await;
+        ids.insert(answer["id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    for id in ids {
+        let (_, source, stored) = h.call("GET", &format!("/orders/{id}"), None).await;
+        assert_eq!(source, "state", "{id}");
+        assert_eq!(stored["id"], id.as_str());
+    }
+}
+
+/// An effect naming the id the answer moved away from means the answer's own
+/// record, not the one that holds that id.
+#[tokio::test]
+async fn an_effect_on_a_rewritten_id_is_dropped() {
+    let order = |id: &str, status: &str| Ok(json!({"id": id, "status": status}).to_string());
+    let h = actions_of(
+        SAME_SHAPE,
+        vec![
+            order("o1", "open"),
+            order("o2", "first"),
+            Ok(json!({
+                "effects": [{"type": "orders", "id": "o2", "set": {"status": "changed"}}],
+                "response": {"id": "o2", "status": "second"},
+            })
+            .to_string()),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    h.call("POST", "/orders/o1/capture", None).await;
+    let (_, _, second) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_ne!(second["id"], "o2");
+    let (_, _, kept) = h.call("GET", "/orders/o2", None).await;
+    assert_eq!(kept["status"], "first");
+}
+
 /// The request names the target, so the answer is about it, whatever the LLM
 /// said before the request was laid over it: the target keeps what it omits.
 #[tokio::test]

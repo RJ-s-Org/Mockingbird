@@ -880,16 +880,20 @@ pub(crate) async fn complete(
     let is_query = matches!(op.kind, OperationKind::Query);
     let collection = collection_of(op, call).filter(|_| rt.consistency);
     async {
+        // A record's id no draw could free: the answer is served, not stored.
+        let mut id_taken = false;
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
-            if matches!(op.kind, OperationKind::Command(Effect::Create)) {
-                unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
+            let makes_record =
+                matches!(op.kind, OperationKind::Command(Effect::Create)) || generated.new_record;
+            if makes_record {
+                id_taken =
+                    !unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
             }
             // An action's new record goes under its own id, not over another's.
             if generated.new_record {
-                unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
                 let own = generated.body.as_ref().and_then(|b| b.get(field));
                 if let Some(id) = own.and_then(id_string) {
@@ -902,7 +906,7 @@ pub(crate) async fn complete(
                 && rt.consistency
                 && target_id.is_none()
                 && !transient_fallback(&generated);
-            if !is_query || seeding {
+            if (!is_query || seeding) && !id_taken {
                 let origin = if is_query {
                     WriteOrigin::Seeded
                 } else {
@@ -928,6 +932,7 @@ pub(crate) async fn complete(
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
+            && !id_taken
         {
             store_wrapped(
                 &mut state,
@@ -1194,8 +1199,11 @@ pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
             .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
 }
 
-/// Gives a create's answer a fresh identity when the session already holds
-/// a resource under the generated one and the request did not ask for it.
+/// Gives the answer of a call making a record a fresh identity when the
+/// session already holds a resource under the generated one and the request
+/// did not ask for it. An effect naming the id it moved from meant the answer's
+/// own record, so it is dropped. Returns whether the answer's id is free to
+/// write under; `false` when no draw could free it.
 async fn unique_create_id(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
@@ -1204,13 +1212,13 @@ async fn unique_create_id(
     resource_type: &str,
     call: &OperationCall,
     generated: &mut GeneratedResponse,
-) {
+) -> bool {
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    let Some(body) = generated.body.as_ref() else {
-        return;
+    let Some(body) = generated.body.clone() else {
+        return true;
     };
     let Some(id) = body.get(field).and_then(id_string) else {
-        return;
+        return true;
     };
     let requested = call
         .body
@@ -1220,20 +1228,26 @@ async fn unique_create_id(
     if requested.as_deref() == Some(id.as_str())
         || state.get(session, resource_type, &id).await.is_none()
     {
-        return;
+        return true;
     }
-    for _ in 0..3 {
-        let Some(fresh) = rt.engine.fresh_identity(&rt.bundle, op, body) else {
-            return;
+    let before = generated.effects.len();
+    generated
+        .effects
+        .retain(|e| e.resource_type != resource_type || e.id != id);
+    generated.dropped_effects += before - generated.effects.len();
+    for attempt in 0..3 {
+        let Some(fresh) = rt.engine.fresh_identity_at(&rt.bundle, op, &body, attempt) else {
+            return false;
         };
         let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
-            return;
+            return false;
         };
         if state.get(session, resource_type, &fresh_id).await.is_none() {
             generated.body = Some(fresh);
-            return;
+            return true;
         }
     }
+    false
 }
 
 /// Stored resources scanned for a read by another field, or for the
