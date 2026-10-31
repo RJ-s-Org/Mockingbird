@@ -739,6 +739,7 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
     }
 
+    let target_missing = target.is_none();
     // A read naming a seed asks for that seed's answer, not for what a plain
     // read answered; a resource stored by a write or a fixture still stands.
     let target = target.filter(|stored| {
@@ -793,6 +794,22 @@ pub(crate) async fn prepare<'a>(
         // resets that could remove them also clear the cache.
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(served);
+    }
+
+    // Last, so that a 404 or a cached answer costs no scan.
+    let mut related = related;
+    if is_query
+        && target_missing
+        && let Some(id) = target_id.as_deref()
+    {
+        let found = referrers(&mut state, session, op, id)
+            .instrument(state_span())
+            .await;
+        for resource in found {
+            if !holds(&related, &resource) {
+                related.push(resource);
+            }
+        }
     }
 
     Prepared::Pending(Pending {
@@ -1043,6 +1060,9 @@ pub(crate) struct BundleIndex {
     /// suit instead, with the position of the read it comes from: a list's
     /// item schema, else a singleton read's success schema (`/user`).
     other_shapes: HashMap<String, (usize, Value)>,
+    /// Per resource type, the types whose answers have a reference field of
+    /// it (see [`reference_targets`]), sorted and deduplicated.
+    referrers: HashMap<String, Vec<String>>,
 }
 
 impl BundleIndex {
@@ -1055,6 +1075,7 @@ impl BundleIndex {
         let mut detail_reads = HashMap::new();
         let mut ranked_defs: HashMap<String, (u8, String)> = HashMap::new();
         let mut shapes = TypeShapes::new();
+        let mut referrers: HashMap<String, Vec<String>> = HashMap::new();
         for (i, op) in bundle.operations.iter().enumerate() {
             by_id.entry(op.id.clone()).or_insert(i);
             if let (Some(t), Some(field)) = (
@@ -1071,6 +1092,9 @@ impl BundleIndex {
                 .and_then(|o| o.schema.as_ref())
                 .map(|schema| list_members(bundle, schema))
                 .unwrap_or_default();
+            if let Some(t) = op.resource_type.as_deref() {
+                record_referrers(bundle, op, t, &members, &mut referrers);
+            }
             if matches!(op.kind, OperationKind::Query) {
                 listed.extend(members.iter().cloned());
                 if let Some(t) = op.resource_type.as_deref() {
@@ -1087,7 +1111,7 @@ impl BundleIndex {
             }
             list_members_of.push(members);
         }
-        for fields in path_fields.values_mut() {
+        for fields in path_fields.values_mut().chain(referrers.values_mut()) {
             fields.sort_unstable();
             fields.dedup();
         }
@@ -1114,6 +1138,7 @@ impl BundleIndex {
                 .into_iter()
                 .map(|(t, (_, i, schema))| (t, (i, schema)))
                 .collect(),
+            referrers,
         }
     }
 
@@ -1137,6 +1162,66 @@ impl BundleIndex {
     fn list_members(&self, op: usize) -> &[String] {
         self.list_members.get(op).map_or(&[], Vec::as_slice)
     }
+
+    fn referrers(&self, resource_type: &str) -> &[String] {
+        self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Records in `referrers` the types the fields of `op`'s answers (as type
+/// `t`, its list items included) refer to.
+fn record_referrers(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    t: &str,
+    members: &[String],
+    referrers: &mut HashMap<String, Vec<String>>,
+) {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let items = list_item_schemas(bundle, op, members);
+    let shapes = std::iter::once(schema).chain(items.iter().map(|(_, s)| s));
+    for shape in shapes {
+        for part in schema_parts(bundle, Some(shape)).0 {
+            let Some(properties) = part.get("properties").and_then(Value::as_object) else {
+                continue;
+            };
+            for (field, property) in properties {
+                for target in reference_targets(bundle, field, property) {
+                    referrers.entry(target).or_default().push(t.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// The types a field of an answer's schema can refer to: `<x>s` and `<x>`
+/// for `<x>Id`/`<x>_id`, or for a member `<x>` that can hold a string.
+fn reference_targets(bundle: &mb_mcm::Bundle, field: &str, property: &Value) -> Vec<String> {
+    let prefix = reference_prefix(field)
+        .or_else(|| (!field.is_empty() && holds_a_string(bundle, property)).then_some(field));
+    prefix.map_or_else(Vec::new, |x| vec![format!("{x}s"), x.to_string()])
+}
+
+/// Whether `schema` admits a string, or a list of them.
+fn holds_a_string(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
+    let string = |s: &Value| {
+        schema_parts(bundle, Some(s))
+            .0
+            .iter()
+            .any(|p| match p.get("type") {
+                Some(Value::String(t)) => t == "string",
+                Some(Value::Array(types)) => types.iter().any(|t| t == "string"),
+                _ => false,
+            })
+    };
+    string(schema)
+        || schema_parts(bundle, Some(schema))
+            .0
+            .iter()
+            .filter_map(|p| p.get("items"))
+            .any(string)
 }
 
 /// The item schemas of `op`'s success schema: each of its list `members`'
@@ -2196,15 +2281,7 @@ async fn read_context(
         },
         _ => None,
     };
-    let related = related(
-        state,
-        session,
-        op,
-        target_id.is_some(),
-        &call.query,
-        call.body.as_ref(),
-    )
-    .await;
+    let related = related(state, session, op, target_id, target.as_ref(), call).await;
     (target, related)
 }
 
@@ -2472,60 +2549,158 @@ pub(crate) async fn store_resources(
     .await;
 }
 
-/// Resources the response should stay consistent with: recent items for a
-/// list query, plus anything referenced by `<x>Id` fields.
+/// Resources the response should stay consistent with, nearest first: what
+/// the request names, recent items for a list query, then what the target
+/// and the resources the request names refer to. With consistency off, only
+/// the `<x>Id` members and global ids of the query and body are followed.
 async fn related(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
-    has_target: bool,
-    query: &Map<String, Value>,
-    body: Option<&Value>,
+    target_id: Option<&str>,
+    target: Option<&StoredResource>,
+    call: &OperationCall,
 ) -> Vec<StoredResource> {
+    let rt = state.rt;
+    let index = rt.consistency.then(|| rt.index());
+    let mut references = Vec::new();
+    if index.is_some() {
+        for (field, value) in &call.path_params {
+            if let Some(id) = id_string(value) {
+                references_in(field, &Value::String(id), 0, index, &mut references);
+            }
+        }
+    }
+    for (field, value) in &call.query {
+        references_in(field, value, 0, index, &mut references);
+    }
+    if let Some(Value::Object(fields)) = &call.body {
+        for (field, value) in fields {
+            references_in(field, value, 0, index, &mut references);
+        }
+    }
     let mut out: Vec<StoredResource> = Vec::new();
+    let mut seen = Vec::new();
+    follow(state, session, references, &mut seen, target, &mut out).await;
+    let named = out.len();
     if matches!(op.kind, OperationKind::Query)
-        && !has_target
+        && target_id.is_none()
         && let Some(t) = op.resource_type.as_deref()
     {
-        out = state.list(session, t, LIST_CONTEXT_LIMIT).await;
+        let mut listed = state.list(session, t, LIST_CONTEXT_LIMIT).await;
         // Lists the answer holds that other reads stored: Plaid's
         // `/auth/get` answers the `accounts` that `/accounts/get` seeded.
-        let members = state
-            .rt
+        let members = rt
             .index()
             .operation(&op.id)
-            .map(|i| state.rt.index().list_members(i))
+            .map(|i| rt.index().list_members(i))
             .unwrap_or_default();
         let others = members
             .iter()
             .filter(|m| m.as_str() != t && !ENVELOPE_KEYS.contains(&m.as_str()));
         for member in others.take(MAX_LIST_MEMBERS) {
-            if out.len() >= LIST_CONTEXT_LIMIT {
+            if listed.len() >= LIST_CONTEXT_LIMIT {
                 break;
             }
-            let room = LIST_CONTEXT_LIMIT - out.len();
-            out.extend(state.list(session, member, room).await);
+            let room = LIST_CONTEXT_LIMIT - listed.len();
+            listed.extend(state.list(session, member, room).await);
+        }
+        for item in listed {
+            if !holds(&out, &item) {
+                out.push(item);
+            }
         }
     }
-    let mut references = Vec::new();
-    for (field, value) in query {
-        references_in(field, value, 0, &mut references);
-    }
-    if let Some(Value::Object(fields)) = body {
-        for (field, value) in fields {
-            references_in(field, value, 0, &mut references);
+    let hops = if index.is_some() { MAX_RELATED_HOPS } else { 0 };
+    let (mut own, mut start, mut end) = (target, 0, named);
+    for _ in 0..hops {
+        let mut references = Vec::new();
+        for resource in own.take().into_iter().chain(&out[start..end]) {
+            references_in("", &resource.data, 0, index, &mut references);
         }
+        start = out.len();
+        follow(state, session, references, &mut seen, target, &mut out).await;
+        end = out.len();
     }
-    for (types, id) in references.into_iter().take(MAX_REFERENCES) {
+    out
+}
+
+/// A reference: the types to look in, and the id.
+type Reference = (Vec<String>, String);
+
+/// Adds to `out` the resources `references` name, other than `target`.
+/// `seen` holds the references looked up so far in this call: at most
+/// [`MAX_REFERENCES`], so that what is followed first is what is nearest.
+async fn follow(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    references: Vec<Reference>,
+    seen: &mut Vec<Reference>,
+    target: Option<&StoredResource>,
+    out: &mut Vec<StoredResource>,
+) {
+    for reference in references {
+        if seen.len() >= MAX_REFERENCES {
+            return;
+        }
+        if seen.contains(&reference) {
+            continue;
+        }
+        seen.push(reference.clone());
+        let (types, id) = reference;
         for t in types {
+            if target.is_some_and(|r| r.resource_type == t && r.id == id) {
+                break;
+            }
             if let Some(hit) = state.get(session, &t, &id).await {
-                if !out
-                    .iter()
-                    .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
-                {
+                let is_target =
+                    target.is_some_and(|r| r.resource_type == hit.resource_type && r.id == hit.id);
+                if !is_target && !holds(out, &hit) {
                     out.push(hit);
                 }
                 break;
+            }
+        }
+    }
+}
+
+/// Whether `resources` already holds `resource`.
+fn holds(resources: &[StoredResource], resource: &StoredResource) -> bool {
+    resources
+        .iter()
+        .any(|r| r.resource_type == resource.resource_type && r.id == resource.id)
+}
+
+/// The stored resources that refer to `id` of `op`'s resource type, for a
+/// read of an id the session does not hold: at most [`MAX_SCAN`] resources
+/// of the types the contract says can refer to it are read, newest first,
+/// and at most what a prompt shows ([`mb_engine::prompt::MAX_RELATED`]) kept.
+async fn referrers(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    id: &str,
+) -> Vec<StoredResource> {
+    let rt = state.rt;
+    let Some(wanted) = op.resource_type.as_deref().filter(|_| rt.consistency) else {
+        return Vec::new();
+    };
+    let index = rt.index();
+    let types = index.referrers(wanted);
+    let each = MAX_SCAN / types.len().clamp(1, MAX_REFERENCES);
+    let mut out = Vec::new();
+    for t in types.iter().take(MAX_REFERENCES) {
+        for resource in state.list(session, t, each).await {
+            let mut references = Vec::new();
+            references_in("", &resource.data, 0, Some(index), &mut references);
+            let refers = references
+                .iter()
+                .any(|(types, to)| to == id && types.iter().any(|t| t == wanted));
+            if refers {
+                out.push(resource);
+                if out.len() >= mb_engine::prompt::MAX_RELATED {
+                    return out;
+                }
             }
         }
     }
@@ -2542,7 +2717,7 @@ pub(crate) async fn referenced(
 ) -> Vec<StoredResource> {
     let mut references = Vec::new();
     for (field, value) in args {
-        references_in(field, value, 0, &mut references);
+        references_in(field, value, 0, None, &mut references);
     }
     let mut state = StateAccess::new(rt);
     let mut out: Vec<StoredResource> = Vec::new();
@@ -2567,11 +2742,24 @@ pub(crate) async fn referenced(
 /// Reference lookups per call, at most.
 const MAX_REFERENCES: usize = 16;
 
+/// How far references are followed out of what a request names and of its
+/// target: to what those refer to, and no further.
+const MAX_RELATED_HOPS: usize = 1;
+
 /// The resources `value` (under member `field`) refers to, as the types to
-/// look in and the id: a `<x>Id`/`<x>_id` member (types `<x>s`, `<x>`), or
-/// a global id `gid://<app>/<Type>/…` (type `<type>`), here or in nested
-/// objects and lists (GraphQL input objects, `lines: [{merchandiseId}]`).
-fn references_in(field: &str, value: &Value, depth: usize, out: &mut Vec<(Vec<String>, String)>) {
+/// look in and the id, here or in nested objects and lists (GraphQL input
+/// objects, `lines: [{merchandiseId}]`): a `<x>Id`/`<x>_id` member (types
+/// `<x>s`, `<x>`), or a global id `gid://<app>/<Type>/…` (type `<type>`).
+/// With `index`, which is `None` when consistency is off, also a `<x>Id`
+/// holding a number, and a string member named after a resource type
+/// (`customer`, `payment_intent`; see [`entity_type`]).
+fn references_in(
+    field: &str,
+    value: &Value,
+    depth: usize,
+    index: Option<&BundleIndex>,
+    out: &mut Vec<Reference>,
+) {
     if depth > 4 || out.len() >= MAX_REFERENCES {
         return;
     }
@@ -2581,16 +2769,26 @@ fn references_in(field: &str, value: &Value, depth: usize, out: &mut Vec<(Vec<St
                 out.push((vec![t], id.clone()));
             } else if let Some(prefix) = reference_prefix(field) {
                 out.push((vec![format!("{prefix}s"), prefix.to_string()], id.clone()));
+            } else if let Some(t) = index.and_then(|i| entity_type(i, None, field)) {
+                out.push((vec![t], id.clone()));
+            }
+        }
+        Value::Number(id) if index.is_some() => {
+            if let Some(prefix) = reference_prefix(field) {
+                out.push((
+                    vec![format!("{prefix}s"), prefix.to_string()],
+                    id.to_string(),
+                ));
             }
         }
         Value::Array(items) => {
             for item in items {
-                references_in(field, item, depth + 1, out);
+                references_in(field, item, depth + 1, index, out);
             }
         }
         Value::Object(obj) => {
             for (k, v) in obj {
-                references_in(k, v, depth + 1, out);
+                references_in(k, v, depth + 1, index, out);
             }
         }
         _ => {}

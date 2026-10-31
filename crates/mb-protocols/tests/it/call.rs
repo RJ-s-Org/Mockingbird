@@ -8,7 +8,7 @@ use mb_engine::{Engine, EngineConfig, SchemaValidator};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_protocols::{MockRuntime, STREAM_ITEMS_HEADER, http_rest};
-use mb_state::MemoryStore;
+use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -1394,4 +1394,480 @@ async fn a_read_with_a_query_is_not_stored() {
     let (source, second) = read(&api, "/customers/c1?view=b").await;
     assert_ne!(source, "state");
     assert_eq!(second["name"], "Two");
+}
+
+/// References between resources: a booking names its offer, a refund its
+/// payment intent, an intent and an order their customer.
+const REFERENCES: &str = r##"
+openapi: 3.0.0
+info: {title: References, version: "1"}
+paths:
+  /offers/{offer}:
+    get:
+      operationId: getOffer
+      parameters: [{name: offer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Offer"}}}}
+  /bookings:
+    post:
+      operationId: createBooking
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {offerId: {}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /v1/payment_intents/{intent}:
+    get:
+      operationId: getIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /v1/refunds:
+    post:
+      operationId: createRefund
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {type: object, properties: {payment_intent: {type: string}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /customers/{customer}:
+    get:
+      operationId: getCustomer
+      parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+  /customers/{customer}/orders/{order}:
+    get:
+      operationId: getCustomerOrder
+      parameters:
+        - {name: customer, in: path, required: true, schema: {type: string}}
+        - {name: order, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders:
+    get:
+      operationId: listOrders
+      parameters: [{name: customer, in: query, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Order"}}
+  /orders/{order}:
+    get:
+      operationId: getOrder
+      parameters: [{name: order, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+components:
+  schemas:
+    Offer:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, hotelId: {type: string}}
+    Booking:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+    Intent:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, customer: {type: string}}
+    Customer:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Order:
+      type: object
+      required: [id, total]
+      properties: {id: {type: string}, total: {type: integer}, customer: {type: string}}
+"##;
+
+/// [`actions_of`] over [`REFERENCES`], with a handle on its store.
+fn references(consistency: bool, answer: Value) -> (Actions, Arc<MemoryStore>) {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(REFERENCES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&store) as Arc<dyn StateStore>,
+    );
+    rt.consistency = consistency;
+    let router = http_rest::router(Arc::new(rt));
+    (Actions { router, provider }, store)
+}
+
+/// Stores a resource in the default session of [`references`].
+async fn store(state: &MemoryStore, resource_type: &str, id: &str, data: Value) {
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "references".into(),
+        session: "default".into(),
+    };
+    let resource = StoredResource {
+        resource_type: resource_type.into(),
+        id: id.into(),
+        data,
+    };
+    state.upsert(&session, resource).await.unwrap();
+}
+
+/// The lines of a prompt's `<related_resources>`.
+fn related_of(prompt: &str) -> Vec<&str> {
+    prompt
+        .split_once("<related_resources>\n")
+        .and_then(|(_, rest)| rest.split_once("</related_resources>"))
+        .map_or_else(Vec::new, |(lines, _)| lines.lines().collect())
+}
+
+/// A booking's prompt holds the stored offer its body names.
+#[tokio::test]
+async fn a_booking_prompt_holds_its_offer() {
+    let (api, state) = references(true, json!({"id": "b1"}));
+    store(
+        &state,
+        "offers",
+        "of1",
+        json!({"id": "of1", "price": "offer-price"}),
+    )
+    .await;
+    let body = json!({"offerId": "of1"});
+    let (status, _, _) = api.call("POST", "/bookings", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt)
+            .iter()
+            .any(|l| l.contains("offer-price")),
+        "{prompt}"
+    );
+}
+
+/// A refund's prompt holds the intent its form body names by a member
+/// called after the resource type, with no `Id` suffix.
+#[tokio::test]
+async fn a_refund_prompt_holds_its_intent() {
+    let (api, state) = references(true, json!({"id": "re1"}));
+    store(
+        &state,
+        "payment_intents",
+        "pi_1",
+        json!({"id": "pi_1", "status": "intent-status"}),
+    )
+    .await;
+    let req = Request::post("/v1/refunds")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("payment_intent=pi_1"))
+        .unwrap();
+    let resp = api.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt)
+            .iter()
+            .any(|l| l.contains("intent-status")),
+        "{prompt}"
+    );
+}
+
+/// A generated read of a stored target also shows what the target refers to.
+/// The stored intent lacks a required member, so it is not served as is.
+#[tokio::test]
+async fn a_read_prompt_holds_what_the_target_refers_to() {
+    let (api, state) = references(true, json!({"id": "pi_1", "status": "open"}));
+    store(
+        &state,
+        "payment_intents",
+        "pi_1",
+        json!({"id": "pi_1", "customer": "cus_1"}),
+    )
+    .await;
+    store(
+        &state,
+        "customers",
+        "cus_1",
+        json!({"id": "cus_1", "name": "Ana"}),
+    )
+    .await;
+    read(&api, "/v1/payment_intents/pi_1").await;
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt).iter().any(|l| l.contains("Ana")),
+        "{prompt}"
+    );
+}
+
+/// A path parameter named after a type is a reference of the request.
+#[tokio::test]
+async fn a_nested_route_prompt_holds_its_parent() {
+    let (api, state) = references(true, json!({"id": "o1", "total": 1}));
+    store(
+        &state,
+        "customers",
+        "c1",
+        json!({"id": "c1", "name": "Ana"}),
+    )
+    .await;
+    read(&api, "/customers/c1/orders/o1").await;
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt).iter().any(|l| l.contains("Ana")),
+        "{prompt}"
+    );
+}
+
+/// The target is shown as the existing resource, not again as related.
+#[tokio::test]
+async fn the_target_is_not_its_own_reference() {
+    let (api, state) = references(true, json!({"id": "c1", "name": "Ana"}));
+    store(
+        &state,
+        "customers",
+        "c1",
+        json!({"id": "c1", "note": "target-note"}),
+    )
+    .await;
+    read(&api, "/customers/c1").await;
+    let prompt = prompt_of(&api, 0);
+    assert!(prompt.contains("target-note"), "{prompt}");
+    assert!(related_of(&prompt).is_empty(), "{prompt}");
+}
+
+/// A read of an id only a stored resource names is told what names it.
+#[tokio::test]
+async fn an_unknown_id_is_generated_knowing_what_refers_to_it() {
+    let (api, state) = references(true, json!({"id": "c9", "name": "Ana"}));
+    store(
+        &state,
+        "orders",
+        "o1",
+        json!({"id": "o1", "customer": "c9", "total": 7}),
+    )
+    .await;
+    store(
+        &state,
+        "orders",
+        "o2",
+        json!({"id": "o2", "customer": "c8", "total": 8}),
+    )
+    .await;
+    read(&api, "/customers/c9").await;
+    let prompt = prompt_of(&api, 0);
+    let related = related_of(&prompt);
+    assert_eq!(related.len(), 1, "{prompt}");
+    assert!(related[0].contains("\"o1\""), "{prompt}");
+}
+
+/// A target that exists needs no scan for what refers to it.
+#[tokio::test]
+async fn a_found_target_scans_nothing() {
+    let (api, state) = references(true, json!({"id": "c9", "name": "Ana"}));
+    store(&state, "customers", "c9", json!({"id": "c9"})).await;
+    store(
+        &state,
+        "orders",
+        "o1",
+        json!({"id": "o1", "customer": "c9", "total": 7}),
+    )
+    .await;
+    read(&api, "/customers/c9").await;
+    let prompt = prompt_of(&api, 0);
+    assert!(related_of(&prompt).is_empty(), "{prompt}");
+}
+
+/// The scan for what refers to an unknown id reads `MAX_SCAN` (500) resources
+/// at most, shared by the types that can refer to it: orders and intents here,
+/// so a reference behind 250 newer orders is not seen.
+#[tokio::test]
+async fn an_unknown_id_scans_a_bounded_number_of_resources() {
+    for (newer, seen) in [(249, true), (250, false)] {
+        let (api, state) = references(true, json!({"id": "c9", "name": "Ana"}));
+        store(
+            &state,
+            "orders",
+            "old",
+            json!({"id": "old", "customer": "c9", "total": 1}),
+        )
+        .await;
+        for i in 0..newer {
+            let id = format!("o{i}");
+            store(
+                &state,
+                "orders",
+                &id,
+                json!({"id": id, "customer": "c8", "total": 1}),
+            )
+            .await;
+        }
+        read(&api, "/customers/c9").await;
+        let prompt = prompt_of(&api, 0);
+        assert_eq!(
+            !related_of(&prompt).is_empty(),
+            seen,
+            "{newer} newer: {prompt}"
+        );
+    }
+}
+
+/// References are followed one hop out of what the request names, and the
+/// request's own come first.
+#[tokio::test]
+async fn references_stop_after_one_hop_nearest_first() {
+    let (api, state) = references(true, json!({"id": "b1"}));
+    store(
+        &state,
+        "offers",
+        "of1",
+        json!({"id": "of1", "hotelId": "h1"}),
+    )
+    .await;
+    store(&state, "hotels", "h1", json!({"id": "h1", "cityId": "ct1"})).await;
+    store(
+        &state,
+        "citys",
+        "ct1",
+        json!({"id": "ct1", "name": "two-hops"}),
+    )
+    .await;
+    let body = json!({"offerId": "of1"});
+    api.call("POST", "/bookings", Some(body)).await;
+    let prompt = prompt_of(&api, 0);
+    let related = related_of(&prompt);
+    assert_eq!(related.len(), 2, "{prompt}");
+    assert!(related[0].contains("of1"), "{prompt}");
+    assert!(related[1].contains("h1"), "{prompt}");
+}
+
+/// A numeric foreign id reaches the resource stored under its string form.
+#[tokio::test]
+async fn a_numeric_reference_is_followed() {
+    let (api, state) = references(true, json!({"id": "b1"}));
+    store(
+        &state,
+        "offers",
+        "41",
+        json!({"id": 41, "price": "offer-price"}),
+    )
+    .await;
+    let body = json!({"offerId": 41});
+    let (status, _, _) = api.call("POST", "/bookings", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt)
+            .iter()
+            .any(|l| l.contains("offer-price")),
+        "{prompt}"
+    );
+}
+
+/// Thousands of stored resources add no more than the limits to a prompt,
+/// and what the request names is kept among them.
+#[tokio::test]
+async fn a_long_session_stays_within_the_limits() {
+    let (api, state) = references(true, json!({"id": "c9", "name": "Ana"}));
+    for i in 0..2_000 {
+        let id = format!("o{i}");
+        store(
+            &state,
+            "orders",
+            &id,
+            json!({"id": id, "customer": "c9", "total": 1}),
+        )
+        .await;
+    }
+    read(&api, "/customers/c9").await;
+    let prompt = prompt_of(&api, 0);
+    assert_eq!(related_of(&prompt).len(), mb_engine::prompt::MAX_RELATED);
+
+    let (api, state) = references(true, json!([]));
+    store(
+        &state,
+        "customers",
+        "c1",
+        json!({"id": "c1", "name": "Named"}),
+    )
+    .await;
+    for i in 0..2_000 {
+        let id = format!("o{i}");
+        store(
+            &state,
+            "orders",
+            &id,
+            json!({"id": id, "customer": "c1", "total": 1}),
+        )
+        .await;
+    }
+    read(&api, "/orders?customer=c1").await;
+    let prompt = prompt_of(&api, 0);
+    let related = related_of(&prompt);
+    assert_eq!(related.len(), mb_engine::prompt::MAX_RELATED);
+    assert!(related[0].contains("Named"), "{prompt}");
+}
+
+/// With consistency off, only the references that were always followed are:
+/// no path parameter, no member named after a type, no hop, no scan.
+#[tokio::test]
+async fn consistency_off_follows_no_new_references() {
+    let (api, state) = references(false, json!({"id": "re1"}));
+    store(
+        &state,
+        "payment_intents",
+        "pi_1",
+        json!({"id": "pi_1", "status": "held"}),
+    )
+    .await;
+    let req = Request::post("/v1/refunds")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("payment_intent=pi_1"))
+        .unwrap();
+    api.router.clone().oneshot(req).await.unwrap();
+    assert!(related_of(&prompt_of(&api, 0)).is_empty());
+
+    let (api, state) = references(false, json!({"id": "o1", "total": 1}));
+    store(
+        &state,
+        "customers",
+        "c1",
+        json!({"id": "c1", "name": "Ana"}),
+    )
+    .await;
+    read(&api, "/customers/c1/orders/o1").await;
+    assert!(related_of(&prompt_of(&api, 0)).is_empty());
+
+    let (api, state) = references(false, json!({"id": "b1"}));
+    store(
+        &state,
+        "offers",
+        "of1",
+        json!({"id": "of1", "hotelId": "h1"}),
+    )
+    .await;
+    store(&state, "hotels", "h1", json!({"id": "h1"})).await;
+    let body = json!({"offerId": "of1"});
+    api.call("POST", "/bookings", Some(body)).await;
+    let prompt = prompt_of(&api, 0);
+    let related = related_of(&prompt);
+    assert_eq!(related.len(), 1, "{prompt}");
+    assert!(related[0].contains("of1"), "{prompt}");
+
+    let (api, state) = references(false, json!({"id": "c9", "name": "Ana"}));
+    store(
+        &state,
+        "orders",
+        "o1",
+        json!({"id": "o1", "customer": "c9", "total": 7}),
+    )
+    .await;
+    read(&api, "/customers/c9").await;
+    assert!(related_of(&prompt_of(&api, 0)).is_empty());
 }
