@@ -6,7 +6,7 @@ This harness runs OpenRouter models through Mockingbird's real LLM code paths: t
 |---|---|
 | `proxy.py` | Recording proxy in front of OpenRouter. It enforces the budget and measures latency and cost. |
 | `run.py` | Orchestrator with three subcommands: `preflight`, `pilot` and `full`. |
-| `server_suites.py` | The `mockingbird serve` workloads: consistency, SSE, smart import and the multi-step journeys. |
+| `server_suites.py` | The `mockingbird serve` workloads: consistency, SSE, smart import, the multi-step journeys and the held-out journeys. |
 | `grade.py` | Deterministic schema conformance grading of the samples. |
 | `aggregate.py` | Joins all outputs into `results.json`, `results.csv` and `tables.md`. |
 
@@ -86,6 +86,10 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 ## Journeys
 
 `server_suites.py --suite journeys` runs three multi-step journeys (Stripe payment to refund, travel search to cancellation, GitHub search to issue) against mocks built from the contracts alone, one fresh session per rep. They measure whether the engine remembers entities across calls and applies the effects of writes. Each check is a `server.jsonl` row with `case` = `<journey>.<check>` and the `x-mockingbird-source` of the call it judged; a journey that breaks fails its remaining checks. The steps and check names match `pilot_world.py`, so results compare with `docs/benchmarks/pilot-2026-10-30/`. The suite is not in the default set, so `run.py` does not run it; it costs real calls.
+
+## Held-out journeys
+
+`server_suites.py --suite journeys_heldout` runs five more journeys in the same row format: PayPal order to capture, Jira issue to transition, Zendesk ticket to update, Notion page to query and Square payment to refund, each against a mock built from its contract alone. The `journeys` suite drove engine fixes, so it no longer shows how well they generalise. This suite exists to measure that. Its checks were written from the contracts, as a client of each API would expect it to behave, without reading the engine. Do not edit a check to suit results. The suite is not in the default set, so `run.py` does not run it; it costs real calls.
 
 ## Testing without spend
 
