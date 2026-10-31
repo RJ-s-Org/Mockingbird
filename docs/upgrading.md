@@ -50,6 +50,16 @@ A resource whose schema is an `allOf` at its root used to compile with no identi
 
 Stored bundles take this the way they take action routes, with the same steps: upload the contract again, or restart a mock from the config file, changing a byte of the contract if the control store is persistent.
 
+### A resource answers only for its owner
+
+On a route that names its target after another path parameter, such as `/repos/{owner}/{repo}` or `/orgs/{org}/teams/{slug}`, a stored resource now has to belong to the route's owner. It belongs when it was listed or written under the same collection path, or, with no such record, when it holds the owner's value as a member or as a path segment in one. Nothing needs recompiling, and on these routes:
+
+- a resource a search or a mention stored without showing its owner is no longer served by name. The read is generated, and the response cache repeats it;
+- `unknown_ids: 404` does not answer a value some owner's resource holds, as the route may not be able to tell whose it is;
+- a delete names only the owner's resource, so another owner's stays in the session's lists.
+
+The collection record lives in the node's memory, like path aliases. On another node or after a restart, a resource showing no owner is generated instead, except a number, which cannot show one and is served as before. A parameter named as an id (`order_id`) stands on its own, and a real string id such as `txn_1` reads back unless it was listed under another collection.
+
 ## Upgrading to 0.1.0
 
 ### Relative paths in the config file follow the file

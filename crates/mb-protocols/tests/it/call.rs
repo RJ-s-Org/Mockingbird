@@ -3310,3 +3310,496 @@ async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
     assert_eq!(effects[0]["outcome"], "rejected");
     assert_eq!(effects[0]["reason"], "no schema to check against");
 }
+
+/// `/orgs/{org}/teams/{team_slug}` with a numeric `id` and a `slug`: a static
+/// segment sits between the parameters, and `{team_slug}` reads by a field.
+const TEAMS: &str = r##"
+openapi: 3.0.0
+info: {title: Teams, version: "1"}
+paths:
+  /orgs/{org}/teams:
+    get:
+      operationId: listTeams
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/team"}}}}}
+  /orgs/{org}/teams/{team_slug}:
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}}
+      - {name: team_slug, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getTeam
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team"}}}}
+    patch:
+      operationId: updateTeam
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/team"}}}}
+components:
+  schemas:
+    team:
+      type: object
+      required: [id, slug, members]
+      properties:
+        id: {type: integer}
+        slug: {type: string}
+        full_name: {type: string}
+        members: {type: integer}
+"##;
+
+/// A listed repository whose string `id` is its name is its owner's: the
+/// lookup by id finds it first, so that lookup must check whose it is too. Nor
+/// is it shown to the answer for another owner.
+#[tokio::test]
+async fn a_listed_string_id_equal_to_its_name_answers_only_for_its_owner() {
+    let item = json!({"id": "hello", "name": "hello", "full_name": "octo/hello", "stargazers_count": 4242});
+    let api = actions_of(
+        &string_id_repos(),
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(json!({"id": "x", "name": "hello", "full_name": "cat/hello", "stargazers_count": 9}).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["stargazers_count"], 9);
+    assert!(
+        !prompt_of(&api, 1).contains("4242"),
+        "{}",
+        prompt_of(&api, 1)
+    );
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state");
+    assert_eq!(own["stargazers_count"], 4242);
+}
+
+/// As a listed one, so a mentioned one: `/user/repos` has no owner either.
+#[tokio::test]
+async fn a_mentioned_string_id_equal_to_its_name_answers_only_for_its_owner() {
+    let contract = string_id_repos().replace(
+        "  /user:\n",
+        "  /events/{event}:\n    get:\n      operationId: getEvent\n      parameters: [{name: event, in: path, required: true, schema: {type: string}}]\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema:\n                type: object\n                required: [id]\n                properties:\n                  id: {type: string}\n                  repo: {$ref: \"#/components/schemas/repository\"}\n  /user:\n",
+    );
+    let mention = json!({"id": "hello", "name": "hello", "full_name": "octo/hello", "stargazers_count": 4242});
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"id": "e1", "repo": mention}).to_string()),
+            Ok(json!({"id": "x", "name": "hello", "full_name": "cat/hello", "stargazers_count": 9}).to_string()),
+        ],
+    );
+    read(&api, "/events/e1").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["stargazers_count"], 9);
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state");
+    assert_eq!(own["stargazers_count"], 4242);
+}
+
+/// A string `id` equal to its name with no `full_name` shows no owner, so it
+/// answers for none.
+#[tokio::test]
+async fn a_listed_string_id_with_no_full_name_answers_for_no_owner() {
+    let item = json!({"id": "hello", "name": "hello", "stargazers_count": 4242});
+    let api = actions_of(
+        &string_id_repos(),
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(json!({"id": "x", "name": "hello", "stargazers_count": 9}).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["stargazers_count"], 9);
+}
+
+/// A listed repository with a numeric `id` and no `full_name` does not say
+/// whose it is, so its name answers for no owner.
+#[tokio::test]
+async fn a_listed_numeric_id_with_no_full_name_answers_for_no_owner() {
+    let item = json!({"id": 7, "name": "hello", "stargazers_count": 4242});
+    let api = actions_of(
+        REPOS,
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(json!({"id": 8, "name": "hello", "stargazers_count": 9}).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["stargazers_count"], 9);
+}
+
+/// A team another organisation listed is not this one's, though only a static
+/// segment and no `full_name` lie between them.
+#[tokio::test]
+async fn a_listed_team_does_not_answer_for_another_org() {
+    let api = actions_of(
+        TEAMS,
+        vec![
+            Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+            Ok(json!({"id": 2, "slug": "core", "members": 5}).to_string()),
+        ],
+    );
+    read(&api, "/orgs/octo/teams").await;
+    let (source, other) = read(&api, "/orgs/cat/teams/core").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["members"], 5);
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state", "the list's path says it is octo's: {own}");
+    assert_eq!(own["members"], 3);
+}
+
+/// A `full_name` over a static segment still shows the owner: `octo/core`.
+#[tokio::test]
+async fn a_listed_team_showing_its_org_reads_back_for_that_org_only() {
+    let api = actions_of(
+        TEAMS,
+        vec![
+            Ok(
+                json!([{"id": 1, "slug": "core", "full_name": "octo/core", "members": 3}])
+                    .to_string(),
+            ),
+            Ok(json!({"id": 2, "slug": "core", "full_name": "cat/core", "members": 5}).to_string()),
+        ],
+    );
+    read(&api, "/orgs/octo/teams").await;
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state");
+    assert_eq!(own["members"], 3);
+    let (source, other) = read(&api, "/orgs/cat/teams/core").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["members"], 5);
+}
+
+/// `{slug}` reads by a field, as a number does, but a name is an owner's: this
+/// is the same team as under `{team_slug}`.
+#[tokio::test]
+async fn a_listed_team_read_by_its_slug_field_does_not_answer_for_another_org() {
+    let api = actions_of(
+        &TEAMS.replace("team_slug", "slug"),
+        vec![
+            Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+            Ok(json!({"id": 2, "slug": "core", "members": 5}).to_string()),
+        ],
+    );
+    read(&api, "/orgs/octo/teams").await;
+    let (source, other) = read(&api, "/orgs/cat/teams/core").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["members"], 5);
+}
+
+/// `unknown_ids: 404` says nothing of a name on a route where it cannot tell
+/// whose a resource is: a team the list just showed is not a missing one.
+#[tokio::test]
+async fn a_listed_team_is_not_a_404_for_its_org() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+        Ok(json!({"id": 1, "slug": "core", "members": 3}).to_string()),
+    ]));
+    let mut rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(TEAMS.replace("team_slug", "slug").as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.unknown_ids = mb_protocols::UnknownIds::NotFound;
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    read(&api, "/orgs/octo/teams").await;
+    let (_, team) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(team["members"], 3);
+}
+
+/// A write through the route stores under the route's name, which is no id the
+/// answer has: nothing else stores such a resource, so it still reads back.
+#[tokio::test]
+async fn a_write_with_no_full_name_reads_back() {
+    let api = actions_of(
+        TEAMS,
+        vec![Ok(
+            json!({"id": 1, "slug": "core", "members": 8}).to_string()
+        )],
+    );
+    let (status, _, _) = api
+        .call(
+            "PATCH",
+            "/orgs/octo/teams/core",
+            Some(json!({"members": 8})),
+        )
+        .await;
+    assert!(status.is_success(), "{status}");
+    let (source, team) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state");
+    assert_eq!(team["members"], 8);
+}
+
+/// An issue a list seeded goes on a delete by number, though the delete's
+/// answer does not declare `number`: the read's route says what `{n}` means.
+#[tokio::test]
+async fn a_listed_issue_stays_gone_when_the_delete_does_not_declare_its_number() {
+    let api = actions_of(
+        ISSUES,
+        vec![
+            Ok(json!([{"id": 999, "number": 5, "title": "a"}]).to_string()),
+            Ok(json!({"id": 999, "deleted": true}).to_string()),
+            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
+        ],
+    );
+    read(&api, "/issues").await;
+    let (source, _) = read(&api, "/issues/5").await;
+    assert_eq!(source, "state");
+    let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, body) = read(&api, "/issues/5").await;
+    assert_ne!(source, "state", "deleted issue read back: {body}");
+    assert_eq!(body["title"], "regenerated");
+}
+
+/// A real string id under an earlier parameter is no name, as Stripe's nested
+/// routes have: it reads back, and a person's `full_name` is no path.
+#[tokio::test]
+async fn a_listed_string_id_that_is_no_name_reads_back_below_a_param() {
+    const NESTED_IDS: &str = r##"
+openapi: 3.0.0
+info: {title: NestedIds, version: "1"}
+paths:
+  /customers/{customer}/people:
+    get:
+      operationId: listPeople
+      parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/person"}}}}}
+  /customers/{customer}/people/{person}:
+    get:
+      operationId: getPerson
+      parameters:
+        - {name: customer, in: path, required: true, schema: {type: string}}
+        - {name: person, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/person"}}}}
+components:
+  schemas:
+    person:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}, full_name: {type: string}}
+"##;
+    let api = actions_of(
+        NESTED_IDS,
+        vec![Ok(
+            json!([{"id": "per_1", "name": "Jo", "full_name": "Jo Bloggs"}]).to_string(),
+        )],
+    );
+    read(&api, "/customers/cus_1/people").await;
+    let (source, person) = read(&api, "/customers/cus_1/people/per_1").await;
+    assert_eq!(source, "state", "{person}");
+    assert_eq!(person["name"], "Jo");
+}
+
+/// An `id` equal to the end of a `full_name` is a name, with no `name` member.
+#[tokio::test]
+async fn a_listed_string_id_shown_only_by_its_full_name_stays_its_owners() {
+    let item = json!({"id": "hello", "full_name": "octo/hello", "name": "other", "stargazers_count": 4242});
+    let api = actions_of(
+        &string_id_repos(),
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(json!({"id": "x", "name": "hello", "full_name": "cat/hello", "stargazers_count": 9}).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    let (source, _) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state");
+}
+
+/// GitLab's shape, with nothing named as on GitHub: `path_with_namespace` shows
+/// the owner, and `path` the name. A search's items have no collection to go by.
+#[tokio::test]
+async fn a_path_with_namespace_shows_its_owner() {
+    let contract = REPOS
+        .replace("full_name: {type: string}\n        stargazers_count", "path_with_namespace: {type: string}\n        path: {type: string}\n        stargazers_count");
+    assert_ne!(contract, REPOS);
+    let item = json!({"id": 7, "name": "Hello World", "path": "hello", "path_with_namespace": "octo/hello", "stargazers_count": 42});
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(json!({"id": 8, "name": "Hello", "path": "hello", "path_with_namespace": "cat/hello", "stargazers_count": 9}).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["stargazers_count"], 9);
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state");
+    assert_eq!(own["stargazers_count"], 42);
+}
+
+/// `namespace` and `name` show the owner and the name in two members.
+#[tokio::test]
+async fn a_namespace_member_shows_its_owner() {
+    let contract = REPOS.replace(
+        "full_name: {type: string}\n        stargazers_count",
+        "namespace: {type: string}\n        stargazers_count",
+    );
+    assert_ne!(contract, REPOS);
+    let item = json!({"id": 7, "name": "hello", "namespace": "octo", "stargazers_count": 42});
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(
+                json!({"id": 8, "name": "hello", "namespace": "cat", "stargazers_count": 9})
+                    .to_string(),
+            ),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, other) = read(&api, "/repos/cat/hello").await;
+    assert_ne!(source, "state", "{other}");
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state");
+    assert_eq!(own["stargazers_count"], 42);
+}
+
+/// A member the contract types as the resource's own type is another of them:
+/// a fork's `parent` does not make it the parent's owner's.
+#[tokio::test]
+async fn a_forks_parent_does_not_show_its_owner() {
+    let contract = REPOS.replace(
+        "stargazers_count: {type: integer}\n        user:",
+        "stargazers_count: {type: integer}\n        parent: {$ref: \"#/components/schemas/repository\"}\n        user:",
+    );
+    assert_ne!(contract, REPOS);
+    // Renamed from `octo/upstream`: only the fork goes by `hello` here.
+    let mut fork = repo(8, "cat", 9);
+    fork["parent"] =
+        json!({"id": 7, "name": "upstream", "full_name": "octo/upstream", "stargazers_count": 42});
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"total_count": 1, "items": [fork]}).to_string()),
+            Ok(repo(9, "octo", 1).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=hello").await;
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_ne!(
+        source, "state",
+        "the fork answered for its parent's owner: {own}"
+    );
+    assert_eq!(own["id"], 9);
+}
+
+/// Issues listed under one repository are that repository's: the numbers of
+/// another's are its own, whatever the issue's members.
+const REPO_ISSUES: &str = r##"
+openapi: 3.0.0
+info: {title: RepoIssues, version: "1"}
+paths:
+  /repos/{owner}/{repo}/issues:
+    parameters:
+      - {name: owner, in: path, required: true, schema: {type: string}}
+      - {name: repo, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: listIssues
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}
+  /repos/{owner}/{repo}/issues/{issue_number}:
+    parameters:
+      - {name: owner, in: path, required: true, schema: {type: string}}
+      - {name: repo, in: path, required: true, schema: {type: string}}
+      - {name: issue_number, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getIssue
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, number, title]
+      properties: {id: {type: integer}, number: {type: integer}, title: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_listed_issue_number_does_not_answer_for_another_repository() {
+    let api = actions_of(
+        REPO_ISSUES,
+        vec![
+            Ok(json!([{"id": 999, "number": 5, "title": "octo's"}]).to_string()),
+            Ok(json!({"id": 1000, "number": 5, "title": "cat's"}).to_string()),
+        ],
+    );
+    read(&api, "/repos/octo/hello/issues").await;
+    let (source, other) = read(&api, "/repos/cat/hello/issues/5").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["title"], "cat's");
+    let (source, own) = read(&api, "/repos/octo/hello/issues/5").await;
+    assert_eq!(source, "state");
+    assert_eq!(own["title"], "octo's");
+}
+
+/// A mention is keyed by what the contract identifies its type by, here `sid`
+/// as on Twilio, so that with no `id` or `number` it still reads back.
+#[tokio::test]
+async fn a_mention_is_keyed_by_the_contracts_identity() {
+    const CALLS: &str = r##"
+openapi: 3.0.0
+info: {title: Calls, version: "1"}
+paths:
+  /calls/{sid}:
+    get:
+      operationId: getCall
+      parameters: [{name: sid, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/call"}}}}
+  /conferences/{conference}:
+    get:
+      operationId: getConference
+      parameters: [{name: conference, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {type: string}
+                  call: {$ref: "#/components/schemas/call"}
+components:
+  schemas:
+    call:
+      type: object
+      required: [sid, status]
+      properties: {sid: {type: string}, status: {type: string}}
+"##;
+    let api = actions_of(
+        CALLS,
+        vec![Ok(
+            json!({"id": "c1", "call": {"sid": "CA1", "status": "ringing"}}).to_string(),
+        )],
+    );
+    read(&api, "/conferences/c1").await;
+    let (source, call) = read(&api, "/calls/CA1").await;
+    assert_eq!(source, "state", "{call}");
+    assert_eq!(call["status"], "ringing");
+}
