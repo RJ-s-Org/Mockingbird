@@ -2668,18 +2668,68 @@ fn unpaid_intent() -> StoredResource {
     }
 }
 
-/// A successful action's prompt says it succeeded and names it.
+/// A successful action's prompt ends by saying it succeeded, what that
+/// supplies and which state it leaves.
 #[tokio::test]
 async fn an_action_prompt_says_it_succeeded() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
     assert!(prompt.contains("requires_payment_method"), "{prompt}");
     assert!(
-        prompt.contains(
-            "This is a successful `confirm`: the call succeeded, so the resource has moved to \
-             the state that follows `confirm`, whatever it needed before."
+        prompt.ends_with(
+            "`confirm` succeeded, so whatever the resource lacked for `confirm` is now there \
+             (fill it in, with no error), and the answer shows the state a finished `confirm` \
+             leaves it in, not a status that still waits for `confirm` or for something before \
+             it."
         ),
         "{prompt}"
     );
+}
+
+/// The prompt does not say every action moves a status: models then moved
+/// one on for an action that leaves it.
+#[tokio::test]
+async fn an_action_prompt_does_not_say_every_action_moves_a_status() {
+    let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
+    assert!(!prompt.contains("moves a status on"), "{prompt}");
+}
+
+/// A scenario's instructions win over what a success supplies: a mock owner
+/// can still answer a 200 that holds an error.
+#[tokio::test]
+async fn a_scenario_overrides_what_an_action_prompt_says() {
+    let bundle = compile(ACTIONS_PROMPT.as_bytes()).unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"id": "x", "status": "s"}).to_string())]);
+    let call = OperationCall {
+        operation_id: "confirmIntent".into(),
+        ..OperationCall::default()
+    };
+    let target = unpaid_intent();
+    let scenario = mb_engine::ScenarioSpec {
+        name: "declined".into(),
+        instructions: Some("The card is declined.".into()),
+        ..mb_engine::ScenarioSpec::default()
+    };
+    let ctx = GenerationContext {
+        target: Some(&target),
+        scenario: Some(&scenario),
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(
+            &bundle,
+            bundle.operation("confirmIntent").unwrap(),
+            &call,
+            ctx,
+        )
+        .await
+        .unwrap();
+    let prompt = provider.requests()[0]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone();
+    assert!(prompt.ends_with("<scenario> overrides this."), "{prompt}");
 }
 
 /// Nothing is said of an action answered with an error, of a write on the
@@ -2691,7 +2741,7 @@ async fn only_a_successful_action_says_it_succeeded() {
         action_prompt("updateIntent", Some(unpaid_intent()), None).await,
         action_prompt("getIntent", Some(unpaid_intent()), None).await,
     ] {
-        assert!(!prompt.contains("successful"), "{prompt}");
+        assert!(!prompt.contains("succeeded"), "{prompt}");
         assert!(!prompt.contains("must include"), "{prompt}");
     }
 }
@@ -2707,7 +2757,7 @@ async fn an_other_action_prompt_asks_for_the_effect_on_its_target() {
         data: json!({"id": "b1", "status": "confirmed"}),
     };
     let prompt = action_prompt("cancelBooking", Some(booking), None).await;
-    assert!(prompt.contains("successful `cancel`"), "{prompt}");
+    assert!(prompt.contains("`cancel` succeeded"), "{prompt}");
     assert!(
         prompt.contains(
             r#"The response is not <existing_resource>, so it changes only through "effects": they must include what `cancel` changes on it, as {"type": "bookings", "id": "b1", "set": {...}}."#
@@ -2723,6 +2773,6 @@ async fn an_effect_is_asked_for_only_of_an_other_action_with_a_target() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
     assert!(!prompt.contains("must include"), "{prompt}");
     let prompt = action_prompt("cancelBooking", None, None).await;
-    assert!(prompt.contains("successful `cancel`"), "{prompt}");
+    assert!(prompt.contains("`cancel` succeeded"), "{prompt}");
     assert!(!prompt.contains("must include"), "{prompt}");
 }

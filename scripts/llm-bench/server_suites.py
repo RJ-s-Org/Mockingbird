@@ -103,6 +103,8 @@ JOURNEY_MOCKS = {
     "stripe": ("examples/apis/stripe/stripe.openapi.yaml", "/stripe", None),
     "travel": ("docs/benchmarks/contracts/travel.openapi.yaml", "/travel", None),
     "github": ("examples/apis/github-rest/github-rest.openapi.yaml", "/github", None),
+    "paypal": ("examples/apis/paypal/paypal-orders.openapi.yaml", "/paypal", None),
+    "invoices": ("docs/benchmarks/contracts/invoicing.openapi.yaml", "/invoices", None),
 }
 SSE_MOCKS = {
     "events": ("fixtures/openapi/events-3.1.yaml", "/events",
@@ -751,6 +753,12 @@ JOURNEY_CHECKS = {
         "repo detail keeps the listed repo", "issue keeps its title", "issue reads back as created",
         "issue list holds the new issue", "repo keeps its identity",
     ],
+    "paypal": [
+        "capture keeps identity", "capture moves the status on", "read shows the captured status",
+    ],
+    "invoices": [
+        "remind keeps the status", "pay moves the status on", "read shows the paid status",
+    ],
 }
 # The check recorded when a journey cannot go on past its first call.
 JOURNEY_GATE = {"travel": "search returned offers", "github": "search returned repositories"}
@@ -929,6 +937,36 @@ def github_steps(j):
                 before=before, after=after["open_issues_count"])
 
 
+def paypal_steps(j):
+    order = j.call("POST", "/v2/checkout/orders", body={
+        "intent": "CAPTURE",
+        "purchase_units": [{"reference_id": "default", "amount": {"currency_code": "EUR", "value": "41.80"}}],
+    })
+    oid = order.get("id")
+    conf = j.call("POST", f"/v2/checkout/orders/{oid}/capture", body={})
+    j.check("capture keeps identity", eq(conf.get("id"), oid))
+    j.check("capture moves the status on", conf.get("status") == "COMPLETED",
+            before=order.get("status"), status_value=conf.get("status"))
+    read = j.call("GET", f"/v2/checkout/orders/{oid}")
+    j.check("read shows the captured status", eq(read.get("status"), conf.get("status")),
+            captured=conf.get("status"), read=read.get("status"))
+
+
+def invoices_steps(j):
+    inv = j.call("POST", "/invoices", body={"customer": "Ana Silva", "amount": 4180, "currency": "eur"})
+    iid = inv.get("id")
+    # An action that moves nothing on is the check against a prompt that pushes every status.
+    rem = j.call("POST", f"/invoices/{iid}/remind")
+    j.check("remind keeps the status", eq(rem.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=rem.get("status"))
+    paid = j.call("POST", f"/invoices/{iid}/pay")
+    j.check("pay moves the status on", paid.get("status") == "paid",
+            before=rem.get("status"), status_value=paid.get("status"))
+    read = j.call("GET", f"/invoices/{iid}")
+    j.check("read shows the paid status", eq(read.get("status"), paid.get("status")),
+            paid=paid.get("status"), read=read.get("status"))
+
+
 def journey_stripe(srv, sink, args, rep):
     run_one_journey("stripe", stripe_steps, srv, sink, args, rep)
 
@@ -941,13 +979,19 @@ def journey_github(srv, sink, args, rep):
     run_one_journey("github", github_steps, srv, sink, args, rep)
 
 
-JOURNEYS = {"stripe": journey_stripe, "travel": journey_travel, "github": journey_github}
+JOURNEYS = {
+    "stripe": journey_stripe, "travel": journey_travel, "github": journey_github,
+    "paypal": lambda srv, sink, args, rep: run_one_journey("paypal", paypal_steps, srv, sink, args, rep),
+    "invoices": lambda srv, sink, args, rep: run_one_journey("invoices", invoices_steps, srv, sink, args, rep),
+}
+# What a journeys run without --journey does: the set the published results compare.
+DEFAULT_JOURNEYS = ("stripe", "travel", "github")
 
 
 def run_journeys(srv, sink, args):
     for rep in range(args.repeat):
-        for fn in JOURNEYS.values():
-            fn(srv, sink, args, rep)
+        for name in args.journey or DEFAULT_JOURNEYS:
+            JOURNEYS[name](srv, sink, args, rep)
 
 
 # ---------------------------------------------------------------- main
@@ -967,6 +1011,8 @@ def main():
     p.add_argument("--out", required=True, help="results directory (server.jsonl is appended)")
     p.add_argument("--repeat", type=int, default=3, help="reps (fresh session each) per suite")
     p.add_argument("--suite", action="append", choices=SUITES, help="default: consistency, sse, import")
+    p.add_argument("--journey", action="append", choices=tuple(JOURNEY_CHECKS),
+                   help="journeys to run; default: stripe, travel, github")
     p.add_argument("--binary", default="target/release/mockingbird")
     p.add_argument("--timeout", type=float, default=180, help="client timeout per call, seconds")
     p.add_argument("--stream-items", type=int, default=5, help="SSE events to read per rep")

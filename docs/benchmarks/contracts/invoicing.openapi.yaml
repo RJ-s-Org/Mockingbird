@@ -1,0 +1,73 @@
+openapi: 3.1.0
+info:
+  title: Invoicing API
+  version: 1.0.0
+  description: Invoices with two action routes. One moves the status on and one does not.
+paths:
+  /invoices:
+    post:
+      operationId: createInvoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer, amount, currency]
+              properties:
+                customer: { type: string }
+                amount: { type: integer }
+                currency: { type: string, minLength: 3, maxLength: 3 }
+      responses:
+        "201":
+          description: The new invoice, not yet paid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getInvoice
+      responses:
+        "200":
+          description: The invoice.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}/pay:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: payInvoice
+      summary: Pay the invoice.
+      responses:
+        "200":
+          description: The paid invoice.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}/remind:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: remindInvoice
+      summary: Send the customer a reminder. The invoice stays as it is, apart from counting the reminder.
+      responses:
+        "200":
+          description: The invoice, with the reminder counted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+components:
+  schemas:
+    invoice:
+      type: object
+      required: [id, customer, amount, currency, status, reminders_sent]
+      properties:
+        id: { type: string }
+        customer: { type: string }
+        amount: { type: integer }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        status: { type: string, enum: [draft, awaiting_payment, overdue, paid, void] }
+        reminders_sent: { type: integer, minimum: 0 }
