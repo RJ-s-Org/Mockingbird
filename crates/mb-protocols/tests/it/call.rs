@@ -3362,14 +3362,21 @@ async fn an_action_of_the_parents_schema_is_told_to_decide_on_its_id() {
     assert_eq!(
         instructions(&h, 1),
         format!(
-            "{TRUST} This call acts on the API: the response shows the state after it, which \
-usually differs from <existing_resource> (an action moves a status on). What the call does not \
-change stays as it is in the existing and related resources, and the response stays consistent \
-with the request body. This is a successful `capture`: the call succeeded, so the resource has \
-moved to the state that follows `capture`, whatever it needed before. If this call changes \
-<existing_resource>, keep its id; if it makes a new one of the same kind, give that a new id of \
-its own and leave <existing_resource> as it is."
+            "{TRUST} This call acts on the API. What it does not change stays as it is in the \
+resources shown, and the response stays consistent with the request body. This is a successful \
+`capture`. Decide which it did: it changed <existing_resource>, so keep its id and show the state \
+after it; or it made a new one of the same kind, so give that a new id of its own and leave \
+<existing_resource> as it is."
         )
+    );
+    let prompt = prompt_of(&h, 1);
+    assert!(!prompt.contains("moves a status on"), "{prompt}");
+    assert!(!prompt.contains("has moved"), "{prompt}");
+    assert!(
+        prompt.ends_with(
+            "</shown_resources>\nIf it made a new one and changed nothing else, \"effects\" is empty."
+        ),
+        "{prompt}"
     );
 }
 
@@ -3413,6 +3420,16 @@ has moved to the state that follows `confirm`, whatever it needed before."
         )
     );
     assert_eq!(instructions(&h, 3), consistent);
+    let cancel = prompt_of(&h, 1);
+    assert!(
+        cancel.ends_with(
+            "</shown_resources>\nThe response is not <existing_resource>, so it changes only \
+through \"effects\": they must include what `cancel` changes on it, as {\"type\": \
+\"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
+        ),
+        "{cancel}"
+    );
+    assert!(!cancel.contains("made a new one"), "{cancel}");
 }
 
 /// A capture that answers its order's id updates that order.

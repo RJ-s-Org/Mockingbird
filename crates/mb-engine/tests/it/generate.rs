@@ -2675,8 +2675,8 @@ async fn an_action_prompt_says_it_succeeded() {
     assert!(prompt.contains("requires_payment_method"), "{prompt}");
     assert!(
         prompt.contains(
-            "This is a successful `confirm`: the call succeeded, so the resource has moved to \
-             the state that follows `confirm`, whatever it needed before."
+            "This is a successful `confirm`. Decide which it did: it changed \
+             <existing_resource>, so keep its id and show the state after it;"
         ),
         "{prompt}"
     );
