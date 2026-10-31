@@ -739,6 +739,14 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
     }
 
+    // A read naming a seed asks for that seed's answer, not for what a plain
+    // read answered; a resource stored by a write or a fixture still stands.
+    let target = target.filter(|stored| {
+        !(matches!(op.kind, OperationKind::Query)
+            && mb_engine::seed::request_seed(call).is_some()
+            && rt.own_reads().holds(session, stored))
+    });
+
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
@@ -856,11 +864,12 @@ pub(crate) async fn complete(
         {
             store_wrapped(&mut state, session, resource_type, &generated).await;
         }
-        // A request naming a seed asks for that seed's answer, kept per seed
-        // by the cache, so it is not the resource.
+        // A request naming a seed asks for that seed's answer, and a query for
+        // one view: the cache keeps those apart, so neither is the resource.
         if rt.consistency
             && plain(plan)
             && mb_engine::seed::request_seed(call).is_none()
+            && call.query.is_empty()
             && !transient_fallback(&generated)
             && (200..300).contains(&generated.status)
             && !matches!(op.binding, Binding::Graphql { .. })
@@ -1366,6 +1375,59 @@ impl PathAliases {
     }
 }
 
+/// Answers [`OwnReads`] holds at most; it is emptied when full.
+const MAX_OWN_READS: usize = 4096;
+
+/// Which stored resources are a plain read's own answer, not a write's or a
+/// fixture's: a read naming a seed is not answered from them. Remembered
+/// from this runtime's reads with a hash of the answer, so any later write
+/// that changes the resource ends it with no bookkeeping. Only a hint: on
+/// another node, after a restart or once emptied, the resource counts as
+/// written and answers such a read as any stored one does.
+#[derive(Debug, Default)]
+pub(crate) struct OwnReads(std::sync::Mutex<HashMap<OwnRead, u64>>);
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct OwnRead {
+    session: SessionKey,
+    resource_type: String,
+    id: String,
+}
+
+impl OwnReads {
+    fn key(session: &SessionKey, r: &StoredResource) -> OwnRead {
+        OwnRead {
+            session: session.clone(),
+            resource_type: r.resource_type.clone(),
+            id: r.id.clone(),
+        }
+    }
+
+    fn digest(data: &Value) -> u64 {
+        use std::hash::{DefaultHasher, Hasher};
+        let mut hasher = DefaultHasher::new();
+        hash_canonical(data, &mut hasher);
+        hasher.finish()
+    }
+
+    fn remember(&self, session: &SessionKey, r: &StoredResource) {
+        let Ok(mut reads) = self.0.lock() else {
+            return;
+        };
+        if reads.len() >= MAX_OWN_READS {
+            reads.clear();
+        }
+        reads.insert(Self::key(session, r), Self::digest(&r.data));
+    }
+
+    /// Whether `r` is, as it stands, a plain read's own answer.
+    fn holds(&self, session: &SessionKey, r: &StoredResource) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|reads| reads.get(&Self::key(session, r)) == Some(&Self::digest(&r.data)))
+    }
+}
+
 impl MockRuntime {
     /// The operation `id` of [`MockRuntime::bundle`] (the first of a
     /// repeated id), without scanning the operations. (SOAP keeps its own
@@ -1466,7 +1528,8 @@ async fn store_wrapped(
     let Some(Value::Object(body)) = generated.body.as_ref() else {
         return;
     };
-    let listed = &state.rt.index().listed;
+    let rt = state.rt;
+    let listed = &rt.index().listed;
     for (member, value) in body {
         let plural = format!("{member}s");
         if !value.is_object() || !listed.contains(&plural) {
@@ -1487,7 +1550,10 @@ async fn store_wrapped(
         };
         if own || unkeyed {
             state.upsert(session, resource).await;
-        } else {
+        } else if rt.consistency
+            && !transient_fallback(generated)
+            && entity_fits(rt, &resource.resource_type, &resource.data)
+        {
             state.insert_seeded(session, resource).await;
         }
     }
@@ -1496,9 +1562,10 @@ async fn store_wrapped(
 /// Stores a generated read by id as the resource it read, when it answers
 /// with its type's by-path schema: otherwise a later answer's mention would
 /// be stored and change what repeating this read returns. It goes under the
-/// target id when the path names the identity; a path parameter naming no
-/// field (`/repos/{o}/{r}`) is no key, or one owner's answer would answer
-/// for another's, so that answer goes under its own id.
+/// target id when the path names the identity. A path parameter naming
+/// another field (`/issues/{number}`) or none (`/repos/{o}/{r}`) is no key:
+/// the answer goes under its own id, or a list repeating it would store a
+/// second one, and one owner's answer would answer for another's.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1531,7 +1598,7 @@ async fn seed_own_read(
     if detail_schema.is_none() || detail_schema != own_schema {
         return;
     }
-    let id = if path_names_identity(identity) {
+    let id = if identity.path_field.is_none() && path_names_identity(identity) {
         Some(target_id.to_string())
     } else {
         body.get(&identity.field).and_then(id_string)
@@ -1544,7 +1611,9 @@ async fn seed_own_read(
         id,
         data: body.clone(),
     };
-    state.insert_seeded(session, resource).await;
+    if state.insert_seeded(session, resource.clone()).await {
+        rt.own_reads().remember(session, &resource);
+    }
 }
 
 /// How deep an answer is walked for entities: containers below its root.
@@ -2113,7 +2182,17 @@ async fn read_context(
                     }
                     None => None,
                 },
-                None => None,
+                // A write whose answer shows no identity (`DELETE` answering
+                // `{}`) acts on what this type's reads find by that field.
+                None => {
+                    let fields = state.rt.index().path_fields(t);
+                    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                    if fields.is_empty() {
+                        None
+                    } else {
+                        by_path_fields(state, session, t, &fields, id, None).await
+                    }
+                }
             },
         },
         _ => None,

@@ -1102,3 +1102,139 @@ async fn the_github_contract_seeds_its_detail_route() {
     assert_eq!(source, "state");
     assert_eq!(found["stargazers_count"], 4242);
 }
+
+/// With consistency off, a create's mention is not stored.
+#[tokio::test]
+async fn consistency_off_stores_no_create_mention() {
+    let api = actions_off(
+        WORLD,
+        vec![
+            order("o2", json!({"id": "c1", "name": "Ana"})),
+            Ok(json!({"id": "c1", "name": "Generated"}).to_string()),
+        ],
+    );
+    let (status, _, _) = api.call("POST", "/orders", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (source, customer) = read(&api, "/customers/c1").await;
+    assert_ne!(source, "state", "{customer}");
+}
+
+/// A faker create standing in for a failed LLM call stores no mention.
+#[tokio::test]
+async fn a_faker_create_stores_no_mention() {
+    let api = actions_of(WORLD, vec![]);
+    let (status, _, created) = api.call("POST", "/orders", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["customer"]["id"].as_str().unwrap().to_string();
+    let (source, customer) = read(&api, &format!("/customers/{id}")).await;
+    assert_ne!(source, "state", "{customer}");
+}
+
+/// A create's mention its type refuses does not take the id from a later
+/// valid one.
+#[tokio::test]
+async fn a_refused_create_mention_does_not_take_the_id() {
+    let contract = WORLD.replace(
+        "customer: {$ref: \"#/components/schemas/Customer\"}",
+        "customer: {type: object, properties: {id: {type: string}, name: {type: string}}}",
+    );
+    let api = actions_of(
+        &contract,
+        vec![
+            order("o2", json!({"id": "c1"})),
+            order("o3", json!({"id": "c1", "name": "Ana"})),
+        ],
+    );
+    let (status, _, _) = api.call("POST", "/orders", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    read(&api, "/orders/o3").await;
+    let (source, customer) = read(&api, "/customers/c1").await;
+    assert_eq!(source, "state");
+    assert_eq!(customer["name"], "Ana");
+}
+
+/// Issues read by their number, with an `id` of their own, as on GitHub.
+const ISSUES: &str = r##"
+openapi: 3.0.0
+info: {title: Issues, version: "1"}
+paths:
+  /issues:
+    get:
+      operationId: listIssues
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}
+  /issues/{issue_number}:
+    get:
+      operationId: getIssue
+      parameters: [{name: issue_number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+    delete:
+      operationId: deleteIssue
+      parameters: [{name: issue_number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: gone, content: {application/json: {schema: {type: object}}}}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, number, title]
+      properties: {id: {type: integer}, number: {type: integer}, title: {type: string}}
+"##;
+
+/// An issue read by number is one resource, under its id: a list repeating
+/// it stores no second one, and deleting it by number leaves none.
+#[tokio::test]
+async fn a_deleted_issue_stays_gone_after_a_read_and_a_list() {
+    let issue = json!({"id": 999, "number": 5, "title": "a"});
+    let api = actions_of(
+        ISSUES,
+        vec![
+            Ok(issue.to_string()),
+            Ok(json!([issue]).to_string()),
+            Ok(json!({}).to_string()),
+            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
+        ],
+    );
+    read(&api, "/issues/5").await;
+    let (source, again) = read(&api, "/issues/5").await;
+    assert_eq!(source, "state");
+    assert_eq!(again["id"], 999);
+    read(&api, "/issues").await;
+    let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, body) = read(&api, "/issues/5").await;
+    assert_ne!(source, "state", "deleted issue read back: {body}");
+    assert_eq!(body["title"], "regenerated");
+}
+
+/// A by-id read with a query is one view of the resource, not the resource:
+/// each query keeps its own answer.
+#[tokio::test]
+async fn a_read_with_a_query_is_not_stored() {
+    let api = actions_of(
+        WORLD,
+        vec![
+            Ok(json!({"id": "c1", "name": "One"}).to_string()),
+            Ok(json!({"id": "c1", "name": "Two"}).to_string()),
+        ],
+    );
+    let (_, first) = read(&api, "/customers/c1?view=a").await;
+    assert_eq!(first["name"], "One");
+    let (source, second) = read(&api, "/customers/c1?view=b").await;
+    assert_ne!(source, "state");
+    assert_eq!(second["name"], "Two");
+}
+
+/// The path names an issue's number: the answer takes it there, and keeps
+/// its own id.
+#[tokio::test]
+async fn a_read_by_number_sets_the_number_and_keeps_the_id() {
+    let api = actions_of(
+        ISSUES,
+        vec![Ok(json!({"id": 999, "number": 7, "title": "a"}).to_string())],
+    );
+    let (_, issue) = read(&api, "/issues/5").await;
+    assert_eq!(issue["id"], 999);
+    assert_eq!(issue["number"], 5);
+}
