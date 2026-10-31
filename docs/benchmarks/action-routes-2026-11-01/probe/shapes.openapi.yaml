@@ -1,0 +1,66 @@
+openapi: 3.0.3
+info: {title: Shapes, version: "1"}
+paths:
+  /comments:
+    post:
+      operationId: createComment
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/NewComment"}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /comments/{id}:
+    get:
+      operationId: getComment
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /comments/{id}/replies:
+    post:
+      operationId: replyToComment
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/NewComment"}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /documents:
+    post:
+      operationId: createDocument
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/NewDocument"}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Document"}}}}}
+  /documents/{id}:
+    get:
+      operationId: getDocument
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Document"}}}}}
+  /documents/{id}/copies:
+    post:
+      operationId: copyDocument
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Document"}}}}}
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/NewTicket"}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}}
+  /tickets/{id}:
+    get:
+      operationId: getTicket
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}}
+  /tickets/{id}/close:
+    post:
+      operationId: closeTicket
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}}
+components:
+  schemas:
+    NewComment: {type: object, required: [body], properties: {body: {type: string}}}
+    Comment:
+      type: object
+      required: [id, body, author]
+      properties: {id: {type: string}, body: {type: string}, author: {type: string}, parent_id: {type: string, nullable: true}}
+    NewDocument: {type: object, required: [title], properties: {title: {type: string}}}
+    Document:
+      type: object
+      required: [id, title, version]
+      properties: {id: {type: string}, title: {type: string}, version: {type: integer}}
+    NewTicket: {type: object, required: [subject], properties: {subject: {type: string}}}
+    Ticket:
+      type: object
+      required: [id, subject, state]
+      properties: {id: {type: string}, subject: {type: string}, state: {type: string, enum: [open, closed]}, closed_at: {type: string, format: date-time, nullable: true}}
