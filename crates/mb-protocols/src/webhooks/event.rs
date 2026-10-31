@@ -100,6 +100,12 @@ pub fn envelope_object(op: &Operation, body: Option<&Value>, target_id: Option<&
     }
 }
 
+/// Whether `op` is an action that stores nothing and answered no body, so its
+/// envelope would say only that the call happened.
+pub fn is_empty_action(op: &Operation, body: Option<&Value>) -> bool {
+    body.is_none() && op.kind == OperationKind::Command(Effect::Other) && op.is_action()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

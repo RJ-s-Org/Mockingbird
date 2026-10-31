@@ -23,12 +23,13 @@ Many documentation pages carry their own OpenAPI definition: a fenced ```` ```ya
 
 The compiler decides from the contract, not the words of the path, whether `POST <static>/{param}/<static>` adds a record of its own or acts on the resource `{param}` names. OpenAPI 3 and Swagger 2.0 read it the same way, in this order:
 
-1. **No success response declares a body** (`204`, or `200` or `202` with no content, for every 2xx it lists): it acts on the parent, even with a `GET` beside it. This also holds under a longer static tail (`/x/{id}/y/z`). A `201` does not count, because it says something was made.
+1. **No success response declares a body** (`204`, or `200` or `202` with no content, for every 2xx it lists): it acts on the parent and stores nothing, even with a `GET` beside it. This also holds under a longer static tail (`/x/{id}/y/z`). A declared `201` does not count, because it says something was made. Such a call sends no webhook unless the contract gives it a payload.
 2. **A route below it** (`<path>/{...}`): a collection.
-3. **A `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not: `POST /v1/playlists/{id}/items` answers a snapshot id, so it acts on the playlist.
-4. **An answer the same as the parent's `GET`**: it replaces the parent (an update).
-5. **An answer with an identity of its own**: a record of its own when another resource's `GET` serves that schema, by path or in a list, stored under that read's type (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it), or when the status is `201`.
-6. **Anything else**: nothing can read what it answers, so it acts on the parent and stores nothing.
+3. **A `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not.
+4. **An answer of the parent's record**, the same schema as the parent's `GET`, through a one-member envelope or an `allOf` shorter form: a child record under the parent's type when it declares a `201`, has an identity and the request supplies the content (a required body with members, or a body schema with `required` members), as in `POST /comments/{id}/replies`. Otherwise it acts on the parent, as in `POST /orders/{id}/capture`, and a schema equal to the `GET`'s replaces the stored record. So a `200` of this shape, or a `201` with no such request, is an update: correct one that makes a new record with `action: false` and `type`.
+5. **An answer another resource's route serves by path**: a record of that route's type, with its identity (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it). The match is the same schema, through a one-member envelope or an `allOf` shorter form; members in common are not enough. Unless the status is `201`, that route must know the record's identity. A list does not count. Where no `GET` exists, a `PATCH`, `PUT` or `DELETE` that declares an answer stands in for it, in 4 as well.
+6. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no identity it stores nothing.
+7. **Anything else**: nothing can read what it answers, so it acts on the parent and stores nothing.
 
 A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read.
 
@@ -46,14 +47,14 @@ paths:
         identity: key   # the member that identifies it
 ```
 
-All three members are optional, and each overrides what inference decides for that operation.
+All three members are optional, and each overrides what inference decides for that operation and no other: an action and the read beside it are corrected one by one.
 
 - `action: true` needs a path ending `<static>/{param}/<static>...` and a method other than `GET`, `HEAD` or `OPTIONS`. It takes any tail, also on `PUT` and `PATCH`, and it beats a read verb in the last segment.
-- `action: false` makes a `POST` a write of its own, also when its last segment is a read verb.
-- `type` also applies to a read, and rule 5 stores a record under the type its read declares.
-- `identity` must be a member of what the operation answers, or for an action of what the parent's `GET` answers. An answer that declares no members cannot contradict it.
+- `action: false` makes a `POST` a write of its own, also when its last segment is a read verb. On anything else (another method, a stream, a `POST` ending in a parameter) it is ignored with a warning.
+- `type` is an identifier-like name: letters, digits, `_`, `-` and `.`, starting with a letter, digit or `_`. On a read, rule 5 stores records under it. It does not change the webhook event type of a route ending in a parameter, which is named after its last static segment.
+- `identity` must be a member of what the operation answers, or for an action of what the parent's `GET` answers. An answer that declares no members cannot contradict it. It sets that operation's identity field, after inference: it does not decide whether a route is an action or a record, or set the identity of other operations on the same resource.
 
-A value that is not valid gives an `invalid_resource_extension` warning, and inference stands for that member: the extension's other valid members still apply. That covers a value that is not an object, a member of the wrong type, an unknown member, an impossible `action: true`, and an `identity` the operation does not declare.
+A value that is not valid gives an `invalid_resource_extension` warning, and inference stands for that member: the extension's other valid members still apply. That covers a value that is not an object, a member of the wrong type, an unknown member, an impossible `action`, and an `identity` the operation does not declare.
 
 ## Merge or replace
 

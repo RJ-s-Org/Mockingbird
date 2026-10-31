@@ -12,7 +12,7 @@ use serde_json::{Map, json};
 
 use super::deliver::OutboundEvent;
 use super::event::{
-    envelope, envelope_object, event_type, new_event_id, read_event_type, singular,
+    envelope, envelope_object, event_type, is_empty_action, new_event_id, read_event_type, singular,
 };
 use crate::MockRuntime;
 
@@ -51,6 +51,10 @@ pub(crate) fn emit(
     let bundle = rt.bundle().clone();
     let engine = Arc::clone(engine);
     let def = bundle.webhook_for(&op.id, &event_type).cloned();
+    // A bodyless action has nothing to put in the envelope.
+    if def.is_none() && is_empty_action(op, generated.body.as_ref()) {
+        return;
+    }
     let event_id = new_event_id();
     let object = envelope_object(op, generated.body.as_ref(), target_id);
     let request = call.body.clone();

@@ -3310,3 +3310,67 @@ async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
     assert_eq!(effects[0]["outcome"], "rejected");
     assert_eq!(effects[0]["reason"], "no schema to check against");
 }
+
+/// `POST /comments/{id}/replies` answers a comment: the reply is a comment of
+/// its own, read by the parent's `GET`, and the parent stays as it was.
+#[tokio::test]
+async fn a_reply_shaped_like_its_parent_leaves_the_parent() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Comments, version: "1"}
+paths:
+  /comments:
+    post:
+      operationId: createComment
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/NewComment"}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+  /comments/{id}:
+    get:
+      operationId: getComment
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+  /comments/{id}/replies:
+    post:
+      operationId: reply
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/NewComment"}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+components:
+  schemas:
+    NewComment: {type: object, required: [body], properties: {body: {type: string}}}
+    Comment:
+      type: object
+      required: [id, body]
+      properties: {id: {type: string}, body: {type: string}}
+"##;
+    let comment = |id: &str, body: &str| Ok(json!({"id": id, "body": body}).to_string());
+    let h = actions_of(
+        contract,
+        vec![comment("c1", "first"), comment("c2", "second")],
+    );
+    let (status, _, first) = h
+        .call("POST", "/comments", Some(json!({"body": "first"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(first["id"], "c1");
+    let (status, _, reply) = h
+        .call(
+            "POST",
+            "/comments/c1/replies",
+            Some(json!({"body": "second"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(reply["id"], "c2");
+    let (_, _, parent) = h.call("GET", "/comments/c1", None).await;
+    assert_eq!(parent, json!({"id": "c1", "body": "first"}));
+    let (_, _, stored) = h.call("GET", "/comments/c2", None).await;
+    assert_eq!(stored, json!({"id": "c2", "body": "second"}));
+}

@@ -4,7 +4,9 @@ use std::borrow::Cow;
 
 use crate::Ctx;
 use crate::schema::defs_name;
-use mb_mcm::{Binding, Effect, HttpMethod, Identity, Operation, OperationKind, StatusSelector};
+use mb_mcm::{
+    Binding, Effect, HttpMethod, Identity, Operation, OperationKind, OutputVariant, StatusSelector,
+};
 use serde_json::{Map, Value};
 
 fn segments(path: &str) -> Vec<&str> {
@@ -274,9 +276,12 @@ fn parent_target(path: &str) -> Option<ParentTarget> {
 enum Route {
     /// It acts on its parent.
     Action(ParentTarget),
-    /// It adds a record of its own, of the type a read elsewhere gives it,
-    /// else the type its path gives it.
-    Collection(Option<String>),
+    /// It adds a record of its own, of the type and identity given here
+    /// where they are not what its path and compiled answer give.
+    Collection {
+        resource_type: Option<String>,
+        identity: Option<Identity>,
+    },
     /// The contract does not say: what the route's shape implies stands.
     Undecided,
 }
@@ -394,30 +399,130 @@ fn reads_back(read: Option<&Value>, answer: Option<&Value>, defs: &Map<String, V
     })
 }
 
-/// The type of the read that serves a record shaped like `answer`, from
-/// another resource than `target`: by path (`GET /refunds/{id}`), else in a
-/// list. The parent's own reads do not count: those are what it acts on.
-fn read_elsewhere(
+/// Methods whose answer on a route says what its record looks like, in the
+/// order they are believed: with no `GET`, a `PATCH`, `PUT` or `DELETE` that
+/// answers is the evidence there is.
+const RECORD_METHODS: [HttpMethod; 4] = [
+    HttpMethod::Get,
+    HttpMethod::Patch,
+    HttpMethod::Put,
+    HttpMethod::Delete,
+];
+
+/// The operations of `route` that say what its record looks like, most
+/// believed first.
+fn record_ops(operations: &[Operation], route: impl Fn(&[&str]) -> bool) -> Vec<&Operation> {
+    let on = |wanted: &HttpMethod, op: &&Operation| {
+        http_path(op).is_some_and(|(method, path)| method == *wanted && route(&segments(path)))
+            && answer(op).is_some()
+    };
+    RECORD_METHODS
+        .iter()
+        .flat_map(|wanted| operations.iter().filter(|op| on(wanted, op)))
+        .collect()
+}
+
+/// The `allOf` branches of `schema`, with those of its branches, resolved.
+fn all_of_branches<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Vec<&'a Value> {
+    let mut branches = Vec::new();
+    let mut pending = vec![schema];
+    while let Some(next) = pending.pop() {
+        let parts = resolve(next, defs)
+            .and_then(|s| s.get("allOf"))
+            .and_then(Value::as_array);
+        for part in parts.into_iter().flatten() {
+            if branches.len() >= MAX_ALL_OF_BRANCHES {
+                return branches;
+            }
+            if let Some(part) = resolve(part, defs) {
+                branches.push(part);
+                pending.push(part);
+            }
+        }
+    }
+    branches
+}
+
+/// Whether two answers are one record: the same schema, through a one-member
+/// envelope on either side, or one a shorter form the other composes with
+/// `allOf`. Nothing here reads names.
+fn same_record(a: &Value, b: &Value, defs: &Map<String, Value>) -> bool {
+    let (a, b) = (answered_things(a, defs), answered_things(b, defs));
+    let composes = |long: &Value, short: &Value| all_of_branches(long, defs).contains(&short);
+    a.iter()
+        .any(|a| b.iter().any(|b| a == b || composes(a, b) || composes(b, a)))
+}
+
+/// The read by path of another resource than `target` that serves the record
+/// `answer` is. The parent's own reads do not count: those are what it acts
+/// on. Nor does a list, which holds its items for any number of reasons.
+/// Unless the route says it `created` something, the read must know what
+/// identifies the record: otherwise a shared answer is all they have in common.
+fn read_elsewhere<'a>(
     answer: &Value,
     target: &ParentTarget,
-    operations: &[Operation],
+    created: bool,
+    operations: &'a [Operation],
     defs: &Map<String, Value>,
-) -> Option<String> {
-    let schema = resolve(answer, defs)?;
-    let others = || {
-        gets(operations, |_| true)
-            .filter(|read| read.resource_type.as_deref() != Some(&target.resource_type))
-    };
-    let by_path = others().find(|read| {
-        http_path(read).is_some_and(|(_, path)| trailing_param(path).is_some())
-            && self::answer(read).and_then(|a| resolve(a, defs)) == Some(schema)
+) -> Option<&'a Operation> {
+    if is_opaque(Some(answer), defs) {
+        return None;
+    }
+    record_ops(operations, |route| {
+        route.last().is_some_and(|last| is_param(last))
+    })
+    .into_iter()
+    .find(|read| {
+        read.resource_type.as_deref() != Some(&target.resource_type)
+            && (created || read.identity.is_some())
+            && self::answer(read).is_some_and(|served| same_record(answer, served, defs))
+    })
+}
+
+/// The output of a declared `201`, which says the route made something,
+/// whichever other successes it lists.
+fn created_output(op: &Operation) -> Option<&OutputVariant> {
+    op.outputs
+        .iter()
+        .find(|o| o.status == StatusSelector::Code(201))
+}
+
+/// What the route answers about what it made: its `201`, else its lowest
+/// success.
+fn record_schema(op: &Operation) -> Option<&Value> {
+    created_output(op)
+        .and_then(|o| o.schema.as_ref())
+        .or_else(|| answer(op))
+}
+
+/// The identity of a record the route adds: the one the read that serves it
+/// knows, with no path parameter since the route's parameter is its parent's;
+/// else what its answer has.
+fn record_identity(
+    op: &Operation,
+    read: Option<&Operation>,
+    defs: &Map<String, Value>,
+) -> Option<Identity> {
+    let known = read.and_then(|r| r.identity.as_ref()).map(|i| Identity {
+        path_param: None,
+        field: i.field.clone(),
+        input_field: None,
+        path_field: None,
     });
-    let listed = || {
-        others().find(|read| {
-            self::answer(read).is_some_and(|a| listed_things(a, defs).iter().any(|i| i == schema))
-        })
+    known.or_else(|| identity_for(None, record_schema(op), defs))
+}
+
+/// Whether the request supplies the content of a new record: a body it must
+/// send, with members, or one that requires some.
+fn supplies_content(op: &Operation, defs: &Map<String, Value>) -> bool {
+    let Some(body) = &op.input.body else {
+        return false;
     };
-    by_path.or_else(listed)?.resource_type.clone()
+    let requires_members = resolve(body, defs)
+        .and_then(|s| s.get("required"))
+        .and_then(Value::as_array)
+        .is_some_and(|r| !r.is_empty());
+    requires_members || (op.input.body_required && !is_opaque(Some(body), defs))
 }
 
 /// The structural test of a `POST` to `<static>/{param}/<static>...`, in
@@ -430,10 +535,14 @@ fn read_elsewhere(
 /// 2. A route below it (`<path>/{...}`) makes it a collection.
 /// 3. A `GET` on its path that [`reads_back`] its answer makes it a collection.
 ///    A `GET` of something else does not.
-/// 4. An answer that is what the parent's `GET` answers replaces the parent.
-/// 5. An answer with an identity of its own is a record of its own when it is
-///    [`read_elsewhere`], under that read's type, or when the status is `201`.
-/// 6. Otherwise nothing can read what it answers, and it acts on the parent.
+/// 4. An answer the parent's record has ([`same_record`]): a child, under the
+///    parent's type, when it declares a `201`, has an identity and
+///    [`supplies_content`] (`POST /comments/{id}/replies`). Otherwise it acts on
+///    the parent, whose stored record it replaces when the schemas are equal
+///    (`POST /orders/{id}/capture`, also on a `201`).
+/// 5. An answer [`read_elsewhere`] is a record of that read's type and identity.
+/// 6. A declared `201` is a record of its own. With no identity it stores nothing.
+/// 7. Otherwise nothing can read what it answers, and it acts on the parent.
 fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Value>) -> Route {
     let Some((HttpMethod::Post, path)) = http_path(op) else {
         return Route::Undecided;
@@ -447,6 +556,10 @@ fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Valu
     if target.tail != 1 || ends_in_read(path) {
         return Route::Undecided;
     }
+    let own = |resource_type, read| Route::Collection {
+        resource_type,
+        identity: record_identity(op, read, defs),
+    };
     let segs = segments(path);
     let has_detail = operations.iter().any(|other| {
         http_path(other).is_some_and(|(_, other)| {
@@ -457,32 +570,47 @@ fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Valu
         })
     });
     if has_detail {
-        return Route::Collection(None);
+        return own(None, None);
     }
-    let answered = answer(op);
+    let answered = record_schema(op);
     if gets(operations, |route| same_route(route, &segs))
         .any(|read| reads_back(answer(read), answered, defs))
     {
-        return Route::Collection(None);
+        return own(None, None);
     }
-    let replaces_parent = parent_read(operations, path, target.tail)
-        .is_some_and(|read| answered.is_some() && answer(read) == answered);
-    if !replaces_parent
-        && op.identity.is_some()
-        && let Some(answered) = answered
-    {
-        if let Some(read) = read_elsewhere(answered, &target, operations, defs) {
-            return Route::Collection(Some(read));
-        }
-        if op.success_output().map(|o| o.status) == Some(StatusSelector::Code(201)) {
-            return Route::Collection(None);
-        }
+    let created = created_output(op).is_some();
+    let Some(answered) = answered else {
+        return if created {
+            own(None, None)
+        } else {
+            Route::Action(target)
+        };
+    };
+    let parent = parent_read(operations, path, target.tail)
+        .filter(|read| answer(read).is_some_and(|a| same_record(answered, a, defs)));
+    if let Some(parent) = parent {
+        let identity = record_identity(op, Some(parent), defs);
+        return if created && identity.is_some() && supplies_content(op, defs) {
+            Route::Collection {
+                resource_type: Some(target.resource_type),
+                identity,
+            }
+        } else {
+            Route::Action(target)
+        };
+    }
+    if let Some(read) = read_elsewhere(answered, &target, created, operations, defs) {
+        return own(read.resource_type.clone(), Some(read));
+    }
+    if created {
+        return own(None, None);
     }
     Route::Action(target)
 }
 
-/// The `GET` of the resource a route with a `tail` of static segments acts
-/// on: `<static>/{param}`, whatever that route names its parameters.
+/// The operation saying what the record a route with a `tail` of static
+/// segments acts on looks like: at `<static>/{param}`, whatever that route
+/// names its parameters.
 fn parent_read<'a>(
     operations: &'a [Operation],
     action_path: &str,
@@ -490,7 +618,9 @@ fn parent_read<'a>(
 ) -> Option<&'a Operation> {
     let action = segments(action_path);
     let parent = action.get(..action.len().checked_sub(tail)?)?;
-    gets(operations, |read| same_route(read, parent)).next()
+    record_ops(operations, |read| same_route(read, parent))
+        .first()
+        .copied()
 }
 
 /// Points the operation at `index` at its parent resource. Its kind is an
@@ -557,6 +687,15 @@ pub(crate) struct ResourceHint {
     action: Option<bool>,
 }
 
+/// Whether `name` can be a resource type: letters, digits, `_`, `-` and `.`,
+/// starting with a letter, a digit or `_`.
+fn is_type_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
 /// Reads operation `op`'s [`RESOURCE_EXT`], with a warning for each value
 /// that is not valid, which then does not count.
 pub(crate) fn resource_hint(op: &Value, op_id: &str, ctx: &mut Ctx) -> ResourceHint {
@@ -578,10 +717,11 @@ pub(crate) fn resource_hint(op: &Value, op_id: &str, ctx: &mut Ctx) -> ResourceH
     for (name, value) in members {
         let text = || value.as_str().filter(|t| !t.is_empty()).map(str::to_owned);
         match name.as_str() {
-            "type" if text().is_some() => hint.resource_type = text(),
+            "type" if text().is_some_and(|t| is_type_name(&t)) => hint.resource_type = text(),
             "identity" if text().is_some() => hint.identity = text(),
             "action" if value.is_boolean() => hint.action = value.as_bool(),
-            "type" | "identity" => invalid(format!("member {name} is not a non-empty string")),
+            "type" => invalid("member type is not an identifier-like name".to_owned()),
+            "identity" => invalid("member identity is not a non-empty string".to_owned()),
             "action" => invalid("member action is not a boolean".to_owned()),
             _ => invalid(format!("has an unknown member {name}")),
         }
@@ -658,7 +798,10 @@ pub(crate) fn apply_action_routes(
         let route = match hint.action {
             Some(true) => declared_target(op, ctx).map_or_else(inferred, Route::Action),
             Some(false) => match inferred() {
-                Route::Action(_) => Route::Collection(None),
+                Route::Action(_) => Route::Collection {
+                    resource_type: None,
+                    identity: record_identity(op, None, defs),
+                },
                 route => route,
             },
             None => inferred(),
@@ -666,10 +809,33 @@ pub(crate) fn apply_action_routes(
         let read_verb_write = hint.action == Some(false)
             && op.kind == OperationKind::Query
             && http_path(op).is_some_and(|(method, _)| method == HttpMethod::Post);
+        let writes_its_own = !is_stream(op)
+            && http_path(op).is_some_and(|(method, _)| method == HttpMethod::Post)
+            && matches!(
+                op.kind,
+                OperationKind::Query | OperationKind::Command(Effect::Create)
+            );
+        if hint.action == Some(false) && !writes_its_own {
+            let id = op.id.clone();
+            ctx.warn(
+                INVALID_RESOURCE_EXT,
+                Some(&id),
+                format!(
+                    "operation {id}: {RESOURCE_EXT} action false applies to a POST that could write a record of its own; it is ignored"
+                ),
+            );
+        }
         match route {
             Route::Action(target) => act_on_parent(index, target, operations, defs),
-            Route::Collection(Some(read)) => operations[index].resource_type = Some(read),
-            Route::Collection(None) | Route::Undecided => {}
+            Route::Collection {
+                resource_type,
+                identity,
+            } => {
+                let op = &mut operations[index];
+                op.resource_type = resource_type.or(op.resource_type.take());
+                op.identity = identity.or(op.identity.take());
+            }
+            Route::Undecided => {}
         }
         let op = &mut operations[index];
         if read_verb_write {

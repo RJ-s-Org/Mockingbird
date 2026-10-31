@@ -741,3 +741,53 @@ async fn an_effect_not_applied_sends_no_event() {
         assert!(sent(&server).await.is_empty());
     }
 }
+
+/// A bodyless action has nothing to report yet: an `updated` event with an
+/// empty `data.object` says only that the call happened. One with a body, and
+/// one the contract gives a payload, still sends.
+#[tokio::test]
+async fn a_bodyless_action_sends_no_empty_event() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Issues, version: "1"}
+paths:
+  /issues/{id}:
+    get:
+      operationId: getIssue
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /issues/{id}/transitions:
+    post:
+      operationId: transition
+      responses: {"204": {description: done}}
+  /issues/{id}/notes:
+    post:
+      operationId: note
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}}
+components:
+  schemas:
+    Issue: {type: object, properties: {id: {type: string}}}
+"##;
+    let server = receiver(200).await;
+    let (d, log) = dispatcher_with(vec![to(&server, &["*"])], fast());
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(60))),
+    );
+    rt.webhooks = Some(d);
+    let app = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post("/issues/i1/transitions"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app.clone().oneshot(post("/issues/i1/notes")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sent = wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    assert_eq!(sent.operation, "note");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(self::sent(&server).await.len(), 1);
+}
