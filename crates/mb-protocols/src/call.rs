@@ -1191,7 +1191,8 @@ pub(crate) struct BundleIndex {
     /// The resource type each `$defs` name is, from the query operations
     /// whose success schema or list items are that `$ref`: a read by path
     /// parameter first (`/repos/{owner}/{repo}`, not `/search/repositories`,
-    /// names GitHub's `repository`), then a list, then any other read.
+    /// names GitHub's `repository`), then a list, then any other read. A
+    /// list under a member naming a type read by path is that type.
     types_by_def: HashMap<String, String>,
     /// The resource types of the query operations.
     read_types: HashSet<String>,
@@ -1216,7 +1217,7 @@ impl BundleIndex {
         let mut listed = HashSet::new();
         let mut read_types = HashSet::new();
         let mut detail_reads = HashMap::new();
-        let mut ranked_defs: HashMap<String, (u8, String)> = HashMap::new();
+        let mut ranked_defs = RankedDefs::new();
         let mut shapes = TypeShapes::new();
         let mut referrers: HashMap<String, Vec<String>> = HashMap::new();
         for (i, op) in bundle.operations.iter().enumerate() {
@@ -1267,6 +1268,10 @@ impl BundleIndex {
             fields.sort_unstable();
             fields.dedup();
         }
+        // Lists under a member of a type read by path hold that type: the
+        // `offers` of a flight search are offers.
+        let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
+        let in_detail_reads = |name: &String| by_path_types.contains(name);
         #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
         #[cfg(any(test, feature = "events"))]
@@ -1283,7 +1288,12 @@ impl BundleIndex {
             list_members: list_members_of,
             types_by_def: ranked_defs
                 .into_iter()
-                .map(|(def, (_, t))| (def, t))
+                .map(|(def, (_, t, member))| {
+                    let t = member
+                        .and_then(|m| [format!("{m}s"), m].into_iter().find(in_detail_reads))
+                        .unwrap_or(t);
+                    (def, t)
+                })
                 .collect(),
             read_types,
             detail_reads,
@@ -1408,6 +1418,10 @@ fn list_item_schemas(
     out
 }
 
+/// Per `$defs` name: the best rank seen, the type of the read it was seen in
+/// and, for a list, the non-envelope member holding it.
+type RankedDefs = HashMap<String, (u8, String, Option<String>)>;
+
 /// Records in `ranked` the `$defs` names `op` reads as resource type `t`,
 /// keeping the best-ranked type of each (see [`BundleIndex::types_by_def`]).
 fn rank_defs(
@@ -1415,7 +1429,7 @@ fn rank_defs(
     t: &str,
     by_path: bool,
     lists: &[(Option<String>, Value)],
-    ranked: &mut HashMap<String, (u8, String)>,
+    ranked: &mut RankedDefs,
 ) {
     const DETAIL: u8 = 0;
     const LIST: u8 = 1;
@@ -1423,16 +1437,23 @@ fn rank_defs(
     let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
         return;
     };
-    let mut found: Vec<(u8, String)> = Vec::new();
+    let mut found: Vec<(u8, String, Option<String>)> = Vec::new();
     if let Some(def) = def_name(schema) {
-        found.push((if by_path { DETAIL } else { OTHER }, def.to_string()));
+        found.push((if by_path { DETAIL } else { OTHER }, def.to_string(), None));
     }
-    let items = lists.iter().filter_map(|(_, items)| def_name(items));
-    found.extend(items.map(|d| (LIST, d.to_string())));
-    for (rank, def) in found {
-        let held = ranked.entry(def).or_insert_with(|| (rank, t.to_string()));
+    let items = lists.iter().filter_map(|(member, items)| {
+        let member = member
+            .as_ref()
+            .filter(|m| !ENVELOPE_KEYS.contains(&m.as_str()));
+        Some((LIST, def_name(items)?.to_string(), member.cloned()))
+    });
+    found.extend(items);
+    for (rank, def, member) in found {
+        let held = ranked
+            .entry(def)
+            .or_insert_with(|| (rank, t.to_string(), member.clone()));
         if rank < held.0 {
-            *held = (rank, t.to_string());
+            *held = (rank, t.to_string(), member);
         }
     }
 }
@@ -1866,6 +1887,16 @@ async fn seed_own_read(
     };
     if state.insert_seeded(session, resource.clone()).await {
         rt.own_reads().remember(session, &resource);
+        return;
+    }
+    // What is held is shorter than this read (see [`is_summary`]): this answer
+    // was generated knowing it, and a later read can be served.
+    if let Some(held) = state.get(session, t, &resource.id).await
+        && !entity_fits(rt, t, &held.data)
+        && entity_fits(rt, t, &resource.data)
+        && state.upsert(session, resource.clone()).await
+    {
+        rt.own_reads().remember(session, &resource);
     }
 }
 
@@ -1877,7 +1908,8 @@ const MAX_ENTITIES: usize = 100;
 /// Stores what a 2xx answer mentions so that a later read returns it: each
 /// object below the answer's root with an `id` or `number`, a known type (see
 /// [`entity_type`]) and, where its type has a read by path parameter, a value
-/// that read would serve. What the session already holds is left as it is.
+/// that read would serve or a shorter form of one (see [`is_summary`]). What
+/// the session already holds is left as it is.
 async fn seed_entities(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1961,7 +1993,9 @@ impl<'a> EntityWalk<'a> {
             return;
         }
         self.considered += 1;
-        if entity_fits(self.rt, &resource_type, value) {
+        if entity_fits(self.rt, &resource_type, value)
+            || is_summary(self.rt, &resource_type, defs, value)
+        {
             self.found.push(StoredResource {
                 resource_type,
                 id,
@@ -1989,6 +2023,32 @@ fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
         return true;
     };
     rt.engine.serve_stored(bundle, op, value, shape).is_some()
+}
+
+/// Whether `value`, shaped by `defs`, is a shorter form of resource type `t`:
+/// valid as one of those definitions, which its by-path read's schema is
+/// composed of (a search's `FlightOffer`, of `Offer`). It is stored though
+/// that read would not serve it: the read is generated knowing it and keeps
+/// what it holds, and the answer takes its place (see [`seed_own_read`]).
+fn is_summary(rt: &MockRuntime, t: &str, defs: &[&str], value: &Value) -> bool {
+    let bundle = rt.bundle();
+    let Some(op) = rt
+        .index()
+        .detail_reads
+        .get(t)
+        .and_then(|i| bundle.operations.get(*i))
+    else {
+        return false;
+    };
+    let read = op.success_output().and_then(|o| o.schema.as_ref());
+    let (_, read_defs) = schema_parts(bundle, read);
+    let Some(def) = defs.iter().find(|d| read_defs.contains(d)) else {
+        return false;
+    };
+    let shape = serde_json::json!({"$ref": format!("#/$defs/{def}")});
+    rt.engine
+        .serve_stored(bundle, op, value, Some(&shape))
+        .is_some()
 }
 
 /// The response cache key of a read: its operation, path parameters,
@@ -3404,6 +3464,21 @@ paths:
             .filter_map(|o| o.success_output()?.schema.as_ref())
             .flat_map(|schema| list_members(bundle, schema))
             .collect()
+    }
+
+    /// A list under a member naming a type read by path is that type, and
+    /// one under any other member stays the type of its read.
+    #[test]
+    fn a_listed_def_takes_its_members_type() {
+        let path = format!(
+            "{}/../../docs/benchmarks/contracts/travel.openapi.yaml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let rt = runtime_of(compile(&std::fs::read(path).unwrap()).unwrap());
+        let index = rt.index();
+        assert_eq!(index.types_by_def["Offer"], "offers");
+        assert_eq!(index.types_by_def["FlightOffer"], "offers");
+        assert_eq!(index.types_by_def["PassengerRecord"], "bookings");
     }
 
     /// GitHub's `repository` is the detail route's type, not a list's.

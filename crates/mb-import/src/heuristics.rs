@@ -1,5 +1,7 @@
 //! Inference of operation kind, resource type, and identity from HTTP shape.
 
+use std::borrow::Cow;
+
 use crate::schema::defs_name;
 use mb_mcm::{Binding, Effect, HttpMethod, Identity, Operation, OperationKind};
 use serde_json::{Map, Value};
@@ -147,6 +149,9 @@ fn param_field<'a>(param: &str, props: &'a Map<String, Value>) -> Option<&'a str
     })
 }
 
+/// `allOf` branches [`schema_properties`] reads, so ref cycles terminate.
+const MAX_ALL_OF_BRANCHES: usize = 64;
+
 /// Follow `$ref` chains through `defs` (bounded, so ref cycles terminate).
 fn resolve<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Option<&'a Value> {
     let mut cur = schema;
@@ -159,15 +164,42 @@ fn resolve<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Option<&'a Va
     None
 }
 
-/// The members a schema declares at its top level.
+/// The members a schema declares at its top level, with those of its `allOf`
+/// branches: an answer has them all.
 fn schema_properties<'a>(
     schema: Option<&'a Value>,
     defs: &'a Map<String, Value>,
-) -> Option<&'a Map<String, Value>> {
-    schema
-        .and_then(|s| resolve(s, defs))
-        .and_then(|s| s.get("properties"))
-        .and_then(Value::as_object)
+) -> Option<Cow<'a, Map<String, Value>>> {
+    let schema = resolve(schema?, defs)?;
+    let own = schema.get("properties").and_then(Value::as_object);
+    let Some(branches) = schema.get("allOf").and_then(Value::as_array) else {
+        return own.map(Cow::Borrowed);
+    };
+    let mut merged = own.cloned().unwrap_or_default();
+    let mut found = own.is_some();
+    let mut pending: Vec<&Value> = branches.iter().collect();
+    let mut visits = 0;
+    while let Some(branch) = pending.pop() {
+        visits += 1;
+        if visits > MAX_ALL_OF_BRANCHES {
+            break;
+        }
+        let Some(branch) = resolve(branch, defs) else {
+            continue;
+        };
+        if let Some(props) = branch.get("properties").and_then(Value::as_object) {
+            found = true;
+            merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        pending.extend(
+            branch
+                .get("allOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        );
+    }
+    found.then_some(Cow::Owned(merged))
 }
 
 pub(crate) fn infer_identity(
@@ -187,6 +219,7 @@ fn identity_for(
     defs: &Map<String, Value>,
 ) -> Option<Identity> {
     let props = schema_properties(success_schema, defs)?;
+    let props = props.as_ref();
     let named = path_param.and_then(|p| param_field(p, props));
     let field = if props.contains_key("id") {
         "id"

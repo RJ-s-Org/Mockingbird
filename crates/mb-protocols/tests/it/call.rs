@@ -2557,3 +2557,121 @@ fn malformed_and_over_limit_effects_are_counted() {
     });
     assert_eq!(counted, (0, 0));
 }
+
+/// The benchmark's travel contract: a search answers `FlightOffer`s, and the
+/// detail read answers an `Offer`, which is a `FlightOffer` and more.
+fn travel(script: Vec<Result<String, LlmError>>) -> Actions {
+    let path = format!(
+        "{}/../../docs/benchmarks/contracts/travel.openapi.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    actions_of(&std::fs::read_to_string(path).unwrap(), script)
+}
+
+const OFFER_ID: &str = "3f7a2c58-9b1e-4d6a-8c2f-5e0a1b7d4c93";
+
+fn airport(iata: &str) -> Value {
+    json!({"iata": iata, "name": "Airport", "city": "City", "countryCode": "PT",
+           "timezone": "Europe/Lisbon"})
+}
+
+fn flight_segments(flight: &str) -> Value {
+    json!([{"type": "flight", "carrierCode": "TP", "flightNumber": flight,
+            "origin": airport("LIS"), "destination": airport("OSL"),
+            "departureAt": "2026-12-14T07:10:00Z", "arrivalAt": "2026-12-14T10:05:00Z",
+            "durationMinutes": 235, "cabin": "economy", "stops": 0}])
+}
+
+fn flight_offer(id: &str, amount: &str, flight: &str) -> Value {
+    json!({"id": id, "expiresAt": "2026-10-31T02:21:57Z",
+           "price": {"amount": amount, "currency": "EUR"},
+           "segments": flight_segments(flight), "cabin": "economy", "refundable": false,
+           "seatsRemaining": 4})
+}
+
+fn flight_search() -> Value {
+    json!({"origin": "LIS", "destination": "OSL", "departureDate": "2026-12-14",
+           "passengers": [{"type": "adult"}], "currency": "EUR"})
+}
+
+/// A search's answer holds offers: the detail read is generated knowing the
+/// one it reads and keeps what the search listed, a booking's prompt holds
+/// it, and the detail answer stays for the next read.
+#[tokio::test]
+async fn a_searched_offer_keeps_what_the_search_listed() {
+    let found = json!({"searchId": "5b1f7c1e-8a44-4f7e-b1a2-0c9d8e7f6a51", "currency": "EUR",
+                       "total": 1, "offers": [flight_offer(OFFER_ID, "148.30", "TP764")]});
+    let mut detail = flight_offer(OFFER_ID, "999.00", "TP999");
+    detail["taxes"] = json!([{"code": "PT", "amount": {"amount": "23.00", "currency": "EUR"}}]);
+    detail["baggage"] = json!([{"type": "checked", "quantity": 1}]);
+    detail["fareRules"] = json!({"changeable": true, "cancellable": false});
+    let booked = json!({"id": "b7e4d2a1-6c3f-4a89-9f12-0d5e8c7b3a64", "reference": "H4K2P9",
+        "status": "confirmed", "createdAt": "2026-10-31T01:52:03Z",
+        "updatedAt": "2026-10-31T01:52:03Z", "offerId": OFFER_ID,
+        "passengers": [{"id": "a1c9f3e2-5b7d-4e18-9a2c-6f0b3d8e1c47",
+                        "ticketNumber": "0000000000000", "givenName": "Ana",
+                        "familyName": "Silva", "dateOfBirth": "1990-04-02", "type": "adult"}],
+        "segments": flight_segments("TP764"),
+        "contact": {"email": "ana@example.org", "phone": "+351912345678"},
+        "price": {"total": {"amount": "148.30", "currency": "EUR"}, "taxes": []},
+        "payment": {"type": "card", "brand": "visa", "last4": "4242", "expMonth": 8,
+                    "expYear": 2030, "holderName": "Ana Silva"}});
+    let api = travel(vec![
+        Ok(found.to_string()),
+        Ok(detail.to_string()),
+        Ok(booked.to_string()),
+    ]);
+    let (status, _, _) = api
+        .call("POST", "/flights/search", Some(flight_search()))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (source, offer) = read(&api, &format!("/offers/{OFFER_ID}")).await;
+    assert_eq!(source, "llm");
+    let prompt = prompt_of(&api, 1);
+    assert!(prompt.contains("<existing_resource>"), "{prompt}");
+    assert!(prompt.contains("148.30"), "{prompt}");
+    assert_eq!(offer["price"]["amount"], "148.30");
+    assert_eq!(offer["segments"], flight_segments("TP764"));
+    assert_eq!(offer["fareRules"]["changeable"], true);
+
+    let request = json!({"offerId": OFFER_ID,
+        "passengers": [{"givenName": "Ana", "familyName": "Silva",
+                        "dateOfBirth": "1990-04-02", "type": "adult"}],
+        "contact": {"email": "ana@example.org", "phone": "+351912345678"},
+        "payment": {"type": "card", "brand": "visa", "last4": "4242", "expMonth": 8,
+                    "expYear": 2030, "holderName": "Ana Silva"}});
+    let (status, _, _) = api.call("POST", "/bookings", Some(request)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = prompt_of(&api, 2);
+    assert!(
+        related_of(&prompt).iter().any(|l| l.contains("TP764")),
+        "{prompt}"
+    );
+
+    // The booking emptied the cache: the store answers, whole.
+    let (source, again) = read(&api, &format!("/offers/{OFFER_ID}")).await;
+    assert_eq!(source, "state");
+    assert_eq!(again, offer);
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// With consistency off, a search stores no offers.
+#[tokio::test]
+async fn consistency_off_stores_no_searched_offer() {
+    let path = format!(
+        "{}/../../docs/benchmarks/contracts/travel.openapi.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let found = json!({"searchId": "5b1f7c1e-8a44-4f7e-b1a2-0c9d8e7f6a51", "currency": "EUR",
+                       "total": 1, "offers": [flight_offer(OFFER_ID, "148.30", "TP764")]});
+    let api = actions_off(
+        &std::fs::read_to_string(path).unwrap(),
+        vec![Ok(found.to_string())],
+    );
+    api.call("POST", "/flights/search", Some(flight_search()))
+        .await;
+    read(&api, &format!("/offers/{OFFER_ID}")).await;
+    let prompt = prompt_of(&api, 1);
+    assert!(!prompt.contains("<existing_resource>"), "{prompt}");
+}

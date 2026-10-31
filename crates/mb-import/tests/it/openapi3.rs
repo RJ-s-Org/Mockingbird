@@ -1029,6 +1029,52 @@ components:
         assert_eq!(identity.path_field.as_deref(), Some("capture_id"));
     }
 
+    /// A resource composed with `allOf` has the members of its branches, so
+    /// its read by path knows what the path names.
+    #[test]
+    fn an_all_of_resource_has_an_identity() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: Composed, version: "1"}
+paths:
+  /offers/{offerId}:
+    get:
+      operationId: getOffer
+      parameters: [{name: offerId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Offer"}}}}
+  /tickets/{ticket_number}:
+    get:
+      operationId: getTicket
+      parameters: [{name: ticket_number, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+components:
+  schemas:
+    Base: {type: object, properties: {id: {type: string}}}
+    Summary:
+      allOf:
+        - $ref: "#/components/schemas/Base"
+        - {type: object, properties: {price: {type: string}}}
+    Offer:
+      allOf:
+        - $ref: "#/components/schemas/Summary"
+        - {type: object, properties: {taxes: {type: string}}}
+    Ticket:
+      type: object
+      properties: {id: {type: string}}
+      allOf:
+        - {type: object, properties: {number: {type: string}}}
+"##;
+        let b = compile(contract.as_bytes()).unwrap();
+        let identity = b.operation("getOffer").unwrap().identity.clone().unwrap();
+        assert_eq!(identity.path_param.as_deref(), Some("offerId"));
+        assert_eq!(identity.field, "id");
+        let identity = b.operation("getTicket").unwrap().identity.clone().unwrap();
+        assert_eq!(identity.field, "id");
+        assert_eq!(identity.path_field.as_deref(), Some("number"));
+    }
+
     #[test]
     fn is_action_tells_an_action_from_a_write_on_the_resource() {
         let b = actions();
