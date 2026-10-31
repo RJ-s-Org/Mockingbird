@@ -3462,6 +3462,145 @@ async fn an_action_answering_no_identity_updates_the_target() {
     assert_eq!(stored, json!({"id": "o1", "status": "captured"}));
 }
 
+/// A body that is not an id: the answer has no identity of its own.
+#[tokio::test]
+async fn an_action_answering_an_empty_id_updates_the_target() {
+    let h = actions_of(
+        SAME_SHAPE,
+        vec![
+            Ok(json!({"id": "o1", "status": "open"}).to_string()),
+            Ok(json!({"id": "", "status": "captured"}).to_string()),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let (_, _, captured) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(captured["id"], "o1");
+    let (_, _, stored) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(stored["status"], "captured");
+}
+
+/// With no stored target there is nothing to tell a new record from, and the
+/// prompt does not ask: the answer is about what the path names.
+#[tokio::test]
+async fn an_action_with_no_stored_target_answers_for_its_path() {
+    let h = actions_of(
+        SAME_SHAPE,
+        vec![Ok(json!({"id": "o7", "status": "captured"}).to_string())],
+    );
+    let (_, _, captured) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(captured["id"], "o1");
+    let (_, source, stored) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(stored["status"], "captured");
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+/// An action's new id goes through what a create's does: a record already
+/// stored under it is left alone, whichever call or owner it came from.
+#[tokio::test]
+async fn a_new_record_from_an_action_leaves_a_record_with_its_id() {
+    let order = |id: &str, status: &str| Ok(json!({"id": id, "status": status}).to_string());
+    let h = actions_of(
+        SAME_SHAPE,
+        vec![
+            order("o1", "open"),
+            order("o2", "first"),
+            order("o2", "second"),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let (_, _, first) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(first["id"], "o2");
+    let (_, _, second) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(second["status"], "second");
+    let fresh = second["id"].as_str().unwrap();
+    assert_ne!(fresh, "o2");
+    let (_, _, kept) = h.call("GET", "/orders/o2", None).await;
+    assert_eq!(kept["status"], "first");
+    let (_, source, stored) = h.call("GET", &format!("/orders/{fresh}"), None).await;
+    assert_eq!(source, "state");
+    assert_eq!(stored["status"], "second");
+    let (_, _, parent) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(parent["status"], "open");
+}
+
+#[tokio::test]
+async fn a_new_record_from_an_action_leaves_another_owners_record() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Teams, version: "1"}
+paths:
+  /orgs/{org}/teams:
+    post:
+      operationId: createTeam
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+  /orgs/{org}/teams/{team}:
+    get:
+      operationId: getTeam
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+  /orgs/{org}/teams/{team}/copies:
+    post:
+      operationId: copyTeam
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team, in: path, required: true, schema: {type: string}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+components:
+  schemas:
+    Team: {type: object, required: [name], properties: {id: {type: string}, name: {type: string}}}
+"##;
+    let team = |id: &str, name: &str| Ok(json!({"id": id, "name": name}).to_string());
+    let h = actions_of(
+        contract,
+        vec![team("t1", "core"), team("t9", "theirs"), team("t9", "copy")],
+    );
+    h.call("POST", "/orgs/a/teams", None).await;
+    h.call("POST", "/orgs/b/teams", None).await;
+    let (_, _, copy) = h.call("POST", "/orgs/a/teams/t1/copies", None).await;
+    assert_eq!(copy["name"], "copy");
+    assert_ne!(copy["id"], "t9");
+    let (_, _, theirs) = h.call("GET", "/orgs/b/teams/t9", None).await;
+    assert_eq!(theirs["name"], "theirs");
+}
+
+/// The request names the target, so the answer is about it, whatever the LLM
+/// said before the request was laid over it: the target keeps what it omits.
+#[tokio::test]
+async fn a_request_naming_the_target_keeps_the_update_whole() {
+    let contract = SAME_SHAPE
+        .replace(
+            "properties: {id: {type: string}, status: {type: string}}",
+            "properties: {id: {type: string}, status: {type: string}, note: {type: string}}",
+        )
+        .replace(
+            "      operationId: capture\n",
+            "      operationId: capture\n      requestBody: {content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}\n",
+        );
+    let h = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"id": "o1", "status": "open", "note": "kept"}).to_string()),
+            Ok(json!({"id": "o2", "status": "captured"}).to_string()),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let (_, _, captured) = h
+        .call("POST", "/orders/o1/capture", Some(json!({"id": "o1"})))
+        .await;
+    assert_eq!(captured["id"], "o1");
+    assert_eq!(captured["note"], "kept");
+    let (_, _, stored) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(stored["note"], "kept");
+    assert_eq!(stored["status"], "captured");
+}
+
 /// A faker answer invents its id, which says nothing about a new record.
 #[tokio::test]
 async fn a_fallback_action_answer_updates_the_target() {

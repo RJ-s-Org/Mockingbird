@@ -263,6 +263,10 @@ pub struct GeneratedResponse {
     /// [`GeneratedResponse::effects`]: malformed, over the limit of 10, or
     /// too large for the response-size cap.
     pub dropped_effects: usize,
+    /// Whether this answer of an action is a new record of its target's type,
+    /// not the target (see `reflect`): it is stored under its own
+    /// identity and the target is left as it is.
+    pub new_record: bool,
 }
 
 /// How an [`Engine`] generates; [`Default`] gives the documented defaults.
@@ -626,6 +630,7 @@ impl Engine {
                 effects: Vec::new(),
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
+                new_record: false,
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -729,6 +734,7 @@ impl Engine {
                         effects: answer.effects.kept,
                         effect_outcomes: Vec::new(),
                         dropped_effects: answer.effects.dropped,
+                        new_record: false,
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -870,6 +876,7 @@ impl Engine {
                 effects: Vec::new(),
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
+                new_record: false,
             };
             let schema = part
                 .ctx
@@ -912,6 +919,7 @@ impl Engine {
                 effects: Vec::new(),
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
+                new_record: false,
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -995,6 +1003,7 @@ impl Engine {
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
+            new_record: false,
         })
     }
 
@@ -1030,6 +1039,7 @@ impl Engine {
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
+            new_record: false,
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1210,6 +1220,7 @@ impl Engine {
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
+            new_record: false,
         }
     }
 
@@ -1257,6 +1268,7 @@ impl Engine {
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
+            new_record: false,
         }
     }
 
@@ -1820,8 +1832,9 @@ fn encode_base64(
 /// request body, updates reflect the target then the request body, and the
 /// identity field always equals the path id. An action's LLM answer is the
 /// state after it, so it wins over the target instead (see
-/// [`Operation::is_action`]). Every merge is validated; an invalid one keeps
-/// the best valid value.
+/// [`Operation::is_action`]), unless it is a new record ([`is_new_record`]),
+/// which takes nothing from the target and keeps its own identity. Every merge
+/// is validated; an invalid one keeps the best valid value.
 fn reflect(
     validator: &SchemaValidator,
     op: &Operation,
@@ -1835,8 +1848,6 @@ fn reflect(
     let Some(body) = response.body.take() else {
         return response;
     };
-    let new_record =
-        action_record_id(op, call, ctx.target, &response.source, Some(&body)).is_some();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
             Some(target) => overlay_target(validator, target, body),
@@ -1846,13 +1857,20 @@ fn reflect(
             overlay_request(validator, body, call.body.as_ref())
         }
         OperationKind::Command(Effect::Update) => {
-            let from_llm = !matches!(response.source, Source::Fallback);
-            let body = match ctx.target {
-                _ if new_record => body,
-                Some(target) if op.is_action() && from_llm => fill_omitted(validator, body, target),
-                target => overlay(validator, body, target.map(|t| &t.data)),
-            };
-            overlay_request(validator, body, call.body.as_ref())
+            let overlaid = overlay_request(validator, body.clone(), call.body.as_ref());
+            if is_new_record(op, call, ctx.target, &response, &overlaid) {
+                response.new_record = true;
+                overlaid
+            } else {
+                let from_llm = !matches!(response.source, Source::Fallback);
+                let body = match ctx.target {
+                    Some(target) if op.is_action() && from_llm => {
+                        fill_omitted(validator, body, target)
+                    }
+                    target => overlay(validator, body, target.map(|t| &t.data)),
+                };
+                overlay_request(validator, body, call.body.as_ref())
+            }
         }
         OperationKind::Command(_) => body,
         // Streams have no stored target to reflect.
@@ -1860,7 +1878,7 @@ fn reflect(
             body
         }
     };
-    response.body = Some(if new_record {
+    response.body = Some(if response.new_record {
         body
     } else {
         force_identity(validator, op, call, body)
@@ -1868,50 +1886,62 @@ fn reflect(
     response
 }
 
-/// The id of the new record an action's LLM answer is: of the parent's schema
-/// (an update, see [`Operation::is_action`]), carrying an identity that is not
-/// its target's. A reply `c2` under `/comments/c1/replies` is stored as `c2`
-/// and `c1` is untouched. An answer with no identity, or the target's, is about
-/// the target, and a faker's invented id says nothing.
-#[must_use]
-pub fn action_record_id(
+/// Whether an action's LLM answer `body` is a new record: of its stored
+/// target's schema (an update, see [`Operation::is_action`]), carrying a
+/// non-empty identity that is not the target's. A reply `c2` under
+/// `/comments/c1/replies` is stored as `c2` and `c1` is untouched. An answer
+/// with no identity, or the target's, is about the target; so is any answer
+/// with no stored target to tell it from, and a faker's invented id says
+/// nothing.
+fn is_new_record(
     op: &Operation,
     call: &OperationCall,
     target: Option<&StoredResource>,
-    source: &Source,
-    body: Option<&Value>,
-) -> Option<String> {
+    response: &GeneratedResponse,
+    body: &Value,
+) -> bool {
     if op.kind != OperationKind::Command(Effect::Update)
         || !op.is_action()
-        || !matches!(source, Source::Llm | Source::Patched | Source::Repaired)
+        || !matches!(
+            response.source,
+            Source::Llm | Source::Patched | Source::Repaired
+        )
+        || op
+            .output_for_status(response.status)
+            .and_then(|o| o.schema.as_ref())
+            != op.success_output().and_then(|o| o.schema.as_ref())
     {
-        return None;
+        return false;
     }
     let text = |v: &Value| match v {
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
         _ => None,
     };
-    let identity = op.identity.as_ref()?;
-    let body = body?;
-    let id = text(body.get(&identity.field)?)?;
+    let (Some(identity), Some(target)) = (op.identity.as_ref(), target) else {
+        return false;
+    };
+    let member = |name: &str| body.get(name).and_then(text);
+    let Some(id) = member(&identity.field) else {
+        return false;
+    };
     // What the path names: the identity, or the member `path_field` says.
-    let named = identity.path_field.as_ref().unwrap_or(&identity.field);
-    let named = text(body.get(named)?)?;
+    let Some(named) = member(identity.path_field.as_ref().unwrap_or(&identity.field)) else {
+        return false;
+    };
     let in_path = identity
         .path_param
         .as_ref()
         .and_then(|p| call.path_params.get(p))
         .and_then(text);
-    let is_target = in_path.as_ref() == Some(&named)
-        || target.is_some_and(|t| {
-            t.id == id || t.data.get(&identity.field).and_then(text).as_ref() == Some(&id)
-        });
-    (!is_target).then_some(id)
+    in_path.as_ref() != Some(&named)
+        && target.id != id
+        && target.data.get(&identity.field).and_then(text).as_ref() != Some(&id)
 }
 
 /// After a scenario `set`: re-apply only the request-body overlay (creates
-/// and updates) and the path identity, never the stored target.
+/// and updates) and the path identity (not on a new record), never the stored
+/// target.
 fn reassert_request(
     validator: &SchemaValidator,
     op: &Operation,
@@ -1927,7 +1957,11 @@ fn reassert_request(
         }
         _ => body,
     };
-    response.body = Some(force_identity(validator, op, call, body));
+    response.body = Some(if response.new_record {
+        body
+    } else {
+        force_identity(validator, op, call, body)
+    });
     response
 }
 

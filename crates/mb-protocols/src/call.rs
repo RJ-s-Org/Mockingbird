@@ -812,6 +812,7 @@ pub(crate) async fn prepare<'a>(
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
+            new_record: false,
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -868,23 +869,13 @@ pub(crate) async fn complete(
 ) -> GeneratedResponse {
     let Pending {
         mut state,
-        target_id,
-        target,
+        mut target_id,
         foreign_key,
         cache,
         ..
     } = pending;
     let op = plan.op;
     let session = &plan.session;
-    // An action's answer may be a new record of the parent's type.
-    let target_id = mb_engine::action_record_id(
-        op,
-        call,
-        target.as_ref(),
-        &generated.source,
-        generated.body.as_ref(),
-    )
-    .or(target_id);
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
     let collection = collection_of(op, call).filter(|_| rt.consistency);
@@ -895,6 +886,15 @@ pub(crate) async fn complete(
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
+            }
+            // An action's new record goes under its own id, not over another's.
+            if generated.new_record {
+                unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let own = generated.body.as_ref().and_then(|b| b.get(field));
+                if let Some(id) = own.and_then(id_string) {
+                    target_id = Some(id);
+                }
             }
             // A faker list standing in for a failed LLM call seeds nothing,
             // or its items would join the session's later LLM lists.

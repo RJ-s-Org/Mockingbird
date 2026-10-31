@@ -12,7 +12,8 @@ use serde_json::{Map, json};
 
 use super::deliver::OutboundEvent;
 use super::event::{
-    envelope, envelope_object, event_type, is_empty_action, new_event_id, read_event_type, singular,
+    created_event_type, envelope, envelope_object, event_type, is_empty_action, new_event_id,
+    read_event_type, singular,
 };
 use crate::MockRuntime;
 
@@ -36,7 +37,12 @@ pub(crate) fn emit(
         return;
     }
     // A read sends only to targets that name it.
-    let (event_type, targets) = match event_type(op) {
+    let event = if generated.new_record {
+        Some(created_event_type(op))
+    } else {
+        event_type(op)
+    };
+    let (event_type, targets) = match event {
         Some(t) => {
             let targets = dispatcher.matching(&op.id, &t);
             (t, targets)

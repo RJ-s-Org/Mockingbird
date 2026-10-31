@@ -36,7 +36,9 @@ Where a `POST` lists several successes, these rules read the `201`. The mock ans
 
 ### An update that answers another record
 
-`POST /comments/{id}/replies` and `POST /orders/{id}/capture` can both answer their parent's schema, and the contract cannot tell them apart. So the LLM's answer does: an identity that differs from the target's is a new record of the parent's type, stored under its own id, and the parent is untouched. The target's identity, or none, updates the parent. A faker's answer always updates the parent, since its id is invented.
+`POST /comments/{id}/replies` and `POST /orders/{id}/capture` can both answer their parent's schema, and the contract cannot tell them apart. So with a stored parent, the prompt asks the model which the call did, and its answer decides: a non-empty identity that differs from the parent's is a new record of the parent's type, stored under its own id, with the parent untouched. If a record already holds that id and the request did not name it, the new record gets a fresh id, as a create does. The webhook is the `created` event of that type, also for a contract payload. The parent's identity, or none, updates the parent. A faker's answer, a call with no stored parent, and a status of another schema also update what the path names.
+
+This choice depends on the model. Measured for a reply with a stored parent, a new id came back 8 times out of 8 with Luna and the default model, and 2 out of 8 with Lightning, so on a model like that a reply can overwrite its parent. When every call of a route makes a new record, say so with `x-mockingbird-resource: {action: false, type: <the parent's type>}`.
 
 A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read.
 

@@ -1,5 +1,5 @@
 use mb_engine::{
-    Engine, EngineConfig, EngineError, GenerationContext, JointPart, OperationCall,
+    Engine, EngineConfig, EngineError, GenerationContext, JointPart, OperationCall, ScenarioSpec,
     SchemaValidator, Source,
 };
 use mb_import::compile;
@@ -2725,4 +2725,92 @@ async fn an_effect_is_asked_for_only_of_an_other_action_with_a_target() {
     let prompt = action_prompt("cancelBooking", None, None).await;
     assert!(prompt.contains("successful `cancel`"), "{prompt}");
     assert!(!prompt.contains("must include"), "{prompt}");
+}
+
+/// An action of its target's schema, for what the engine decides of its answer.
+const NEW_RECORD: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders/{id}/capture:
+    post:
+      operationId: capture
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+        "202": {description: queued, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}
+components:
+  schemas:
+    Order: {type: object, properties: {id: {type: string}, status: {type: string}}}
+    Job: {type: object, properties: {id: {type: string}, queue: {type: string}}}
+"##;
+
+async fn capture_answering(
+    answer: Value,
+    forced_status: Option<u16>,
+    scenario: Option<&ScenarioSpec>,
+) -> mb_engine::GeneratedResponse {
+    let bundle = compile(NEW_RECORD.as_bytes()).unwrap();
+    let (_, engine) = scripted(vec![Ok(answer.to_string())]);
+    let target = StoredResource {
+        resource_type: "orders".into(),
+        id: "o1".into(),
+        data: json!({"id": "o1", "status": "open"}),
+    };
+    let mut path_params = serde_json::Map::new();
+    path_params.insert("id".into(), json!("o1"));
+    let call = OperationCall {
+        operation_id: "capture".into(),
+        path_params,
+        ..OperationCall::default()
+    };
+    let ctx = GenerationContext {
+        target: Some(&target),
+        forced_status,
+        scenario,
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(&bundle, bundle.operation("capture").unwrap(), &call, ctx)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_answer_with_another_identity_is_marked_a_new_record() {
+    let new = capture_answering(json!({"id": "o2", "status": "s"}), None, None).await;
+    assert!(new.new_record);
+    assert_eq!(new.body.unwrap()["id"], "o2");
+    let same = capture_answering(json!({"id": "o1", "status": "s"}), None, None).await;
+    assert!(!same.new_record);
+    let none = capture_answering(json!({"status": "s"}), None, None).await;
+    assert!(!none.new_record);
+}
+
+/// A status of another schema answers something else than the target's kind.
+#[tokio::test]
+async fn an_answer_of_another_schema_is_no_new_record() {
+    let job = capture_answering(json!({"id": "j1", "queue": "q"}), Some(202), None).await;
+    assert_eq!(job.status, 202);
+    assert!(!job.new_record);
+}
+
+/// A scenario `set` does not force the path's id onto a new record.
+#[tokio::test]
+async fn a_scenario_set_keeps_a_new_records_id() {
+    let spec = ScenarioSpec {
+        name: "s".into(),
+        instructions: None,
+        set: Some(json!({"status": "set"})),
+        status: None,
+    };
+    let new = capture_answering(json!({"id": "o2", "status": "s"}), None, Some(&spec)).await;
+    assert!(new.new_record);
+    let body = new.body.unwrap();
+    assert_eq!(body["id"], "o2");
+    assert_eq!(body["status"], "set");
 }
