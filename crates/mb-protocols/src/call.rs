@@ -626,8 +626,8 @@ pub(crate) async fn generate_once(
 }
 
 /// The stored target and related resources a read-only generation of `call`
-/// takes into account (as [`generate_once`] reads them); the session is
-/// marked used.
+/// takes into account (as [`generate_once`] reads them, but for the hops,
+/// which its callers do not read); the session is marked used.
 #[cfg(feature = "graphql")]
 pub(crate) async fn read_state(
     rt: &MockRuntime,
@@ -636,7 +636,7 @@ pub(crate) async fn read_state(
 ) -> (Option<StoredResource>, Vec<StoredResource>) {
     let mut state = StateAccess::new(rt);
     let target_id = target_id(plan.op, call);
-    let read = read_context(
+    let (target, related, _) = read_context(
         &mut state,
         &plan.session,
         plan.op,
@@ -646,7 +646,7 @@ pub(crate) async fn read_state(
     .instrument(state_span())
     .await;
     state.touch(&plan.session).instrument(state_span()).await;
-    read
+    (target, related)
 }
 
 /// [`generate_once`] with a 2xx response schema narrowed to what the caller
@@ -718,9 +718,10 @@ pub(crate) async fn prepare<'a>(
     // Before any state is read: an answer generated from older state must
     // not be cached after a write that lands meanwhile.
     let since = rt.state.response_cache().map(|c| c.epoch(session));
-    let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call)
-        .instrument(state_span())
-        .await;
+    let (target, mut related, followed) =
+        read_context(&mut state, session, op, target_id.as_deref(), call)
+            .instrument(state_span())
+            .await;
     // Found by another field (an issue's `number`): writes go to its id.
     if let Some(found) = &target {
         target_id = Some(found.id.clone());
@@ -796,21 +797,22 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(served);
     }
 
-    // Last, so that a 404 or a cached answer costs no scan.
-    let mut related = related;
-    if is_query
-        && target_missing
-        && let Some(id) = target_id.as_deref()
-    {
-        let found = referrers(&mut state, session, op, id)
-            .instrument(state_span())
-            .await;
-        for resource in found {
-            if !holds(&related, &resource) {
-                related.push(resource);
+    // Last, so that a 404, a stored or a cached answer costs none of this.
+    async {
+        follow_hops(&mut state, session, target.as_ref(), followed, &mut related).await;
+        if is_query
+            && target_missing
+            && let Some(id) = target_id.as_deref()
+        {
+            for resource in referrers(&mut state, session, op, id).await {
+                if !holds(&related, &resource) {
+                    related.push(resource);
+                }
             }
         }
     }
+    .instrument(state_span())
+    .await;
 
     Prepared::Pending(Pending {
         state,
@@ -1953,10 +1955,18 @@ pub(crate) async fn open_stream(
     let mut state = StateAccess::new(rt);
     let target_id = target_id(op, &call);
     let (target, related) = async {
-        let context =
+        let (target, mut related, followed) =
             read_context(&mut state, &plan.session, op, target_id.as_deref(), &call).await;
+        follow_hops(
+            &mut state,
+            &plan.session,
+            target.as_ref(),
+            followed,
+            &mut related,
+        )
+        .await;
         state.touch(&plan.session).await;
-        context
+        (target, related)
     }
     .instrument(state_span())
     .await;
@@ -2253,14 +2263,15 @@ pub(crate) fn recorded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<Str
     safe_headers(rt, headers, true)
 }
 
-/// The target (when `target_id` is set) and the related resources.
+/// The target (when `target_id` is set), the related resources before any
+/// hop, and what [`follow_hops`] needs to add those.
 async fn read_context(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
     target_id: Option<&str>,
     call: &OperationCall,
-) -> (Option<StoredResource>, Vec<StoredResource>) {
+) -> (Option<StoredResource>, Vec<StoredResource>, Followed) {
     let target = match (op.resource_type.as_deref(), target_id) {
         (Some(t), Some(id)) => match state.get(session, t, id).await {
             Some(hit) => Some(hit),
@@ -2281,8 +2292,8 @@ async fn read_context(
         },
         _ => None,
     };
-    let related = related(state, session, op, target_id, target.as_ref(), call).await;
-    (target, related)
+    let (related, followed) = related(state, session, op, target_id, target.as_ref(), call).await;
+    (target, related, followed)
 }
 
 /// The value `data` holds for each of `fields`, as (field, value).
@@ -2550,9 +2561,9 @@ pub(crate) async fn store_resources(
 }
 
 /// Resources the response should stay consistent with, nearest first: what
-/// the request names, recent items for a list query, then what the target
-/// and the resources the request names refer to. With consistency off, only
-/// the `<x>Id` members and global ids of the query and body are followed.
+/// the request names, then recent items for a list query. [`follow_hops`]
+/// adds what those refer to. With consistency off, only the `<x>Id` members
+/// and global ids of the query and body are followed.
 async fn related(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -2560,7 +2571,7 @@ async fn related(
     target_id: Option<&str>,
     target: Option<&StoredResource>,
     call: &OperationCall,
-) -> Vec<StoredResource> {
+) -> (Vec<StoredResource>, Followed) {
     let rt = state.rt;
     let index = rt.consistency.then(|| rt.index());
     let mut references = Vec::new();
@@ -2611,18 +2622,45 @@ async fn related(
             }
         }
     }
-    let hops = if index.is_some() { MAX_RELATED_HOPS } else { 0 };
+    (out, Followed { named, seen })
+}
+
+/// What [`related`] followed, for [`follow_hops`] to go on from.
+struct Followed {
+    /// How many of the related resources the request itself names; they
+    /// come first.
+    named: usize,
+    /// The references looked up so far (see [`follow`]).
+    seen: Vec<Reference>,
+}
+
+/// Adds to `out`, as gathered by [`related`], what the target and the
+/// resources the request names refer to. Separate from [`related`] because
+/// only a generation needs it: an answer served from the store or the cache
+/// must not pay for these lookups. Nothing with consistency off.
+async fn follow_hops(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    target: Option<&StoredResource>,
+    followed: Followed,
+    out: &mut Vec<StoredResource>,
+) {
+    let rt = state.rt;
+    if !rt.consistency {
+        return;
+    }
+    let index = Some(rt.index());
+    let Followed { named, mut seen } = followed;
     let (mut own, mut start, mut end) = (target, 0, named);
-    for _ in 0..hops {
+    for _ in 0..MAX_RELATED_HOPS {
         let mut references = Vec::new();
         for resource in own.take().into_iter().chain(&out[start..end]) {
             references_in("", &resource.data, 0, index, &mut references);
         }
         start = out.len();
-        follow(state, session, references, &mut seen, target, &mut out).await;
+        follow(state, session, references, &mut seen, target, out).await;
         end = out.len();
     }
-    out
 }
 
 /// A reference: the types to look in, and the id.
@@ -3523,13 +3561,18 @@ paths:
         assert_eq!(hashes.len(), distinct.len());
     }
 
-    /// Counts `list` calls on a memory store.
+    /// Counts `get` and `list` calls on a memory store.
     struct ListSpy {
         inner: MemoryStore,
+        gets: std::sync::atomic::AtomicUsize,
         lists: std::sync::atomic::AtomicUsize,
     }
 
     impl ListSpy {
+        fn gets(&self) -> usize {
+            self.gets.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         fn lists(&self) -> usize {
             self.lists.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -3543,6 +3586,7 @@ paths:
             t: &str,
             id: &str,
         ) -> Result<Option<StoredResource>, StateError> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.get(s, t, id).await
         }
         async fn list(
@@ -3595,6 +3639,7 @@ paths:
     fn issue_reads() -> (Arc<ListSpy>, MockRuntime, Operation) {
         let spy = Arc::new(ListSpy {
             inner: MemoryStore::new(Duration::from_secs(3600)),
+            gets: Default::default(),
             lists: Default::default(),
         });
         let rt = MockRuntime::new(
@@ -3621,9 +3666,68 @@ paths:
         }
     }
 
+    /// A read answered from the store never reaches a prompt, so it looks up
+    /// its target and nothing the target refers to.
+    #[cfg(feature = "http-rest")]
+    #[tokio::test]
+    async fn a_served_read_makes_one_get() {
+        use tower::ServiceExt;
+        const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Served, version: "1"}
+paths:
+  /customers/{customer}:
+    get:
+      operationId: getCustomer
+      parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties: {id: {type: string}, offerId: {type: string}, customer: {type: string}}
+"##;
+        let spy = Arc::new(ListSpy {
+            inner: MemoryStore::new(Duration::from_secs(3600)),
+            gets: Default::default(),
+            lists: Default::default(),
+        });
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            spy.clone(),
+        );
+        let s = SessionKey {
+            workspace: "default".into(),
+            mock: "m".into(),
+            session: DEFAULT_SESSION.into(),
+        };
+        let data = json!({"id": "c1", "offerId": "of1", "customer": "c2"});
+        let stored = StoredResource {
+            resource_type: "customers".into(),
+            id: "c1".into(),
+            data,
+        };
+        spy.inner.upsert(&s, stored).await.unwrap();
+        let request = axum::http::Request::get("/customers/c1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = crate::http_rest::router(Arc::new(rt))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["x-mockingbird-source"], "state");
+        assert_eq!(spy.gets(), 1);
+        assert_eq!(spy.lists(), 0);
+    }
+
     async fn read_by(rt: &MockRuntime, op: &Operation, number: &str) -> Option<String> {
         let mut state = StateAccess::new(rt);
-        let (target, _) = read_context(
+        let (target, _, _) = read_context(
             &mut state,
             &session("s"),
             op,
