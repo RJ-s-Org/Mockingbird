@@ -50,6 +50,17 @@ A resource whose schema is an `allOf` at its root used to compile with no identi
 
 Stored bundles take this the way they take action routes, with the same steps: upload the contract again, or restart a mock from the config file, changing a byte of the contract if the control store is persistent.
 
+### A resource answers only for its owner
+
+On a route that names its target after another path parameter, such as `/repos/{owner}/{repo}` or `/orgs/{org}/teams/{slug}`, a read must now be able to tell a stored resource is the route owner's, unless the parameter is named as an id (`order_id`). It can when the resource was listed or written under the same route template and collection path. Otherwise the resource must show the owner: a relative path ending in the owner and the name (`full_name`, `path_with_namespace`), a member tied to the parameter (`namespace`, `owner.login`, `org_id`, `organization`), or a link ending in them. Nothing needs recompiling, and on these routes:
+
+- a resource a search, a mention, a fixture or a session seed stored without showing its owner is no longer served by name. The read is generated, and the response cache repeats it. Give such a fixture a member that shows its owner;
+- only a member named for the parameter, `name`, `login`, `slug` or `key`, or a path holding the owner too, identifies a resource by name. Any other string does not;
+- `unknown_ids: 404` does not answer a value some owner's resource goes by. A value none goes by is still a 404;
+- a write acts unless the resource is known to be another's, by a record, by what it shows or by a link elsewhere. Then a delete leaves it and an update does not change it. Another owner's create can still replace a resource with the same id.
+
+The collection record lives in the node's memory, like path aliases, and ends when the resource changes without it. On another node or after a restart a read relies on what the resource shows, except that a number showing nothing is served, and a resource written through the route under its name, with an `id` of its own, reads back for any owner. A string id no name member holds, such as `txn_1` below `/customers/{customer}`, reads back as before unless it was listed under another collection or a member tied to the parameter names another owner.
+
 ## Upgrading to 0.1.0
 
 ### Relative paths in the config file follow the file
