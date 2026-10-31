@@ -27,6 +27,10 @@ Suites (contracts are in-repo, so the bench is reproducible):
   judged. A journey that breaks fails its remaining checks. Not in the default
   suites (it is asked for with `--suite journeys`). Measures remembering entities
   and the effects of writes.
+- journeys_heldout: the same kind of journey over five contracts the engine was not
+  fixed against: PayPal orders, Jira issues, Zendesk tickets, Notion pages and Square
+  payments. Not in the default suites. Measures how `journeys` generalises, so its
+  checks are written from each contract and are not edited to suit results.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -60,9 +64,9 @@ import uuid
 from datetime import datetime
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SUITES = ("consistency", "sse", "import", "journeys")
-# What a run without --suite does (and what run.py gets). The journeys suite
-# costs real calls on top of these, so it is asked for by name.
+SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout")
+# What a run without --suite does (and what run.py gets). The journey suites
+# cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
 PLACEHOLDER_KEY = "bench-proxy-injects-the-real-key"
 IMPORT_DIR = "docs/benchmarks/import-inputs"
@@ -105,6 +109,14 @@ JOURNEY_MOCKS = {
     "github": ("examples/apis/github-rest/github-rest.openapi.yaml", "/github", None),
     "paypal": ("examples/apis/paypal/paypal-orders.openapi.yaml", "/paypal", None),
     "invoices": ("docs/benchmarks/contracts/invoicing.openapi.yaml", "/invoices", None),
+}
+# The held-out journeys, contracts alone as well: no persona.
+HELDOUT_MOCKS = {
+    "paypal": ("examples/apis/paypal/paypal-orders.openapi.yaml", "/paypal", None),
+    "jira": ("examples/apis/jira/jira.openapi.yaml", "/jira", None),
+    "zendesk": ("examples/apis/zendesk/zendesk.openapi.yaml", "/zendesk", None),
+    "notion": ("examples/apis/notion/notion.openapi.yaml", "/notion", None),
+    "square": ("examples/apis/square/square.openapi.yaml", "/square", None),
 }
 SSE_MOCKS = {
     "events": ("fixtures/openapi/events-3.1.yaml", "/events",
@@ -994,6 +1006,373 @@ def run_journeys(srv, sink, args):
             JOURNEYS[name](srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- held-out journeys
+
+# These journeys measure how the engine generalises beyond the `journeys` suite,
+# which drove its fixes. They are written from the contracts alone, as a client of
+# each API would expect it to behave. Do not edit a check to suit results.
+HELDOUT_CHECKS = {
+    "paypal": [
+        "order has an id", "order keeps the intent", "order keeps the amount", "order keeps the reference id",
+        "read matches the created order", "confirm keeps the order id", "confirm names the payer",
+        "confirm moves the status on", "read shows the confirmed status", "capture keeps the order id",
+        "capture completes the order", "capture takes the order's amount", "read shows the completed capture",
+        "read keeps the order's details",
+    ],
+    "jira": [
+        "issue has an id and key", "issue lands in the project asked for", "read keeps the identity",
+        "read keeps the summary", "read keeps the description", "read keeps project, type and priority",
+        "read keeps the labels", "comment keeps its text", "comment list holds the new comment",
+        "comment list counts one comment", "transitions offer another status", "read shows the new status",
+        "read keeps the issue after the transition", "search finds the issue in its new status",
+    ],
+    "zendesk": [
+        "ticket has an id", "ticket keeps its subject", "ticket keeps priority and type",
+        "first comment becomes the description", "audit names the ticket", "read matches the created ticket",
+        "read keeps the tags", "reply keeps the ticket", "comment list holds the reply",
+        "comment list holds both comments in order", "update changes status and priority",
+        "read shows the update", "read keeps the subject and description", "list shows the ticket as updated",
+    ],
+    "notion": [
+        "page has an id", "page keeps its parent", "page keeps its title", "page keeps its properties",
+        "read matches the created page", "update keeps the page's identity", "update changes the properties",
+        "read shows the update", "read keeps what the update left alone", "append returns the new blocks in order",
+        "new blocks name their page", "block list holds the appended blocks",
+        "query finds the page in its new status", "search finds the page by title",
+    ],
+    "square": [
+        "payment has an id", "payment keeps the amount", "total adds the tip", "payment keeps the client's details",
+        "delayed payment waits for completion", "read matches the created payment",
+        "complete keeps identity and amount", "complete moves the status on", "read shows the completed status",
+        "list shows the completed payment", "refund names its payment", "refund keeps the amount and reason",
+        "read shows the refund", "read keeps the original amount",
+    ],
+}
+JOURNEY_CHECKS.update(HELDOUT_CHECKS)
+# The contracts require a credential; this one only makes the client well formed.
+HELDOUT_AUTH = {"authorization": "Bearer bench-placeholder"}
+
+
+def need(j, check, value):
+    """A check the rest of the journey depends on: when it fails, so do the others."""
+    j.check(check, bool(value))
+    if not value:
+        raise JourneyStop(check)
+
+
+def obj(value):
+    return value if isinstance(value, dict) else {}
+
+
+def dicts(value):
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def head(value):
+    items = dicts(value)
+    return items[0] if items else {}
+
+
+def by_id(items, wanted):
+    return next((i for i in dicts(items) if eq(i.get("id"), wanted)), {})
+
+
+def same(a, b, *fields):
+    return all(eq(a.get(f), b.get(f)) for f in fields)
+
+
+def paypal_steps(j):
+    # Capture, not authorize: an order has one intent. Refunds are in another
+    # contract (paypal-payments). PATCH is left out: the lifecycle does not need it.
+    j.headers.update(HELDOUT_AUTH)
+    j.headers["prefer"] = "return=representation"  # the full order, not only its id and status
+    amount = {"currency_code": "EUR", "value": f"{j.rng.randint(20, 900)}.{j.rng.choice(['25', '50', '75'])}"}
+    reference = f"basket-{j.rng.randint(1000, 9999)}"
+    order = j.call("POST", "/v2/checkout/orders", body={
+        "intent": "CAPTURE",
+        "purchase_units": [{"reference_id": reference, "description": "Two ceramic mugs", "amount": amount}],
+    })
+    oid = order.get("id")
+    need(j, "order has an id", oid)
+    unit = head(order.get("purchase_units"))
+    j.check("order keeps the intent", eq(order.get("intent"), "CAPTURE"))
+    j.check("order keeps the amount", same(obj(unit.get("amount")), amount, "currency_code", "value"))
+    j.check("order keeps the reference id", eq(unit.get("reference_id"), reference))
+    read = j.call("GET", f"/v2/checkout/orders/{oid}")
+    read_unit = head(read.get("purchase_units"))
+    j.check("read matches the created order",
+            same(read, order, "id", "intent", "status") and same(read_unit, unit, "reference_id", "amount"))
+    email = f"ana{j.rng.randint(100, 999)}@example.org"
+    conf = j.call("POST", f"/v2/checkout/orders/{oid}/confirm-payment-source",
+                  body={"payment_source": {"paypal": {"email_address": email}}})
+    j.check("confirm keeps the order id", eq(conf.get("id"), oid))
+    j.check("confirm names the payer", eq(obj(obj(conf.get("payment_source")).get("paypal")).get("email_address"), email))
+    j.check("confirm moves the status on", conf.get("status") in ("APPROVED", "PAYER_ACTION_REQUIRED"),
+            status_value=conf.get("status"))
+    read2 = j.call("GET", f"/v2/checkout/orders/{oid}")
+    j.check("read shows the confirmed status", eq(read2.get("status"), conf.get("status")),
+            confirmed=conf.get("status"), read=read2.get("status"))
+    cap = j.call("POST", f"/v2/checkout/orders/{oid}/capture", body={})
+    j.check("capture keeps the order id", eq(cap.get("id"), oid))
+    j.check("capture completes the order", eq(cap.get("status"), "COMPLETED"), status_value=cap.get("status"))
+    capture = head(obj(head(cap.get("purchase_units")).get("payments")).get("captures"))
+    j.check("capture takes the order's amount", same(obj(capture.get("amount")), amount, "currency_code", "value"))
+    read3 = j.call("GET", f"/v2/checkout/orders/{oid}")
+    read3_unit = head(read3.get("purchase_units"))
+    read3_capture = head(obj(read3_unit.get("payments")).get("captures"))
+    j.check("read shows the completed capture",
+            eq(read3.get("status"), "COMPLETED") and eq(read3_capture.get("id"), capture.get("id")),
+            status_value=read3.get("status"))
+    j.check("read keeps the order's details",
+            eq(read3.get("intent"), "CAPTURE") and eq(read3_unit.get("reference_id"), reference)
+            and same(obj(read3_unit.get("amount")), amount, "currency_code", "value")
+            and eq(obj(obj(read3.get("payment_source")).get("paypal")).get("email_address"), email))
+
+
+def adf(text):
+    return {"type": "doc", "version": 1,
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
+
+
+def adf_text(doc):
+    return "".join(str(node.get("text")) for para in dicts(obj(doc).get("content"))
+                   for node in dicts(para.get("content")))
+
+
+def jira_steps(j):
+    j.headers.update(HELDOUT_AUTH)
+    issue = "/rest/api/3/issue"
+    summary = f"Checkout fails for basket {j.rng.randint(1000, 9999)}"
+    description = "Paying with a saved card returns an error page."
+    labels = ["checkout", "regression"]
+    created = j.call("POST", issue, body={"fields": {
+        "project": {"key": "PLNT"}, "issuetype": {"name": "Bug"}, "summary": summary,
+        "description": adf(description), "priority": {"name": "High"}, "labels": labels,
+    }})
+    key = created.get("key")
+    need(j, "issue has an id and key", key and created.get("id"))
+    j.check("issue lands in the project asked for", str(key).startswith("PLNT-"), key=key)
+    read = j.call("GET", f"{issue}/{key}")
+    fields = obj(read.get("fields"))
+    j.check("read keeps the identity", same(read, created, "id", "key"))
+    j.check("read keeps the summary", eq(fields.get("summary"), summary))
+    j.check("read keeps the description", adf_text(fields.get("description")) == description)
+    j.check("read keeps project, type and priority",
+            eq(obj(fields.get("project")).get("key"), "PLNT") and eq(obj(fields.get("issuetype")).get("name"), "Bug")
+            and eq(obj(fields.get("priority")).get("name"), "High"))
+    j.check("read keeps the labels", isinstance(fields.get("labels"), list) and sorted(fields["labels"]) == labels)
+    text = "Reproduced on the staging shop as well."
+    comment = j.call("POST", f"{issue}/{key}/comment", body={"body": adf(text)})
+    j.check("comment keeps its text", adf_text(comment.get("body")) == text)
+    page = j.call("GET", f"{issue}/{key}/comment")
+    comments = dicts(page.get("comments"))
+    j.check("comment list holds the new comment", comment.get("id") is not None
+            and adf_text(by_id(comments, comment.get("id")).get("body")) == text)
+    j.check("comment list counts one comment", eq(page.get("total"), 1) and len(comments) == 1,
+            total=page.get("total"), listed=len(comments))
+    before = obj(fields.get("status")).get("name")
+    transitions = j.call("GET", f"{issue}/{key}/transitions")
+    options = [t for t in dicts(transitions.get("transitions"))
+               if t.get("id") and obj(t.get("to")).get("name") not in (None, before)]
+    target = next((t for t in options if t["to"]["name"] == "In Progress"), options[0] if options else None)
+    need(j, "transitions offer another status", target)
+    to_status = target["to"]["name"]
+    j.call("POST", f"{issue}/{key}/transitions", body={"transition": {"id": target["id"]}})
+    read2 = j.call("GET", f"{issue}/{key}")
+    fields2 = obj(read2.get("fields"))
+    j.check("read shows the new status", eq(obj(fields2.get("status")).get("name"), to_status),
+            wanted=to_status, read=obj(fields2.get("status")).get("name"))
+    j.check("read keeps the issue after the transition",
+            same(read2, created, "id", "key") and eq(fields2.get("summary"), summary))
+    found = j.call("GET", "/rest/api/3/search/jql", query={"jql": f"key = {key}"})
+    hit = next((i for i in dicts(found.get("issues")) if eq(i.get("key"), key)), {})
+    j.check("search finds the issue in its new status",
+            eq(obj(obj(hit.get("fields")).get("status")).get("name"), to_status))
+
+
+def zendesk_steps(j):
+    # The contract has no route to post a comment: a comment goes in through
+    # PUT /api/v2/tickets/{ticket_id}, as its summary says.
+    j.headers.update(HELDOUT_AUTH)
+    subject = f"Invoice {j.rng.randint(1000, 9999)} shows the wrong address"
+    opening, reply = "The invoice has our old address on it.", "Checking with the billing team."
+    tags = ["billing", "invoice"]
+    made = j.call("POST", "/api/v2/tickets", body={"ticket": {
+        "subject": subject, "comment": {"body": opening}, "priority": "high", "type": "incident", "tags": tags,
+        "requester": {"name": "Ana Silva", "email": "ana@example.org"},
+    }})
+    ticket = obj(made.get("ticket"))
+    tid = ticket.get("id")
+    need(j, "ticket has an id", tid)
+    path = f"/api/v2/tickets/{tid}"
+    j.check("ticket keeps its subject", eq(ticket.get("subject"), subject))
+    j.check("ticket keeps priority and type", eq(ticket.get("priority"), "high") and eq(ticket.get("type"), "incident"))
+    j.check("first comment becomes the description", eq(ticket.get("description"), opening))
+    j.check("audit names the ticket", eq(obj(made.get("audit")).get("ticket_id"), tid))
+    read = obj(j.call("GET", path).get("ticket"))
+    j.check("read matches the created ticket",
+            same(read, ticket, "id", "subject", "description", "status", "priority", "type", "requester_id"))
+    j.check("read keeps the tags", isinstance(read.get("tags"), list) and sorted(read["tags"]) == tags)
+    replied = obj(j.call("PUT", path, body={"ticket": {"comment": {"body": reply, "public": False}}}).get("ticket"))
+    j.check("reply keeps the ticket", eq(replied.get("id"), tid) and eq(replied.get("subject"), subject))
+    page = j.call("GET", f"{path}/comments")
+    comments = dicts(page.get("comments"))
+    j.check("comment list holds the reply",
+            any(eq(c.get("body"), reply) and c.get("public") is False for c in comments))
+    j.check("comment list holds both comments in order",
+            [c.get("body") for c in comments] == [opening, reply] and eq(page.get("count"), 2),
+            listed=len(comments), count=page.get("count"))
+    updated = obj(j.call("PUT", path, body={"ticket": {"status": "pending", "priority": "urgent"}}).get("ticket"))
+    j.check("update changes status and priority",
+            eq(updated.get("id"), tid) and eq(updated.get("status"), "pending") and eq(updated.get("priority"), "urgent"))
+    read2 = obj(j.call("GET", path).get("ticket"))
+    j.check("read shows the update", eq(read2.get("status"), "pending") and eq(read2.get("priority"), "urgent"),
+            status_value=read2.get("status"), priority=read2.get("priority"))
+    j.check("read keeps the subject and description",
+            eq(read2.get("subject"), subject) and eq(read2.get("description"), opening))
+    listed = by_id(j.call("GET", "/api/v2/tickets", query={"sort_by": "created_at", "sort_order": "desc"}).get("tickets"),
+                   tid)
+    j.check("list shows the ticket as updated", eq(listed.get("status"), "pending") and eq(listed.get("subject"), subject))
+
+
+def notion_text(rich_text):
+    return "".join(str(t.get("plain_text")) for t in dicts(rich_text))
+
+
+def notion_title(page):
+    return notion_text(obj(obj(page.get("properties")).get("Name")).get("title"))
+
+
+def notion_values(page):
+    """(status, priority, due date) of a page in the contract's data source."""
+    props = obj(page.get("properties"))
+    return (obj(obj(props.get("Status")).get("status")).get("name"),
+            obj(obj(props.get("Priority")).get("select")).get("name"),
+            obj(obj(props.get("Due")).get("date")).get("start"))
+
+
+def notion_block_text(block):
+    return notion_text(obj(block.get(block.get("type"))).get("rich_text"))
+
+
+def notion_block(kind, text, **extra):
+    return {"object": "block", "type": kind,
+            kind: {"rich_text": [{"type": "text", "text": {"content": text}}], **extra}}
+
+
+def notion_steps(j):
+    # A page in a data source the client was given: the contract has no route to
+    # create a database or a data source. Trashing is left out: its Page schema pins
+    # in_trash and archived to false, so a read-back could not show it.
+    j.headers.update(HELDOUT_AUTH)
+    j.headers["notion-version"] = "2025-09-03"
+    source = str(uuid.UUID(int=j.rng.getrandbits(128), version=4))
+    title = f"Oslo launch checklist {j.rng.randint(100, 999)}"
+    due = "2026-12-14"
+    page = j.call("POST", "/v1/pages", body={
+        "parent": {"type": "data_source_id", "data_source_id": source},
+        "properties": {
+            "Name": {"title": [{"type": "text", "text": {"content": title}}]},
+            "Status": {"status": {"name": "Not started"}},
+            "Priority": {"select": {"name": "P1"}},
+            "Due": {"date": {"start": due}},
+        },
+    })
+    pid = page.get("id")
+    need(j, "page has an id", pid)
+    j.check("page keeps its parent", eq(obj(page.get("parent")).get("data_source_id"), source))
+    j.check("page keeps its title", notion_title(page) == title)
+    j.check("page keeps its properties", notion_values(page) == ("Not started", "P1", due), values=notion_values(page))
+    read = j.call("GET", f"/v1/pages/{pid}")
+    j.check("read matches the created page",
+            same(read, page, "id", "parent", "created_time") and notion_title(read) == title
+            and notion_values(read) == notion_values(page))
+    updated = j.call("PATCH", f"/v1/pages/{pid}", body={"properties": {
+        "Status": {"status": {"name": "In progress"}}, "Priority": {"select": {"name": "P0"}},
+    }})
+    j.check("update keeps the page's identity", eq(updated.get("id"), pid) and notion_title(updated) == title)
+    j.check("update changes the properties", notion_values(updated)[:2] == ("In progress", "P0"),
+            values=notion_values(updated))
+    read2 = j.call("GET", f"/v1/pages/{pid}")
+    j.check("read shows the update", notion_values(read2)[:2] == ("In progress", "P0"), values=notion_values(read2))
+    j.check("read keeps what the update left alone",
+            notion_title(read2) == title and notion_values(read2)[2] == due and same(read2, page, "id", "created_time"))
+    texts = ["Book the venue in Oslo.", "Send the invitations."]
+    appended = j.call("PATCH", f"/v1/blocks/{pid}/children", body={"children": [
+        notion_block("paragraph", texts[0]), notion_block("to_do", texts[1], checked=False),
+    ]})
+    blocks = dicts(appended.get("results"))
+    j.check("append returns the new blocks in order", [notion_block_text(b) for b in blocks] == texts)
+    j.check("new blocks name their page",
+            len(blocks) == 2 and all(eq(obj(b.get("parent")).get("page_id"), pid) for b in blocks))
+    children = dicts(j.call("GET", f"/v1/blocks/{pid}/children").get("results"))
+    j.check("block list holds the appended blocks",
+            [notion_block_text(b) for b in children] == texts
+            and [b.get("id") for b in children] == [b.get("id") for b in blocks])
+    query = j.call("POST", f"/v1/data_sources/{source}/query",
+                   body={"filter": {"property": "Status", "status": {"equals": "In progress"}}})
+    j.check("query finds the page in its new status",
+            notion_values(by_id(query.get("results"), pid))[0] == "In progress")
+    found = j.call("POST", "/v1/search", body={"query": title, "filter": {"property": "object", "value": "page"}})
+    j.check("search finds the page by title", notion_title(by_id(found.get("results"), pid)) == title)
+
+
+def square_steps(j):
+    # The contract has no route to read a refund: its effect is read on the payment.
+    j.headers.update(HELDOUT_AUTH)
+    location = "L88917AVBK2S5"
+    amount = {"amount": 1000 + j.rng.randint(1, 900) * 10, "currency": "USD"}
+    tip = {"amount": 100 + j.rng.randint(1, 90) * 5, "currency": "USD"}
+    reference, note = f"table-{j.rng.randint(100, 999)}", "Dinner for two"
+    made = j.call("POST", "/v2/payments", body={
+        "source_id": "cnon:card-nonce-ok", "idempotency_key": str(uuid.UUID(int=j.rng.getrandbits(128), version=4)),
+        "amount_money": amount, "tip_money": tip, "autocomplete": False, "location_id": location,
+        "reference_id": reference, "note": note,
+    })
+    pay = obj(made.get("payment"))
+    pid = pay.get("id")
+    need(j, "payment has an id", pid)
+    j.check("payment keeps the amount", eq(pay.get("amount_money"), amount))
+    j.check("total adds the tip", eq(obj(pay.get("total_money")).get("amount"), amount["amount"] + tip["amount"]))
+    j.check("payment keeps the client's details",
+            eq(pay.get("reference_id"), reference) and eq(pay.get("note"), note) and eq(pay.get("location_id"), location))
+    j.check("delayed payment waits for completion", eq(pay.get("status"), "APPROVED"), status_value=pay.get("status"))
+    read = obj(j.call("GET", f"/v2/payments/{pid}").get("payment"))
+    j.check("read matches the created payment",
+            same(read, pay, "id", "amount_money", "total_money", "status", "location_id", "order_id", "reference_id"))
+    done = obj(j.call("POST", f"/v2/payments/{pid}/complete", body={}).get("payment"))
+    j.check("complete keeps identity and amount", eq(done.get("id"), pid) and eq(done.get("amount_money"), amount))
+    j.check("complete moves the status on", eq(done.get("status"), "COMPLETED"), status_value=done.get("status"))
+    read2 = obj(j.call("GET", f"/v2/payments/{pid}").get("payment"))
+    j.check("read shows the completed status", eq(read2.get("status"), "COMPLETED"), status_value=read2.get("status"))
+    listed = by_id(j.call("GET", "/v2/payments", query={"location_id": location}).get("payments"), pid)
+    j.check("list shows the completed payment", eq(listed.get("status"), "COMPLETED") and eq(listed.get("amount_money"), amount))
+    part = {"amount": amount["amount"] // 2, "currency": "USD"}
+    reason = "One dish was returned"
+    refund = obj(j.call("POST", "/v2/refunds", body={
+        "idempotency_key": str(uuid.UUID(int=j.rng.getrandbits(128), version=4)),
+        "amount_money": part, "payment_id": pid, "reason": reason,
+    }).get("refund"))
+    j.check("refund names its payment", eq(refund.get("payment_id"), pid))
+    j.check("refund keeps the amount and reason", eq(refund.get("amount_money"), part) and eq(refund.get("reason"), reason))
+    read3 = obj(j.call("GET", f"/v2/payments/{pid}").get("payment"))
+    ids = read3.get("refund_ids")
+    j.check("read shows the refund",
+            isinstance(ids, list) and refund.get("id") in ids and eq(read3.get("refunded_money"), part),
+            refund_ids=ids, refunded=read3.get("refunded_money"))
+    j.check("read keeps the original amount", eq(read3.get("amount_money"), amount))
+
+
+HELDOUT_JOURNEYS = {"paypal": paypal_steps, "jira": jira_steps, "zendesk": zendesk_steps,
+                    "notion": notion_steps, "square": square_steps}
+
+
+def run_journeys_heldout(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in HELDOUT_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -1001,6 +1380,7 @@ RUNNERS = {
     "sse": (SSE_MOCKS, run_sse),
     "import": ({}, run_import),
     "journeys": (JOURNEY_MOCKS, run_journeys),
+    "journeys_heldout": (HELDOUT_MOCKS, run_journeys_heldout),
 }
 
 

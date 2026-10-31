@@ -152,6 +152,84 @@ class FakeStripe(BaseHTTPRequestHandler):
         self.reply(item or {}, 200 if item else 404)
 
 
+class FakeSquare(FakeStripe):
+    """A tiny Square that remembers its payments. `stale_read` makes a read of a
+    completed payment return the old status."""
+
+    store = {}
+    stale_read = False
+
+    def do_POST(self):
+        path, st = self.path.split("?")[0], FakeSquare.store
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        if path == "/square/v2/payments":
+            pay = {k: body.get(k) for k in ("amount_money", "tip_money", "location_id", "reference_id", "note")}
+            total = body["amount_money"]["amount"] + body["tip_money"]["amount"]
+            pay.update(id=f"pay{len(st)}", order_id="ord1", status="APPROVED",
+                       total_money={"amount": total, "currency": "USD"})
+            st[pay["id"]] = pay
+            return self.reply({"payment": pay})
+        if path.endswith("/complete"):
+            pay = st[path.split("/")[-2]]
+            if not FakeSquare.stale_read:
+                pay["status"] = "COMPLETED"
+            return self.reply({"payment": dict(pay, status="COMPLETED")})
+        if path == "/square/v2/refunds":
+            pay = st[body["payment_id"]]
+            refund = {"id": "ref1", "payment_id": pay["id"], "amount_money": body["amount_money"],
+                      "reason": body["reason"], "status": "PENDING"}
+            pay.update(refund_ids=[refund["id"]], refunded_money=body["amount_money"])
+            return self.reply({"refund": refund})
+        self.reply({}, 404)
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/square/v2/payments":
+            return self.reply({"payments": list(FakeSquare.store.values())})
+        pay = FakeSquare.store.get(path.split("/")[-1])
+        self.reply({"payment": pay} if pay else {}, 200 if pay else 404)
+
+
+class HeldOutJourneyTest(unittest.TestCase):
+    def run_square(self, stale):
+        FakeSquare.store, FakeSquare.stale_read = {}, stale
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeSquare)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys_heldout")
+            server_suites.run_one_journey("square", server_suites.square_steps, Srv, sink, Args, 0)
+        return {r["case"]: r for r in sink.rows}
+
+    def test_journeys_heldout_is_a_suite(self):
+        self.assertIn("journeys_heldout", server_suites.SUITES)
+        self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_heldout"]
+        self.assertIs(runner, server_suites.run_journeys_heldout)
+        self.assertEqual(sorted(mocks), ["jira", "notion", "paypal", "square", "zendesk"])
+        for contract, _, persona in mocks.values():
+            self.assertIsNone(persona)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertTrue(8 <= len(server_suites.JOURNEY_CHECKS[name]) <= 14, name)
+
+    def test_square_journey_scores_a_consistent_fake_and_catches_a_stale_read(self):
+        rows = self.run_square(stale=False)
+        self.assertEqual(sorted(rows), sorted(f"square.{n}" for n in server_suites.JOURNEY_CHECKS["square"]))
+        self.assertEqual([c for c, r in rows.items() if not r["ok"]], [])
+        rows = self.run_square(stale=True)
+        self.assertEqual(sorted(c for c, r in rows.items() if not r["ok"]),
+                         ["square.list shows the completed payment", "square.read shows the completed status"])
+
+
 class JourneyTest(unittest.TestCase):
     def run_stripe(self, stale):
         FakeStripe.store, FakeStripe.stale_read = {}, stale
