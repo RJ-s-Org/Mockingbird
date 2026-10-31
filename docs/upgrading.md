@@ -52,14 +52,14 @@ Stored bundles take this the way they take action routes, with the same steps: u
 
 ### A resource answers only for its owner
 
-On a route that names its target after another path parameter, such as `/repos/{owner}/{repo}` or `/orgs/{org}/teams/{slug}`, a stored resource now has to belong to the route's owner, unless the parameter is named as an id (`order_id`). It belongs when it was listed or written under the same route template and collection path. Otherwise it must show the owner: a member that is a path ending in the owner and the name (`full_name`, `path_with_namespace`, a `url`), a member named for the parameter (`namespace`, `owner.login`), or another object holding the value. Nothing needs recompiling, and on these routes:
+On a route that names its target after another path parameter, such as `/repos/{owner}/{repo}` or `/orgs/{org}/teams/{slug}`, a read must now be able to tell a stored resource is the route owner's, unless the parameter is named as an id (`order_id`). It can when the resource was listed or written under the same route template and collection path. Otherwise the resource must show the owner: a relative path ending in the owner and the name (`full_name`, `path_with_namespace`), a member tied to the parameter (`namespace`, `owner.login`, `org_id`, `organization`), or a link ending in them. Nothing needs recompiling, and on these routes:
 
 - a resource a search, a mention, a fixture or a session seed stored without showing its owner is no longer served by name. The read is generated, and the response cache repeats it. Give such a fixture a member that shows its owner;
-- only a member named for the parameter, or `name`, `login`, `slug` or `key`, or a path holding the owner too, identifies a resource by name. Any other string does not;
-- `unknown_ids: 404` does not answer a value some owner's resource goes by, as the route may not be able to tell whose it is. A value none goes by is still a 404;
-- a delete or an update by another owner leaves what is stored under that name, and the update is stored apart.
+- only a member named for the parameter, `name`, `login`, `slug` or `key`, or a path holding the owner too, identifies a resource by name. Any other string does not;
+- `unknown_ids: 404` does not answer a value some owner's resource goes by. A value none goes by is still a 404;
+- a write acts unless the resource is known to be another's. Then a delete leaves it, and an update's answer is not stored. Another owner's create can still replace a resource with the same id.
 
-The collection record lives in the node's memory, like path aliases, and ends when the resource changes without it. On another node or after a restart, a resource showing no owner is generated, except a number, which cannot show one and is served as before. A string id no name member holds, such as `txn_1` below `/customers/{customer}`, reads back as before unless it was listed under another collection.
+The collection record lives in the node's memory, like path aliases, and ends when the resource changes without it. On another node or after a restart a read relies on what the resource shows, except that a number showing nothing is served, and a resource written through the route under its name, with an `id` of its own, reads back for any owner. A string id no name member holds, such as `txn_1` below `/customers/{customer}`, reads back as before unless it was listed under another collection.
 
 ## Upgrading to 0.1.0
 

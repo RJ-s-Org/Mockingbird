@@ -904,18 +904,9 @@ pub(crate) async fn complete(
                         session,
                         op,
                         resource_type: t,
-                        target_id: if foreign_key {
-                            // A delete has nothing of this owner's to remove.
-                            collection
-                                .as_ref()
-                                .filter(|_| {
-                                    !matches!(op.kind, OperationKind::Command(Effect::Delete))
-                                })
-                                .zip(target_id.as_ref())
-                                .map(|(c, id)| format!("{}/{id}", c.path))
-                        } else {
-                            target_id.clone()
-                        },
+                        // What the key holds is another's: this write has no
+                        // key of its own to go under.
+                        target_id: target_id.clone().filter(|_| !foreign_key),
                         generated: &generated,
                         request_body: call.body.as_ref(),
                         collection: collection.clone(),
@@ -2613,7 +2604,10 @@ async fn read_context(
     target_id: Option<&str>,
     call: &OperationCall,
 ) -> (Option<StoredResource>, Vec<StoredResource>, Followed) {
-    let owner = guarded(state.rt, op, call);
+    let mut owner = guarded(state.rt, op, call);
+    if let Some(owner) = &mut owner {
+        owner.writing = !matches!(op.kind, OperationKind::Query);
+    }
     let owner = owner.as_ref();
     let rt = state.rt;
     let target = match (op.resource_type.as_deref(), target_id) {
@@ -2626,15 +2620,17 @@ async fn read_context(
             None => {
                 let delete = matches!(op.kind, OperationKind::Command(Effect::Delete));
                 let identity = op.identity.as_ref();
+                let param = target_param(op);
+                let param_is_id = param.as_deref().is_some_and(id_like)
+                    || identity.is_some_and(path_names_identity);
                 // A delete may not declare what its route's read goes by.
                 let read_fields: Vec<&str> = rt
                     .index()
                     .path_fields(t)
                     .iter()
-                    .filter(|_| delete && rt.consistency)
+                    .filter(|_| delete && rt.consistency && !param_is_id)
                     .map(String::as_str)
                     .collect();
-                let param = target_param(op);
                 match by_path_fields(state, session, t, &read_fields, id, owner).await {
                     Some(hit) => Some(hit),
                     None => match identity.and_then(|i| i.path_field.as_deref()) {
@@ -2683,6 +2679,8 @@ struct Owner {
     name: String,
     /// The path from `value` to `name`: `octo/teams/core`.
     tail: String,
+    /// For a write, which acts unless the resource is known to be another's.
+    writing: bool,
 }
 
 /// A collection a path names: `/orgs/octo/teams` of `/orgs/{}/teams`.
@@ -2743,6 +2741,7 @@ fn owner_of_param(op: &Operation, call: &OperationCall, name: &str) -> Option<Ow
         value: value(owner)?,
         name: value(name)?,
         tail: fill_path(call, &segments[before..=at])?.path,
+        writing: false,
     })
 }
 
@@ -2841,6 +2840,13 @@ impl Collections {
         (*digest == OwnReads::digest(&r.data)).then(|| collection.clone())
     }
 
+    /// Whether a record for `r`'s key exists, as `r` may not be what it recorded.
+    fn has(&self, session: &SessionKey, r: &StoredResource) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|records| records.contains_key(&OwnReads::key(session, r)))
+    }
+
     /// `old`'s record goes on to what replaced it, `new`.
     fn carry(&self, session: &SessionKey, old: &StoredResource, new: &StoredResource) {
         if let Some(collection) = self.get(session, old) {
@@ -2867,35 +2873,42 @@ fn path_shows(text: &str, owner: &Owner) -> bool {
     })
 }
 
-/// Whether a member's name is that of parameter `param`, one naming the other
-/// (`owner`, `org` and `organization`).
-fn named_for(member: &str, param: &str) -> bool {
-    let (member, param) = (member.to_lowercase(), param.to_lowercase());
-    member.starts_with(&param) || param.starts_with(&member)
+/// Whether `text` is a path relative to nothing, ending in `name`: `octo/hello`.
+fn relative_path_ending(text: &str, name: &str) -> bool {
+    !text.contains("://")
+        && !text.starts_with('/')
+        && text
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .is_some_and(|(_, last)| last == name)
 }
 
-/// Whether `r` shows it is `owner`'s, in the order the contract says most:
-/// a member that is a path ending in the owner and the name; else, unless one
-/// ends in the name under another owner, a member named for the owner's
-/// parameter, as a string or an object holding it; else another object holding
-/// it (`namespace: {path: octo}`). A list says nothing of an owner, nor free
-/// text, nor an object the contract types as `r`'s own type: a fork's `parent`
-/// is another repository.
-fn shows_owner(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
-    let Value::Object(members) = &r.data else {
-        return false;
-    };
+/// How a member relates to parameter `param`: named for it, or for its id.
+/// `org` also means `organization`, but `org_ref` and `owner_previous` are
+/// other things.
+fn tied_to_param(member: &str, param: &str) -> bool {
+    let (member, param) = (member.to_lowercase(), param.to_lowercase());
+    member == param
+        || member == format!("{param}_id")
+        || member == format!("{param}id")
+        || (param.len() >= 3
+            && member.starts_with(&param)
+            && member.chars().all(char::is_alphanumeric))
+}
+
+/// What `r` itself says of `owner`, `None` when it says nothing: a relative path
+/// ending in the name decides, all of them having to show the owner (a fork
+/// names its source, and its `full_name` says whose it is); else a member tied
+/// to the owner's parameter, as a value or an object holding it, not one the
+/// contract types as `r`'s own type; else a link showing the owner.
+fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option<bool> {
+    let members = r.data.as_object()?;
     let strings = || members.values().filter_map(Value::as_str);
-    if strings().any(|text| path_shows(text, owner)) {
-        return true;
-    }
-    let another_owners = strings().any(|text| {
-        text.trim_end_matches('/')
-            .rsplit_once('/')
-            .is_some_and(|(_, last)| last == owner.name)
-    });
-    if another_owners {
-        return false;
+    let mut paths = strings()
+        .filter(|text| relative_path_ending(text, &owner.name))
+        .peekable();
+    if paths.peek().is_some() {
+        return Some(paths.all(|text| path_shows(text, owner)));
     }
     let index = rt.index();
     let schema = index.detail_reads.get(&r.resource_type).and_then(|i| {
@@ -2914,31 +2927,48 @@ fn shows_owner(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
             .any(|d| index.types_by_def.get(*d) == Some(&r.resource_type))
     };
     let holds = |value: &Value| match value {
-        Value::String(text) => *text == owner.value,
         Value::Object(inner) => inner
             .values()
             .any(|v| v.as_str() == Some(owner.value.as_str())),
-        _ => false,
+        value => id_string(value).as_deref() == Some(owner.value.as_str()),
     };
     let is_link = |value: &Value| value.as_str().is_some_and(|text| text.contains("://"));
-    let mut named = members
+    let mut tied = members
         .iter()
         .filter(|(member, value)| {
-            named_for(member, &owner.param) && !is_link(value) && !own_type(member)
+            tied_to_param(member, &owner.param) && !is_link(value) && !own_type(member)
         })
-        .filter(|(_, value)| value.is_string() || value.is_object())
+        .filter(|(_, value)| value.is_string() || value.is_number() || value.is_object())
         .peekable();
-    if named.peek().is_some() {
-        return named.any(|(_, value)| holds(value));
+    if tied.peek().is_some() {
+        return Some(tied.any(|(_, value)| holds(value)));
     }
-    members
-        .iter()
-        .any(|(member, value)| value.is_object() && !own_type(member) && holds(value))
+    strings()
+        .any(|text| text.contains("://") && path_shows(text, owner))
+        .then_some(true)
 }
 
-/// Whether stored `r` is `owner`'s: as a record says, else showing that owner.
-/// A number has no way to show one, so with neither it passes on `field`, what
-/// the path gave.
+/// Whether `r` shows it is `owner`'s (see [`owner_evidence`]).
+fn shows_owner(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
+    owner_evidence(rt, r, owner) == Some(true)
+}
+
+/// Whether `r` is known to be another's, by a record or by what it says.
+fn known_foreign(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    r: &StoredResource,
+    owner: &Owner,
+) -> bool {
+    rt.collections()
+        .fits(session, r, owner)
+        .map_or_else(|| owner_evidence(rt, r, owner) == Some(false), |fits| !fits)
+}
+
+/// Whether stored `r` may be taken for `owner`'s under the value in `field`. A
+/// write acts on what it cannot tell is another's, or it would leave it behind.
+/// A read needs a record or what `r` shows, as an answer can be generated. A
+/// number cannot show its owner, so it passes unless `r` links elsewhere.
 fn owner_fits(
     rt: &MockRuntime,
     session: &SessionKey,
@@ -2946,17 +2976,37 @@ fn owner_fits(
     owner: &Owner,
     field: &str,
 ) -> bool {
-    rt.collections().fits(session, r, owner).unwrap_or_else(|| {
-        r.data.get(field).is_some_and(Value::is_number) || shows_owner(rt, r, owner)
-    })
+    if owner.writing {
+        return !known_foreign(rt, session, r, owner);
+    }
+    rt.collections()
+        .fits(session, r, owner)
+        .unwrap_or_else(|| match owner_evidence(rt, r, owner) {
+            Some(shown) => shown,
+            None => {
+                r.data.get(field).is_some_and(Value::is_number)
+                    && !r.data.as_object().is_some_and(|members| {
+                        members.values().filter_map(Value::as_str).any(|text| {
+                            text.trim_end_matches('/')
+                                .rsplit_once('/')
+                                .is_some_and(|(_, last)| last == owner.name)
+                                && !path_shows(text, owner)
+                        })
+                    })
+            }
+        })
 }
 
-/// Whether `r`, stored under the value a path gave, is `owner`'s to answer with:
-/// as a record says. Else a key that is no name of `r` is `r`'s id, and stands on
-/// its own. A name (in one of [`NAME_FIELDS`], or the end of a relative path in
-/// a string) must show its owner, or differ from `r`'s own `id`: only a
-/// write through the route keys it so, as a list or a mention keys by the `id`.
+/// Whether `r`, stored under the value a path gave, is `owner`'s to answer with.
+/// A write takes it unless it is known to be another's. For a read a record
+/// decides; else a key that is no name of `r` is `r`'s id, and stands on its
+/// own. A name (in one of [`NAME_FIELDS`], or the end of a relative path) must
+/// show its owner, or differ from `r`'s own `id`: only a write through the route
+/// keys it so, as a list or a mention keys by the `id`.
 fn key_fits(rt: &MockRuntime, session: &SessionKey, r: &StoredResource, owner: &Owner) -> bool {
+    if owner.writing {
+        return !known_foreign(rt, session, r, owner);
+    }
     if let Some(fits) = rt.collections().fits(session, r, owner) {
         return fits;
     }
@@ -2966,11 +3016,10 @@ fn key_fits(rt: &MockRuntime, session: &SessionKey, r: &StoredResource, owner: &
     let is_name = NAME_FIELDS
         .iter()
         .any(|field| members.get(*field).and_then(id_string).as_ref() == Some(&r.id))
-        || members.values().filter_map(Value::as_str).any(|text| {
-            !text.contains("://")
-                && !text.starts_with('/')
-                && text.rsplit_once('/').is_some_and(|(_, last)| last == r.id)
-        });
+        || members
+            .values()
+            .filter_map(Value::as_str)
+            .any(|text| relative_path_ending(text, &r.id));
     let written = members
         .get("id")
         .and_then(id_string)
@@ -3021,7 +3070,7 @@ async fn by_path_fields(
     value: &str,
     owner: Option<&Owner>,
 ) -> Option<StoredResource> {
-    if fields.is_empty() && owner.is_none() {
+    if fields.is_empty() {
         return None;
     }
     let rt = state.rt;
@@ -3657,10 +3706,18 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 data: item.clone(),
             };
             let stored = resource.clone();
-            if state.insert_seeded(session, resource).await
-                && let Some(collection) = collection.clone()
-            {
+            let Some(collection) = collection.clone() else {
+                state.insert_seeded(session, resource).await;
+                continue;
+            };
+            if state.insert_seeded(session, resource).await {
                 rt.collections().remember(session, &stored, collection);
+            } else if let Some(held) = state.get(session, resource_type, &id).await
+                && rt.collections().get(session, &held).is_none()
+                && held.data == stored.data
+            {
+                // A mention stored it first: this list says where it belongs.
+                rt.collections().remember(session, &held, collection);
             }
         }
         return;
@@ -3697,8 +3754,10 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             let stored = resource.clone();
             // A route naming no collection keeps the one it had.
             let held = match &collection {
-                Some(_) => None,
-                None => state.get(session, resource_type, &stored.id).await,
+                None if rt.collections().has(session, &stored) => {
+                    state.get(session, resource_type, &stored.id).await
+                }
+                _ => None,
             };
             if state.upsert(session, resource).await {
                 match (collection, held) {
