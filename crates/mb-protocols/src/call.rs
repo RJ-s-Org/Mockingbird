@@ -1515,10 +1515,11 @@ const WRAPPED_IDS: [&str; 4] = ["id", "ts", "sid", "uuid"];
 /// Stores each object a create's answer wraps under a member `<x>` (Slack's
 /// `chat.postMessage` → `{ok, ts, message: {...}}`) as a resource of type
 /// `<x>s` when a read lists `<x>s` (`conversations.history`'s `messages`),
-/// so that read is generated knowing it. Only the create's own member
-/// replaces what the session holds: one of the operation's own type
-/// (`resource_type`), or one [`seed_entities`] could not key, having no `id`
-/// or `number` (Slack's `ts`). Any other is a mention, stored only when new.
+/// so that read is generated knowing it. The create's own member, one of the
+/// operation's own type (`resource_type`), replaces what the session holds.
+/// Any other is a mention, stored under what [`seed_entities`] requires of
+/// one: it replaces what is held only when that cannot key it, having no
+/// `id` or `number` (Slack's `ts`), and otherwise is stored only when new.
 async fn store_wrapped(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1548,13 +1549,17 @@ async fn store_wrapped(
             id,
             data: value.clone(),
         };
-        if own || unkeyed {
+        if own {
             state.upsert(session, resource).await;
         } else if rt.consistency
             && !transient_fallback(generated)
             && entity_fits(rt, &resource.resource_type, &resource.data)
         {
-            state.insert_seeded(session, resource).await;
+            if unkeyed {
+                state.upsert(session, resource).await;
+            } else {
+                state.insert_seeded(session, resource).await;
+            }
         }
     }
 }
@@ -1562,10 +1567,11 @@ async fn store_wrapped(
 /// Stores a generated read by id as the resource it read, when it answers
 /// with its type's by-path schema: otherwise a later answer's mention would
 /// be stored and change what repeating this read returns. It goes under the
-/// target id when the path names the identity. A path parameter naming
-/// another field (`/issues/{number}`) or none (`/repos/{o}/{r}`) is no key:
-/// the answer goes under its own id, or a list repeating it would store a
-/// second one, and one owner's answer would answer for another's.
+/// target id when the path names the identity. A path parameter naming no
+/// field (`/repos/{o}/{r}`) is no key, or one owner's answer would answer for
+/// another's, so that answer goes under its own id. A route read by another
+/// field (`/issues/{number}`) stores nothing: its answer's `id` comes from
+/// the path and is no resource's, so a list would store the issue again.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1598,7 +1604,10 @@ async fn seed_own_read(
     if detail_schema.is_none() || detail_schema != own_schema {
         return;
     }
-    let id = if identity.path_field.is_none() && path_names_identity(identity) {
+    if identity.path_field.is_some() {
+        return;
+    }
+    let id = if path_names_identity(identity) {
         Some(target_id.to_string())
     } else {
         body.get(&identity.field).and_then(id_string)
@@ -2182,17 +2191,7 @@ async fn read_context(
                     }
                     None => None,
                 },
-                // A write whose answer shows no identity (`DELETE` answering
-                // `{}`) acts on what this type's reads find by that field.
-                None => {
-                    let fields = state.rt.index().path_fields(t);
-                    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-                    if fields.is_empty() {
-                        None
-                    } else {
-                        by_path_fields(state, session, t, &fields, id, None).await
-                    }
-                }
+                None => None,
             },
         },
         _ => None,

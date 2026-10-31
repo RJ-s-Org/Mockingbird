@@ -1153,7 +1153,8 @@ async fn a_refused_create_mention_does_not_take_the_id() {
     assert_eq!(customer["name"], "Ana");
 }
 
-/// Issues read by their number, with an `id` of their own, as on GitHub.
+/// Issues read by their number, with an `id` of their own, as on GitHub. The
+/// delete's answer shows only the `id`, and the lock's a record of its own.
 const ISSUES: &str = r##"
 openapi: 3.0.0
 info: {title: Issues, version: "1"}
@@ -1173,7 +1174,13 @@ paths:
       operationId: deleteIssue
       parameters: [{name: issue_number, in: path, required: true, schema: {type: integer}}]
       responses:
-        "200": {description: gone, content: {application/json: {schema: {type: object}}}}
+        "200": {description: gone, content: {application/json: {schema: {type: object, properties: {id: {type: integer}, deleted: {type: boolean}}}}}}
+  /issues/{issue_number}/lock:
+    post:
+      operationId: lockIssue
+      parameters: [{name: issue_number, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {issue_number: {type: integer}, locked: {type: boolean}}}}}}
 components:
   schemas:
     Issue:
@@ -1182,30 +1189,193 @@ components:
       properties: {id: {type: integer}, number: {type: integer}, title: {type: string}}
 "##;
 
-/// An issue read by number is one resource, under its id: a list repeating
-/// it stores no second one, and deleting it by number leaves none.
+/// An issue a list seeded and a delete by number removes stays gone. The
+/// delete's answer declares `number`, which is what finds the listed issue.
 #[tokio::test]
 async fn a_deleted_issue_stays_gone_after_a_read_and_a_list() {
     let issue = json!({"id": 999, "number": 5, "title": "a"});
+    let contract = ISSUES.replace(
+        "{type: object, properties: {id: {type: integer}, deleted: {type: boolean}}}",
+        "{$ref: \"#/components/schemas/Issue\"}",
+    );
     let api = actions_of(
-        ISSUES,
+        &contract,
         vec![
             Ok(issue.to_string()),
             Ok(json!([issue]).to_string()),
-            Ok(json!({}).to_string()),
+            Ok(issue.to_string()),
             Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
         ],
     );
     read(&api, "/issues/5").await;
-    let (source, again) = read(&api, "/issues/5").await;
-    assert_eq!(source, "state");
-    assert_eq!(again["id"], 999);
     read(&api, "/issues").await;
     let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
     assert!(status.is_success(), "{status}");
     let (source, body) = read(&api, "/issues/5").await;
     assert_ne!(source, "state", "deleted issue read back: {body}");
     assert_eq!(body["title"], "regenerated");
+}
+
+/// A read by number is not stored: its answer's `id` cannot make it another
+/// issue's answer.
+#[tokio::test]
+async fn a_read_by_number_does_not_answer_for_another_issue() {
+    let api = actions_of(
+        ISSUES,
+        vec![
+            Ok(json!({"id": 5, "number": 7, "title": "seven"}).to_string()),
+            Ok(json!({"id": 50, "number": 5, "title": "five"}).to_string()),
+        ],
+    );
+    read(&api, "/issues/7").await;
+    let (source, issue) = read(&api, "/issues/5").await;
+    assert_ne!(source, "state");
+    assert_eq!(issue["number"], 5);
+    assert_eq!(issue["title"], "five");
+}
+
+/// A read by number stores nothing a delete could leave behind.
+#[tokio::test]
+async fn a_read_by_number_leaves_nothing_after_a_delete() {
+    let issue = json!({"id": 999, "number": 5, "title": "a"});
+    let api = actions_of(
+        ISSUES,
+        vec![
+            Ok(issue.to_string()),
+            Ok(json!({"id": 999, "deleted": true}).to_string()),
+            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
+        ],
+    );
+    read(&api, "/issues/5").await;
+    let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, body) = read(&api, "/issues/5").await;
+    assert_ne!(source, "state", "deleted issue read back: {body}");
+}
+
+/// An action's record takes the path value in the member named for its
+/// parameter, and gains no member it does not declare.
+#[tokio::test]
+async fn a_lock_record_keeps_its_own_members() {
+    let api = actions_of(
+        ISSUES,
+        vec![Ok(json!({"issue_number": 7, "locked": true}).to_string())],
+    );
+    let (status, _, record) = api.call("POST", "/issues/5/lock", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(record, json!({"issue_number": 5, "locked": true}));
+}
+
+/// Jira's `issueIdOrKey`: an `id` in the path answers under that `id`, whether
+/// or not `key` could hold it.
+const JIRA: &str = r##"
+openapi: 3.0.0
+info: {title: Jira, version: "1"}
+paths:
+  /issue/{issueIdOrKey}:
+    get:
+      operationId: getIssue
+      parameters: [{name: issueIdOrKey, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, key]
+      properties: {id: {type: string}, key: {type: string, pattern: "^[A-Z]+-[0-9]+$"}}
+"##;
+
+#[tokio::test]
+async fn a_jira_read_answers_the_requested_id() {
+    for contract in [
+        JIRA.to_string(),
+        JIRA.replace(", pattern: \"^[A-Z]+-[0-9]+$\"", ""),
+    ] {
+        let api = actions_of(
+            &contract,
+            vec![Ok(json!({"id": "777", "key": "ABC-1"}).to_string())],
+        );
+        let (_, issue) = read(&api, "/issue/10001").await;
+        assert_eq!(issue["id"], "10001", "{issue}");
+        assert_eq!(issue["key"], "ABC-1", "{issue}");
+    }
+}
+
+/// Orders whose answers mention receipts, keyed by a `uuid` only.
+const RECEIPTS: &str = r##"
+openapi: 3.0.0
+info: {title: Receipts, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}, receipt: {type: object, properties: {uuid: {type: string}}}}}}}}
+  /receipts:
+    get:
+      operationId: listReceipts
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {receipts: {type: array, items: {$ref: "#/components/schemas/Receipt"}}}}}}}
+  /receipts/{uuid}:
+    get:
+      operationId: getReceipt
+      parameters: [{name: uuid, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Receipt"}}}}
+components:
+  schemas:
+    Receipt:
+      type: object
+      required: [uuid, total]
+      properties: {uuid: {type: string}, total: {type: integer}}
+"##;
+
+/// With consistency off, a create's mention keyed by no `id` is not stored.
+#[tokio::test]
+async fn consistency_off_stores_no_unkeyed_mention() {
+    let api = actions_off(
+        RECEIPTS,
+        vec![
+            Ok(json!({"id": "o1", "receipt": {"uuid": "r1", "total": 3}}).to_string()),
+            Ok(json!({"uuid": "r1", "total": 9}).to_string()),
+        ],
+    );
+    let (status, _, _) = api.call("POST", "/orders", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (source, receipt) = read(&api, "/receipts/r1").await;
+    assert_ne!(source, "state", "{receipt}");
+}
+
+/// A faker create stores no mention keyed by no `id`.
+#[tokio::test]
+async fn a_faker_create_stores_no_unkeyed_mention() {
+    let api = actions_of(RECEIPTS, vec![]);
+    let (status, _, created) = api.call("POST", "/orders", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let Some(id) = created["receipt"]["uuid"].as_str() else {
+        return;
+    };
+    let (source, _) = read(&api, &format!("/receipts/{id}")).await;
+    assert_ne!(source, "state");
+}
+
+/// A mention its type refuses does not overwrite a stored read.
+#[tokio::test]
+async fn a_refused_unkeyed_mention_leaves_a_stored_read() {
+    let api = actions_of(
+        RECEIPTS,
+        vec![
+            Ok(json!({"uuid": "r1", "total": 9}).to_string()),
+            Ok(json!({"id": "o1", "receipt": {"uuid": "r1"}}).to_string()),
+        ],
+    );
+    let (_, first) = read(&api, "/receipts/r1").await;
+    let (status, _, _) = api.call("POST", "/orders", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (source, again) = read(&api, "/receipts/r1").await;
+    assert_eq!(source, "state");
+    assert_eq!(again, first);
 }
 
 /// A by-id read with a query is one view of the resource, not the resource:
@@ -1224,17 +1394,4 @@ async fn a_read_with_a_query_is_not_stored() {
     let (source, second) = read(&api, "/customers/c1?view=b").await;
     assert_ne!(source, "state");
     assert_eq!(second["name"], "Two");
-}
-
-/// The path names an issue's number: the answer takes it there, and keeps
-/// its own id.
-#[tokio::test]
-async fn a_read_by_number_sets_the_number_and_keeps_the_id() {
-    let api = actions_of(
-        ISSUES,
-        vec![Ok(json!({"id": 999, "number": 7, "title": "a"}).to_string())],
-    );
-    let (_, issue) = read(&api, "/issues/5").await;
-    assert_eq!(issue["id"], 999);
-    assert_eq!(issue["number"], 5);
 }

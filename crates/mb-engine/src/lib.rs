@@ -1854,8 +1854,8 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
     best
 }
 
-/// Set `body[identity.path_field]`, else `body[identity.field]`, to the path
-/// id (else the request body's `identity.input_field`), as a string or (when the schema wants one) a
+/// Set `body[identity.field]` to the path id (else the request body's
+/// `identity.input_field`), as a string or (when the schema wants one) a
 /// number. The answer of an action that does not return its resource is a
 /// record of its own: only a member named for the path parameter names the
 /// target, and any other `id` is the record's.
@@ -1885,10 +1885,7 @@ fn force_identity(
     let Some(id) = from_path.or_else(from_body) else {
         return body;
     };
-    // The path names this field, which need not be the resource's id: GitHub's
-    // `/issues/{issue_number}` names the `number` of an issue with its own `id`.
-    let field = identity.path_field.as_ref().unwrap_or(&identity.field);
-    if !body.is_object() || body.get(field) == Some(id) {
+    if !body.is_object() || body.get(&identity.field) == Some(id) {
         return body;
     }
     let mut candidates = vec![id.clone()];
@@ -1906,7 +1903,7 @@ fn force_identity(
     for candidate in candidates {
         let mut forced = body.clone();
         if let Value::Object(obj) = &mut forced {
-            obj.insert(field.clone(), candidate);
+            obj.insert(identity.field.clone(), candidate);
         }
         if validator.is_valid(&forced) {
             return forced;
