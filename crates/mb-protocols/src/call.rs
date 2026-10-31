@@ -7,7 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::http::HeaderMap;
-use mb_engine::consistency::{ENVELOPE_KEYS, item_identity, list_items, list_members};
+use mb_engine::consistency::{
+    ENVELOPE_KEYS, item_identity, list_items, list_members, property_schema,
+};
 use mb_engine::{
     EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext, OFFLINE_REASON,
     OperationCall, Source,
@@ -854,6 +856,22 @@ pub(crate) async fn complete(
         {
             store_wrapped(&mut state, session, &generated).await;
         }
+        // An operation with no resource type is stateless, GraphQL stores the
+        // objects of its answers under their own types, and a delete's answer
+        // may name what it just removed.
+        if (200..300).contains(&generated.status)
+            && resource_type.is_some()
+            && rt.consistency
+            && !transient_fallback(&generated)
+            && !matches!(op.binding, Binding::Graphql { .. })
+            && !matches!(op.kind, OperationKind::Command(Effect::Delete))
+            && let Some(body) = generated.body.as_ref()
+        {
+            let schema = op
+                .output_for_status(generated.status)
+                .and_then(|o| o.schema.as_ref());
+            seed_entities(&mut state, session, rt, body, schema).await;
+        }
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -983,6 +1001,16 @@ pub(crate) struct BundleIndex {
     listed: HashSet<String>,
     /// Per operation, by position: the members its success schema lists.
     list_members: Vec<Vec<String>>,
+    /// The resource type each `$defs` name is, from the query operations
+    /// whose success schema or list items are that `$ref`: a read by path
+    /// parameter first (`/repos/{owner}/{repo}`, not `/search/repositories`,
+    /// names GitHub's `repository`), then a list, then any other read.
+    types_by_def: HashMap<String, String>,
+    /// The resource types of the query operations.
+    read_types: HashSet<String>,
+    /// Per resource type, the position of its first query by path parameter
+    /// with a success schema: the read a stored resource must suit.
+    detail_reads: HashMap<String, usize>,
 }
 
 impl BundleIndex {
@@ -991,6 +1019,9 @@ impl BundleIndex {
         let mut path_fields: HashMap<String, Vec<String>> = HashMap::new();
         let mut list_members_of = Vec::with_capacity(bundle.operations.len());
         let mut listed = HashSet::new();
+        let mut read_types = HashSet::new();
+        let mut detail_reads = HashMap::new();
+        let mut ranked_defs: HashMap<String, (u8, String)> = HashMap::new();
         for (i, op) in bundle.operations.iter().enumerate() {
             by_id.entry(op.id.clone()).or_insert(i);
             if let (Some(t), Some(field)) = (
@@ -1009,6 +1040,15 @@ impl BundleIndex {
                 .unwrap_or_default();
             if matches!(op.kind, OperationKind::Query) {
                 listed.extend(members.iter().cloned());
+                if let Some(t) = op.resource_type.as_deref() {
+                    read_types.insert(t.to_string());
+                    let by_path = op.identity.as_ref().is_some_and(|i| i.path_param.is_some())
+                        && !op.is_action();
+                    if by_path && op.success_output().is_some_and(|o| o.schema.is_some()) {
+                        detail_reads.entry(t.to_string()).or_insert(i);
+                    }
+                    rank_defs(bundle, op, t, by_path, &members, &mut ranked_defs);
+                }
             }
             list_members_of.push(members);
         }
@@ -1029,6 +1069,12 @@ impl BundleIndex {
             path_fields,
             listed,
             list_members: list_members_of,
+            types_by_def: ranked_defs
+                .into_iter()
+                .map(|(def, (_, t))| (def, t))
+                .collect(),
+            read_types,
+            detail_reads,
         }
     }
 
@@ -1052,6 +1098,118 @@ impl BundleIndex {
     fn list_members(&self, op: usize) -> &[String] {
         self.list_members.get(op).map_or(&[], Vec::as_slice)
     }
+}
+
+/// Records in `ranked` the `$defs` names `op` reads as resource type `t`,
+/// keeping the best-ranked type of each (see [`BundleIndex::types_by_def`]).
+fn rank_defs(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    t: &str,
+    by_path: bool,
+    members: &[String],
+    ranked: &mut HashMap<String, (u8, String)>,
+) {
+    const DETAIL: u8 = 0;
+    const LIST: u8 = 1;
+    const OTHER: u8 = 2;
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let mut found: Vec<(u8, String)> = Vec::new();
+    if let Some(def) = def_name(schema) {
+        found.push((if by_path { DETAIL } else { OTHER }, def.to_string()));
+    }
+    let mut lists: Vec<Value> = members
+        .iter()
+        .filter_map(|m| property_schema(bundle, schema, m))
+        .collect();
+    lists.push(schema.clone());
+    for list in &lists {
+        let (parts, _) = schema_parts(bundle, Some(list));
+        let items = parts.iter().filter_map(|p| p.get("items"));
+        found.extend(items.filter_map(def_name).map(|d| (LIST, d.to_string())));
+    }
+    for (rank, def) in found {
+        let held = ranked.entry(def).or_insert_with(|| (rank, t.to_string()));
+        if rank < held.0 {
+            *held = (rank, t.to_string());
+        }
+    }
+}
+
+/// The `$defs` name `schema` is a `$ref` to.
+fn def_name(schema: &Value) -> Option<&str> {
+    schema.get("$ref")?.as_str()?.strip_prefix("#/$defs/")
+}
+
+/// Schemas [`schema_parts`] returns, at most.
+const MAX_SCHEMA_PARTS: usize = 32;
+
+/// What `schema` is made of, its `$ref`s followed and its
+/// `anyOf`/`oneOf`/`allOf` branches flattened, with the `$defs` names met.
+fn schema_parts<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    schema: Option<&'a Value>,
+) -> (Vec<&'a Value>, Vec<&'a str>) {
+    fn visit<'a>(
+        bundle: &'a mb_mcm::Bundle,
+        schema: &'a Value,
+        depth: usize,
+        parts: &mut Vec<&'a Value>,
+        defs: &mut Vec<&'a str>,
+    ) {
+        if depth > 8 || parts.len() >= MAX_SCHEMA_PARTS {
+            return;
+        }
+        if let Some(def) = def_name(schema) {
+            defs.push(def);
+            if let Some(target) = bundle.defs.get(def) {
+                visit(bundle, target, depth + 1, parts, defs);
+            }
+            return;
+        }
+        parts.push(schema);
+        for key in ["anyOf", "oneOf", "allOf"] {
+            for branch in schema
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                visit(bundle, branch, depth + 1, parts, defs);
+            }
+        }
+    }
+    let (mut parts, mut defs) = (Vec::new(), Vec::new());
+    if let Some(schema) = schema {
+        visit(bundle, schema, 0, &mut parts, &mut defs);
+    }
+    (parts, defs)
+}
+
+/// The resource type of an object found under `member`, shaped by `$defs`
+/// entry `def`: the def's type, else the listed type named `member` or
+/// `<member>s`, one a read can name by path first (GitHub's `user` member is
+/// a `/users/{username}`, not the caller's `/user`).
+pub(crate) fn entity_type(index: &BundleIndex, def: Option<&str>, member: &str) -> Option<String> {
+    if let Some(t) = def.and_then(|d| index.types_by_def.get(d)) {
+        return Some(t.clone());
+    }
+    if member.is_empty() {
+        return None;
+    }
+    let names = [member.to_string(), format!("{member}s")];
+    // An envelope's member (`items`) names no type of its own.
+    let is_type = |name: &String| {
+        index.read_types.contains(name)
+            || (index.listed.contains(name) && !ENVELOPE_KEYS.contains(&name.as_str()))
+    };
+    names
+        .iter()
+        .find(|name| index.detail_reads.contains_key(*name))
+        .or_else(|| names.iter().find(|name| is_type(name)))
+        .cloned()
 }
 
 /// Aliases [`PathAliases`] holds at most; it is emptied when full.
@@ -1230,6 +1388,119 @@ async fn store_wrapped(
             data: value.clone(),
         };
         state.upsert(session, resource).await;
+    }
+}
+
+/// How deep an answer is walked for entities: containers below its root.
+const MAX_ENTITY_DEPTH: usize = 6;
+/// Entities one answer may seed.
+const MAX_ENTITIES: usize = 100;
+
+/// Stores what a 2xx answer mentions so that a later read returns it: each
+/// object below the answer's root with an `id` or `number`, a known type (see
+/// [`entity_type`]) and, where its type has a read by path parameter, a value
+/// that read would serve. What the session already holds is left as it is.
+async fn seed_entities(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    body: &Value,
+    schema: Option<&Value>,
+) {
+    let mut walk = EntityWalk {
+        rt,
+        considered: 0,
+        found: Vec::new(),
+    };
+    walk.visit(body, schema, "", 0);
+    for resource in walk.found {
+        state.insert_seeded(session, resource).await;
+    }
+}
+
+/// One walk of an answer for [`seed_entities`].
+struct EntityWalk<'a> {
+    rt: &'a MockRuntime,
+    /// Objects taken for entities, stored or refused.
+    considered: usize,
+    found: Vec<StoredResource>,
+}
+
+impl<'a> EntityWalk<'a> {
+    fn visit(&mut self, value: &Value, schema: Option<&'a Value>, member: &str, depth: usize) {
+        if depth > MAX_ENTITY_DEPTH || self.considered >= MAX_ENTITIES {
+            return;
+        }
+        let bundle: &'a mb_mcm::Bundle = self.rt.bundle();
+        let (parts, defs) = schema_parts(bundle, schema);
+        match value {
+            Value::Array(items) => {
+                let item = parts.iter().find_map(|p| p.get("items"));
+                for value in items {
+                    self.visit(value, item, member, depth + 1);
+                }
+            }
+            Value::Object(fields) => {
+                if depth > 0 {
+                    self.consider(value, &defs, member);
+                }
+                for (field, value) in fields {
+                    if !value.is_object() && !value.is_array() {
+                        continue;
+                    }
+                    let inner = parts
+                        .iter()
+                        .find_map(|p| p.get("properties")?.get(field.as_str()));
+                    // `data` in Stripe's `charges: {data: [...]}` holds `charges`.
+                    let named = if ENVELOPE_KEYS.contains(&field.as_str()) {
+                        member
+                    } else {
+                        field
+                    };
+                    self.visit(value, inner, named, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn consider(&mut self, value: &Value, defs: &[&str], member: &str) {
+        let Some(id) = ["id", "number"]
+            .iter()
+            .find_map(|f| value.get(*f).and_then(id_string))
+        else {
+            return;
+        };
+        let index = self.rt.index();
+        let def = defs
+            .iter()
+            .copied()
+            .find(|d| index.types_by_def.contains_key(*d));
+        let Some(resource_type) = entity_type(index, def, member) else {
+            return;
+        };
+        if self.considered >= MAX_ENTITIES {
+            return;
+        }
+        self.considered += 1;
+        let bundle = self.rt.bundle();
+        let read = index
+            .detail_reads
+            .get(&resource_type)
+            .and_then(|i| bundle.operations.get(*i));
+        // Stored unservable, a later read would fall to the faker.
+        if read.is_none_or(|op| {
+            self.rt
+                .engine
+                .serve_stored(bundle, op, value, None)
+                .is_some()
+        }) {
+            self.found.push(StoredResource {
+                resource_type,
+                id,
+                data: value.clone(),
+            });
+        }
     }
 }
 
@@ -1665,8 +1936,15 @@ async fn read_context(
     let target = match (op.resource_type.as_deref(), target_id) {
         (Some(t), Some(id)) => match state.get(session, t, id).await {
             Some(hit) => Some(hit),
-            None => match op.identity.as_ref().and_then(|i| i.path_field.as_deref()) {
-                Some(field) => by_path_field(state, session, t, field, id).await,
+            None => match op.identity.as_ref() {
+                Some(identity) => match identity.path_field.as_deref() {
+                    Some(field) => by_path_fields(state, session, t, &[field], id, None).await,
+                    None if identity.path_param.is_some() && !path_names_identity(identity) => {
+                        let owned = owned_name(op, call);
+                        by_path_fields(state, session, t, &NAME_FIELDS, id, owned.as_deref()).await
+                    }
+                    None => None,
+                },
                 None => None,
             },
         },
@@ -1692,35 +1970,73 @@ fn path_values<'f>(fields: &'f [String], data: &Value) -> Vec<(&'f str, String)>
         .collect()
 }
 
-/// The resource of type `t` whose `field` is `value` (a read by GitHub's
-/// issue number): the one [`PathAliases`] names when it still holds the
-/// value, else the first of a scan.
-async fn by_path_field(
+/// Fields a path parameter that names no field may mean: `/repos/{o}/{r}`
+/// finds a repository seeded under its numeric id by its `name`.
+const NAME_FIELDS: [&str; 4] = ["name", "login", "slug", "key"];
+
+/// `{o}/{r}` of a route ending in those two parameters, which a stored
+/// `full_name` must end with. Any other route gives none: a person's
+/// `full_name` is no path.
+fn owned_name(op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let mut segments = path.rsplit('/').filter(|s| !s.is_empty());
+    let mut value = || {
+        let name = segments.next()?.strip_prefix('{')?.strip_suffix('}')?;
+        call.path_params.get(name).and_then(id_string)
+    };
+    let name = value()?;
+    let owner = value()?;
+    Some(format!("{owner}/{name}"))
+}
+
+/// Whether stored `r`'s `full_name`, when it has one, ends with path
+/// segments `owned`.
+fn full_name_fits(r: &StoredResource, owned: Option<&str>) -> bool {
+    let full_name = r.data.get("full_name").and_then(Value::as_str);
+    match (owned, full_name) {
+        (Some(owned), Some(full_name)) => full_name
+            .strip_suffix(owned)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('/')),
+        _ => true,
+    }
+}
+
+/// The resource of type `t` whose field is `value`, trying `fields` in order
+/// (a read by GitHub's issue number, or a repository's name) and, with
+/// `owned`, only one whose `full_name` fits: the one [`PathAliases`] names
+/// when it still holds the value, else the first of one scan.
+async fn by_path_fields(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
-    field: &str,
+    fields: &[&str],
     value: &str,
+    owned: Option<&str>,
 ) -> Option<StoredResource> {
-    let holds =
-        |r: &StoredResource| r.data.get(field).and_then(id_string).as_deref() == Some(value);
-    if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
-        && let Some(hit) = state.get(session, t, &id).await
-        && holds(&hit)
-    {
-        return Some(hit);
+    let holds = |r: &StoredResource, field: &str| {
+        r.data.get(field).and_then(id_string).as_deref() == Some(value) && full_name_fits(r, owned)
+    };
+    for field in fields {
+        if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
+            && let Some(hit) = state.get(session, t, &id).await
+            && holds(&hit, field)
+        {
+            return Some(hit);
+        }
     }
-    let found = state
-        .list(session, t, MAX_SCAN)
-        .await
-        .into_iter()
-        .find(|r| holds(r))?;
+    let stored = state.list(session, t, MAX_SCAN).await;
+    let (field, found) = fields.iter().find_map(|field| {
+        let found = stored.iter().find(|r| holds(r, field))?;
+        Some((*field, found))
+    })?;
     let values = vec![(field, value.to_string())];
     state
         .rt
         .path_aliases()
         .remember(session, t, &found.id, values);
-    Some(found)
+    Some(found.clone())
 }
 
 /// State-store access for one call. The first failing call marks the mock
@@ -2449,6 +2765,22 @@ paths:
             .filter_map(|o| o.success_output()?.schema.as_ref())
             .flat_map(|schema| list_members(bundle, schema))
             .collect()
+    }
+
+    /// GitHub's `repository` is the detail route's type, not a list's.
+    #[test]
+    fn entity_types_of_the_github_contract() {
+        let rt = runtime_of(example("github-rest/github-rest.openapi.yaml"));
+        let index = rt.index();
+        assert_eq!(index.types_by_def["repository"], "repos");
+        assert_eq!(
+            entity_type(index, Some("repository"), "ignored").as_deref(),
+            Some("repos")
+        );
+        assert_eq!(entity_type(index, None, "repo").as_deref(), Some("repos"));
+        assert_eq!(entity_type(index, None, "items"), None);
+        assert_eq!(entity_type(index, None, "nothing"), None);
+        assert_eq!(entity_type(index, None, ""), None);
     }
 
     /// The runtime's index answers what scanning the bundle answers.
