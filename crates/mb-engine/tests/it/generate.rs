@@ -2045,10 +2045,15 @@ async fn a_resource_with_response_and_effects_members_is_not_unwrapped() {
 #[tokio::test]
 async fn a_malformed_effect_list_is_ignored() {
     let bundle = effects_bundle();
-    for effects in [
-        json!("none"),
-        json!({"type": "charges"}),
-        json!([1, {"type": "charges"}, {"id": "x", "set": {}}, {"type": "a", "id": "b", "set": 3}]),
+    for (effects, dropped) in [
+        (json!("none"), 1),
+        (json!({"type": "charges"}), 1),
+        (json!(null), 0),
+        (json!([]), 0),
+        (
+            json!([1, {"type": "charges"}, {"id": "x", "set": {}}, {"type": "a", "id": "b", "set": 3}]),
+            4,
+        ),
     ] {
         let answer = json!({"response": cancelled(), "effects": effects});
         let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
@@ -2056,6 +2061,7 @@ async fn a_malformed_effect_list_is_ignored() {
         assert_eq!(out.source, Source::Llm, "{effects}");
         assert_eq!(out.body, Some(cancelled()), "{effects}");
         assert!(out.effects.is_empty(), "{effects}");
+        assert_eq!(out.dropped_effects, dropped, "{effects}");
         assert_eq!(provider.requests().len(), 1);
     }
 }
@@ -2071,6 +2077,7 @@ async fn a_good_effect_survives_a_bad_neighbour() {
     let out = with_target(&bundle, "cancelBooking", &engine).await;
     assert_eq!(out.effects.len(), 1);
     assert_eq!(out.effects[0].id, "7");
+    assert_eq!(out.dropped_effects, 1);
 }
 
 #[tokio::test]
@@ -2085,6 +2092,7 @@ async fn an_oversized_effect_list_is_cut_to_ten() {
     assert_eq!(out.effects.len(), 10);
     assert_eq!(out.effects[0].id, "ch0");
     assert_eq!(out.effects[9].id, "ch9");
+    assert_eq!(out.dropped_effects, 15);
 }
 
 /// A query, or a create with nothing stored to act on, is asked for what it
@@ -2305,12 +2313,33 @@ async fn an_effect_is_scrubbed_like_the_answer() {
     assert!(!note.contains("ana@realcompany.org"), "{note}");
 }
 
-/// The response-size cap covers what the effects add.
+/// The response-size cap covers what the effects add, but an effect too
+/// large costs itself: the answer is served, and an effect that fits stays.
 #[tokio::test]
 async fn effects_count_towards_the_size_cap() {
     let bundle = effects_bundle();
-    let effect = json!({"type": "charges", "id": "ch1", "set": {"note": "x".repeat(4_000)}});
-    let answer = json!({"response": cancelled(), "effects": [effect]});
+    let large = json!({"type": "charges", "id": "ch1", "set": {"note": "x".repeat(4_000)}});
+    let answer = json!({"response": cancelled(), "effects": [large, charge_effect()]});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let engine = engine.with_guards(mb_engine::EngineGuards {
+        max_response_bytes: Some(1_000),
+        ..Default::default()
+    });
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(cancelled()));
+    assert_eq!(out.effects.len(), 1);
+    assert_eq!(out.effects[0].set["status"], "refunded");
+    assert_eq!(out.dropped_effects, 1);
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// An answer over the cap by itself is refused as ever, effects or not.
+#[tokio::test]
+async fn an_answer_over_the_cap_is_refused_with_its_effects() {
+    let bundle = effects_bundle();
+    let long = json!({"id": "b1", "status": "x".repeat(4_000)});
+    let answer = json!({"response": long, "effects": [charge_effect()]});
     let (_, engine) = scripted(vec![Ok(answer.to_string())]);
     let engine = engine.with_guards(mb_engine::EngineGuards {
         max_response_bytes: Some(1_000),

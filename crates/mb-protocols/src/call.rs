@@ -792,6 +792,7 @@ pub(crate) async fn prepare<'a>(
             fallback_reason,
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -925,6 +926,14 @@ pub(crate) async fn complete(
         if rt.consistency && (200..300).contains(&generated.status) {
             generated.effect_outcomes =
                 apply_effects(&mut state, session, rt, &generated.effects).await;
+            if generated.dropped_effects > 0 {
+                metrics::counter!(
+                    EFFECTS_METRIC,
+                    "mock" => rt.name.clone(),
+                    "outcome" => "rejected"
+                )
+                .increment(generated.dropped_effects as u64);
+            }
         }
         state.touch(session).await;
     }
@@ -955,6 +964,13 @@ pub(crate) async fn complete(
         target_id.as_deref(),
         session,
     );
+    #[cfg(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    ))]
+    crate::webhooks::emit::emit_effects(rt, op, &generated.effect_outcomes, session);
 
     // Seeded first, then cached: a later list never clears a cached one.
     // A fallback is cached too: a schema the LLM cannot answer in time
@@ -1010,9 +1026,14 @@ async fn apply_effects(
         };
         metrics::counter!(EFFECTS_METRIC, "mock" => rt.name.clone(), "outcome" => outcome)
             .increment(1);
+        let (merged, rejected) = match result {
+            Ok(merged) => (Some(merged), None),
+            Err(reason) => (None, Some(reason.to_string())),
+        };
         outcomes.push(EffectOutcome {
             effect: effect.clone(),
-            rejected: result.err().map(str::to_string),
+            rejected,
+            merged,
         });
     }
     outcomes
@@ -1049,23 +1070,28 @@ pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse)
     }
 }
 
-/// Merges `effect` into the stored resource it names; `Err` says why not. The
-/// resource must exist (an effect never creates one, and never deletes one),
-/// keep its identity and, merged, still suit its type (see [`entity_fits`]).
+/// Merges `effect` into the stored resource it names and returns the result;
+/// `Err` says why not. The resource must exist (an effect never creates one,
+/// and never deletes one), keep its identity and, merged, still suit its type,
+/// which must have a schema to check against (see [`entity_fits`]).
 async fn apply_effect(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     effect: &ResourceEffect,
-) -> Result<(), &'static str> {
+) -> Result<Value, &'static str> {
     let t = effect.resource_type.as_str();
-    let identity = rt.index().identity_fields(t);
+    let index = rt.index();
+    let identity = index.identity_fields(t);
     if effect
         .set
         .keys()
         .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
     {
         return Err("it sets an identity field");
+    }
+    if !index.detail_reads.contains_key(t) && !index.other_shapes.contains_key(t) {
+        return Err("no schema to check against");
     }
     let Some(mut stored) = state.get(session, t, &effect.id).await else {
         return Err("no such resource");
@@ -1077,10 +1103,11 @@ async fn apply_effect(
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
     }
+    let merged = stored.data.clone();
     if !state.upsert(session, stored).await {
         return Err("the store took no write");
     }
-    Ok(())
+    Ok(merged)
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's

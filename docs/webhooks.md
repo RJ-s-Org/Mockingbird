@@ -22,6 +22,8 @@ After a call to a command (create, update, delete or another non-read operation)
 
 A target receives an event when its `events` list contains `*`, the operation id or the event type.
 
+A call whose LLM answer changes another stored resource (an [effect](concepts.md#sessions-and-state)) also sends `<resource>.updated` for each change applied, named after the resource's type, to the targets matching that event type or the call's operation id. Its body is always the Stripe-shaped event below, with the whole merged resource as `data.object`, even when the contract describes a payload for the call. A rejected change sends nothing.
+
 ## The event
 
 **Event type.** `<resource>.<verb>`. The verb is `created` for creates, `deleted` for deletes and `updated` for everything else (Stripe's `POST /v1/customers/{id}` is an update). The resource is the path segment before a trailing `{param}` (`/v1/customers/{customer}` → `customer`), else the operation's resource type, singularised: `POST /v1/payment_intents` → `payment_intent.created`.

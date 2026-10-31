@@ -1905,6 +1905,11 @@ paths:
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Charge"}}}}
+  /refunds:
+    post:
+      operationId: createRefund
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
   /widgets/{sku}:
     get:
       operationId: getWidget
@@ -1925,6 +1930,10 @@ components:
       type: object
       required: [id, status]
       properties: {id: {type: string}, status: {type: string}}
+    Refund:
+      type: object
+      required: [id, amount]
+      properties: {id: {type: string}, amount: {type: integer}}
     Widget:
       type: object
       required: [sku, status]
@@ -2225,6 +2234,13 @@ async fn an_effect_clears_the_cached_read() {
     let (_, source, body) = api.call("GET", "/charges", None).await;
     assert_eq!(source, "llm");
     assert_eq!(body, refunded);
+    // Only the applied effect gives these: the list's answer is scripted, and
+    // any 2xx command clears the cache.
+    let prompt = prompt_of(&api, 2);
+    assert!(prompt.contains("refunded"), "{prompt}");
+    let (_, source, body) = api.call("GET", "/charges/ch1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(body["status"], "refunded");
 }
 
 /// An effect is a write like any other to whoever watches the session.
@@ -2477,4 +2493,67 @@ async fn effects_are_in_the_request_log() {
     assert_eq!(effects[1]["outcome"], "rejected");
     assert_eq!(effects[1]["id"], "nope");
     assert_eq!(effects[1]["reason"], "no such resource");
+}
+
+/// A type with no read has no schema to hold a merged value to, so nothing
+/// is merged into it.
+#[test]
+fn an_effect_on_a_type_with_no_schema_is_rejected() {
+    let counted = counting_effects(async {
+        let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let refund = json!({"id": "r1", "amount": 5});
+        store(
+            &state,
+            "bookings",
+            "b1",
+            json!({"id": "b1", "status": "held"}),
+        )
+        .await;
+        store(&state, "refunds", "r1", refund.clone()).await;
+        let answer = json!({"response": {"reason": "asked"}, "effects": [
+            {"type": "refunds", "id": "r1", "set": {"amount": "banana"}},
+        ]});
+        let api = effects_runtime(
+            true,
+            Arc::clone(&state) as Arc<dyn StateStore>,
+            vec![Ok(answer.to_string())],
+        );
+        let (status, _, _) = api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stored_data(&state, "refunds", "r1").await, refund);
+    });
+    assert_eq!(counted, (0, 1));
+}
+
+/// What the answer listed but the engine dropped counts as rejected.
+#[test]
+fn malformed_and_over_limit_effects_are_counted() {
+    let counted = counting_effects(async {
+        let (api, _) = cancelling(true, json!("none")).await;
+        api.call("POST", "/bookings/b1/cancel", None).await;
+    });
+    assert_eq!(counted, (0, 1));
+
+    let counted = counting_effects(async {
+        let good = json!({"type": "bookings", "id": "b1", "set": {"status": "cancelled"}});
+        let (api, _) = cancelling(true, json!(["bad", good])).await;
+        api.call("POST", "/bookings/b1/cancel", None).await;
+    });
+    assert_eq!(counted, (1, 1));
+
+    let counted = counting_effects(async {
+        let effects: Vec<Value> = (0..12)
+            .map(|i| json!({"type": "bookings", "id": "b1", "set": {"status": format!("s{i}")}}))
+            .collect();
+        let (api, _) = cancelling(true, Value::Array(effects)).await;
+        api.call("POST", "/bookings/b1/cancel", None).await;
+    });
+    assert_eq!(counted, (10, 2));
+
+    // With consistency off nothing is applied, so nothing is counted.
+    let counted = counting_effects(async {
+        let (api, _) = cancelling(false, json!("none")).await;
+        api.call("POST", "/bookings/b1/cancel", None).await;
+    });
+    assert_eq!(counted, (0, 0));
 }

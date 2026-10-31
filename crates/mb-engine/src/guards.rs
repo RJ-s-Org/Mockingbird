@@ -223,9 +223,12 @@ impl Engine {
         validator: &SchemaValidator,
         text: &str,
         checks: &Checks<'_>,
-    ) -> (Checked, Vec<ResourceEffect>) {
+    ) -> (Checked, AnswerEffects) {
         let Some(value) = crate::extract_json(text) else {
-            return (Checked::Invalid(vec![NOT_JSON.to_string()]), Vec::new());
+            return (
+                Checked::Invalid(vec![NOT_JSON.to_string()]),
+                AnswerEffects::default(),
+            );
         };
         self.check_parsed(validator, value, text.len(), checks, false)
     }
@@ -239,9 +242,12 @@ impl Engine {
         validator: &SchemaValidator,
         text: &str,
         checks: &Checks<'_>,
-    ) -> (Checked, Vec<ResourceEffect>) {
+    ) -> (Checked, AnswerEffects) {
         let Some(value) = crate::salvage::close_truncated(text) else {
-            return (Checked::Invalid(vec![CUT_SHORT.to_string()]), Vec::new());
+            return (
+                Checked::Invalid(vec![CUT_SHORT.to_string()]),
+                AnswerEffects::default(),
+            );
         };
         let (checked, effects) = self.check_parsed(validator, value, text.len(), checks, true);
         let checked = match checked {
@@ -257,7 +263,7 @@ impl Engine {
     /// [`Engine::check_answer`] of a parsed `value` (of `text_len` bytes),
     /// out of the effects envelope when `checks` asked for one. The effects
     /// are LLM output like the answer: their PII is replaced and their size
-    /// counts towards the cap.
+    /// counts towards the cap, though one too large costs only itself.
     fn check_parsed(
         &self,
         validator: &SchemaValidator,
@@ -265,32 +271,27 @@ impl Engine {
         text_len: usize,
         checks: &Checks<'_>,
         fill_missing: bool,
-    ) -> (Checked, Vec<ResourceEffect>) {
+    ) -> (Checked, AnswerEffects) {
         let (value, list) = if checks.effects_envelope {
             unwrap_effects(validator, value)
         } else {
             (value, None)
         };
-        let mut effects = list.map_or_else(Vec::new, parse_effects);
-        let mut effects_bytes = 0;
-        for effect in &mut effects {
+        let mut effects = list.map_or_else(AnswerEffects::default, parse_effects);
+        for effect in &mut effects.kept {
             let mut set = Value::Object(std::mem::take(&mut effect.set));
             self.scrub(&mut set);
             if let Value::Object(scrubbed) = set {
                 effect.set = scrubbed;
             }
-            if self.guards.max_response_bytes.is_some() {
-                effects_bytes += serde_json::to_vec(&effect.set).map_or(0, |b| b.len());
-            }
         }
-        let checked = self.check_answer(
-            validator,
-            value,
-            text_len,
-            effects_bytes,
-            checks,
-            fill_missing,
-        );
+        if let Some(cap) = self.guards.max_response_bytes {
+            effects.fit(
+                serde_json::to_vec(&value).map_or(text_len, |b| b.len()),
+                cap,
+            );
+        }
+        let checked = self.check_answer(validator, value, text_len, checks, fill_missing);
         (checked, effects)
     }
 
@@ -304,16 +305,14 @@ impl Engine {
         }
     }
 
-    /// The checks of an answer out of any effects envelope, whose effects add
-    /// `effects_bytes` to its size; with `fill_missing`, every missing
-    /// required member is filled when the value does not validate without
-    /// that.
+    /// The checks of an answer out of any effects envelope; with
+    /// `fill_missing`, every missing required member is filled when the value
+    /// does not validate without that.
     fn check_answer(
         &self,
         validator: &SchemaValidator,
         mut value: Value,
         text_len: usize,
-        effects_bytes: usize,
         checks: &Checks<'_>,
         fill_missing: bool,
     ) -> Checked {
@@ -322,7 +321,7 @@ impl Engine {
             value = unwrap_items(validator, value);
         }
         if let Some(cap) = self.guards.max_response_bytes {
-            let size = serde_json::to_vec(&value).map_or(text_len, |b| b.len()) + effects_bytes;
+            let size = serde_json::to_vec(&value).map_or(text_len, |b| b.len());
             if size > cap {
                 return Checked::Rejected(format!(
                     "response of {size} bytes exceeds the {cap}-byte cap"
@@ -763,17 +762,61 @@ fn unwrap_effects(validator: &SchemaValidator, value: Value) -> (Value, Option<V
     }
 }
 
-/// The well-formed effects of `list` (anything but an array holds none), at
-/// most [`MAX_EFFECTS`]. A malformed one costs only itself.
-fn parse_effects(list: Value) -> Vec<ResourceEffect> {
-    let Value::Array(items) = list else {
-        return Vec::new();
+/// What an answer's effects list came to.
+#[derive(Default)]
+pub(crate) struct AnswerEffects {
+    /// The effects to apply.
+    pub kept: Vec<ResourceEffect>,
+    /// The effects it listed that are not among them.
+    pub dropped: usize,
+}
+
+impl AnswerEffects {
+    /// Keeps the effects that fit under `cap` bytes beside an answer of
+    /// `answer_bytes`, in order; the rest are dropped.
+    fn fit(&mut self, answer_bytes: usize, cap: usize) {
+        let mut size = answer_bytes;
+        let before = self.kept.len();
+        self.kept.retain(|effect| {
+            let bytes = serde_json::to_vec(&effect.set).map_or(0, |b| b.len());
+            let fits = size + bytes <= cap;
+            if fits {
+                size += bytes;
+            }
+            fits
+        });
+        let dropped = before - self.kept.len();
+        if dropped > 0 {
+            tracing::info!(dropped, cap, "dropped effects over the response size cap");
+            self.dropped += dropped;
+        }
+    }
+}
+
+/// The well-formed effects of `list`, at most [`MAX_EFFECTS`]; a malformed or
+/// surplus one costs only itself. `null` lists none, and anything else that is
+/// not an array counts as one malformed effect.
+fn parse_effects(list: Value) -> AnswerEffects {
+    let items = match list {
+        Value::Array(items) => items,
+        Value::Null => return AnswerEffects::default(),
+        _ => {
+            return AnswerEffects {
+                kept: Vec::new(),
+                dropped: 1,
+            };
+        }
     };
-    items
+    let listed = items.len();
+    let kept: Vec<ResourceEffect> = items
         .into_iter()
         .filter_map(parse_effect)
         .take(MAX_EFFECTS)
-        .collect()
+        .collect();
+    AnswerEffects {
+        dropped: listed - kept.len(),
+        kept,
+    }
 }
 
 /// `{"type": .., "id": .., "set": {..}}` with a type, an id (a resource with

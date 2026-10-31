@@ -228,6 +228,8 @@ pub struct EffectOutcome {
     pub effect: ResourceEffect,
     /// Why it was not applied; `None` when it was.
     pub rejected: Option<String>,
+    /// The whole resource after it, when it was applied.
+    pub merged: Option<Value>,
 }
 
 /// A generated answer to one call.
@@ -257,6 +259,10 @@ pub struct GeneratedResponse {
     /// What became of [`GeneratedResponse::effects`], for the record: filled
     /// by the caller that applies them.
     pub effect_outcomes: Vec<EffectOutcome>,
+    /// Effects the answer listed that never reached
+    /// [`GeneratedResponse::effects`]: malformed, over the limit of 10, or
+    /// too large for the response-size cap.
+    pub dropped_effects: usize,
 }
 
 /// How an [`Engine`] generates; [`Default`] gives the documented defaults.
@@ -619,6 +625,7 @@ impl Engine {
                 fallback_reason,
                 effects: Vec::new(),
                 effect_outcomes: Vec::new(),
+                dropped_effects: 0,
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -718,8 +725,9 @@ impl Engine {
                         source: answer.source,
                         usage: Usage::default(),
                         fallback_reason: None,
-                        effects: answer.effects,
+                        effects: answer.effects.kept,
                         effect_outcomes: Vec::new(),
+                        dropped_effects: answer.effects.dropped,
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -860,6 +868,7 @@ impl Engine {
                 fallback_reason: None,
                 effects: Vec::new(),
                 effect_outcomes: Vec::new(),
+                dropped_effects: 0,
             };
             let schema = part
                 .ctx
@@ -901,6 +910,7 @@ impl Engine {
                 fallback_reason: None,
                 effects: Vec::new(),
                 effect_outcomes: Vec::new(),
+                dropped_effects: 0,
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -983,6 +993,7 @@ impl Engine {
             fallback_reason: None,
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         })
     }
 
@@ -1017,6 +1028,7 @@ impl Engine {
             fallback_reason: None,
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1196,6 +1208,7 @@ impl Engine {
             fallback_reason: (!valid).then(|| FAKER_INVALID_REASON.to_string()),
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         }
     }
 
@@ -1242,6 +1255,7 @@ impl Engine {
             )),
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         }
     }
 
@@ -1550,7 +1564,7 @@ impl Engine {
         validator: &SchemaValidator,
         reply: &Reply,
         checks: &Checks<'_>,
-    ) -> (Checked, bool, Vec<ResourceEffect>) {
+    ) -> (Checked, bool, guards::AnswerEffects) {
         let (checked, effects) = self.check_output(validator, &reply.text, checks);
         if reply.truncated.is_none() {
             return (checked, false, effects);
@@ -1559,7 +1573,11 @@ impl Engine {
             Checked::Invalid(errors) => {
                 match self.check_truncated(validator, &reply.text, checks) {
                     (salvaged @ Checked::Patched(_), effects) => (salvaged, true, effects),
-                    _ => (Checked::Invalid(errors), true, Vec::new()),
+                    _ => (
+                        Checked::Invalid(errors),
+                        true,
+                        guards::AnswerEffects::default(),
+                    ),
                 }
             }
             other => (other, true, effects),
@@ -1617,7 +1635,7 @@ impl Engine {
 struct LlmAnswer {
     value: Value,
     source: Source,
-    effects: Vec<ResourceEffect>,
+    effects: guards::AnswerEffects,
 }
 
 /// An LLM reply: its text, and, when the provider stopped it at

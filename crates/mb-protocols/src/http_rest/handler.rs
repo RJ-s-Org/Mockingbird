@@ -1328,6 +1328,7 @@ mod tests {
             fallback_reason: None,
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         }
     }
 
