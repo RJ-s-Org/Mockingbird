@@ -3651,31 +3651,48 @@ async fn a_path_with_namespace_shows_its_owner() {
     assert_eq!(own["stargazers_count"], 42);
 }
 
-/// `namespace` and `name` show the owner and the name in two members.
+/// The contract ties a member to a parameter by name: `{namespace}` and
+/// `namespace`, as a string or an object of the owner's.
 #[tokio::test]
-async fn a_namespace_member_shows_its_owner() {
-    let contract = REPOS.replace(
-        "full_name: {type: string}\n        stargazers_count",
-        "namespace: {type: string}\n        stargazers_count",
-    );
-    assert_ne!(contract, REPOS);
-    let item = json!({"id": 7, "name": "hello", "namespace": "octo", "stargazers_count": 42});
+async fn a_member_named_for_the_owner_parameter_shows_its_owner() {
+    const PROJECTS: &str = r##"
+openapi: 3.0.0
+info: {title: Projects, version: "1"}
+paths:
+  /search:
+    get:
+      operationId: search
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/project"}}}}}}}
+  /projects/{namespace}/{project}:
+    get:
+      operationId: getProject
+      parameters:
+        - {name: namespace, in: path, required: true, schema: {type: string}}
+        - {name: project, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/project"}}}}
+components:
+  schemas:
+    project:
+      type: object
+      required: [id, name, namespace]
+      properties: {id: {type: integer}, name: {type: string}, namespace: {type: string}}
+"##;
+    let item = json!({"id": 7, "name": "hello", "namespace": "octo"});
     let api = actions_of(
-        &contract,
+        PROJECTS,
         vec![
-            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
-            Ok(
-                json!({"id": 8, "name": "hello", "namespace": "cat", "stargazers_count": 9})
-                    .to_string(),
-            ),
+            Ok(json!({"items": [item]}).to_string()),
+            Ok(json!({"id": 8, "name": "hello", "namespace": "cat"}).to_string()),
         ],
     );
-    read(&api, "/search/repositories?q=hello").await;
-    let (source, other) = read(&api, "/repos/cat/hello").await;
+    read(&api, "/search").await;
+    let (source, other) = read(&api, "/projects/cat/hello").await;
     assert_ne!(source, "state", "{other}");
-    let (source, own) = read(&api, "/repos/octo/hello").await;
+    let (source, own) = read(&api, "/projects/octo/hello").await;
     assert_eq!(source, "state");
-    assert_eq!(own["stargazers_count"], 42);
+    assert_eq!(own["id"], 7);
 }
 
 /// A member the contract types as the resource's own type is another of them:
@@ -3802,4 +3819,493 @@ components:
     let (source, call) = read(&api, "/calls/CA1").await;
     assert_eq!(source, "state", "{call}");
     assert_eq!(call["status"], "ringing");
+}
+
+/// [`REPOS`] with a list by organisation, a route the read's path does not
+/// follow from, and writes on the detail route.
+fn org_repos() -> String {
+    let contract = REPOS.replace(
+        "  /user:\n",
+        r##"  /orgs/{org}/repos:
+    get:
+      operationId: listOrgRepos
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/repository"}}}}}
+  /user:
+"##,
+    );
+    assert_ne!(contract, REPOS);
+    contract.replace(
+        "        \"200\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/repository\"}}}}\n  /orgs",
+        "        \"200\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/repository\"}}}}\n    patch:\n      operationId: patchRepo\n      parameters:\n        - {name: owner, in: path, required: true, schema: {type: string}}\n        - {name: repo, in: path, required: true, schema: {type: string}}\n      requestBody:\n        required: true\n        content: {application/json: {schema: {type: object}}}\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/repository\"}}}}\n    delete:\n      operationId: deleteRepo\n      parameters:\n        - {name: owner, in: path, required: true, schema: {type: string}}\n        - {name: repo, in: path, required: true, schema: {type: string}}\n      responses:\n        \"200\": {description: gone, content: {application/json: {schema: {type: object, properties: {deleted: {type: boolean}}}}}}\n  /orgs",
+    )
+}
+
+/// A list on another route is no other collection: `/orgs/octo/repos` and
+/// `/repos/octo/hello` have different templates, so the record says nothing
+/// and the `full_name` decides.
+#[tokio::test]
+async fn a_repo_listed_on_another_route_reads_back_for_its_owner() {
+    let api = actions_of(
+        &org_repos(),
+        vec![Ok(json!([repo(7, "octo", 42)]).to_string())],
+    );
+    read(&api, "/orgs/octo/repos").await;
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state", "{own}");
+    assert_eq!(own["id"], 7);
+}
+
+/// What `site` holds in free text or as its branch is not its name, even under
+/// its own owner.
+#[tokio::test]
+async fn a_plain_string_member_is_not_a_name() {
+    let contract = org_repos().replace(
+        "stargazers_count: {type: integer}\n        user:",
+        "stargazers_count: {type: integer}\n        description: {type: string}\n        default_branch: {type: string}\n        user:",
+    );
+    let mut site =
+        json!({"id": 1, "name": "site", "full_name": "octo/site", "stargazers_count": 42});
+    site["description"] = json!("hello");
+    site["default_branch"] = json!("main");
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"total_count": 1, "items": [site]}).to_string()),
+            Ok(
+                json!({"id": 2, "name": "hello", "full_name": "octo/hello", "stargazers_count": 1})
+                    .to_string(),
+            ),
+            Ok(json!({"deleted": true}).to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=x").await;
+    let (source, other) = read(&api, "/repos/octo/hello").await;
+    assert_ne!(source, "state", "{other}");
+    let (status, _, _) = api.call("DELETE", "/repos/octo/main", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, kept) = read(&api, "/repos/octo/site").await;
+    assert_eq!(source, "state", "{kept}");
+}
+
+/// The owner's value in the wrong place shows nothing: as the name itself, in
+/// free text, or as any segment of a URL.
+#[tokio::test]
+async fn a_loose_string_does_not_show_an_owner() {
+    let contract = REPOS.replace(
+        "stargazers_count: {type: integer}\n        user:",
+        "stargazers_count: {type: integer}\n        description: {type: string}\n        url: {type: string}\n        user:",
+    );
+    for (item, uri) in [
+        (
+            json!({"id": 1, "name": "octo", "full_name": "cat/octo", "stargazers_count": 42}),
+            "/repos/octo/octo",
+        ),
+        (
+            json!({"id": 1, "name": "hello", "full_name": "cat/hello", "description": "octo", "stargazers_count": 42}),
+            "/repos/octo/hello",
+        ),
+        (
+            json!({"id": 1, "name": "hello", "full_name": "cat/hello", "url": "https://x/repos/cat/hello", "stargazers_count": 42}),
+            "/repos/repos/hello",
+        ),
+    ] {
+        let api = actions_of(
+            &contract,
+            vec![
+                Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+                Ok(
+                    json!({"id": 2, "name": "x", "full_name": "x/x", "stargazers_count": 9})
+                        .to_string(),
+                ),
+            ],
+        );
+        read(&api, "/search/repositories?q=x").await;
+        let (source, other) = read(&api, uri).await;
+        assert_ne!(source, "state", "{uri}: {other}");
+    }
+}
+
+/// Another owner's delete and update leave what is stored under the same name,
+/// and the update reads back for its own owner.
+#[tokio::test]
+async fn another_owners_write_leaves_a_string_id_alone() {
+    let item =
+        json!({"id": "hello", "name": "hello", "full_name": "octo/hello", "stargazers_count": 42});
+    let cats =
+        json!({"id": "hello", "name": "hello", "full_name": "cat/hello", "stargazers_count": 9});
+    let api = actions_of(
+        &org_repos().replace(
+            "id: {type: integer}\n        name: {type: string}",
+            "id: {type: string}\n        name: {type: string}",
+        ),
+        vec![
+            Ok(json!({"total_count": 1, "items": [item]}).to_string()),
+            Ok(json!({"deleted": true}).to_string()),
+            Ok(cats.to_string()),
+        ],
+    );
+    read(&api, "/search/repositories?q=x").await;
+    let (status, _, _) = api.call("DELETE", "/repos/cat/hello", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state", "{own}");
+    let (status, _, _) = api.call("PATCH", "/repos/cat/hello", Some(json!({}))).await;
+    assert!(status.is_success(), "{status}");
+    let (source, own) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state", "{own}");
+    assert_eq!(own["stargazers_count"], 42);
+    let (source, written) = read(&api, "/repos/cat/hello").await;
+    assert_eq!(source, "state", "{written}");
+    assert_eq!(written["stargazers_count"], 9);
+}
+
+/// A record speaks only for the resource as it was recorded: a session reset or
+/// a fixture may put another one under that id.
+#[tokio::test]
+async fn a_record_does_not_outlive_its_resource() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+        Ok(json!({"id": 2, "slug": "core", "members": 5}).to_string()),
+    ]));
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(TEAMS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    read(&api, "/orgs/octo/teams").await;
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "actions".into(),
+        session: "default".into(),
+    };
+    state
+        .upsert(
+            &session,
+            StoredResource {
+                resource_type: "teams".into(),
+                id: "1".into(),
+                data: json!({"id": 1, "slug": "core", "full_name": "cat/core", "members": 9}),
+            },
+        )
+        .await
+        .unwrap();
+    let (source, other) = read(&api, "/orgs/octo/teams/core").await;
+    assert_ne!(source, "state", "cat's team answered for octo: {other}");
+}
+
+/// A mention and a list key one resource alike, by `id`, whatever other field
+/// a route reads it by, so a delete removes it.
+#[tokio::test]
+async fn a_mention_and_a_list_key_alike_when_a_route_reads_by_another_field() {
+    const AIRPORTS: &str = r##"
+openapi: 3.0.0
+info: {title: Airports, version: "1"}
+paths:
+  /airports:
+    get:
+      operationId: listAirports
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/airport"}}}}}
+  /airports/{code}:
+    parameters: [{name: code, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAirport
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/airport"}}}}
+    delete:
+      operationId: deleteAirport
+      responses:
+        "200": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/airport"}}}}
+  /flights/{flight}:
+    get:
+      operationId: getFlight
+      parameters: [{name: flight, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {type: string}
+                  airport: {$ref: "#/components/schemas/airport"}
+components:
+  schemas:
+    airport:
+      type: object
+      required: [id, code]
+      properties: {id: {type: integer}, code: {type: string}}
+"##;
+    let airport = json!({"id": 7, "code": "SFO"});
+    let api = actions_of(
+        AIRPORTS,
+        vec![
+            Ok(json!({"id": "f1", "airport": airport}).to_string()),
+            Ok(json!([airport]).to_string()),
+            Ok(airport.to_string()),
+            Ok(json!({"id": 8, "code": "SFO"}).to_string()),
+        ],
+    );
+    read(&api, "/flights/f1").await;
+    read(&api, "/airports").await;
+    let (status, _, _) = api.call("DELETE", "/airports/SFO", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, body) = read(&api, "/airports/SFO").await;
+    assert_ne!(source, "state", "deleted airport read back: {body}");
+}
+
+/// Another organisation's read with the same small id replaces the summary, and
+/// the record goes with it: that team no longer answers for the first.
+#[tokio::test]
+async fn another_owners_read_over_a_summary_does_not_answer_for_the_first() {
+    let contract = TEAMS
+        .replace(
+            "items: {$ref: \"#/components/schemas/team\"}",
+            "items: {$ref: \"#/components/schemas/teamSummary\"}",
+        )
+        .replace(
+            "required: [id, slug, members]",
+            "required: [id, slug, members, full_name]",
+        )
+        .replace(
+            "components:\n  schemas:\n",
+            "components:\n  schemas:\n    teamSummary:\n      type: object\n      required: [id, slug, members]\n      properties: {id: {type: integer}, slug: {type: string}, members: {type: integer}}\n",
+        );
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+            Ok(json!({"id": 1, "slug": "core", "full_name": "cat/core", "members": 5}).to_string()),
+            Ok(
+                json!({"id": 2, "slug": "core", "full_name": "octo/core", "members": 3})
+                    .to_string(),
+            ),
+        ],
+    );
+    read(&api, "/orgs/octo/teams").await;
+    read(&api, "/orgs/cat/teams/core").await;
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_ne!(source, "state", "cat's team answered for octo: {own}");
+}
+
+/// A trailing slash in the contract is the same collection.
+#[tokio::test]
+async fn a_trailing_slash_contract_reads_a_listed_team_back() {
+    let contract = TEAMS
+        .replace("/orgs/{org}/teams:", "/orgs/{org}/teams/:")
+        .replace(
+            "/orgs/{org}/teams/{team_slug}:",
+            "/orgs/{org}/teams/{team_slug}/:",
+        );
+    let api = actions_of(
+        &contract,
+        vec![Ok(
+            json!([{"id": 1, "slug": "core", "members": 3}]).to_string()
+        )],
+    );
+    read(&api, "/orgs/octo/teams/").await;
+    let (source, own) = read(&api, "/orgs/octo/teams/core/").await;
+    assert_eq!(source, "state", "{own}");
+}
+
+/// A create that wraps its resource puts it in the collection as a plain one does.
+#[tokio::test]
+async fn a_wrapped_create_reads_back_for_its_owner() {
+    let contract = TEAMS.replace(
+        "  /orgs/{org}/teams/{team_slug}:\n",
+        "  /orgs/{org}/team_creates:\n    post:\n      operationId: createTeamWrapped\n      parameters: [{name: org, in: path, required: true, schema: {type: string}}]\n      responses:\n        \"201\": {description: ok, content: {application/json: {schema: {type: object, properties: {team: {$ref: \"#/components/schemas/team\"}}}}}}\n  /orgs/{org}/teams/{team_slug}:\n",
+    ).replace(
+        "    get:\n      operationId: listTeams\n",
+        "    post:\n      operationId: createTeam\n      requestBody:\n        required: true\n        content: {application/json: {schema: {type: object}}}\n      responses:\n        \"201\": {description: ok, content: {application/json: {schema: {type: object, properties: {team: {$ref: \"#/components/schemas/team\"}}}}}}\n    get:\n      operationId: listTeams\n",
+    );
+    let api = actions_of(
+        &contract,
+        vec![Ok(
+            json!({"team": {"id": 1, "slug": "core", "members": 3}}).to_string()
+        )],
+    );
+    let (status, _, _) = api.call("POST", "/orgs/octo/teams", Some(json!({}))).await;
+    assert!(status.is_success(), "{status}");
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state", "{own}");
+}
+
+/// A real id reads back below a parameter though a self link ends in it, or
+/// the contract identifies its type by another member.
+#[tokio::test]
+async fn a_real_id_reads_back_with_a_self_link_or_a_named_identity() {
+    const LINKED: &str = r##"
+openapi: 3.0.0
+info: {title: Linked, version: "1"}
+paths:
+  /people:
+    post:
+      operationId: createPerson
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/person"}}}}
+  /customers/{customer}/people/{person}:
+    get:
+      operationId: getPerson
+      parameters:
+        - {name: customer, in: path, required: true, schema: {type: string}}
+        - {name: person, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/person"}}}}
+  /calls:
+    post:
+      operationId: createCall
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/call"}}}}
+  /accounts/{account}/calls/{sid}:
+    get:
+      operationId: getCall
+      parameters:
+        - {name: account, in: path, required: true, schema: {type: string}}
+        - {name: sid, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/call"}}}}
+components:
+  schemas:
+    person:
+      type: object
+      required: [id, url]
+      properties: {id: {type: string}, url: {type: string}}
+    call:
+      type: object
+      required: [sid, status]
+      properties: {sid: {type: string}, status: {type: string}}
+"##;
+    let api = actions_of(
+        LINKED,
+        vec![
+            Ok(json!({"id": "per_1", "url": "https://x/people/per_1"}).to_string()),
+            Ok(json!({"sid": "CA1", "status": "ringing"}).to_string()),
+        ],
+    );
+    api.call("POST", "/people", Some(json!({}))).await;
+    let (source, person) = read(&api, "/customers/cus_1/people/per_1").await;
+    assert_eq!(source, "state", "{person}");
+    api.call("POST", "/calls", Some(json!({}))).await;
+    let (source, call) = read(&api, "/accounts/a1/calls/CA1").await;
+    assert_eq!(source, "state", "{call}");
+}
+
+/// A segment that is not exactly the parameter names no collection: the update
+/// does not record one its read could never match.
+#[tokio::test]
+async fn an_update_on_a_format_route_records_no_collection() {
+    let json_route = TEAMS.replace(
+        "  /orgs/{org}/teams/{team_slug}:\n",
+        "  /orgs/{org}/teams/{team_slug}.json:\n    parameters:\n      - {name: org, in: path, required: true, schema: {type: string}}\n      - {name: team_slug, in: path, required: true, schema: {type: string}}\n    patch:\n      operationId: patchTeamJson\n      requestBody:\n        required: true\n        content: {application/json: {schema: {type: object}}}\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/team\"}}}}\n  /orgs/{org}/teams/{team_slug}:\n",
+    );
+    let api = actions_of(
+        &json_route,
+        vec![
+            Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+            Ok(json!({"id": 1, "slug": "core", "members": 8}).to_string()),
+        ],
+    );
+    read(&api, "/orgs/octo/teams").await;
+    let (status, _, _) = api
+        .call("PATCH", "/orgs/octo/teams/core.json", Some(json!({})))
+        .await;
+    assert!(status.is_success(), "{status}");
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state", "{own}");
+}
+
+/// A plain string that happens to be the value holds no name: an unknown one is
+/// still a 404, under an owner too.
+#[tokio::test]
+async fn a_plain_string_does_not_suppress_a_404() {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(
+        json!([{"id": 1, "slug": "x", "full_name": "foo", "members": 3}]).to_string(),
+    )]));
+    let mut rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(TEAMS.replace("team_slug", "slug").as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.unknown_ids = mb_protocols::UnknownIds::NotFound;
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    read(&api, "/orgs/octo/teams").await;
+    let (status, _, body) = api.call("GET", "/orgs/octo/teams/foo", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// A delete by number finds what a list stored though its answer has no `id`
+/// either, and so the operation no identity of its own.
+#[tokio::test]
+async fn a_listed_issue_stays_gone_when_the_delete_answers_no_identity() {
+    let contract = ISSUES.replace(
+        "{type: object, properties: {id: {type: integer}, deleted: {type: boolean}}}",
+        "{type: object, properties: {deleted: {type: boolean}}}",
+    );
+    assert_ne!(contract, ISSUES);
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!([{"id": 999, "number": 5, "title": "a"}]).to_string()),
+            Ok(json!({"deleted": true}).to_string()),
+            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
+        ],
+    );
+    read(&api, "/issues").await;
+    let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, body) = read(&api, "/issues/5").await;
+    assert_ne!(source, "state", "deleted issue read back: {body}");
+}
+
+/// An effect on a listed team keeps it the org's.
+#[tokio::test]
+async fn an_effect_keeps_a_listed_resource_its_owners() {
+    let contract = TEAMS.replace(
+        "  /orgs/{org}/teams/{team_slug}:\n",
+        "  /orgs/{org}/audits:\n    post:\n      operationId: createAudit\n      parameters: [{name: org, in: path, required: true, schema: {type: string}}]\n      requestBody:\n        required: true\n        content: {application/json: {schema: {type: object, properties: {teamId: {type: string}}}}}\n      responses:\n        \"201\": {description: ok, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}}}}}\n  /orgs/{org}/teams/{team_slug}:\n",
+    );
+    let answer = json!({"response": {"id": "a1"}, "effects": [
+        {"type": "teams", "id": "1", "set": {"members": 9}},
+    ]});
+    let api = actions_of(
+        &contract,
+        vec![
+            Ok(json!([{"id": 1, "slug": "core", "members": 3}]).to_string()),
+            Ok(answer.to_string()),
+        ],
+    );
+    read(&api, "/orgs/octo/teams").await;
+    let (status, _, _) = api
+        .call("POST", "/orgs/octo/audits", Some(json!({"teamId": "1"})))
+        .await;
+    assert!(status.is_success(), "{status}");
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state", "{own}");
+    assert_eq!(own["members"], 9, "{own}");
 }
