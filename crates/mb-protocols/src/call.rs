@@ -854,7 +854,26 @@ pub(crate) async fn complete(
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
         {
-            store_wrapped(&mut state, session, &generated).await;
+            store_wrapped(&mut state, session, resource_type, &generated).await;
+        }
+        // A request naming a seed asks for that seed's answer, kept per seed
+        // by the cache, so it is not the resource.
+        if rt.consistency
+            && plain(plan)
+            && mb_engine::seed::request_seed(call).is_none()
+            && !transient_fallback(&generated)
+            && (200..300).contains(&generated.status)
+            && !matches!(op.binding, Binding::Graphql { .. })
+        {
+            seed_own_read(
+                &mut state,
+                session,
+                rt,
+                op,
+                target_id.as_deref(),
+                &generated,
+            )
+            .await;
         }
         // An operation with no resource type is stateless, GraphQL stores the
         // objects of its answers under their own types, and a delete's answer
@@ -1011,6 +1030,10 @@ pub(crate) struct BundleIndex {
     /// Per resource type, the position of its first query by path parameter
     /// with a success schema: the read a stored resource must suit.
     detail_reads: HashMap<String, usize>,
+    /// Per resource type with no such read, what a stored resource must
+    /// suit instead, with the position of the read it comes from: a list's
+    /// item schema, else a singleton read's success schema (`/user`).
+    other_shapes: HashMap<String, (usize, Value)>,
 }
 
 impl BundleIndex {
@@ -1022,6 +1045,7 @@ impl BundleIndex {
         let mut read_types = HashSet::new();
         let mut detail_reads = HashMap::new();
         let mut ranked_defs: HashMap<String, (u8, String)> = HashMap::new();
+        let mut shapes = TypeShapes::new();
         for (i, op) in bundle.operations.iter().enumerate() {
             by_id.entry(op.id.clone()).or_insert(i);
             if let (Some(t), Some(field)) = (
@@ -1047,7 +1071,9 @@ impl BundleIndex {
                     if by_path && op.success_output().is_some_and(|o| o.schema.is_some()) {
                         detail_reads.entry(t.to_string()).or_insert(i);
                     }
-                    rank_defs(bundle, op, t, by_path, &members, &mut ranked_defs);
+                    let lists = list_item_schemas(bundle, op, &members);
+                    rank_defs(op, t, by_path, &lists, &mut ranked_defs);
+                    record_shapes(op, i, t, by_path, &members, &lists, &mut shapes);
                 }
             }
             list_members_of.push(members);
@@ -1075,6 +1101,10 @@ impl BundleIndex {
                 .collect(),
             read_types,
             detail_reads,
+            other_shapes: shapes
+                .into_iter()
+                .map(|(t, (_, i, schema))| (t, (i, schema)))
+                .collect(),
         }
     }
 
@@ -1100,14 +1130,38 @@ impl BundleIndex {
     }
 }
 
+/// The item schemas of `op`'s success schema: each of its list `members`'
+/// (with the member), and the root's when it is an array itself.
+fn list_item_schemas(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    members: &[String],
+) -> Vec<(Option<String>, Value)> {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return Vec::new();
+    };
+    let items_of = |list: &Value| {
+        let (parts, _) = schema_parts(bundle, Some(list));
+        parts.iter().find_map(|p| p.get("items")).cloned()
+    };
+    let mut out: Vec<(Option<String>, Value)> = members
+        .iter()
+        .filter_map(|m| {
+            let items = items_of(&property_schema(bundle, schema, m)?)?;
+            Some((Some(m.clone()), items))
+        })
+        .collect();
+    out.extend(items_of(schema).map(|items| (None, items)));
+    out
+}
+
 /// Records in `ranked` the `$defs` names `op` reads as resource type `t`,
 /// keeping the best-ranked type of each (see [`BundleIndex::types_by_def`]).
 fn rank_defs(
-    bundle: &mb_mcm::Bundle,
     op: &Operation,
     t: &str,
     by_path: bool,
-    members: &[String],
+    lists: &[(Option<String>, Value)],
     ranked: &mut HashMap<String, (u8, String)>,
 ) {
     const DETAIL: u8 = 0;
@@ -1120,21 +1174,59 @@ fn rank_defs(
     if let Some(def) = def_name(schema) {
         found.push((if by_path { DETAIL } else { OTHER }, def.to_string()));
     }
-    let mut lists: Vec<Value> = members
-        .iter()
-        .filter_map(|m| property_schema(bundle, schema, m))
-        .collect();
-    lists.push(schema.clone());
-    for list in &lists {
-        let (parts, _) = schema_parts(bundle, Some(list));
-        let items = parts.iter().filter_map(|p| p.get("items"));
-        found.extend(items.filter_map(def_name).map(|d| (LIST, d.to_string())));
-    }
+    let items = lists.iter().filter_map(|(_, items)| def_name(items));
+    found.extend(items.map(|d| (LIST, d.to_string())));
     for (rank, def) in found {
         let held = ranked.entry(def).or_insert_with(|| (rank, t.to_string()));
         if rank < held.0 {
             *held = (rank, t.to_string());
         }
+    }
+}
+
+/// Per resource type: the best rank seen, the read's position and the schema.
+type TypeShapes = HashMap<String, (u8, usize, Value)>;
+
+/// Records in `shapes` what query `op` (at position `i`, of type `t`) says a
+/// resource looks like (see [`BundleIndex::other_shapes`]): a list's items
+/// describe the type the member names and, for the root, an envelope or an
+/// only member, `t`; with no list, its success schema describes `t`.
+fn record_shapes(
+    op: &Operation,
+    i: usize,
+    t: &str,
+    by_path: bool,
+    members: &[String],
+    lists: &[(Option<String>, Value)],
+    shapes: &mut TypeShapes,
+) {
+    const ITEMS: u8 = 0;
+    const SINGLETON: u8 = 1;
+    let mut record = |t: &str, rank: u8, schema: &Value| {
+        let held = shapes
+            .entry(t.to_string())
+            .or_insert_with(|| (rank, i, schema.clone()));
+        if rank < held.0 {
+            *held = (rank, i, schema.clone());
+        }
+    };
+    for (member, items) in lists {
+        match member.as_deref() {
+            None => record(t, ITEMS, items),
+            Some(m) if ENVELOPE_KEYS.contains(&m) || members.len() == 1 => {
+                record(t, ITEMS, items);
+                if !ENVELOPE_KEYS.contains(&m) {
+                    record(m, ITEMS, items);
+                }
+            }
+            Some(m) => record(m, ITEMS, items),
+        }
+    }
+    if lists.is_empty()
+        && !by_path
+        && let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref())
+    {
+        record(t, SINGLETON, schema);
     }
 }
 
@@ -1361,10 +1453,14 @@ const WRAPPED_IDS: [&str; 4] = ["id", "ts", "sid", "uuid"];
 /// Stores each object a create's answer wraps under a member `<x>` (Slack's
 /// `chat.postMessage` → `{ok, ts, message: {...}}`) as a resource of type
 /// `<x>s` when a read lists `<x>s` (`conversations.history`'s `messages`),
-/// so that read is generated knowing it.
+/// so that read is generated knowing it. Only the create's own member
+/// replaces what the session holds: one of the operation's own type
+/// (`resource_type`), or one [`seed_entities`] could not key, having no `id`
+/// or `number` (Slack's `ts`). Any other is a mention, stored only when new.
 async fn store_wrapped(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
+    resource_type: Option<&str>,
     generated: &GeneratedResponse,
 ) {
     let Some(Value::Object(body)) = generated.body.as_ref() else {
@@ -1382,13 +1478,73 @@ async fn store_wrapped(
         else {
             continue;
         };
+        let own = resource_type == Some(member.as_str()) || resource_type == Some(plural.as_str());
+        let unkeyed = value.get("id").is_none() && value.get("number").is_none();
         let resource = StoredResource {
             resource_type: plural,
             id,
             data: value.clone(),
         };
-        state.upsert(session, resource).await;
+        if own || unkeyed {
+            state.upsert(session, resource).await;
+        } else {
+            state.insert_seeded(session, resource).await;
+        }
     }
+}
+
+/// Stores a generated read by id as the resource it read, when it answers
+/// with its type's by-path schema: otherwise a later answer's mention would
+/// be stored and change what repeating this read returns. It goes under the
+/// target id when the path names the identity; a path parameter naming no
+/// field (`/repos/{o}/{r}`) is no key, or one owner's answer would answer
+/// for another's, so that answer goes under its own id.
+async fn seed_own_read(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    op: &Operation,
+    target_id: Option<&str>,
+    generated: &GeneratedResponse,
+) {
+    let (true, Some(t), Some(target_id), Some(identity), Some(body)) = (
+        matches!(op.kind, OperationKind::Query),
+        op.resource_type.as_deref(),
+        target_id,
+        op.identity.as_ref(),
+        generated.body.as_ref(),
+    ) else {
+        return;
+    };
+    let index = rt.index();
+    let detail_schema = index.detail_reads.get(t).and_then(|i| {
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    let own_schema = op
+        .output_for_status(generated.status)
+        .and_then(|o| o.schema.as_ref());
+    if detail_schema.is_none() || detail_schema != own_schema {
+        return;
+    }
+    let id = if path_names_identity(identity) {
+        Some(target_id.to_string())
+    } else {
+        body.get(&identity.field).and_then(id_string)
+    };
+    let Some(id) = id else {
+        return;
+    };
+    let resource = StoredResource {
+        resource_type: t.to_string(),
+        id,
+        data: body.clone(),
+    };
+    state.insert_seeded(session, resource).await;
 }
 
 /// How deep an answer is walked for entities: containers below its root.
@@ -1483,18 +1639,7 @@ impl<'a> EntityWalk<'a> {
             return;
         }
         self.considered += 1;
-        let bundle = self.rt.bundle();
-        let read = index
-            .detail_reads
-            .get(&resource_type)
-            .and_then(|i| bundle.operations.get(*i));
-        // Stored unservable, a later read would fall to the faker.
-        if read.is_none_or(|op| {
-            self.rt
-                .engine
-                .serve_stored(bundle, op, value, None)
-                .is_some()
-        }) {
+        if entity_fits(self.rt, &resource_type, value) {
             self.found.push(StoredResource {
                 resource_type,
                 id,
@@ -1502,6 +1647,26 @@ impl<'a> EntityWalk<'a> {
             });
         }
     }
+}
+
+/// Whether `value` suits resource type `t`: its by-path read would serve it
+/// (stored unservable, a later read would fall to the faker), else its list
+/// items or singleton read accept it. A type with neither has nothing to
+/// check against.
+fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
+    let index = rt.index();
+    let bundle = rt.bundle();
+    let (read, shape) = match index.detail_reads.get(t) {
+        Some(i) => (Some(*i), None),
+        None => match index.other_shapes.get(t) {
+            Some((i, schema)) => (Some(*i), Some(schema)),
+            None => (None, None),
+        },
+    };
+    let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
+        return true;
+    };
+    rt.engine.serve_stored(bundle, op, value, shape).is_some()
 }
 
 /// The response cache key of a read: its operation, path parameters,
@@ -1939,7 +2104,10 @@ async fn read_context(
             None => match op.identity.as_ref() {
                 Some(identity) => match identity.path_field.as_deref() {
                     Some(field) => by_path_fields(state, session, t, &[field], id, None).await,
-                    None if identity.path_param.is_some() && !path_names_identity(identity) => {
+                    None if state.rt.consistency
+                        && identity.path_param.is_some()
+                        && !path_names_identity(identity) =>
+                    {
                         let owned = owned_name(op, call);
                         by_path_fields(state, session, t, &NAME_FIELDS, id, owned.as_deref()).await
                     }

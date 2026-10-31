@@ -417,6 +417,14 @@ paths:
       parameters: [{name: orderId, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
   /orders/{orderId}/confirm:
     post:
       operationId: confirmOrder
@@ -453,6 +461,19 @@ paths:
                 type: object
                 properties:
                   entries: {type: array, items: {$ref: "#/components/schemas/Order"}}
+  /summary:
+    get:
+      operationId: summary
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customers: {type: array, items: {$ref: "#/components/schemas/Customer"}}
+                  orders: {type: array, items: {$ref: "#/components/schemas/Order"}}
   /deep:
     get:
       operationId: deep
@@ -478,6 +499,25 @@ components:
 
 fn order(id: &str, customer: Value) -> Result<String, LlmError> {
     Ok(json!({"id": id, "status": "open", "customer": customer}).to_string())
+}
+
+/// [`actions_of`] with `consistency: off`.
+fn actions_off(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions {
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let mut rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.consistency = false;
+    Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    }
 }
 
 /// What a read returned, with its source.
@@ -545,27 +585,232 @@ async fn a_delete_answer_does_not_seed_what_it_deleted() {
     assert_eq!(source, "llm");
 }
 
+/// A create mentioning a stored customer leaves that customer as it was.
+#[tokio::test]
+async fn a_create_mention_leaves_a_stored_entity_unchanged() {
+    let api = actions_of(
+        WORLD,
+        vec![
+            order("o1", json!({"id": "c1", "name": "Ana"})),
+            order("o2", json!({"id": "c1", "name": "Other"})),
+        ],
+    );
+    read(&api, "/orders/o1").await;
+    let (status, _, _) = api.call("POST", "/orders", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (source, customer) = read(&api, "/customers/c1").await;
+    assert_eq!(source, "state");
+    assert_eq!(customer["name"], "Ana");
+}
+
+/// A create's own wrapped member still replaces what the session holds.
+#[tokio::test]
+async fn a_create_updates_its_own_wrapped_member() {
+    let api = actions_of(
+        &WORLD.replace(
+            "        customer: {$ref: \"#/components/schemas/Customer\"}\n",
+            "        customer: {$ref: \"#/components/schemas/Customer\"}\n        order: {type: object}\n",
+        ),
+        vec![
+            order("o1", json!({"id": "c1", "name": "Ana"})),
+            Ok(json!({"id": "o2", "order": {"id": "o1", "status": "merged"}}).to_string()),
+        ],
+    );
+    read(&api, "/orders/o1").await;
+    let (status, _, _) = api.call("POST", "/orders", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (source, stored) = read(&api, "/orders/o1").await;
+    assert_eq!(source, "state");
+    assert_eq!(stored["status"], "merged");
+}
+
+/// A repeated read answers the same whatever another read mentions meanwhile:
+/// the first answer is the stored one.
+#[tokio::test]
+async fn a_mention_does_not_change_a_repeated_read() {
+    let api = actions_of(
+        WORLD,
+        vec![
+            Ok(json!({"id": "c1", "name": "Bob"}).to_string()),
+            order("o1", json!({"id": "c1", "name": "Ana"})),
+        ],
+    );
+    let (_, first) = read(&api, "/customers/c1").await;
+    assert_eq!(first["name"], "Bob");
+    read(&api, "/orders/o1").await;
+    let (_, again) = read(&api, "/customers/c1").await;
+    assert_eq!(again["name"], "Bob");
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A by-id read's answer stays out of state with consistency off.
+#[tokio::test]
+async fn consistency_off_stores_no_read_answer() {
+    let api = actions_off(
+        WORLD,
+        vec![
+            Ok(json!({"id": "c1", "name": "Bob"}).to_string()),
+            Ok(json!({"id": "c1", "name": "Generated"}).to_string()),
+        ],
+    );
+    read(&api, "/customers/c1").await;
+    let (source, customer) = read(&api, "/customers/c1").await;
+    assert_ne!(source, "state");
+    assert_eq!(customer["name"], "Generated");
+}
+
+/// A faker answer standing in for a failed LLM call is not a by-id read's
+/// stored answer.
+#[tokio::test]
+async fn a_faker_fallback_read_is_not_stored() {
+    let api = actions_of(WORLD, vec![]);
+    let (source, _) = read(&api, "/customers/c1").await;
+    assert_eq!(source, "fallback");
+    let (source, _) = read(&api, "/customers/c1").await;
+    assert_ne!(source, "state");
+}
+
+/// A by-name read's answer is stored under its own id, so another owner's
+/// repository of that name is not it.
+#[tokio::test]
+async fn a_read_by_name_does_not_answer_for_another_owner() {
+    let api = actions_of(
+        REPOS,
+        vec![
+            Ok(repo(7, "octo", 42).to_string()),
+            Ok(repo(8, "cat", 9).to_string()),
+        ],
+    );
+    let (_, first) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(first["stargazers_count"], 42);
+    let (_, other) = read(&api, "/repos/cat/hello").await;
+    assert_eq!(other["stargazers_count"], 9);
+    let (source, again) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "state");
+    assert_eq!(again["stargazers_count"], 42);
+}
+
+/// With consistency off, a stored repository is not found by its name.
+#[tokio::test]
+async fn consistency_off_finds_nothing_by_name() {
+    let api = actions_off(
+        REPOS,
+        vec![
+            Ok(repo(7, "octo", 42).to_string()),
+            Ok(repo(7, "octo", 1).to_string()),
+        ],
+    );
+    let (status, _, _) = api.call("POST", "/user/repos", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (source, found) = read(&api, "/repos/octo/hello").await;
+    assert_ne!(source, "state");
+    assert_eq!(found["stargazers_count"], 1);
+}
+
+/// `customers` here has only a list read: an entity its items' schema would
+/// refuse stays out of state, and so of the list's prompt.
+const LIST_ONLY: &str = r##"
+openapi: 3.0.0
+info: {title: ListOnly, version: "1"}
+paths:
+  /customers:
+    get:
+      operationId: listCustomers
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Customer"}}
+  /user:
+    get:
+      operationId: getCaller
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, login]
+                properties: {id: {type: integer}, login: {type: string}}
+  /deep:
+    get:
+      operationId: deep
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object}}}}
+components:
+  schemas:
+    Customer:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, name: {type: string}}
+"##;
+
+fn prompt_of(api: &Actions, call: usize) -> String {
+    api.provider.requests()[call].messages[1].content.clone()
+}
+
+/// A type with a list read only checks what it stores against the items.
+#[tokio::test]
+async fn a_list_only_type_refuses_what_its_items_refuse() {
+    let api = actions_of(
+        LIST_ONLY,
+        vec![
+            Ok(json!({"customer": {"id": 5, "name": "junk-name"}}).to_string()),
+            Ok(json!([]).to_string()),
+        ],
+    );
+    read(&api, "/deep").await;
+    read(&api, "/customers").await;
+    assert!(!prompt_of(&api, 1).contains("junk-name"));
+}
+
+/// What its items accept is stored and reaches the list's prompt.
+#[tokio::test]
+async fn a_list_only_type_keeps_what_its_items_accept() {
+    let api = actions_of(
+        LIST_ONLY,
+        vec![
+            Ok(json!({"customer": {"id": "c5", "name": "good-name"}}).to_string()),
+            Ok(json!([]).to_string()),
+        ],
+    );
+    read(&api, "/deep").await;
+    read(&api, "/customers").await;
+    assert!(prompt_of(&api, 1).contains("good-name"));
+}
+
+/// A singleton read's schema checks what is stored under its type.
+#[tokio::test]
+async fn a_singleton_type_refuses_what_its_read_refuses() {
+    let api = actions_of(
+        LIST_ONLY,
+        vec![
+            Ok(
+                json!({"user": {"id": 5}, "other": {"user": {"id": 6, "login": "ok-login"}}})
+                    .to_string(),
+            ),
+            Ok(json!({"id": 1, "login": "me"}).to_string()),
+        ],
+    );
+    read(&api, "/deep").await;
+    read(&api, "/user").await;
+    let prompt = prompt_of(&api, 1);
+    assert!(prompt.contains("ok-login"), "{prompt}");
+    assert!(!prompt.contains("\"id\":5"), "{prompt}");
+}
+
 /// With consistency off, an answer stores nothing: the read generates anew.
 #[tokio::test]
 async fn consistency_off_stores_no_entities() {
-    let provider = Arc::new(ScriptedProvider::new(vec![
-        order("o1", json!({"id": "c1", "name": "Ana"})),
-        Ok(json!({"id": "c1", "name": "Generated"}).to_string()),
-    ]));
-    let mut rt = MockRuntime::new(
-        "world",
-        Arc::new(compile(WORLD.as_bytes()).unwrap()),
-        Arc::new(Engine::new(
-            Some(Arc::clone(&provider) as Arc<dyn Provider>),
-            EngineConfig::default(),
-        )),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    let api = actions_off(
+        WORLD,
+        vec![
+            order("o1", json!({"id": "c1", "name": "Ana"})),
+            Ok(json!({"id": "c1", "name": "Generated"}).to_string()),
+        ],
     );
-    rt.consistency = false;
-    let api = Actions {
-        router: http_rest::router(Arc::new(rt)),
-        provider,
-    };
     read(&api, "/orders/o1").await;
     let (source, customer) = read(&api, "/customers/c1").await;
     assert_ne!(source, "state");
@@ -701,6 +946,13 @@ paths:
           content:
             application/json:
               schema: {type: array, items: {$ref: "#/components/schemas/repository"}}
+    post:
+      operationId: createRepo
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/repository"}}}}
   /repos/{owner}/{repo}:
     get:
       operationId: getRepo
