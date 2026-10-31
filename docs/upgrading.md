@@ -42,7 +42,7 @@ A bundle takes this on recompile, and stored bundles are not recompiled on their
 
 ### Resources composed with `allOf` have an identity
 
-A resource whose schema is an `allOf` at its root used to compile with no identity. Its members now count (the `schema_properties` change), so every such resource has one on recompile. On those contracts:
+A resource whose schema is an `allOf` at its root used to compile with no identity. The importer now reads the members of its `allOf` branches, so every such resource has one on recompile. On those contracts:
 
 - reads by path start serving stored resources, where they were generated knowing nothing stored;
 - `unknown_ids: 404` starts answering `404` where it generated;

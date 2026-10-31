@@ -1114,6 +1114,9 @@ async fn apply_effect(
     {
         return Err("it sets an identity field");
     }
+    if !index.detail_reads.contains_key(t) && !index.other_shapes.contains_key(t) {
+        return Err("no schema to check against");
+    }
     let Some(mut stored) = state.get(session, t, &effect.id).await else {
         return Err("no such resource");
     };
@@ -1854,13 +1857,14 @@ async fn store_wrapped(
 /// with its type's by-path schema: otherwise a later answer's mention would
 /// be stored and change what repeating this read returns. It goes under the
 /// target id when the path names the identity. A path parameter naming no
-/// field (`/repos/{o}/{r}`) is no key, or one owner's answer would answer for
-/// another's: that answer goes under its own id, or stores nothing, the
-/// response cache keeping its repeat, when it has none (its `id` is that
-/// parameter's value, forced there) or, on a route ending in an owner and a
-/// name, its `full_name` does not show it is that owner's (see
-/// [`owned_name`]). A route read by another field (`/issues/{number}`) stores
-/// nothing: its answer's `id` comes from
+/// field goes under its own id, or under the parameter's value when that is
+/// what its `id` holds. After an earlier parameter (`/repos/{o}/{r}`,
+/// `/orgs/{o}/teams/{t}`) that value is no key, or one owner's answer would
+/// answer for another's: such an answer stores nothing, the response cache
+/// keeping its repeat. So does one on a route ending in an owner and a name
+/// whose `full_name` does not show it is that owner's (see [`owned_name`]).
+/// A route read by another field (`/issues/{number}`) stores nothing: its
+/// answer's `id` comes from
 /// the path and is no resource's, so a list would store the issue again.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
@@ -1903,7 +1907,7 @@ async fn seed_own_read(
     } else {
         body.get(&identity.field)
             .and_then(id_string)
-            .filter(|id| id != target_id)
+            .filter(|id| id != target_id || !follows_a_param(op, identity))
     };
     let Some(id) = id else {
         return;
@@ -1915,7 +1919,8 @@ async fn seed_own_read(
     };
     if !path_names_identity(identity)
         && let Some(owned) = owned_name(op, call)
-        && (body.get("full_name").is_none() || !full_name_fits(&resource, Some(&owned)))
+        && (!body.get("full_name").is_some_and(Value::is_string)
+            || !full_name_fits(&resource, Some(&owned)))
     {
         return;
     }
@@ -2177,6 +2182,19 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
         || param.eq_ignore_ascii_case("id")
         || param.ends_with("Id")
         || param.ends_with("_id")
+}
+
+/// Whether another path parameter comes before the one naming `op`'s target:
+/// that value then only means something under the earlier one.
+fn follows_a_param(op: &Operation, identity: &mb_mcm::Identity) -> bool {
+    let (Binding::Http { path, .. }, Some(param)) = (&op.binding, identity.path_param.as_deref())
+    else {
+        return false;
+    };
+    let own = format!("{{{param}}}");
+    path.split('/')
+        .take_while(|s| !s.contains(&own))
+        .any(|s| s.contains('{'))
 }
 
 /// Whether no scenario applies to the call and no status is forced (an

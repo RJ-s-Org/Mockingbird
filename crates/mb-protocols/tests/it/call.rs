@@ -3144,3 +3144,168 @@ paths:
     };
     assert!(state.get(&session, "things", "t1").await.unwrap().is_none());
 }
+
+/// A read of an intent is stored, though `{intent}` is not named like an id:
+/// the route has no earlier parameter a second owner could differ by. Its
+/// action is shown it.
+#[tokio::test]
+async fn a_read_on_a_route_with_no_earlier_param_is_shown_to_its_action() {
+    let api = actions(vec![
+        Ok(json!({"id": "pi_1", "status": "requires_confirmation", "amount": 1234}).to_string()),
+        Ok(json!({"id": "pi_1", "status": "succeeded", "amount": 1234}).to_string()),
+    ]);
+    read(&api, "/v1/payment_intents/pi_1").await;
+    let (source, again) = read(&api, "/v1/payment_intents/pi_1").await;
+    assert_eq!(source, "state");
+    assert_eq!(again["amount"], 1234);
+    api.call("POST", "/v1/payment_intents/pi_1/confirm", None)
+        .await;
+    let prompt = prompt_of(&api, 1);
+    assert!(prompt.contains("<existing_resource>"), "{prompt}");
+    assert!(prompt.contains("1234"), "{prompt}");
+}
+
+/// `/v1/customers/{customer}` as in Stripe's contract, and a write mentioning
+/// a customer.
+const CUSTOMERS: &str = r##"
+openapi: 3.0.0
+info: {title: Customers, version: "1"}
+paths:
+  /v1/customers/{customer}:
+    get:
+      operationId: getCustomer
+      parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+  /v1/charges:
+    post:
+      operationId: createCharge
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Charge"}}}}
+components:
+  schemas:
+    Customer:
+      type: object
+      required: [id, balance]
+      properties: {id: {type: string}, balance: {type: integer}}
+    Charge:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        customer: {$ref: "#/components/schemas/Customer"}
+"##;
+
+/// A later answer's mention does not change what repeating such a read
+/// returns, which is why it is stored.
+#[tokio::test]
+async fn a_later_mention_does_not_change_a_read_with_no_earlier_param() {
+    let api = actions_of(
+        CUSTOMERS,
+        vec![
+            Ok(json!({"id": "cus_1", "balance": 1}).to_string()),
+            Ok(json!({"id": "ch_1", "customer": {"id": "cus_1", "balance": 99}}).to_string()),
+        ],
+    );
+    read(&api, "/v1/customers/cus_1").await;
+    api.call("POST", "/v1/charges", Some(json!({}))).await;
+    let (source, customer) = read(&api, "/v1/customers/cus_1").await;
+    assert_eq!(source, "state");
+    assert_eq!(customer["balance"], 1, "{customer}");
+}
+
+/// `/orgs/{org}/teams/{team_slug}` has an earlier parameter, so a string `id`
+/// forced to the slug is no key: another organisation's team is its own.
+#[tokio::test]
+async fn a_slug_forced_into_a_string_id_does_not_answer_for_another_org() {
+    const TEAMS: &str = r##"
+openapi: 3.0.0
+info: {title: Teams, version: "1"}
+paths:
+  /orgs/{org}/teams/{team_slug}:
+    get:
+      operationId: getTeam
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, members]
+                properties: {id: {type: string}, members: {type: integer}}
+"##;
+    let answer = |members: u32| Ok(json!({"id": "t", "members": members}).to_string());
+    let api = cached_actions_of(TEAMS, vec![answer(3), answer(5)]);
+    let (_, first) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(first["id"], "core");
+    let (_, other) = read(&api, "/orgs/cat/teams/core").await;
+    assert_eq!(other["members"], 5, "{other}");
+    let (source, again) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "cache");
+    assert_eq!(again["members"], 3);
+}
+
+/// A null `full_name` shows no owner any more than a missing one.
+#[tokio::test]
+async fn a_read_by_name_with_a_null_full_name_does_not_answer_for_another_owner() {
+    let contract = REPOS.replace(
+        "full_name: {type: string}\n        stargazers_count",
+        "full_name: {type: string, nullable: true}\n        stargazers_count",
+    );
+    assert_ne!(contract, REPOS);
+    let answer = |id: u32, stars: u32| {
+        Ok(
+            json!({"id": id, "name": "hello", "full_name": null, "stargazers_count": stars})
+                .to_string(),
+        )
+    };
+    let api = cached_actions_of(&contract, vec![answer(7, 42), answer(8, 9)]);
+    read(&api, "/repos/octo/hello").await;
+    let (_, other) = read(&api, "/repos/cat/hello").await;
+    assert_eq!(other["stargazers_count"], 9, "{other}");
+}
+
+/// An effect on a stored resource of a type with no read says why it was
+/// rejected.
+#[tokio::test]
+async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "bookings",
+        "b1",
+        json!({"id": "b1", "status": "held"}),
+    )
+    .await;
+    store(&state, "refunds", "r1", json!({"id": "r1", "amount": 5})).await;
+    let answer = json!({"response": {"reason": "asked"}, "effects": [
+        {"type": "refunds", "id": "r1", "set": {"amount": 7}},
+    ]});
+    let records = Arc::new(crate::support::Records::default());
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(EFFECTS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state as Arc<dyn StateStore>,
+    );
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    let req = Request::post("/bookings/b1/cancel")
+        .body(Body::empty())
+        .unwrap();
+    http_rest::router(Arc::new(rt)).oneshot(req).await.unwrap();
+    let record = records.wait(1).await.remove(0);
+    let effects = record.request["effects"].as_array().unwrap();
+    assert_eq!(effects[0]["outcome"], "rejected");
+    assert_eq!(effects[0]["reason"], "no schema to check against");
+}
