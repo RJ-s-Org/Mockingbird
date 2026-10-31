@@ -741,3 +741,170 @@ async fn an_effect_not_applied_sends_no_event() {
         assert!(sent(&server).await.is_empty());
     }
 }
+
+/// A bodyless action has nothing to report yet: an `updated` event with an
+/// empty `data.object` says only that the call happened. One with a body, and
+/// one the contract gives a payload, still sends.
+#[tokio::test]
+async fn a_bodyless_action_sends_no_empty_event() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Issues, version: "1"}
+paths:
+  /issues/{id}:
+    get:
+      operationId: getIssue
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /issues/{id}/transitions:
+    post:
+      operationId: transition
+      responses: {"204": {description: done}}
+  /issues/{id}/notes:
+    post:
+      operationId: note
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}}
+components:
+  schemas:
+    Issue: {type: object, properties: {id: {type: string}}}
+"##;
+    let server = receiver(200).await;
+    let (d, log) = dispatcher_with(vec![to(&server, &["*"])], fast());
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(60))),
+    );
+    rt.webhooks = Some(d);
+    let app = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post("/issues/i1/transitions"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app.clone().oneshot(post("/issues/i1/notes")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sent = wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    assert_eq!(sent.operation, "note");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(self::sent(&server).await.len(), 1);
+}
+
+/// A new record from an action is a `created`, not an update of its parent;
+/// the same action answering its target stays an update.
+#[tokio::test]
+async fn a_new_record_from_an_action_sends_created() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Comments, version: "1"}
+paths:
+  /comments:
+    post:
+      operationId: createComment
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /comments/{id}:
+    get:
+      operationId: getComment
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /comments/{id}/replies:
+    post:
+      operationId: reply
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+components:
+  schemas:
+    Comment: {type: object, properties: {id: {type: string}, body: {type: string}}}
+"##;
+    let comment = |id: &str| Ok(json!({"id": id, "body": "text"}).to_string());
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        comment("c1"),
+        comment("c2"),
+        comment("c1"),
+    ]));
+    let server = receiver(200).await;
+    let (d, _log) = dispatcher_with(vec![to(&server, &["*"])], fast());
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(60))),
+    );
+    rt.webhooks = Some(d);
+    let app = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    for uri in ["/comments", "/comments/c1/replies", "/comments/c1/replies"] {
+        let resp = app.clone().oneshot(post(uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    for _ in 0..200 {
+        if sent(&server).await.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut types: Vec<String> = sent(&server)
+        .await
+        .iter()
+        .map(|e| e["type"].as_str().unwrap().to_owned())
+        .collect();
+    types.sort();
+    assert_eq!(
+        types,
+        ["comment.created", "comment.created", "comment.updated"]
+    );
+}
+
+/// A new record that could not be stored did not happen: no event says so.
+#[tokio::test]
+async fn an_unstored_new_record_sends_no_event() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{id}/copy:
+    post:
+      operationId: copy
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+components:
+  schemas:
+    Order: {type: object, properties: {id: {type: string, enum: [o1, o2]}}}
+"##;
+    let order = |id: &str| Ok(json!({"id": id}).to_string());
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        order("o1"),
+        order("o2"),
+        order("o2"),
+    ]));
+    let server = receiver(200).await;
+    let (d, _log) = dispatcher_with(vec![to(&server, &["*"])], fast());
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(60))),
+    );
+    rt.webhooks = Some(d);
+    let app = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    for uri in ["/orders", "/orders", "/orders/o1/copy"] {
+        let resp = app.clone().oneshot(post(uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sent(&server).await.len(), 2);
+}

@@ -1,10 +1,12 @@
 //! Swagger 2.0 -> MCM compiler.
 
-use crate::heuristics::{apply_action_routes, infer_identity, infer_kind, infer_resource_type};
+use crate::heuristics::{
+    apply_action_routes, infer_identity, infer_kind, infer_resource_type, resource_hint,
+};
 use crate::openapi3::{
     CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
     OperationIds, check_defs_refs, check_operation_refs, deref, escape, invalid, is_event_stream,
-    is_json_media, non_json_schema, path_methods, slug, stream_item_schema, stream_kind,
+    is_json_media, non_json_schema, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -242,6 +244,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
 
     let mut ids = OperationIds::new(doc)?;
     let mut operations = Vec::new();
+    let mut hints = Vec::new();
     let empty = Map::new();
     let paths = doc
         .get("paths")
@@ -304,12 +307,11 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
             }
 
             check_operation_refs(&op_out, &mut defs, REF_PREFIX, ctx)?;
+            hints.push(resource_hint(op, &op_out.id, ctx));
             operations.push(op_out);
         }
     }
-    let methods = path_methods(doc, paths)?;
-    let all_paths: Vec<_> = methods.iter().map(|(p, m)| (*p, m.as_slice())).collect();
-    apply_action_routes(&mut operations, &all_paths, &defs);
+    apply_action_routes(&mut operations, &hints, &defs, ctx);
     check_defs_refs(&mut defs, "/definitions/", REF_PREFIX, ctx)?;
 
     let digest = Sha256::digest(bytes);

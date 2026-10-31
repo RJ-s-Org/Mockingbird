@@ -32,13 +32,37 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ### Action routes act on their parent resource
 
-A singular `POST <static>/{param}/<verb>` with no `GET` on its path and no route below it, such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:
+A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how that is read](import.md#how-a-post-under-a-resource-is-read)), such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:
 
 - its operation's `kind`, `resource_type` and `identity` in the compiled bundle, while `source_digest`, which hashes the source, does not;
 - its webhook event type, from `confirm.created` to `payment_intent.updated`, or for a command that answers a record of its own, from `cancel.created` to `booking.updated`;
 - what state it writes: resources stored under the old type (`confirm`) in a session or a session snapshot are no longer read by anything, and `on_state_change` triggers on that type stop firing.
 
 A bundle takes this on recompile, and stored bundles are not recompiled on their own. For a mock managed through the API, upload the contract again. For a mock from the config file, restart: with an in-memory control store that is enough, but with a persistent one a mock keeps its active version while the contract's digest matches it, so also change a byte of the contract, such as a comment.
+
+### Action routes come from the contract's structure
+
+`POST <static>/{param}/<static>` used to be an action only if its last segment did not end in `s`, it had no `GET` on its path and no route below it. The spelling no longer counts, and [the contract decides](import.md#how-a-post-under-a-resource-is-read). On recompile:
+
+- A `POST` whose successes declare no body acts on its parent and stores nothing, even with a `GET` beside it or a longer static tail: Jira's `POST /issue/{issueIdOrKey}/transitions` and Auth0's `POST /users/{id}/roles`. It sends no webhook unless the contract gives it a payload.
+- A bodyless `POST` whose last segment is a read verb (`POST /jobs/{id}/sync` answering `204`) was a read and is now an action on its parent.
+- A plural tail that answers what the parent's `GET` answers (`POST /orders/{id}/items` answering the order, with nothing below it) was a create of `items` and is now an update of the order.
+- An update on an action route whose LLM answer carries an identity other than its target's is [a new record of the parent's type](import.md#an-update-that-answers-another-record), stored under its own id, or a fresh one if a record holds that id, with the target untouched, and sends `<type>.created`. If no fresh id can be drawn, the answer is served and not stored. The id used to be overwritten with the target's. A faker answer, an answer with no identity, or a call with no stored target updates the target as before. This depends on the model: for a reply with a stored parent, a new id came back 8 of 8 times with Luna and the default model and at most 2 of 8 with Lightning, so a reply can still overwrite its parent. Where every call makes a new record, set `x-mockingbird-resource: {action: false, type: <the parent's type>}`.
+- An action answering `{type: object}` beside a parent's `GET` answering `{type: object}` moves from an update to `Effect::Other`: it stores nothing, since two open schemas do not say the answer is the parent.
+- A `POST` answering `200`, whose `GET` beside it reads something else or that has no `GET` and nothing else reading its answer, acts on its parent whatever its spelling: `POST /v1/customers/{id}/sources`, `/{id}/process`, `/{id}/address`.
+- A singular tail declaring a `201`, which acted on its parent unless it answered the parent's record, is now a create of its own, even with no identity (when it stores nothing). It loses its parent as a target: with no identity path parameter it has no stored target, and its prompt shows the parent only if the path parameter is named for a type (`{booking_id}`, not `{id}`).
+- A `POST` whose answer another resource's `GET` serves by path is a create under that route's type: PayPal's `POST /captures/{capture_id}/refund` is a create of `refunds`, so `GET /refunds/{id}` serves it. It was a command on `captures` that stored nothing, and it now has no capture as its target.
+- A `POST` declaring a `201` beside a `200` is judged by the `201`.
+
+For each operation that changes, these follow:
+
+- its `kind`, `resource_type` and `identity` in the compiled bundle. Routes, operation ids and `source_digest` stay the same;
+- its webhook event type, from `roles.created` to nothing at all for a bodyless action, from `capture.updated` to `refund.created`, and to `<type>.created` for an action's new record. `Bundle::webhook_for` also finds a contract's payload by event type, so a webhook the contract names after the old event type (`capture.updated`) stops matching this operation: the event goes out as the default envelope unless a callback of the operation or a webhook named after its id applies;
+- what state it writes: resources stored under the old type in a session or snapshot are no longer read by these operations, and `on_state_change` triggers on that type stop firing for them.
+
+Set [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) on an operation to keep what it was. It is per operation. Contracts without the extension behave as inference says.
+
+Stored bundles take this the way they take action routes, with the same steps: upload the contract again, or restart a mock from the config file, changing a byte of the contract if the control store is persistent.
 
 ### Resources composed with `allOf` have an identity
 

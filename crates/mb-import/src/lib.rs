@@ -374,8 +374,9 @@ pub const PROMPT_SCHEMA_BUDGET: usize = 64 * 1024;
 pub struct Warning {
     /// `schema_too_large`, `security_scheme_unsupported`,
     /// `status_range_expanded`, `dangling_ref`, `cookie_param_ignored`,
-    /// `response_header_unresolved`, `xsd_wildcard_ignored` or
-    /// `wsdl_import_ignored` (see `docs/protocols.md`).
+    /// `response_header_unresolved`, `invalid_resource_extension`,
+    /// `xsd_wildcard_ignored` or `wsdl_import_ignored` (see
+    /// `docs/protocols.md`).
     pub code: String,
     /// The operation id the warning is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]

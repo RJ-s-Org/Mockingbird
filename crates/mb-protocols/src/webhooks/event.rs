@@ -20,10 +20,19 @@ pub fn event_type(op: &Operation) -> Option<String> {
         Effect::Update | Effect::Other => "updated",
         Effect::Delete => "deleted",
     };
+    Some(resource_event(op, verb))
+}
+
+/// The event type of a call to `op` that made a new record of its type.
+pub fn created_event_type(op: &Operation) -> String {
+    resource_event(op, "created")
+}
+
+fn resource_event(op: &Operation, verb: &str) -> String {
     let resource = path_resource(op)
         .or(op.resource_type.as_deref())
         .unwrap_or(&op.id);
-    Some(format!("{}.{verb}", singular(resource)))
+    format!("{}.{verb}", singular(resource))
 }
 
 /// The event type a read sends to targets that name its operation (an
@@ -98,6 +107,12 @@ pub fn envelope_object(op: &Operation, body: Option<&Value>, target_id: Option<&
         },
         None => json!({}),
     }
+}
+
+/// Whether `op` is an action that stores nothing and answered no body, so its
+/// envelope would say only that the call happened.
+pub fn is_empty_action(op: &Operation, body: Option<&Value>) -> bool {
+    body.is_none() && op.kind == OperationKind::Command(Effect::Other) && op.is_action()
 }
 
 #[cfg(test)]

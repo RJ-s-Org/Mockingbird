@@ -19,6 +19,52 @@ Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploa
 
 Many documentation pages carry their own OpenAPI definition: a fenced ```` ```yaml ```` or ```` ```json ```` block, a `<script type="application/json">` blob, or the page data of a ReadMe site (`script#ssr-props`, `script#__NEXT_DATA__`, `data-initial-props`, including definitions stored as JSON strings such as `oasDefinition`). An OpenAPI 3.x definition found there is taken as written: its operations (with every operation of the definition, not only the one the page describes), components and servers go into the draft with confidence 1.0 and the provenance `embedded OpenAPI`, and the block is removed from the text the LLM reads. When the definitions cover every endpoint the page names, no LLM is called (and none is needed). On a page with both, the block wins: the LLM only fills in operations without a block. A block operation that does not compile is skipped with an `invalid_operation` warning; a block that does not parse stays in the text for the LLM. A Swagger 2.0 block is converted to OpenAPI 3.0 first (definitions, parameters, `in: body` and `formData` parameters as request bodies, `consumes` and `produces`, response headers, security definitions, and `host` with `basePath` as the server) and then taken as written the same way.
 
+## How a `POST` under a resource is read
+
+The compiler decides from the contract, not the words of the path, whether `POST <static>/{param}/<static>` adds a record of its own or acts on the resource `{param}` names. When the contract does not decide, it acts on the parent, which is harmless: the answer is served, the parent is shown as context, and the parent changes only through validated effects. OpenAPI 3 and Swagger 2.0 read it the same way, in this order:
+
+1. **No success response declares a body** (`204`, or `200` or `202` with no content, for every 2xx it lists): it acts on the parent and stores nothing, even with a `GET` beside it or under a longer static tail (`/x/{id}/y/z`). A declared `201` does not count, because it says something was made. Such a call sends no webhook unless the contract gives it a payload.
+2. **A route below it** (`<path>/{...}`), or **a `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not.
+3. **The parent's `GET` answers the same record**: it acts on the parent. With the very schema of that `GET` it is an update, [decided at runtime](#an-update-that-answers-another-record).
+4. **Another resource's `GET` by path serves the same record**: a record of that route's type, with its identity (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it). If `GET`s of several types serve it, the contract does not say which, and this rule does not apply.
+5. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no identity it stores nothing.
+6. **Anything else**: it acts on the parent and stores nothing.
+
+The same record means the same schema, through a one-member envelope that holds an object (on either side), or a shorter form the other composes with `allOf`. Members in common are not enough: `{id, status}` beside a `Refund` that does not compose it does not match. An envelope with other members beside its record (`{data: User, links: ...}`) is not unwrapped, because nothing but the member's name says which one is the record.
+
+Where a `POST` lists several successes, these rules read the `201`. The mock answers with the lowest success unless the call forces another status, so a `POST` listing an empty `200` and a `201` with a body answers empty and stores nothing.
+
+### An update that answers another record
+
+`POST /comments/{id}/replies` and `POST /orders/{id}/capture` can both answer their parent's schema, and the contract cannot tell them apart. So with a stored parent, the prompt asks the model which the call did, and its answer decides: a non-empty identity that differs from the parent's is a new record of the parent's type, stored under its own id, with the parent untouched. If a record already holds that id, the new record gets a fresh id and a number past those stored, as a create does; if no id can be drawn, the answer is served and nothing else comes of it: no state, no effects and no webhook, with a warning in the log and a rejected entry under `effects` in the request record. A request that names the id itself (`POST /orders/o1/capture {"id": "o2"}`) chooses what gets overwritten. An effect naming the id the answer moved from is dropped. The webhook is the `created` event of that type, also for a contract payload. The parent's identity, or none, updates the parent. A faker's answer, a call with no stored parent, and a status of another schema also update what the path names.
+
+This choice depends on the model. Measured for a reply with a stored parent, a new id came back 8 times out of 8 with Luna and the default model, and at most 2 out of 8 with Lightning, so on a model like that a reply can overwrite its parent. When every call of a route makes a new record, say so with `x-mockingbird-resource: {action: false, type: <the parent's type>}`.
+
+A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read.
+
+### Correcting it: `x-mockingbird-resource`
+
+Inference needs no help from a contract. When it is wrong, an OpenAPI 3 or Swagger 2.0 operation can say so:
+
+```yaml
+paths:
+  /jobs/{id}/sync:
+    post:
+      x-mockingbird-resource:
+        action: true    # acts on what its path names; false: it writes a record of its own
+        type: batches   # the resource type
+        identity: key   # the member that identifies it
+```
+
+All three members are optional, and each overrides what inference decides for that operation and no other: an action and the read beside it are corrected one by one.
+
+- `action: true` needs a path ending `<static>/{param}/<static>...` and a method other than `GET`, `HEAD` or `OPTIONS`. It takes any tail, also on `PUT` and `PATCH`, and it beats a read verb in the last segment.
+- `action: false` makes a `POST` a write of its own, also when its last segment is a read verb. On anything else (another method, a stream, a `POST` ending in a parameter) it is ignored with a warning.
+- `type` is an identifier-like name: letters, digits, `_`, `-` and `.`, starting with a letter, digit or `_`. On a `GET`, rule 4 stores records under it. It does not change the webhook event type of a route ending in a parameter, which is named after its last static segment.
+- `identity` must be a member of what the operation answers, in its `201` or its lowest success, or for an action of what the parent's `GET` answers. An answer that declares no members cannot contradict it. It sets that operation's identity field after inference, so it does not decide whether that route is an action or a record. On a `GET`, what is inferred from that `GET` takes it: an action on that resource, and a record that `GET` serves.
+
+A value that is not valid gives an `invalid_resource_extension` warning, and inference stands for that member: the extension's other valid members still apply. That covers a value that is not an object, a member of the wrong type, an unknown member, an impossible `action`, and an `identity` the operation does not declare.
+
 ## Merge or replace
 
 An import **merges** into the mock's newest draft or active version when it has one: new operations are added, an operation with the same method and path (parameter names aside) is replaced, and nothing is removed. Base components win over incoming ones with the same name (a differing one gives a `conflicting_component` warning), and an incoming operation id already used by a kept operation gets a `_2` suffix (the original goes in `x-original-operation-id`). Re-importing the same documentation therefore gives the same operations and ids. `mode: replace` makes the draft hold only what the import found. When the base is not an OpenAPI 3 document (a GraphQL or protobuf mock, say), a default import is stored unmerged with a `merge_skipped` warning, while an explicit `mode: merge` fails the job. Two imports running at once each merge into the same base; the later draft does not include the earlier one's operations.

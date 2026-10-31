@@ -889,7 +889,7 @@ paths:
       operationId: refundCapture
       parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
       responses:
-        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
   /repos/{number}/close:
     post:
       operationId: closeWithNoDetail
@@ -1029,7 +1029,7 @@ paths:
       operationId: shipOrder
       parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
       responses:
-        "201":
+        "200":
           description: ok
           content: {{application/json: {{schema: {{type: object, properties: {{{param}: {{type: string}}, orderId: {{type: string}}}}}}}}}}
 "##
@@ -1118,18 +1118,24 @@ components:
         for id in ["confirmIntent", "cancelBooking", "refundCapture"] {
             assert!(b.operation(id).unwrap().is_action(), "{id}");
         }
-        for id in ["createIntent", "getIntent", "addSource", "createIssue"] {
+        for id in ["createIntent", "getIntent", "createIssue"] {
             assert!(!b.operation(id).unwrap().is_action(), "{id}");
         }
     }
 
+    /// Nothing reads what `POST /v1/customers/{id}/sources` answers, and a
+    /// `200` does not say it created anything: its spelling does not count.
     #[test]
-    fn a_plural_tail_stays_a_collection() {
+    fn a_plural_tail_nothing_reads_acts_on_its_parent() {
         let b = actions();
         let op = b.operation("addSource").unwrap();
-        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
-        assert_eq!(op.resource_type.as_deref(), Some("sources"));
-        assert_eq!(op.identity.as_ref().unwrap().path_param, None);
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("customers"));
+        assert_eq!(
+            op.identity.as_ref().unwrap().path_param.as_deref(),
+            Some("id")
+        );
+        assert!(op.is_action());
     }
 
     #[test]
@@ -1168,5 +1174,977 @@ components:
         let op = b.operation("streamReply").unwrap();
         assert_eq!(op.kind, OperationKind::StreamServer);
         assert_eq!(op.resource_type.as_deref(), Some("reply"));
+    }
+}
+
+/// What the contract says about a `POST` under `<static>/{param}`, with no
+/// word of its path read as English.
+mod action_structure {
+    use super::*;
+    use mb_import::compile_with_warnings;
+
+    const STRUCTURE: &str = r##"
+openapi: 3.0.0
+info: {title: Structure, version: "1"}
+paths:
+  /jobs/{id}/process:
+    post:
+      operationId: process
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /users/{id}/address:
+    post:
+      operationId: address
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /lists/{id}/entries:
+    get:
+      operationId: listEntries
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addEntry
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /pages/{id}/entries:
+    get:
+      operationId: pageEntries
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Item"}}
+                  has_more: {type: boolean}
+    post:
+      operationId: addWrapped
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, properties: {data: {$ref: "#/components/schemas/Item"}}}}}
+  /sums/{id}/entries:
+    get:
+      operationId: listSummaries
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/ItemSummary"}}}}}}
+    post:
+      operationId: addFull
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /playlists/{id}/tracks:
+    get:
+      operationId: listTracks
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addTracks
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /boards/{id}/labels:
+    get:
+      operationId: listLabels
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addLabelled
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /blobs/{id}/parts:
+    get:
+      operationId: listParts
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object}}}}}
+    post:
+      operationId: addPart
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /blobs/{id}/chunks:
+    get:
+      operationId: listChunks
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addChunk
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object}}}}}
+  /states/{id}/phase:
+    get:
+      operationId: getPhase
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {state: {type: string}}}}}}}
+    post:
+      operationId: movePhase
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /issues/{key}/transitions:
+    get:
+      operationId: listTransitions
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: transition
+      responses: {"204": {description: done}}
+  /docs/{id}/tags:
+    post:
+      operationId: tagDoc
+      responses: {"200": {description: done}}
+  /docs/{id}/tags/{tag}:
+    delete:
+      operationId: untagDoc
+      responses: {"204": {description: done}}
+  /batches/{id}/run:
+    post:
+      operationId: runBatch
+      responses: {"202": {description: accepted}}
+  /folders/{id}/files:
+    get:
+      operationId: listFiles
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addFile
+      responses: {"201": {description: created}}
+  /mixed/{id}/things:
+    get:
+      operationId: listThings
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addThing
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "204": {description: already there}
+  /deep/{id}/y/z:
+    post:
+      operationId: deepNoBody
+      responses: {"204": {description: done}}
+  /deeper/{id}/y/z:
+    post:
+      operationId: deepWithBody
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /repos/{o}/{r}/close:
+    post:
+      operationId: closeUnderTwoParams
+      responses: {"204": {description: done}}
+  /tasks/{id}/sync:
+    post:
+      operationId: syncNoBody
+      responses: {"204": {description: done}}
+  /tasks/{id}/search:
+    post:
+      operationId: searchWithBody
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /stars/{id}/star:
+    put:
+      operationId: putStar
+      responses: {"204": {description: done}}
+  /blocks/{id}/children:
+    patch:
+      operationId: patchChildren
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /charges/{id}/refund:
+    post:
+      operationId: refundCharge
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+  /refunds/{refund_id}:
+    get:
+      operationId: getRefund
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+  /charges/{id}/dispute:
+    post:
+      operationId: disputeCharge
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Dispute"}}}}}
+  /disputes:
+    get:
+      operationId: listDisputes
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Dispute"}}}}}}
+  /posts/{id}/comments:
+    post:
+      operationId: comment
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /installs/{id}/tokens:
+    post:
+      operationId: mintToken
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /orders:
+    get:
+      operationId: listOrders
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Order"}}}}}}
+  /orders/{id}/close:
+    post:
+      operationId: closeOrder
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /Accounts/{Sid}/Calls.json:
+    post:
+      operationId: createCall
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /Accounts/{Sid}/Calls/{CallSid}.json:
+    delete:
+      operationId: deleteCall
+      responses: {"204": {description: done}}
+components:
+  schemas:
+    Ack: {type: object, properties: {accepted: {type: boolean}}}
+    Item: {type: object, properties: {id: {type: string}, name: {type: string}}}
+    ItemSummary: {type: object, properties: {id: {type: string}}}
+    Snapshot: {type: object, properties: {snapshot_id: {type: string}}}
+    Refund: {type: object, properties: {id: {type: string}, amount: {type: integer}}}
+    Dispute: {type: object, properties: {id: {type: string}, reason: {type: string}}}
+    Comment: {type: object, properties: {id: {type: string}, body: {type: string}}}
+    Order: {type: object, properties: {id: {type: string}, status: {type: string}}}
+"##;
+
+    fn other(b: &Bundle, id: &str, parent: &str, param: &str) {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other), "{id}");
+        assert_eq!(op.resource_type.as_deref(), Some(parent), "{id}");
+        assert_eq!(
+            op.identity.as_ref().and_then(|i| i.path_param.as_deref()),
+            Some(param),
+            "{id}"
+        );
+        assert!(op.is_action(), "{id}");
+    }
+
+    fn create(b: &Bundle, id: &str, resource: &str) {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create), "{id}");
+        assert_eq!(op.resource_type.as_deref(), Some(resource), "{id}");
+        assert!(!op.is_action(), "{id}");
+    }
+
+    fn structure() -> Bundle {
+        compile(STRUCTURE.as_bytes()).unwrap()
+    }
+
+    /// `process` and `address` end in `s`; that says nothing.
+    #[test]
+    fn the_spelling_of_a_tail_does_not_count() {
+        let b = structure();
+        other(&b, "process", "jobs", "id");
+        other(&b, "address", "users", "id");
+    }
+
+    #[test]
+    fn a_get_beside_it_that_lists_its_answer_makes_a_collection() {
+        let b = structure();
+        create(&b, "addEntry", "entries");
+        // In envelopes, and a shorter item with the same identity.
+        create(&b, "addWrapped", "entries");
+        create(&b, "addFull", "entries");
+    }
+
+    #[test]
+    fn a_get_beside_it_that_reads_something_else_leaves_an_action() {
+        let b = structure();
+        other(&b, "movePhase", "states", "id");
+        other(&b, "addLabelled", "boards", "id");
+    }
+
+    /// An open schema on either side tells them apart from nothing.
+    #[test]
+    fn a_get_beside_it_that_cannot_be_compared_makes_a_collection() {
+        let b = structure();
+        create(&b, "addPart", "parts");
+        create(&b, "addChunk", "chunks");
+    }
+
+    #[test]
+    fn a_post_with_no_body_acts_on_its_parent_whatever_is_beside_it() {
+        let b = structure();
+        other(&b, "transition", "issues", "key");
+        other(&b, "tagDoc", "docs", "id");
+        other(&b, "runBatch", "batches", "id");
+    }
+
+    /// A `201` says it created something, with or without a body; one of
+    /// several successes having a body means a client can be told.
+    #[test]
+    fn a_created_or_a_body_among_the_successes_is_not_a_bodyless_action() {
+        let b = structure();
+        create(&b, "addFile", "files");
+        create(&b, "addThing", "things");
+    }
+
+    #[test]
+    fn a_static_tail_of_two_segments_needs_no_body_to_act() {
+        let b = structure();
+        other(&b, "deepNoBody", "deep", "id");
+        create(&b, "deepWithBody", "z");
+    }
+
+    /// Two parameters in a row name one resource together: the contract does
+    /// not say which of them is its identity.
+    #[test]
+    fn a_tail_under_two_params_stays_as_it_was_without_a_body() {
+        create(&structure(), "closeUnderTwoParams", "close");
+    }
+
+    #[test]
+    fn no_body_beats_a_read_verb() {
+        let b = structure();
+        other(&b, "syncNoBody", "tasks", "id");
+        assert_eq!(
+            b.operation("searchWithBody").unwrap().kind,
+            OperationKind::Query
+        );
+    }
+
+    #[test]
+    fn put_and_patch_on_a_tail_write_what_their_path_names() {
+        let b = structure();
+        for (id, resource) in [("putStar", "star"), ("patchChildren", "children")] {
+            let op = b.operation(id).unwrap();
+            assert_eq!(op.kind, OperationKind::Command(Effect::Update), "{id}");
+            assert_eq!(op.resource_type.as_deref(), Some(resource), "{id}");
+        }
+    }
+
+    /// The created record has to land where its read looks.
+    #[test]
+    fn an_answer_read_elsewhere_is_created_under_that_read() {
+        create(&structure(), "refundCharge", "refunds");
+    }
+
+    /// `GET /disputes` lists it, and so might any list of anything.
+    #[test]
+    fn a_list_alone_does_not_rename_the_type() {
+        other(&structure(), "disputeCharge", "charges", "id");
+    }
+
+    /// `201` says it made something. With no identity it stores nothing.
+    #[test]
+    fn a_created_answer_is_a_record_with_or_without_an_identity() {
+        let b = structure();
+        create(&b, "comment", "comments");
+        create(&b, "mintToken", "tokens");
+        create(&b, "addTracks", "tracks");
+        assert_eq!(b.operation("mintToken").unwrap().identity, None);
+    }
+
+    /// Its parent's list is no read elsewhere: the parent is what it acts on.
+    #[test]
+    fn the_parents_own_list_is_not_a_read_elsewhere() {
+        other(&structure(), "closeOrder", "orders", "id");
+    }
+
+    /// `Calls.json` and `Calls/{CallSid}.json` are one route with its detail.
+    #[test]
+    fn a_format_suffix_does_not_hide_a_detail_route() {
+        create(&structure(), "createCall", "Calls");
+    }
+
+    fn example(rel: &str) -> Bundle {
+        let path = format!("{}/../../examples/apis/{rel}", env!("CARGO_MANIFEST_DIR"));
+        compile(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// `POST .../transitions` answers `204` beside a `GET` of the same path.
+    #[test]
+    fn jiras_transition_acts_on_its_issue() {
+        let b = example("jira/jira.openapi.yaml");
+        other(&b, "doTransition", "issue", "issueIdOrKey");
+        let identity = b.operation("doTransition").unwrap().identity.clone();
+        let read = b.operation("getIssue").unwrap().identity.clone().unwrap();
+        let identity = identity.unwrap();
+        assert_eq!(identity.field, read.field);
+        assert_eq!(identity.path_field, read.path_field);
+        assert_eq!(
+            b.operation("getTransitions").unwrap().kind,
+            OperationKind::Query
+        );
+        create(&b, "addComment", "comment");
+    }
+
+    #[test]
+    fn real_contracts_classify_by_structure() {
+        let auth0 = example("auth0-management/auth0-management.openapi.yaml");
+        other(&auth0, "post_user_roles", "users", "id");
+        let spotify = example("spotify/spotify.openapi.yaml");
+        create(&spotify, "add-items-to-playlist", "items");
+        create(&spotify, "add-tracks-to-playlist", "tracks");
+        let github = example("github-rest/github-rest.openapi.yaml");
+        create(
+            &github,
+            "apps/create-installation-access-token",
+            "access_tokens",
+        );
+        create(&github, "issues/create-comment", "comments");
+        let paypal = example("paypal/paypal-payments.openapi.yaml");
+        create(&paypal, "captures.refund", "refunds");
+        let twilio = example("twilio/twilio.openapi.yaml");
+        create(&twilio, "CreateCall", "Calls");
+        create(&twilio, "CreateMessage", "Messages");
+        let discord = example("discord/discord.openapi.yaml");
+        create(&discord, "create_message", "messages");
+        create(&discord, "create_interaction_response", "callback");
+    }
+
+    /// One contract for the shapes the review found, each route on its own
+    /// resource so that none reads another.
+    fn shaped(routes: &str, schemas: &str) -> Bundle {
+        let contract = format!(
+            "openapi: 3.0.0\ninfo: {{title: Shapes, version: \"1\"}}\npaths:\n{routes}components:\n  schemas:\n{schemas}"
+        );
+        compile(contract.as_bytes()).unwrap()
+    }
+
+    const NEW_BODY: &str = r##"requestBody: {required: true, content: {application/json: {schema: {type: object, properties: {body: {type: string}}}}}}"##;
+
+    fn body_of(status: &str, schema: &str) -> String {
+        format!(
+            r##"responses: {{"{status}": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/{schema}"}}}}}}}}}}"##
+        )
+    }
+
+    fn parent_and_child(parent: &str, tail: &str, status: &str, request: &str) -> Bundle {
+        let read = body_of("200", "Node");
+        let write = body_of(status, "Node");
+        shaped(
+            &format!(
+                "  /{parent}/{{id}}:\n    get:\n      operationId: read\n      {read}\n  /{parent}/{{id}}/{tail}:\n    post:\n      operationId: subject\n      {request}\n      {write}\n"
+            ),
+            "    Node: {type: object, properties: {id: {type: string}, text: {type: string}}}\n",
+        )
+    }
+
+    fn update_of(b: &Bundle, id: &str, parent: &str) {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update), "{id}");
+        assert_eq!(op.resource_type.as_deref(), Some(parent), "{id}");
+        assert!(op.is_action(), "{id}");
+    }
+
+    /// An answer of the parent's own schema is an update whatever the status
+    /// and the request: nothing in the contract tells a reply from a capture.
+    /// The runtime goes by the identity the answer carries.
+    #[test]
+    fn an_answer_of_the_parents_schema_is_an_update() {
+        let required = r##"requestBody: {required: true, content: {application/json: {schema: {type: object, required: [amount], properties: {amount: {type: integer}}}}}}"##;
+        let optional = r##"requestBody: {content: {application/json: {schema: {type: object, properties: {body: {type: string}}}}}}"##;
+        let one_of = r##"requestBody: {required: true, content: {application/json: {schema: {oneOf: [{type: object, properties: {a: {type: string}}}, {type: object, properties: {b: {type: string}}}]}}}}"##;
+        let text = "requestBody: {required: true, content: {text/plain: {schema: {type: string}}}}";
+        for request in ["summary: none", NEW_BODY, required, optional, one_of, text] {
+            for status in ["200", "201"] {
+                for (parent, tail) in [
+                    ("comments", "replies"),
+                    ("documents", "copies"),
+                    ("orders", "capture"),
+                ] {
+                    update_of(
+                        &parent_and_child(parent, tail, status, request),
+                        "subject",
+                        parent,
+                    );
+                }
+            }
+        }
+        let paypal = example("paypal/paypal-orders.openapi.yaml");
+        for id in ["orders.capture", "orders.authorize", "orders.confirm"] {
+            update_of(&paypal, id, "orders");
+        }
+    }
+
+    /// Two open objects are not the parent's schema by an exact statement.
+    #[test]
+    fn an_opaque_answer_does_not_overwrite_its_parent() {
+        let open = r##"responses: {"200": {description: ok, content: {application/json: {schema: {type: object}}}}}"##;
+        let b = shaped(
+            &format!(
+                "  /jobs/{{id}}:\n    get:\n      operationId: read\n      {open}\n  /jobs/{{id}}/run:\n    post:\n      operationId: subject\n      {open}\n"
+            ),
+            "    Unused: {type: object}\n",
+        );
+        other(&b, "subject", "jobs", "id");
+    }
+
+    #[test]
+    fn action_false_with_a_type_corrects_an_update() {
+        let corrected =
+            format!("{NEW_BODY}\n      x-mockingbird-resource: {{action: false, type: comments}}");
+        let b = parent_and_child("comments", "replies", "200", &corrected);
+        create(&b, "subject", "comments");
+    }
+
+    /// `Operation` also answers a `DELETE` elsewhere, which serves no record.
+    #[test]
+    fn a_shared_answer_needs_a_get_by_path_to_rename_the_type() {
+        let answer = body_of("200", "Operation");
+        let without = format!(
+            "  /instances/{{id}}/start:\n    post:\n      operationId: subject\n      {answer}\n  /disks/{{id}}:\n    delete:\n      operationId: dropDisk\n      {answer}\n"
+        );
+        let schemas = "    Operation: {type: object, properties: {name: {type: string}, done: {type: boolean}}}\n";
+        other(&shaped(&without, schemas), "subject", "instances", "id");
+        let with = format!(
+            "{without}  /operations/{{name}}:\n    get:\n      operationId: getOperation\n      {answer}\n"
+        );
+        create(&shaped(&with, schemas), "subject", "operations");
+    }
+
+    /// Two reads serve it: the contract does not say which it is.
+    #[test]
+    fn two_reads_serving_an_answer_rename_nothing() {
+        let answer = body_of("200", "Rec");
+        let b = shaped(
+            &format!(
+                "  /a/{{id}}/go:\n    post:\n      operationId: subject\n      {answer}\n  /x/{{id}}:\n    get:\n      operationId: x\n      {answer}\n  /y/{{id}}:\n    get:\n      operationId: y\n      {answer}\n"
+            ),
+            "    Rec: {type: object, properties: {id: {type: string}}}\n",
+        );
+        other(&b, "subject", "a", "id");
+    }
+
+    /// One string member is no envelope: `{snapshot_id}` is not `{id}`.
+    #[test]
+    fn an_envelope_unwraps_only_to_an_object() {
+        let snapshot = r##"responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {snapshot_id: {type: string}}}}}}}"##;
+        let id = r##"responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}}"##;
+        let b = shaped(
+            &format!(
+                "  /volumes/{{id}}/snapshots:\n    post:\n      operationId: subject\n      {snapshot}\n  /disks/{{id}}:\n    get:\n      operationId: getDisk\n      {id}\n  /notes/{{id}}:\n    get:\n      operationId: getNote\n      {id}\n  /notes/{{id}}/pin:\n    post:\n      operationId: pin\n      {snapshot}\n"
+            ),
+            "    Unused: {type: object}\n",
+        );
+        other(&b, "subject", "volumes", "id");
+        other(&b, "pin", "notes", "id");
+    }
+
+    /// Neither has a `GET`, so nothing says `Ack` is the order.
+    #[test]
+    fn an_answer_shared_with_a_delete_does_not_overwrite_its_parent() {
+        let ack = body_of("200", "Ack");
+        let b = shaped(
+            &format!(
+                "  /orders/{{id}}:\n    delete:\n      operationId: dropOrder\n      {ack}\n  /orders/{{id}}/ship:\n    post:\n      operationId: subject\n      {ack}\n"
+            ),
+            "    Ack: {type: object, properties: {ok: {type: boolean}}}\n",
+        );
+        other(&b, "subject", "orders", "id");
+    }
+
+    /// A read that wraps its record serves it just the same.
+    #[test]
+    fn a_read_side_envelope_counts_at_any_status() {
+        let refund = r##"{"$ref": "#/components/schemas/Refund"}"##;
+        let b = shaped(
+            &format!(
+                r##"  /charges/{{id}}/refund:
+    post:
+      operationId: subject
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {refund}}}}}}}}}
+  /refunds/{{id}}:
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{data: {refund}}}}}}}}}}}}}
+"##
+            ),
+            "    Refund: {type: object, properties: {id: {type: string}}}\n",
+        );
+        create(&b, "subject", "refunds");
+        assert_eq!(
+            b.operation("subject")
+                .unwrap()
+                .identity
+                .as_ref()
+                .unwrap()
+                .field,
+            "id"
+        );
+    }
+
+    /// Whichever success declares it, `identity` is declared.
+    #[test]
+    fn the_identity_hint_reads_the_declared_201_too() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: Ext, version: "1"}
+paths:
+  /a/{id}/b:
+    post:
+      operationId: subject
+      x-mockingbird-resource: {identity: sku}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+        "201": {description: ok, content: {application/json: {schema: {type: object, properties: {sku: {type: string}}}}}}
+"##;
+        let (op, warnings) = subject(contract);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.identity.unwrap().field, "sku");
+    }
+
+    /// Whatever names its identity: the read elsewhere knows it.
+    #[test]
+    fn a_record_read_elsewhere_takes_its_identity_from_the_read() {
+        for (status, schema, param, field) in [
+            (
+                "201",
+                "{shipment_id: {type: string}, carrier: {type: string}}",
+                "shipment_id",
+                Some("shipment_id"),
+            ),
+            (
+                "200",
+                "{shipment_id: {type: string}, carrier: {type: string}}",
+                "shipment_id",
+                Some("shipment_id"),
+            ),
+            (
+                "201",
+                "{key: {type: string}, secret: {type: string}}",
+                "key",
+                Some("key"),
+            ),
+            ("201", "{Id: {type: string}}", "id", Some("Id")),
+            ("201", "{_id: {type: string}}", "shipment_id", None),
+            (
+                "201",
+                "{data: {type: object}, links: {type: object}}",
+                "shipment_id",
+                None,
+            ),
+        ] {
+            let write = body_of(status, "Shipment");
+            let read = body_of("200", "Shipment");
+            let b = shaped(
+                &format!(
+                    "  /orders/{{id}}/shipments:\n    post:\n      operationId: subject\n      {write}\n  /parcels/{{{param}}}:\n    get:\n      operationId: read\n      {read}\n"
+                ),
+                &format!("    Shipment: {{type: object, properties: {schema}}}\n"),
+            );
+            let op = b.operation("subject").unwrap();
+            assert_eq!(op.kind, OperationKind::Command(Effect::Create), "{schema}");
+            assert_eq!(op.resource_type.as_deref(), Some("parcels"), "{schema}");
+            let identity = op.identity.as_ref();
+            assert_eq!(identity.map(|i| i.field.as_str()), field, "{schema}");
+            assert_eq!(
+                identity.and_then(|i| i.path_param.clone()),
+                None,
+                "{schema}"
+            );
+        }
+    }
+
+    /// Serving it by path is the contract's statement, with no identity name
+    /// needed.
+    #[test]
+    fn a_200_read_elsewhere_needs_no_identity() {
+        let b = shaped(
+            &format!(
+                "  /jobs/{{id}}/run:\n    post:\n      operationId: subject\n      {}\n  /stats/{{day}}:\n    get:\n      operationId: read\n      {}\n",
+                body_of("200", "Ack"),
+                body_of("200", "Ack"),
+            ),
+            "    Ack: {type: object, properties: {ok: {type: boolean}}}\n",
+        );
+        create(&b, "subject", "stats");
+    }
+
+    /// Any declared `201` counts, and it says what the identity is.
+    #[test]
+    fn a_201_beside_another_success_counts() {
+        let id = r##"{"$ref": "#/components/schemas/Rec"}"##;
+        let b = shaped(
+            &format!(
+                r##"  /a/{{id}}/both:
+    post:
+      operationId: both
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {id}}}}}}}
+        "201": {{description: ok, content: {{application/json: {{schema: {id}}}}}}}
+  /a/{{id}}/empty:
+    post:
+      operationId: emptyFirst
+      responses:
+        "200": {{description: already there}}
+        "201": {{description: ok, content: {{application/json: {{schema: {id}}}}}}}
+"##
+            ),
+            "    Rec: {type: object, properties: {id: {type: string}}}\n",
+        );
+        for (op, resource) in [("both", "both"), ("emptyFirst", "empty")] {
+            create(&b, op, resource);
+            let identity = b.operation(op).unwrap().identity.clone().unwrap();
+            assert_eq!(identity.field, "id", "{op}");
+        }
+    }
+
+    /// The parent's read wraps what it answers, and a list elsewhere holds
+    /// the same schema: it still acts on the parent.
+    #[test]
+    fn an_answer_the_parent_wraps_is_not_read_elsewhere() {
+        let user = r##"{"$ref": "#/components/schemas/User"}"##;
+        let b = shaped(
+            &format!(
+                r##"  /users/{{id}}:
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{data: {user}}}}}}}}}}}}}
+  /users/{{id}}/suspend:
+    post:
+      operationId: subject
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {user}}}}}}}}}
+  /teams/{{id}}/members:
+    get:
+      operationId: members
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: array, items: {user}}}}}}}}}}}
+"##
+            ),
+            "    User: {type: object, properties: {id: {type: string}}}\n",
+        );
+        other(&b, "subject", "users", "id");
+    }
+
+    #[test]
+    fn a_read_elsewhere_counts_through_an_envelope_or_an_all_of() {
+        let refund = r##"{"$ref": "#/components/schemas/Refund"}"##;
+        let short = r##"{"$ref": "#/components/schemas/RefundCreated"}"##;
+        let b = shaped(
+            &format!(
+                r##"  /a/{{id}}/wrapped:
+    post:
+      operationId: wrapped
+      responses: {{"201": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{data: {refund}}}}}}}}}}}}}
+  /b/{{id}}/shorter:
+    post:
+      operationId: shorter
+      responses: {{"201": {{description: ok, content: {{application/json: {{schema: {short}}}}}}}}}
+  /c/{{id}}/shorter200:
+    post:
+      operationId: shorter200
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {short}}}}}}}}}
+  /refunds/{{id}}:
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {refund}}}}}}}}}
+"##
+            ),
+            r##"    RefundCreated: {type: object, properties: {id: {type: string}, status: {type: string}}}
+    Refund:
+      allOf:
+        - $ref: "#/components/schemas/RefundCreated"
+        - {type: object, properties: {amount: {type: integer}}}
+"##,
+        );
+        for id in ["wrapped", "shorter", "shorter200"] {
+            create(&b, id, "refunds");
+        }
+    }
+
+    fn with_ext(path: &str, method: &str, status: &str, ext: &str) -> String {
+        format!(
+            r##"
+openapi: 3.0.0
+info: {{title: Ext, version: "1"}}
+paths:
+  /things/{{id}}:
+    get:
+      operationId: getThing
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Thing"}}}}}}}}}}
+  {path}:
+    {method}:
+      operationId: subject
+      x-mockingbird-resource: {ext}
+      responses: {status}
+components:
+  schemas:
+    Thing: {{type: object, properties: {{id: {{type: string}}, sku: {{type: string}}}}}}
+"##
+        )
+    }
+
+    const THING: &str = r##"{"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}"##;
+    const NOTE: &str = r##"{"200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}}"##;
+
+    fn subject(contract: &str) -> (mb_mcm::Operation, Vec<String>) {
+        let (b, warnings) = compile_with_warnings(contract.as_bytes()).unwrap();
+        let op = b.operation("subject").unwrap().clone();
+        let codes = warnings
+            .into_iter()
+            .filter(|w| w.code == "invalid_resource_extension")
+            .map(|w| {
+                assert_eq!(w.operation.as_deref(), Some("subject"));
+                assert!(w.message.contains("x-mockingbird-resource"), "{w:?}");
+                w.message
+            })
+            .collect();
+        (op, codes)
+    }
+
+    /// The tail says nothing English here: it would be read as a read.
+    #[test]
+    fn the_extension_makes_a_read_verb_an_action() {
+        let c = with_ext("/things/{id}/sync", "post", NOTE, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("things"));
+        assert!(op.is_action());
+    }
+
+    #[test]
+    fn the_extension_makes_a_read_verb_a_write_of_its_own() {
+        let c = with_ext("/things/{id}/history", "post", NOTE, "{action: false}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("history"));
+        assert!(!op.is_action());
+    }
+
+    #[test]
+    fn the_extension_overrides_what_inference_decides() {
+        // Inference: an action. Declared: a collection.
+        let c = with_ext("/things/{id}/note", "post", NOTE, "{action: false}");
+        let (op, _) = subject(&c);
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("note"));
+        // Inference: a create with no parent. Declared: an action, deep down.
+        let c = with_ext("/things/{id}/a/b", "post", THING, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update));
+        assert_eq!(op.resource_type.as_deref(), Some("things"));
+        // PUT is left alone by inference, not by the contract's author.
+        let c = with_ext(
+            "/things/{id}/star",
+            "put",
+            r#"{"204": {description: ok}}"#,
+            "{action: true}",
+        );
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("things"));
+    }
+
+    #[test]
+    fn the_extension_names_the_type_and_the_identity() {
+        let c = with_ext(
+            "/parts/{id}",
+            "put",
+            THING,
+            "{type: widgets, identity: sku}",
+        );
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update));
+        assert_eq!(op.resource_type.as_deref(), Some("widgets"));
+        let identity = op.identity.unwrap();
+        assert_eq!(identity.field, "sku");
+        assert_eq!(identity.path_param.as_deref(), Some("id"));
+        // On an action, the type and the identity of what it acts on.
+        let c = with_ext(
+            "/things/{id}/ship",
+            "post",
+            NOTE,
+            "{action: true, type: widgets, identity: sku}",
+        );
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("widgets"));
+        let identity = op.identity.unwrap();
+        assert_eq!(identity.field, "sku");
+        assert_eq!(identity.path_param.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn an_invalid_extension_warns_and_inference_stands() {
+        let inferred = with_ext("/things/{id}/note", "post", NOTE, "{}");
+        let (expected, warnings) = subject(&inferred);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for ext in [
+            "true",
+            "[a]",
+            "{type: 1}",
+            "{type: ''}",
+            "{identity: 1}",
+            "{identity: ''}",
+            "{identity: nowhere}",
+            "{action: 'yes'}",
+            "{resource: things}",
+            "{type: 'two words'}",
+            "{type: 'a/b'}",
+            "{type: '{id}'}",
+        ] {
+            let c = with_ext("/things/{id}/note", "post", NOTE, ext);
+            let (op, warnings) = subject(&c);
+            assert_eq!(warnings.len(), 1, "{ext}: {warnings:?}");
+            assert_eq!(op.kind, expected.kind, "{ext}");
+            assert_eq!(op.resource_type, expected.resource_type, "{ext}");
+            assert_eq!(op.identity, expected.identity, "{ext}");
+        }
+    }
+
+    #[test]
+    fn an_impossible_action_warns_and_inference_stands() {
+        let c = with_ext("/standalone", "post", NOTE, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("standalone"));
+        let c = with_ext("/things/{id}/view", "get", NOTE, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Query);
+        let streams =
+            r#"{"200": {description: ok, content: {text/event-stream: {schema: {type: object}}}}}"#;
+        let c = with_ext("/things/{id}/reply", "post", streams, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::StreamServer);
+    }
+
+    #[test]
+    fn an_action_false_with_nothing_to_override_warns() {
+        for (path, method) in [
+            ("/things/{id}/view", "get"),
+            ("/things/{id}/star", "put"),
+            ("/parts/{id}", "post"),
+        ] {
+            let c = with_ext(path, method, NOTE, "{action: false}");
+            let (_, warnings) = subject(&c);
+            assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+        }
+        // Stating what inference already decides is not ignored.
+        let c = with_ext("/standalone", "post", NOTE, "{action: false}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        let streams =
+            r#"{"200": {description: ok, content: {text/event-stream: {schema: {type: object}}}}}"#;
+        let c = with_ext("/things/{id}/reply", "post", streams, "{action: false}");
+        let (_, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    /// A route is judged by the reads as declared, wherever they sort.
+    #[test]
+    fn a_route_lands_where_a_read_declares_its_type() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: Ext, version: "1"}
+paths:
+  /a/{id}/refund:
+    post:
+      operationId: subject
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+  /z/{refund_id}:
+    get:
+      operationId: getRefund
+      x-mockingbird-resource: {type: refunds}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+components:
+  schemas:
+    Refund: {type: object, properties: {id: {type: string}}}
+"##;
+        let (op, warnings) = subject(contract);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("refunds"));
+    }
+
+    /// One bad member does not cost the good ones.
+    #[test]
+    fn a_valid_member_beside_an_invalid_one_holds() {
+        let c = with_ext(
+            "/things/{id}/note",
+            "post",
+            NOTE,
+            "{type: widgets, action: 'yes'}",
+        );
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.resource_type.as_deref(), Some("widgets"));
     }
 }
