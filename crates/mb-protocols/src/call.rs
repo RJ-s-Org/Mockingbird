@@ -2735,9 +2735,16 @@ fn owner_of_param(op: &Operation, call: &OperationCall, name: &str) -> Option<Ow
         .rposition(|s| segment_param(s).is_some())?;
     let owner = segment_param(segments[before])?;
     let value = |p: &str| call.path_params.get(p).and_then(id_string);
+    // A bare `{id}` is named by the collection before it: a project's.
+    let owner_name = match before.checked_sub(1).map(|i| segments[i]) {
+        Some(collection) if mb_mcm::is_generic_id(owner) && segment_param(collection).is_none() => {
+            collection.strip_suffix('s').unwrap_or(collection)
+        }
+        _ => owner,
+    };
     Some(Owner {
         collection: fill_path(call, &segments[..at])?,
-        param: owner.to_string(),
+        param: owner_name.to_string(),
         value: value(owner)?,
         name: value(name)?,
         tail: fill_path(call, &segments[before..=at])?.path,
@@ -2933,12 +2940,19 @@ fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option
         value => id_string(value).as_deref() == Some(owner.value.as_str()),
     };
     let is_link = |value: &Value| value.as_str().is_some_and(|text| text.contains("://"));
+    let numeric_owner = owner.value.parse::<f64>().is_ok();
     let mut tied = members
         .iter()
         .filter(|(member, value)| {
-            tied_to_param(member, &owner.param) && !is_link(value) && !own_type(member)
+            !mb_mcm::is_generic_id(member)
+                && tied_to_param(member, &owner.param)
+                && !is_link(value)
+                && !own_type(member)
         })
-        .filter(|(_, value)| value.is_string() || value.is_number() || value.is_object())
+        // A number says nothing of an owner the route names by a string.
+        .filter(|(_, value)| {
+            value.is_string() || value.is_object() || (value.is_number() && numeric_owner)
+        })
         .peekable();
     if tied.peek().is_some() {
         return Some(tied.any(|(_, value)| holds(value)));
@@ -2953,16 +2967,34 @@ fn shows_owner(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
     owner_evidence(rt, r, owner) == Some(true)
 }
 
-/// Whether `r` is known to be another's, by a record or by what it says.
+/// Whether a string of `r` ending in the name does not show `owner`: another
+/// owner's link, or none at all. Weak: a `homepage` may end so.
+fn links_elsewhere(r: &StoredResource, owner: &Owner) -> bool {
+    r.data.as_object().is_some_and(|members| {
+        members.values().filter_map(Value::as_str).any(|text| {
+            text.trim_end_matches('/')
+                .rsplit_once('/')
+                .is_some_and(|(_, last)| last == owner.name)
+                && !path_shows(text, owner)
+        })
+    })
+}
+
+/// Whether `r` is known to be another's: by a record, by what it says, or, when
+/// it says nothing, by a link elsewhere.
 fn known_foreign(
     rt: &MockRuntime,
     session: &SessionKey,
     r: &StoredResource,
     owner: &Owner,
 ) -> bool {
-    rt.collections()
-        .fits(session, r, owner)
-        .map_or_else(|| owner_evidence(rt, r, owner) == Some(false), |fits| !fits)
+    rt.collections().fits(session, r, owner).map_or_else(
+        || match owner_evidence(rt, r, owner) {
+            Some(shown) => !shown,
+            None => links_elsewhere(r, owner),
+        },
+        |fits| !fits,
+    )
 }
 
 /// Whether stored `r` may be taken for `owner`'s under the value in `field`. A
@@ -2983,24 +3015,14 @@ fn owner_fits(
         .fits(session, r, owner)
         .unwrap_or_else(|| match owner_evidence(rt, r, owner) {
             Some(shown) => shown,
-            None => {
-                r.data.get(field).is_some_and(Value::is_number)
-                    && !r.data.as_object().is_some_and(|members| {
-                        members.values().filter_map(Value::as_str).any(|text| {
-                            text.trim_end_matches('/')
-                                .rsplit_once('/')
-                                .is_some_and(|(_, last)| last == owner.name)
-                                && !path_shows(text, owner)
-                        })
-                    })
-            }
+            None => r.data.get(field).is_some_and(Value::is_number) && !links_elsewhere(r, owner),
         })
 }
 
 /// Whether `r`, stored under the value a path gave, is `owner`'s to answer with.
 /// A write takes it unless it is known to be another's. For a read a record
 /// decides; else a key that is no name of `r` is `r`'s id, and stands on its
-/// own. A name (in one of [`NAME_FIELDS`], or the end of a relative path) must
+/// own unless `r` says otherwise. A name (in one of [`NAME_FIELDS`], or the end of a relative path) must
 /// show its owner, or differ from `r`'s own `id`: only a write through the route
 /// keys it so, as a list or a mention keys by the `id`.
 fn key_fits(rt: &MockRuntime, session: &SessionKey, r: &StoredResource, owner: &Owner) -> bool {
@@ -3024,7 +3046,12 @@ fn key_fits(rt: &MockRuntime, session: &SessionKey, r: &StoredResource, owner: &
         .get("id")
         .and_then(id_string)
         .is_some_and(|id| id != r.id);
-    !is_name || written || shows_owner(rt, r, owner)
+    let evidence = owner_evidence(rt, r, owner);
+    if is_name {
+        written || evidence == Some(true)
+    } else {
+        evidence != Some(false)
+    }
 }
 
 /// The members that may hold a name path parameter `param` gives: one named for

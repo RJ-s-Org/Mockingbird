@@ -4513,3 +4513,191 @@ async fn a_list_records_what_a_mention_stored_first() {
     let (source, own) = read(&api, "/orgs/octo/teams/core").await;
     assert_eq!(source, "state", "{own}");
 }
+
+/// [`REPO_ISSUES`] with issues found across repositories, and deleted by number.
+fn searched_issues() -> String {
+    REPO_ISSUES
+        .replace(
+            "properties: {id: {type: integer}, number: {type: integer}, title: {type: string}}",
+            "properties: {id: {type: integer}, number: {type: integer}, title: {type: string}, url: {type: string}}",
+        )
+        .replace(
+            "  /repos/{owner}/{repo}/issues:\n",
+            "  /search/issues:\n    get:\n      operationId: searchIssues\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/Issue\"}}}}}\n  /repos/{owner}/{repo}/issues:\n",
+        )
+        .replace(
+            "      - {name: issue_number, in: path, required: true, schema: {type: integer}}\n",
+            "      - {name: issue_number, in: path, required: true, schema: {type: integer}}\n    delete:\n      operationId: deleteIssue\n      responses:\n        \"200\": {description: gone, content: {application/json: {schema: {type: object, properties: {deleted: {type: boolean}}}}}}\n",
+        )
+}
+
+fn issue_at(id: u64, repo: &str) -> Value {
+    json!({"id": id, "number": 7, "title": repo, "url": format!("https://x/repos/{repo}/issues/7")})
+}
+
+/// A link cannot only prove: one to another repository says a delete by number
+/// has the wrong issue, and it goes on to the right one.
+#[tokio::test]
+async fn a_delete_by_number_takes_the_issue_linking_to_its_repository() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        Ok(json!([issue_at(1, "octo/hello"), issue_at(2, "cat/world")]).to_string()),
+        Ok(json!({"deleted": true}).to_string()),
+    ]));
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(searched_issues().as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    read(&api, "/search/issues").await;
+    let (status, _, _) = api.call("DELETE", "/repos/octo/hello/issues/7", None).await;
+    assert!(status.is_success(), "{status}");
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "actions".into(),
+        session: "default".into(),
+    };
+    assert!(state.get(&session, "issues", "1").await.unwrap().is_none());
+    assert!(state.get(&session, "issues", "2").await.unwrap().is_some());
+}
+
+/// A delete under a repository no stored issue links to removes nothing.
+#[tokio::test]
+async fn a_delete_by_number_leaves_an_issue_linking_elsewhere() {
+    let api = actions_of(
+        &searched_issues(),
+        vec![
+            Ok(json!([issue_at(1, "octo/hello")]).to_string()),
+            Ok(json!({"deleted": true}).to_string()),
+        ],
+    );
+    read(&api, "/search/issues").await;
+    let (status, _, _) = api.call("DELETE", "/repos/cat/world/issues/7", None).await;
+    assert!(status.is_success(), "{status}");
+    let (source, kept) = read(&api, "/repos/octo/hello/issues/7").await;
+    assert_eq!(source, "state", "{kept}");
+}
+
+/// `/projects/{id}/labels/{name}`: `{id}` is the project's, so `project_id` shows
+/// it, and the label's own `id` says nothing of it. No record: another node.
+#[tokio::test]
+async fn a_generic_owner_parameter_is_read_from_its_collections_member() {
+    const LABELS: &str = r##"
+openapi: 3.0.0
+info: {title: Labels, version: "1"}
+paths:
+  /projects/{id}/labels/{name}:
+    get:
+      operationId: getLabel
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer}}
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/label"}}}}
+components:
+  schemas:
+    label:
+      type: object
+      required: [id, name, project_id]
+      properties: {id: {type: integer}, name: {type: string}, project_id: {type: integer}}
+"##;
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(
+        json!({"id": 77, "name": "bug", "project_id": 2}).to_string(),
+    )]));
+    let rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(LABELS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    store(
+        &state,
+        "labels",
+        "9",
+        json!({"id": 9, "name": "bug", "project_id": 1}),
+    )
+    .await;
+    let (source, own) = read(&api, "/projects/1/labels/bug").await;
+    assert_eq!(source, "state", "{own}");
+    assert_eq!(own["id"], 9);
+    let (source, other) = read(&api, "/projects/2/labels/bug").await;
+    assert_ne!(source, "state", "{other}");
+}
+
+/// A number cannot contradict a route that names its owner: a link decides.
+#[tokio::test]
+async fn a_numeric_owner_member_does_not_contradict_a_named_route() {
+    let contract = TEAMS
+        .replace(
+            "  /orgs/{org}/teams:\n",
+            "  /user/teams:\n    get:\n      operationId: myTeams\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/team\"}}}}}\n  /orgs/{org}/teams:\n",
+        )
+        .replace(
+            "        full_name: {type: string}\n        members",
+            "        org_id: {type: integer}\n        url: {type: string}\n        members",
+        );
+    let team = json!({"id": 1, "slug": "core", "org_id": 42, "url": "https://x/orgs/octo/teams/core", "members": 3});
+    let api = actions_of(&contract, vec![Ok(json!([team]).to_string())]);
+    read(&api, "/user/teams").await;
+    let (source, own) = read(&api, "/orgs/octo/teams/core").await;
+    assert_eq!(source, "state", "{own}");
+}
+
+/// A real id whose member names another parent is not this parent's.
+#[tokio::test]
+async fn a_string_id_naming_another_parent_does_not_answer() {
+    const REFUNDS: &str = r##"
+openapi: 3.0.0
+info: {title: Refunds, version: "1"}
+paths:
+  /v1/refunds:
+    get:
+      operationId: listRefunds
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/refund"}}}}}
+  /v1/charges/{charge}/refunds/{refund}:
+    get:
+      operationId: getRefund
+      parameters:
+        - {name: charge, in: path, required: true, schema: {type: string}}
+        - {name: refund, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/refund"}}}}
+components:
+  schemas:
+    refund:
+      type: object
+      required: [id, charge, amount]
+      properties: {id: {type: string}, charge: {type: string}, amount: {type: integer}}
+"##;
+    let api = actions_of(
+        REFUNDS,
+        vec![
+            Ok(json!([{"id": "re_1", "charge": "ch_a", "amount": 100}]).to_string()),
+            Ok(json!({"id": "re_1", "charge": "ch_b", "amount": 5}).to_string()),
+        ],
+    );
+    read(&api, "/v1/refunds").await;
+    let (source, other) = read(&api, "/v1/charges/ch_b/refunds/re_1").await;
+    assert_ne!(source, "state", "{other}");
+    assert_eq!(other["amount"], 5);
+    let (source, own) = read(&api, "/v1/charges/ch_a/refunds/re_1").await;
+    assert_eq!(source, "state", "{own}");
+    assert_eq!(own["amount"], 100);
+}
