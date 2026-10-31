@@ -11,8 +11,8 @@ use mb_engine::consistency::{
     ENVELOPE_KEYS, item_identity, list_items, list_members, property_schema,
 };
 use mb_engine::{
-    EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext, OFFLINE_REASON,
-    OperationCall, Source,
+    EffectOutcome, EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext,
+    OFFLINE_REASON, OperationCall, ResourceEffect, Source,
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
@@ -790,6 +790,8 @@ pub(crate) async fn prepare<'a>(
             source,
             usage: Usage::default(),
             fallback_reason,
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -919,6 +921,11 @@ pub(crate) async fn complete(
                 .and_then(|o| o.schema.as_ref());
             seed_entities(&mut state, session, rt, body, schema).await;
         }
+        // Last: an effect on what this call just stored sees it.
+        if rt.consistency && (200..300).contains(&generated.status) {
+            generated.effect_outcomes =
+                apply_effects(&mut state, session, rt, &generated.effects).await;
+        }
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -971,6 +978,109 @@ pub(crate) async fn complete(
         );
     }
     generated
+}
+
+/// Counter of the effects an answer listed, by `mock` and `outcome`
+/// (`applied` or `rejected`).
+const EFFECTS_METRIC: &str = "mb_effects_total";
+
+/// Applies what an answer says it changed in other resources, in this session
+/// only, and counts each effect. A rejected effect costs itself: the answer is
+/// served and the next effect still applies.
+async fn apply_effects(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    effects: &[ResourceEffect],
+) -> Vec<EffectOutcome> {
+    let mut outcomes = Vec::with_capacity(effects.len());
+    for effect in effects {
+        let result = apply_effect(state, session, rt, effect).await;
+        tracing::info!(
+            mock = %rt.name,
+            resource_type = %effect.resource_type,
+            id = %effect.id,
+            rejected = result.as_ref().err().copied(),
+            "effect of an answer"
+        );
+        let outcome = if result.is_ok() {
+            "applied"
+        } else {
+            "rejected"
+        };
+        metrics::counter!(EFFECTS_METRIC, "mock" => rt.name.clone(), "outcome" => outcome)
+            .increment(1);
+        outcomes.push(EffectOutcome {
+            effect: effect.clone(),
+            rejected: result.err().map(str::to_string),
+        });
+    }
+    outcomes
+}
+
+/// Adds what became of `generated`'s effects to a request record's `request`
+/// (nothing when it listed none), under `effects`.
+pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse) {
+    if generated.effect_outcomes.is_empty() {
+        return;
+    }
+    let recorded = generated.effect_outcomes.iter().map(|o| {
+        let mut record = serde_json::json!({
+            "type": o.effect.resource_type,
+            "id": o.effect.id,
+            "set": o.effect.set,
+            "outcome": if o.rejected.is_some() { "rejected" } else { "applied" },
+        });
+        if let Some(reason) = &o.rejected {
+            record["reason"] = Value::from(reason.as_str());
+        }
+        record
+    });
+    if request.is_null() {
+        *request = serde_json::json!({});
+    }
+    if let Value::Object(request) = request {
+        match request.get_mut("effects") {
+            Some(Value::Array(list)) => list.extend(recorded),
+            _ => {
+                request.insert("effects".to_string(), Value::Array(recorded.collect()));
+            }
+        }
+    }
+}
+
+/// Merges `effect` into the stored resource it names; `Err` says why not. The
+/// resource must exist (an effect never creates one, and never deletes one),
+/// keep its identity and, merged, still suit its type (see [`entity_fits`]).
+async fn apply_effect(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    effect: &ResourceEffect,
+) -> Result<(), &'static str> {
+    let t = effect.resource_type.as_str();
+    let identity = rt.index().identity_fields(t);
+    if effect
+        .set
+        .keys()
+        .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
+    {
+        return Err("it sets an identity field");
+    }
+    let Some(mut stored) = state.get(session, t, &effect.id).await else {
+        return Err("no such resource");
+    };
+    let Value::Object(data) = &mut stored.data else {
+        return Err("the stored resource is not an object");
+    };
+    data.extend(effect.set.clone());
+    if !entity_fits(rt, t, &stored.data) {
+        return Err("the merged resource breaks its schema");
+    }
+    if !state.upsert(session, stored).await {
+        return Err("the store took no write");
+    }
+    Ok(())
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
@@ -1044,6 +1154,9 @@ pub(crate) struct BundleIndex {
     /// Per resource type: the fields its operations take from the path
     /// (GitHub's issue `number`), sorted and deduplicated.
     path_fields: HashMap<String, Vec<String>>,
+    /// Per resource type: the fields its operations identify it by, those
+    /// [`BundleIndex::path_fields`] holds included, sorted and deduplicated.
+    identity_fields: HashMap<String, Vec<String>>,
     /// The members every query operation's success schema lists.
     listed: HashSet<String>,
     /// Per operation, by position: the members its success schema lists.
@@ -1071,6 +1184,7 @@ impl BundleIndex {
     pub(crate) fn new(bundle: &mb_mcm::Bundle) -> Self {
         let mut by_id = HashMap::with_capacity(bundle.operations.len());
         let mut path_fields: HashMap<String, Vec<String>> = HashMap::new();
+        let mut identity_fields: HashMap<String, Vec<String>> = HashMap::new();
         let mut list_members_of = Vec::with_capacity(bundle.operations.len());
         let mut listed = HashSet::new();
         let mut read_types = HashSet::new();
@@ -1088,6 +1202,11 @@ impl BundleIndex {
                     .entry(t.to_string())
                     .or_default()
                     .push(field.to_string());
+            }
+            if let (Some(t), Some(identity)) = (op.resource_type.as_deref(), op.identity.as_ref()) {
+                let fields = identity_fields.entry(t.to_string()).or_default();
+                fields.push(identity.field.clone());
+                fields.extend(identity.path_field.iter().cloned());
             }
             let members = op
                 .success_output()
@@ -1113,7 +1232,11 @@ impl BundleIndex {
             }
             list_members_of.push(members);
         }
-        for fields in path_fields.values_mut().chain(referrers.values_mut()) {
+        for fields in path_fields
+            .values_mut()
+            .chain(identity_fields.values_mut())
+            .chain(referrers.values_mut())
+        {
             fields.sort_unstable();
             fields.dedup();
         }
@@ -1128,6 +1251,7 @@ impl BundleIndex {
             #[cfg(any(test, feature = "events"))]
             channel_by_id,
             path_fields,
+            identity_fields,
             listed,
             list_members: list_members_of,
             types_by_def: ranked_defs
@@ -1157,6 +1281,12 @@ impl BundleIndex {
 
     fn path_fields(&self, resource_type: &str) -> &[String] {
         self.path_fields
+            .get(resource_type)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn identity_fields(&self, resource_type: &str) -> &[String] {
+        self.identity_fields
             .get(resource_type)
             .map_or(&[], Vec::as_slice)
     }

@@ -80,6 +80,14 @@ With a Postgres lock, leadership can overlap: when the holder's session ends on 
 
 **Action:** check the broker and the `brokers.<name>` settings (address, TLS, SASL secret). Clients reconnect by themselves. Check the broker channel state in the console's Channels tab or `GET /api/v1/mocks/<mock>/channels`.
 
+## Effects rejected
+
+**Signal:** `mb_effects_total{mock,outcome="rejected"}` rising against `outcome="applied"`.
+
+**Meaning:** LLM answers name changes to other resources that fail a check: the resource is not stored in the session, the change touches its identity, the result breaks its schema, or the store took no write. Calls are still served, and the rejected change is simply not made, so a later read shows the old value. The request log keeps each effect under the record's `request.effects`, with its `outcome` and `reason`; each is also logged at `info` (`effect of an answer`).
+
+**Action:** none is needed for a few. When they dominate for one mock, read the log lines: a schema the model keeps breaking usually needs a clearer `description` or persona. A burst alongside `mb_state_errors_total{mock}` is the store, not the model.
+
 ## Request log dropped
 
 **Signal:** `mb_request_log_dropped_total{mock}` (and `mb_request_log_errors_total`) increasing.

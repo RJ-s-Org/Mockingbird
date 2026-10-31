@@ -477,6 +477,7 @@ async fn generate_in(
                         Err(e) => Err(e),
                     };
                     generated.map(|generated| {
+                        call::record_effects(&mut report.request, &generated);
                         report.usage = generated.usage;
                         report.source = Some(generated.source);
                         report.fallback_reason = generated.fallback_reason;
@@ -600,6 +601,7 @@ pub(crate) fn merged_record(
     }
     reports.sort_by(|a, b| a.0.cmp(&b.0));
     let mut args = Map::new();
+    let mut effects: Vec<Value> = Vec::new();
     let mut operations: Vec<String> = Vec::new();
     let (_, first) = reports.first()?;
     let mut merged = first.clone();
@@ -616,6 +618,9 @@ pub(crate) fn merged_record(
             key.clone(),
             r.request.get("args").cloned().unwrap_or(Value::Null),
         );
+        if let Some(Value::Array(list)) = r.request.get("effects") {
+            effects.extend(list.iter().cloned());
+        }
         merged.status = merged.status.max(r.status);
         merged.source = match (merged.source, r.source) {
             (Some(a), Some(b)) => Some(a.worst(b)),
@@ -630,6 +635,9 @@ pub(crate) fn merged_record(
     merged.operation_id = Some(operations.join(","));
     if let Value::Object(request) = &mut merged.request {
         request.insert("args".into(), Value::Object(args));
+        if !effects.is_empty() {
+            request.insert("effects".into(), Value::Array(effects));
+        }
     }
     if merged.response.is_some() {
         merged.response = response();

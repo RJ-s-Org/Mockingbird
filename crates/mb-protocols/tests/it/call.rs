@@ -1871,3 +1871,610 @@ async fn consistency_off_follows_no_new_references() {
     read(&api, "/customers/c9").await;
     assert!(related_of(&prompt_of(&api, 0)).is_empty());
 }
+
+/// A booking that cancels (answering a cancellation, not the booking), a
+/// charge that refunds, and a widget keyed by `sku`.
+const EFFECTS: &str = r##"
+openapi: 3.0.0
+info: {title: Effects, version: "1"}
+paths:
+  /bookings/{id}:
+    get:
+      operationId: getBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /bookings/{id}/cancel:
+    post:
+      operationId: cancelBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cancellation"}}}}
+  /charges:
+    get:
+      operationId: listCharges
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Charge"}}
+  /charges/{id}:
+    get:
+      operationId: getCharge
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Charge"}}}}
+  /widgets/{sku}:
+    get:
+      operationId: getWidget
+      parameters: [{name: sku, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+components:
+  schemas:
+    Booking:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, number: {type: integer}}
+    Cancellation:
+      type: object
+      required: [reason]
+      properties: {reason: {type: string}}
+    Charge:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Widget:
+      type: object
+      required: [sku, status]
+      properties: {sku: {type: string}, status: {type: string}}
+"##;
+
+fn effects_runtime(
+    consistency: bool,
+    store: Arc<dyn StateStore>,
+    script: Vec<Result<String, LlmError>>,
+) -> Actions {
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(EFFECTS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        store,
+    );
+    rt.consistency = consistency;
+    Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    }
+}
+
+/// [`effects_runtime`] over a store holding booking `b1` (held) and charge
+/// `ch1` (paid), and its one answer: `reason` with `effects`.
+async fn cancelling(consistency: bool, effects: Value) -> (Actions, Arc<MemoryStore>) {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "bookings",
+        "b1",
+        json!({"id": "b1", "status": "held"}),
+    )
+    .await;
+    store(
+        &state,
+        "charges",
+        "ch1",
+        json!({"id": "ch1", "status": "paid"}),
+    )
+    .await;
+    let answer = json!({"response": {"reason": "asked"}, "effects": effects});
+    let api = effects_runtime(
+        consistency,
+        Arc::clone(&state) as Arc<dyn StateStore>,
+        vec![Ok(answer.to_string())],
+    );
+    (api, state)
+}
+
+async fn stored_data(state: &MemoryStore, resource_type: &str, id: &str) -> Value {
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "references".into(),
+        session: "default".into(),
+    };
+    state
+        .get(&session, resource_type, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .data
+}
+
+/// Runs `test` on this thread with a metrics recorder, and returns how many
+/// effects it counted, applied and rejected, for mock `references`.
+fn counting_effects<F: std::future::Future<Output = ()>>(test: F) -> (u64, u64) {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test);
+    });
+    let (mut applied, mut rejected) = (0, 0);
+    for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+        if key.key().name() != "mb_effects_total" {
+            continue;
+        }
+        let label = |name: &str| {
+            key.key()
+                .labels()
+                .find(|l| l.key() == name)
+                .map(|l| l.value().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(label("mock"), "references");
+        let DebugValue::Counter(n) = value else {
+            panic!("a counter");
+        };
+        match label("outcome").as_str() {
+            "applied" => applied += n,
+            "rejected" => rejected += n,
+            other => panic!("outcome {other}"),
+        }
+    }
+    (applied, rejected)
+}
+
+/// A cancellation answers with its own shape; the booking changes through
+/// the effect, and a later read serves it from the store.
+#[tokio::test]
+async fn cancel_shows_on_the_booking() {
+    let effect = json!([{"type": "bookings", "id": "b1", "set": {"status": "cancelled"}}]);
+    let (api, _) = cancelling(true, effect).await;
+    let (status, _, body) = api.call("POST", "/bookings/b1/cancel", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["reason"], "asked");
+    let (status, source, body) = api.call("GET", "/bookings/b1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source, "state");
+    assert_eq!(body, json!({"id": "b1", "status": "cancelled"}));
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// The members `set` leaves out stay, and an effect may reach a resource of
+/// another type than the call's.
+#[tokio::test]
+async fn an_effect_merges_into_another_type() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "bookings",
+        "b1",
+        json!({"id": "b1", "status": "held", "number": 4}),
+    )
+    .await;
+    store(
+        &state,
+        "charges",
+        "ch1",
+        json!({"id": "ch1", "status": "paid"}),
+    )
+    .await;
+    let answer = json!({"response": {"reason": "asked"}, "effects": [
+        {"type": "charges", "id": "ch1", "set": {"status": "refunded"}},
+        {"type": "bookings", "id": "b1", "set": {"status": "cancelled"}},
+    ]});
+    let api = effects_runtime(
+        true,
+        Arc::clone(&state) as Arc<dyn StateStore>,
+        vec![Ok(answer.to_string())],
+    );
+    api.call("POST", "/bookings/b1/cancel", None).await;
+    assert_eq!(
+        stored_data(&state, "charges", "ch1").await["status"],
+        "refunded"
+    );
+    assert_eq!(
+        stored_data(&state, "bookings", "b1").await,
+        json!({"id": "b1", "status": "cancelled", "number": 4})
+    );
+}
+
+/// Asserts that one call with `effect` is answered, changes nothing stored
+/// and counts one rejection.
+fn rejected(effect: Value) {
+    let (applied, refused) = counting_effects(async {
+        let (api, state) = cancelling(true, json!([effect])).await;
+        let (status, _, body) = api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["reason"], "asked");
+        assert_eq!(
+            stored_data(&state, "bookings", "b1").await,
+            json!({"id": "b1", "status": "held"})
+        );
+    });
+    assert_eq!((applied, refused), (0, 1), "{effect}");
+}
+
+#[test]
+fn an_applied_effect_is_counted() {
+    let counted = counting_effects(async {
+        let effect = json!([{"type": "bookings", "id": "b1", "set": {"status": "cancelled"}}]);
+        let (api, _) = cancelling(true, effect).await;
+        api.call("POST", "/bookings/b1/cancel", None).await;
+    });
+    assert_eq!(counted, (1, 0));
+}
+
+#[test]
+fn an_effect_on_a_missing_resource_is_rejected() {
+    rejected(json!({"type": "bookings", "id": "nope", "set": {"status": "cancelled"}}));
+    rejected(json!({"type": "nothing", "id": "b1", "set": {"status": "cancelled"}}));
+}
+
+#[test]
+fn an_effect_on_an_identity_field_is_rejected() {
+    rejected(json!({"type": "bookings", "id": "b1", "set": {"id": "b2"}}));
+    rejected(json!({"type": "bookings", "id": "b1", "set": {"number": 9}}));
+    // Among others too: an effect applies whole or not at all.
+    rejected(json!({"type": "bookings", "id": "b1", "set": {"status": "cancelled", "id": "b2"}}));
+}
+
+/// The identity field of the effect's own type counts, not only `id`.
+#[test]
+fn an_effect_on_its_types_own_identity_field_is_rejected() {
+    let counted = counting_effects(async {
+        let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let widget = json!({"sku": "w1", "status": "new"});
+        store(
+            &state,
+            "bookings",
+            "b1",
+            json!({"id": "b1", "status": "held"}),
+        )
+        .await;
+        store(&state, "widgets", "w1", widget.clone()).await;
+        let answer = json!({"response": {"reason": "asked"}, "effects": [
+            {"type": "widgets", "id": "w1", "set": {"sku": "w2"}},
+        ]});
+        let api = effects_runtime(
+            true,
+            Arc::clone(&state) as Arc<dyn StateStore>,
+            vec![Ok(answer.to_string())],
+        );
+        api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(stored_data(&state, "widgets", "w1").await, widget);
+    });
+    assert_eq!(counted, (0, 1));
+}
+
+#[test]
+fn an_effect_breaking_the_schema_is_rejected() {
+    rejected(json!({"type": "bookings", "id": "b1", "set": {"status": 5}}));
+}
+
+/// One effect's rejection leaves the next alone.
+#[test]
+fn a_rejected_effect_does_not_stop_the_next() {
+    let counted = counting_effects(async {
+        let (api, state) = cancelling(
+            true,
+            json!([
+                {"type": "bookings", "id": "nope", "set": {"status": "cancelled"}},
+                {"type": "bookings", "id": "b1", "set": {"status": "cancelled"}},
+            ]),
+        )
+        .await;
+        api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(
+            stored_data(&state, "bookings", "b1").await["status"],
+            "cancelled"
+        );
+    });
+    assert_eq!(counted, (1, 1));
+}
+
+/// A read cached before the write is not served after it.
+#[tokio::test]
+async fn an_effect_clears_the_cached_read() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "bookings",
+        "b1",
+        json!({"id": "b1", "status": "held"}),
+    )
+    .await;
+    store(
+        &state,
+        "charges",
+        "ch1",
+        json!({"id": "ch1", "status": "paid"}),
+    )
+    .await;
+    let paid = json!([{"id": "ch1", "status": "paid"}]);
+    let refunded = json!([{"id": "ch1", "status": "refunded"}]);
+    let answer = json!({"response": {"reason": "asked"}, "effects": [
+        {"type": "charges", "id": "ch1", "set": {"status": "refunded"}},
+    ]});
+    let cached = mb_state::CachingStateStore::wrap(
+        Arc::clone(&state) as Arc<dyn StateStore>,
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    let api = effects_runtime(
+        true,
+        cached,
+        vec![
+            Ok(paid.to_string()),
+            Ok(answer.to_string()),
+            Ok(refunded.to_string()),
+        ],
+    );
+    api.call("GET", "/charges", None).await;
+    let (_, source, _) = api.call("GET", "/charges", None).await;
+    assert_eq!(source, "cache");
+    api.call("POST", "/bookings/b1/cancel", None).await;
+    let (_, source, body) = api.call("GET", "/charges", None).await;
+    assert_eq!(source, "llm");
+    assert_eq!(body, refunded);
+}
+
+/// An effect is a write like any other to whoever watches the session.
+#[tokio::test]
+async fn an_effect_publishes_a_state_change() {
+    let effect = json!([{"type": "charges", "id": "ch1", "set": {"status": "refunded"}}]);
+    let (api, state) = cancelling(true, effect).await;
+    let mut changes = state.subscribe();
+    api.call("POST", "/bookings/b1/cancel", None).await;
+    let change = changes.try_recv().unwrap();
+    assert_eq!(change.resource_type, "charges");
+    assert_eq!(change.id, "ch1");
+    assert_eq!(change.kind, mb_state::ChangeKind::Upserted);
+}
+
+/// With consistency off the envelope is still understood, and nothing is
+/// applied or counted.
+#[test]
+fn consistency_off_applies_no_effects() {
+    let counted = counting_effects(async {
+        let effect = json!([{"type": "charges", "id": "ch1", "set": {"status": "refunded"}}]);
+        let (api, state) = cancelling(false, effect).await;
+        let (status, _, body) = api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["reason"], "asked");
+        assert_eq!(
+            stored_data(&state, "charges", "ch1").await["status"],
+            "paid"
+        );
+    });
+    assert_eq!(counted, (0, 0));
+}
+
+/// A store that reads but refuses every write.
+struct ReadOnlyStore(Arc<MemoryStore>);
+
+#[async_trait::async_trait]
+impl StateStore for ReadOnlyStore {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, mb_state::StateError> {
+        self.0.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, mb_state::StateError> {
+        self.0.list(s, t, limit).await
+    }
+    async fn upsert(&self, _: &SessionKey, _: StoredResource) -> Result<(), mb_state::StateError> {
+        Err(mb_state::StateError::Backend("read only".into()))
+    }
+    async fn delete(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<bool, mb_state::StateError> {
+        self.0.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), mb_state::StateError> {
+        self.0.reset(s).await
+    }
+    async fn reset_mock(&self, w: &str, m: &str) -> Result<(), mb_state::StateError> {
+        self.0.reset_mock(w, m).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), mb_state::StateError> {
+        self.0.touch(s).await
+    }
+    async fn sessions(
+        &self,
+        w: &str,
+        m: &str,
+    ) -> Result<Vec<mb_state::SessionInfo>, mb_state::StateError> {
+        self.0.sessions(w, m).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, mb_state::StateError> {
+        self.0.export(s).await
+    }
+    async fn seed(
+        &self,
+        s: &SessionKey,
+        r: Vec<StoredResource>,
+    ) -> Result<(), mb_state::StateError> {
+        self.0.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), mb_state::StateError> {
+        Ok(())
+    }
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<mb_state::StateChanged> {
+        self.0.subscribe()
+    }
+}
+
+/// A store failing the effect's write costs the effect, not the answer.
+#[test]
+fn a_degraded_store_still_serves_the_answer() {
+    let counted = counting_effects(async {
+        let (_, state) = cancelling(true, json!([])).await;
+        let answer = json!({"response": {"reason": "asked"}, "effects": [
+            {"type": "bookings", "id": "b1", "set": {"status": "cancelled"}},
+        ]});
+        let api = effects_runtime(
+            true,
+            Arc::new(ReadOnlyStore(Arc::clone(&state))),
+            vec![Ok(answer.to_string())],
+        );
+        let (status, source, body) = api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source, "llm");
+        assert_eq!(body["reason"], "asked");
+        assert_eq!(
+            stored_data(&state, "bookings", "b1").await["status"],
+            "held"
+        );
+    });
+    assert_eq!(counted, (0, 1));
+}
+
+/// Over a real client: the envelope goes out under the free-text limit, and
+/// an endpoint refusing the schema is still asked for the envelope, in the
+/// prompt, in JSON mode.
+#[tokio::test]
+async fn a_refused_schema_still_asks_for_the_envelope() {
+    use wiremock::{Mock, MockServer, Request as WireRequest, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &WireRequest| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v["response_format"]["type"] == "json_schema"
+        })
+        .respond_with(
+            ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"Invalid schema for response_format 'x'"}}"#,
+            ),
+        )
+        .mount(&server)
+        .await;
+    let answer = json!({"response": {"reason": "asked"}, "effects": [
+        {"type": "bookings", "id": "b1", "set": {"status": "cancelled"}},
+    ]});
+    let reply = json!({
+        "choices": [{"message": {"content": answer.to_string()}}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+    });
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+        .mount(&server)
+        .await;
+    let provider = mb_llm::OpenAiCompatible::new(mb_llm::OpenAiConfig {
+        base_url: format!("{}/", server.uri()),
+        api_key: Some("k".into()),
+        model: "m".into(),
+        output_mode: mb_llm::OutputMode::JsonSchema,
+        headers: Vec::new(),
+        extra_body: serde_json::Map::new(),
+        http: Default::default(),
+    })
+    .unwrap();
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "bookings",
+        "b1",
+        json!({"id": "b1", "status": "held"}),
+    )
+    .await;
+    let rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(EFFECTS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::new(provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    let router = http_rest::router(Arc::new(rt));
+    let req = Request::post("/bookings/b1/cancel")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        stored_data(&state, "bookings", "b1").await["status"],
+        "cancelled"
+    );
+
+    let sent: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(sent.len(), 2);
+    let schema = &sent[0]["response_format"]["json_schema"]["schema"];
+    let effect = &schema["properties"]["effects"]["items"]["properties"];
+    assert_eq!(effect["id"]["maxLength"], mb_llm::MAX_FREE_TEXT_CHARS);
+    assert_eq!(effect["type"]["maxLength"], mb_llm::MAX_FREE_TEXT_CHARS);
+    assert_eq!(sent[1]["response_format"]["type"], "json_object");
+    let messages = sent[1]["messages"].as_array().unwrap();
+    let prompt = messages.last().unwrap()["content"].as_str().unwrap();
+    assert!(prompt.contains(r#"{"response": <the answer"#), "{prompt}");
+}
+
+/// The request log shows what each effect did, and why not.
+#[tokio::test]
+async fn effects_are_in_the_request_log() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "bookings",
+        "b1",
+        json!({"id": "b1", "status": "held"}),
+    )
+    .await;
+    let answer = json!({"response": {"reason": "asked"}, "effects": [
+        {"type": "bookings", "id": "b1", "set": {"status": "cancelled"}},
+        {"type": "bookings", "id": "nope", "set": {"status": "cancelled"}},
+    ]});
+    let records = Arc::new(crate::support::Records::default());
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(EFFECTS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state as Arc<dyn StateStore>,
+    );
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    let req = Request::post("/bookings/b1/cancel")
+        .body(Body::empty())
+        .unwrap();
+    let router = http_rest::router(Arc::new(rt));
+    router.oneshot(req).await.unwrap();
+    let record = records.wait(1).await.remove(0);
+    let effects = record.request["effects"].as_array().unwrap();
+    assert_eq!(effects.len(), 2);
+    assert_eq!(effects[0]["outcome"], "applied");
+    assert_eq!(effects[0]["type"], "bookings");
+    assert_eq!(effects[0]["set"]["status"], "cancelled");
+    assert!(effects[0].get("reason").is_none());
+    assert_eq!(effects[1]["outcome"], "rejected");
+    assert_eq!(effects[1]["id"], "nope");
+    assert_eq!(effects[1]["reason"], "no such resource");
+}

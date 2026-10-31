@@ -503,10 +503,14 @@ async fn serve_call(
     report.source = answer.source;
     report.latency = started.elapsed();
     if rt.recorder.is_some() {
+        let effects = report.request["effects"].take();
         report.request = json!({
             "headers": recorded_headers(rt, &headers),
             "body": decoded.unwrap_or_else(|| Value::String(UNDECODABLE.into())),
         });
+        if !effects.is_null() {
+            report.request["effects"] = effects;
+        }
         report.response = Some(answer.record);
     }
     call::report(rt, &headers, report).await;
@@ -642,6 +646,7 @@ async fn answer(
         }
         None => match call::generate_once(rt, &plan, &call).await {
             Ok(generated) => {
+                call::record_effects(&mut report.request, &generated);
                 report.usage = generated.usage;
                 let body = generated.body.unwrap_or(Value::Null);
                 let encode = tracing::info_span!("mb.encode").entered();

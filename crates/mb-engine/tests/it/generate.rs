@@ -1862,3 +1862,498 @@ components:
     assert_eq!(out.body, Some(json!([order])));
     assert_eq!(provider.requests().len(), 1);
 }
+
+/// A contract whose booking action answers a `Booking`, whose list action
+/// answers an array, and whose ledger's members are named like the envelope.
+const EFFECTS: &str = r##"
+openapi: 3.0.0
+info: {title: Effects, version: "1"}
+paths:
+  /bookings/{id}:
+    get:
+      operationId: getBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /bookings/{id}/cancel:
+    post:
+      operationId: cancelBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+        "409": {description: no, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /bookings:
+    post:
+      operationId: createBooking
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /bookings/{id}/charges:
+    post:
+      operationId: chargeBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Booking"}}
+  /ledgers/{id}/settle:
+    post:
+      operationId: settleLedger
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ledger"}}}}
+components:
+  schemas:
+    Booking:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Ledger:
+      type: object
+      required: [response, effects]
+      properties:
+        response: {type: string}
+        effects: {type: array, items: {type: string}}
+"##;
+
+fn effects_bundle() -> Bundle {
+    compile(EFFECTS.as_bytes()).unwrap()
+}
+
+fn stored_booking() -> StoredResource {
+    StoredResource {
+        resource_type: "bookings".into(),
+        id: "b1".into(),
+        data: json!({"id": "b1", "status": "held"}),
+    }
+}
+
+fn booking_call(op: &str) -> OperationCall {
+    let mut path_params = Map::new();
+    path_params.insert("id".into(), json!("b1"));
+    OperationCall {
+        operation_id: op.into(),
+        path_params,
+        ..OperationCall::default()
+    }
+}
+
+/// Generates `op` with `stored_booking` as its target.
+async fn with_target(bundle: &Bundle, op: &str, engine: &Engine) -> mb_engine::GeneratedResponse {
+    let target = stored_booking();
+    let ctx = GenerationContext {
+        target: Some(&target),
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(
+            bundle,
+            bundle.operation(op).unwrap(),
+            &booking_call(op),
+            ctx,
+        )
+        .await
+        .unwrap()
+}
+
+fn cancelled() -> Value {
+    json!({"id": "b1", "status": "cancelled"})
+}
+
+fn charge_effect() -> Value {
+    json!({"type": "charges", "id": "ch1", "set": {"status": "refunded"}})
+}
+
+/// The envelope gives the answer and its effects; the answer alone is the
+/// body and the schema that was sent wraps it.
+#[tokio::test]
+async fn an_envelope_answer_yields_body_and_effects() {
+    let bundle = effects_bundle();
+    let answer = json!({"response": cancelled(), "effects": [charge_effect()]});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(cancelled()));
+    assert_eq!(
+        out.effects,
+        vec![mb_engine::ResourceEffect {
+            resource_type: "charges".into(),
+            id: "ch1".into(),
+            set: json!({"status": "refunded"}).as_object().unwrap().clone(),
+        }]
+    );
+    let request = &provider.requests()[0];
+    let mb_llm::ResponseFormat::JsonSchema { schema, .. } = &request.response_format else {
+        panic!("a schema was asked for");
+    };
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["required"], json!(["response"]));
+    assert!(schema["properties"]["response"].is_object());
+    assert_eq!(schema["properties"]["effects"]["type"], "array");
+    assert!(schema["$defs"]["Booking"].is_object());
+}
+
+/// A model may ignore the envelope: its plain answer costs nothing more.
+#[tokio::test]
+async fn a_plain_answer_is_accepted_without_effects() {
+    let bundle = effects_bundle();
+    let (provider, engine) = scripted(vec![Ok(cancelled().to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(cancelled()));
+    assert!(out.effects.is_empty());
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// An answer with `response` alone is the envelope too: effects are optional.
+#[tokio::test]
+async fn an_envelope_without_effects_is_unwrapped() {
+    let bundle = effects_bundle();
+    let answer = json!({"response": cancelled(), "effects": null});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(cancelled()));
+    assert!(out.effects.is_empty());
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// A resource that really has those members is the answer, and no envelope
+/// is asked for around it.
+#[tokio::test]
+async fn a_resource_with_response_and_effects_members_is_not_unwrapped() {
+    let bundle = effects_bundle();
+    let ledger = json!({"response": "settled", "effects": ["e1"]});
+    let (provider, engine) = scripted(vec![Ok(ledger.to_string())]);
+    let out = with_target(&bundle, "settleLedger", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    // The target's members may be merged in around it.
+    let body = out.body.unwrap();
+    assert_eq!(body["response"], ledger["response"]);
+    assert_eq!(body["effects"], ledger["effects"]);
+    assert!(out.effects.is_empty());
+    let request = &provider.requests()[0];
+    let mb_llm::ResponseFormat::JsonSchema { schema, .. } = &request.response_format else {
+        panic!("a schema was asked for");
+    };
+    assert_ne!(schema["required"], json!(["response"]), "{schema}");
+    let prompt = &request.messages.last().unwrap().content;
+    assert!(!prompt.contains("<shown_resources>"), "{prompt}");
+}
+
+#[tokio::test]
+async fn a_malformed_effect_list_is_ignored() {
+    let bundle = effects_bundle();
+    for effects in [
+        json!("none"),
+        json!({"type": "charges"}),
+        json!([1, {"type": "charges"}, {"id": "x", "set": {}}, {"type": "a", "id": "b", "set": 3}]),
+    ] {
+        let answer = json!({"response": cancelled(), "effects": effects});
+        let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+        let out = with_target(&bundle, "cancelBooking", &engine).await;
+        assert_eq!(out.source, Source::Llm, "{effects}");
+        assert_eq!(out.body, Some(cancelled()), "{effects}");
+        assert!(out.effects.is_empty(), "{effects}");
+        assert_eq!(provider.requests().len(), 1);
+    }
+}
+
+/// A numeric id names a resource stored under its string form; a malformed
+/// member of the list costs only itself.
+#[tokio::test]
+async fn a_good_effect_survives_a_bad_neighbour() {
+    let bundle = effects_bundle();
+    let good = json!({"type": "charges", "id": 7, "set": {"status": "refunded"}});
+    let answer = json!({"response": cancelled(), "effects": ["bad", good]});
+    let (_, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.effects.len(), 1);
+    assert_eq!(out.effects[0].id, "7");
+}
+
+#[tokio::test]
+async fn an_oversized_effect_list_is_cut_to_ten() {
+    let bundle = effects_bundle();
+    let effects: Vec<Value> = (0..25)
+        .map(|i| json!({"type": "charges", "id": format!("ch{i}"), "set": {"n": i}}))
+        .collect();
+    let answer = json!({"response": cancelled(), "effects": effects});
+    let (_, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.effects.len(), 10);
+    assert_eq!(out.effects[0].id, "ch0");
+    assert_eq!(out.effects[9].id, "ch9");
+}
+
+/// A query, or a create with nothing stored to act on, is asked for what it
+/// always was.
+#[tokio::test]
+async fn no_envelope_is_asked_for_without_context() {
+    let bundle = effects_bundle();
+    let target = stored_booking();
+    let query = GenerationContext {
+        target: Some(&target),
+        ..GenerationContext::default()
+    };
+    let (read, engine) = scripted(vec![Ok(cancelled().to_string())]);
+    engine
+        .generate(
+            &bundle,
+            bundle.operation("getBooking").unwrap(),
+            &booking_call("getBooking"),
+            query,
+        )
+        .await
+        .unwrap();
+    let (create, engine) = scripted(vec![Ok(cancelled().to_string())]);
+    let out = engine
+        .generate(
+            &bundle,
+            bundle.operation("createBooking").unwrap(),
+            &booking_call("createBooking"),
+            GenerationContext::default(),
+        )
+        .await
+        .unwrap();
+    assert!(out.effects.is_empty());
+    for provider in [read, create] {
+        let request = &provider.requests()[0];
+        let prompt = &request.messages.last().unwrap().content;
+        assert!(!prompt.contains("\"effects\""), "{prompt}");
+        assert!(!prompt.contains("acts on the API"), "{prompt}");
+        assert!(prompt.contains("same ids and field values"), "{prompt}");
+        let mb_llm::ResponseFormat::JsonSchema { schema, .. } = &request.response_format else {
+            panic!("a schema was asked for");
+        };
+        assert!(schema["properties"]["response"].is_null(), "{schema}");
+    }
+}
+
+/// A forced error answers nothing about what changed.
+#[tokio::test]
+async fn no_envelope_is_asked_for_on_an_error_status() {
+    let bundle = effects_bundle();
+    let target = stored_booking();
+    let (provider, engine) = scripted(vec![Ok(cancelled().to_string())]);
+    let ctx = GenerationContext {
+        target: Some(&target),
+        forced_status: Some(409),
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(
+            &bundle,
+            bundle.operation("cancelBooking").unwrap(),
+            &booking_call("cancelBooking"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    let prompt = provider.requests()[0]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone();
+    assert!(!prompt.contains("\"effects\""), "{prompt}");
+    assert!(prompt.contains("same ids and field values"), "{prompt}");
+}
+
+/// The prompt no longer tells a model to keep an old status: the call acts,
+/// the answer shows the state after it, and the resources it may change are
+/// named by type and id.
+#[tokio::test]
+async fn an_acting_prompt_says_the_state_moves_on() {
+    let bundle = effects_bundle();
+    let target = stored_booking();
+    let charge = StoredResource {
+        resource_type: "charges".into(),
+        id: "ch1".into(),
+        data: json!({"id": "ch1", "status": "paid"}),
+    };
+    let related = [charge];
+    let (provider, engine) = scripted(vec![Ok(cancelled().to_string())]);
+    let ctx = GenerationContext {
+        target: Some(&target),
+        related: &related,
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(
+            &bundle,
+            bundle.operation("cancelBooking").unwrap(),
+            &booking_call("cancelBooking"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    let request = &provider.requests()[0];
+    let prompt = &request.messages.last().unwrap().content;
+    assert!(prompt.contains("This call acts on the API"), "{prompt}");
+    assert!(prompt.contains("state after it"), "{prompt}");
+    assert!(prompt.contains("<existing_resource>"), "{prompt}");
+    assert!(!prompt.contains("same ids and field values"), "{prompt}");
+    assert!(prompt.contains(r#""effects""#), "{prompt}");
+    assert!(
+        prompt.contains(r#"{"type": "bookings", "id": "b1"}"#),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#"{"type": "charges", "id": "ch1"}"#),
+        "{prompt}"
+    );
+    let system = &request.messages[0].content;
+    assert!(
+        !system.contains("effects"),
+        "the system message stays cacheable: {system}"
+    );
+}
+
+/// A related resource alone is enough to ask.
+#[tokio::test]
+async fn related_alone_asks_for_the_envelope() {
+    let bundle = effects_bundle();
+    let related = [stored_booking()];
+    let (provider, engine) = scripted(vec![Ok(cancelled().to_string())]);
+    let ctx = GenerationContext {
+        related: &related,
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(
+            &bundle,
+            bundle.operation("createBooking").unwrap(),
+            &booking_call("createBooking"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    let prompt = provider.requests()[0]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone();
+    assert!(prompt.contains(r#""effects""#), "{prompt}");
+}
+
+/// An array answer under the effects envelope is not wrapped twice: the root
+/// is an object already.
+#[tokio::test]
+async fn the_effects_envelope_replaces_the_items_envelope() {
+    let bundle = effects_bundle();
+    let list = json!([cancelled()]);
+    let answer = json!({"response": list, "effects": [charge_effect()]});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = with_target(&bundle, "chargeBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body.as_ref().map(|b| b.is_array()), Some(true));
+    assert_eq!(out.effects.len(), 1);
+    let request = &provider.requests()[0];
+    let mb_llm::ResponseFormat::JsonSchema { schema, .. } = &request.response_format else {
+        panic!("a schema was asked for");
+    };
+    assert_eq!(schema["properties"]["response"]["type"], "array");
+    assert!(schema["properties"]["items"].is_null(), "{schema}");
+    let prompt = &request.messages.last().unwrap().content;
+    assert!(!prompt.contains(r#"{"items": [...]}"#), "{prompt}");
+}
+
+/// A repair works on the answer inside the envelope and asks for the
+/// envelope again; the second answer's effects are the ones kept.
+#[tokio::test]
+async fn a_repair_repeats_the_envelope_instruction() {
+    let bundle = effects_bundle();
+    let bad = json!({"response": {"id": 5, "status": {"a": 1}}, "effects": [charge_effect()]});
+    let good = json!({
+        "response": cancelled(),
+        "effects": [{"type": "charges", "id": "ch2", "set": {"status": "refunded"}}]
+    });
+    let (provider, engine) = scripted(vec![Ok(bad.to_string()), Ok(good.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(out.body, Some(cancelled()));
+    assert_eq!(out.effects.len(), 1);
+    assert_eq!(out.effects[0].id, "ch2");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    let repair = &requests[1].messages.last().unwrap().content;
+    assert_eq!(requests[1].messages.last().unwrap().role, Role::User);
+    assert!(repair.contains(r#""effects""#), "{repair}");
+    assert!(repair.contains(r#""response""#), "{repair}");
+}
+
+/// PII in what an effect sets is replaced like PII in the answer: it is
+/// stored and served later.
+#[tokio::test]
+async fn an_effect_is_scrubbed_like_the_answer() {
+    let bundle = effects_bundle();
+    let effect =
+        json!({"type": "charges", "id": "ch1", "set": {"note": "mail ana@realcompany.org"}});
+    let answer = json!({"response": cancelled(), "effects": [effect]});
+    let (_, engine) = scripted(vec![Ok(answer.to_string())]);
+    let engine = engine.with_guards(mb_engine::EngineGuards {
+        scrubber: Some(Arc::new(
+            mb_engine::pii::Scrubber::new(&Default::default()).unwrap(),
+        )),
+        ..Default::default()
+    });
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    let note = out.effects[0].set["note"].as_str().unwrap();
+    assert!(!note.contains("ana@realcompany.org"), "{note}");
+}
+
+/// The response-size cap covers what the effects add.
+#[tokio::test]
+async fn effects_count_towards_the_size_cap() {
+    let bundle = effects_bundle();
+    let effect = json!({"type": "charges", "id": "ch1", "set": {"note": "x".repeat(4_000)}});
+    let answer = json!({"response": cancelled(), "effects": [effect]});
+    let (_, engine) = scripted(vec![Ok(answer.to_string())]);
+    let engine = engine.with_guards(mb_engine::EngineGuards {
+        max_response_bytes: Some(1_000),
+        ..Default::default()
+    });
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Fallback);
+    assert!(out.effects.is_empty());
+}
+
+fn cut(partial: &str) -> LlmError {
+    LlmError::Truncated {
+        message: "stopped at max_tokens".into(),
+        partial: partial.into(),
+        usage: mb_llm::Usage::default(),
+    }
+}
+
+/// A cut envelope is closed, and the complete effects before the cut stand.
+#[tokio::test]
+async fn a_cut_envelope_keeps_its_complete_effects() {
+    let bundle = effects_bundle();
+    let partial = format!(
+        r#"{{"response": {}, "effects": [{}, {{"type": "charges", "id": "c"#,
+        cancelled(),
+        charge_effect()
+    );
+    let (_, engine) = scripted(vec![Err(cut(&partial))]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Patched);
+    assert_eq!(out.body, Some(cancelled()));
+    assert_eq!(out.effects.len(), 1);
+    assert_eq!(out.effects[0].id, "ch1");
+}
+
+/// An envelope cut inside the answer has its inner answer completed.
+#[tokio::test]
+async fn an_envelope_cut_inside_its_answer_is_completed() {
+    let bundle = effects_bundle();
+    let partial = r#"{"response": {"id": "b1", "status": "cancelled", "note": "unfin"#;
+    let (_, engine) = scripted(vec![Err(cut(partial))]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Patched);
+    assert_eq!(out.body, Some(cancelled()));
+    assert!(out.effects.is_empty());
+}

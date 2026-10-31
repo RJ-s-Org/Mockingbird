@@ -71,7 +71,9 @@ pub struct RequestRecord {
     pub latency: Duration,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    /// `{query, headers, body}`; sensitive headers are left out.
+    /// `{query, headers, body}`, with `effects` when the answer listed some
+    /// (each `{type, id, set, outcome}`, and `reason` when rejected); sensitive
+    /// headers are left out.
     pub request: Value,
     /// Byte length of the raw request body, when known, so a recorder can
     /// bound a large body without serializing it.

@@ -89,6 +89,7 @@ uuid = { workspace = true, optional = true }
 [dev-dependencies]
 mb-import.workspace = true
 mb-llm = { workspace = true, features = ["testing"] }
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 rumqttd.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true

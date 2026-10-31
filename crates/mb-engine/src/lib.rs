@@ -71,7 +71,9 @@ pub mod validate;
 
 pub use extract::extract_json;
 pub use faker::{Costs, Faker, FakerHints};
-pub use guards::{EngineGuards, GenerationLimiter, TokenBudget, without_items_schema};
+pub use guards::{
+    EngineGuards, GenerationLimiter, TokenBudget, without_effects_schema, without_items_schema,
+};
 pub use message::{GeneratedMessage, MessageContext};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};
@@ -205,6 +207,29 @@ impl fmt::Display for Source {
     }
 }
 
+/// A change an LLM answer asks for on another stored resource: the fields
+/// of `set` merged into resource `id` of `resource_type`. The engine only
+/// reads it from the answer; the caller checks it against the session's state
+/// and applies it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceEffect {
+    /// The resource's type.
+    pub resource_type: String,
+    /// The resource's id.
+    pub id: String,
+    /// The members to set on it.
+    pub set: Map<String, Value>,
+}
+
+/// What became of a [`ResourceEffect`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectOutcome {
+    /// The effect.
+    pub effect: ResourceEffect,
+    /// Why it was not applied; `None` when it was.
+    pub rejected: Option<String>,
+}
+
 /// A generated answer to one call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeneratedResponse {
@@ -225,6 +250,13 @@ pub struct GeneratedResponse {
     /// answer that matched no schema-valid draw carries
     /// [`FAKER_INVALID_REASON`], after the primary reason when there is one.
     pub fallback_reason: Option<String>,
+    /// What the LLM's answer changes in other stored resources, as it said
+    /// (see [`ResourceEffect`]); empty for anything but an LLM's answer to a
+    /// command that holds stored context.
+    pub effects: Vec<ResourceEffect>,
+    /// What became of [`GeneratedResponse::effects`], for the record: filled
+    /// by the caller that applies them.
+    pub effect_outcomes: Vec<EffectOutcome>,
 }
 
 /// How an [`Engine`] generates; [`Default`] gives the documented defaults.
@@ -585,6 +617,8 @@ impl Engine {
                 source,
                 usage: Usage::default(),
                 fallback_reason,
+                effects: Vec::new(),
+                effect_outcomes: Vec::new(),
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -632,16 +666,25 @@ impl Engine {
                         self.config.persona.as_deref(),
                     )
                 });
-                let items_envelope =
-                    guards::items_envelope(provider.capabilities(), validator.schema());
-                if items_envelope && let Some(user) = messages.last_mut() {
-                    user.content.push_str("\n\n");
-                    user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
+                let effects_envelope = guards::effects_envelope(op, status, &ctx, &validator);
+                // The effects envelope's root is an object already.
+                let items_envelope = !effects_envelope
+                    && guards::items_envelope(provider.capabilities(), validator.schema());
+                if let Some(user) = messages.last_mut() {
+                    if effects_envelope {
+                        user.content.push_str("\n\n");
+                        user.content.push_str(&prompt::effects_note(&ctx));
+                    } else if items_envelope {
+                        user.content.push_str("\n\n");
+                        user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
+                    }
                 }
                 let prompt_schema = compact::response_prompt_schema(bundle, written);
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
-                    schema: if items_envelope {
+                    schema: if effects_envelope {
+                        guards::effects_schema(prompt_schema)
+                    } else if items_envelope {
                         guards::items_schema(prompt_schema)
                     } else {
                         prompt_schema
@@ -662,18 +705,21 @@ impl Engine {
                             fill: fill.as_ref(),
                             echoes: Echoes::of([call]),
                             items_envelope,
+                            effects_envelope,
                         },
                         &mut usage,
                     )
                     .await
                 {
-                    Ok((body, source)) => GeneratedResponse {
+                    Ok(answer) => GeneratedResponse {
                         status,
                         content_type: variant.content_type.clone(),
-                        body: Some(body),
-                        source,
+                        body: Some(answer.value),
+                        source: answer.source,
                         usage: Usage::default(),
                         fallback_reason: None,
+                        effects: answer.effects,
+                        effect_outcomes: Vec::new(),
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -791,12 +837,13 @@ impl Engine {
                     fill: None,
                     echoes: Echoes::of(parts.iter().map(|p| p.call)),
                     items_envelope: false,
+                    effects_envelope: false,
                 },
                 &mut usage,
             )
             .await
         {
-            Ok(answer) => answer,
+            Ok(answer) => (answer.value, answer.source),
             Err(reason) => {
                 tracing::info!(%reason, "joint generation failed; answering each field on its own");
                 return None;
@@ -811,6 +858,8 @@ impl Engine {
                 source,
                 usage: if i == 0 { usage } else { Usage::default() },
                 fallback_reason: None,
+                effects: Vec::new(),
+                effect_outcomes: Vec::new(),
             };
             let schema = part
                 .ctx
@@ -850,6 +899,8 @@ impl Engine {
                 source: Source::Fallback,
                 usage: Usage::default(),
                 fallback_reason: None,
+                effects: Vec::new(),
+                effect_outcomes: Vec::new(),
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -930,6 +981,8 @@ impl Engine {
             source: Source::State,
             usage: Usage::default(),
             fallback_reason: None,
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
         })
     }
 
@@ -962,6 +1015,8 @@ impl Engine {
             source: Source::State,
             usage: Usage::default(),
             fallback_reason: None,
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1139,6 +1194,8 @@ impl Engine {
             source: Source::Fallback,
             usage: Usage::default(),
             fallback_reason: (!valid).then(|| FAKER_INVALID_REASON.to_string()),
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
         }
     }
 
@@ -1183,6 +1240,8 @@ impl Engine {
                 NON_JSON_MEDIA_REASON.to_string(),
                 faker_note,
             )),
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
         }
     }
 
@@ -1404,7 +1463,7 @@ impl Engine {
         format: &ResponseFormat,
         checks: &Checks<'_>,
         usage: &mut Usage,
-    ) -> Result<(Value, Source), String> {
+    ) -> Result<LlmAnswer, String> {
         // A fallback chain gets every hop's timeout, not just the first's.
         let limit = provider.total_timeout(self.config.timeout);
         let deadline = Instant::now() + limit;
@@ -1412,12 +1471,24 @@ impl Engine {
         let first = self
             .complete(provider, &messages, format, usage, deadline)
             .await?;
-        let (checked, cut) = tracing::info_span!("mb.validate")
+        let (checked, cut, effects) = tracing::info_span!("mb.validate")
             .in_scope(|| self.check_reply(validator, &first, checks));
         let truncated = first.truncated.clone().filter(|_| cut);
         let errors = match checked {
-            Checked::Valid(value) => return Ok((value, Source::Llm)),
-            Checked::Patched(value) => return Ok((value, Source::Patched)),
+            Checked::Valid(value) => {
+                return Ok(LlmAnswer {
+                    value,
+                    source: Source::Llm,
+                    effects,
+                });
+            }
+            Checked::Patched(value) => {
+                return Ok(LlmAnswer {
+                    value,
+                    source: Source::Patched,
+                    effects,
+                });
+            }
             Checked::Rejected(reason) => return Err(with_cause(truncated.as_deref(), reason)),
             Checked::Invalid(errors) => errors,
         };
@@ -1444,7 +1515,7 @@ impl Engine {
                 .complete(provider, &messages, format, usage, Instant::now() + limit)
                 .await
                 .map_err(|reason| with_cause(truncated.as_deref(), reason))?;
-            let (checked, second_cut) = tracing::info_span!("mb.validate")
+            let (checked, second_cut, effects) = tracing::info_span!("mb.validate")
                 .in_scope(|| self.check_reply(validator, &second, checks));
             let cause = if second_cut {
                 second.truncated
@@ -1452,7 +1523,11 @@ impl Engine {
                 truncated
             };
             match checked {
-                Checked::Valid(value) | Checked::Patched(value) => Ok((value, Source::Repaired)),
+                Checked::Valid(value) | Checked::Patched(value) => Ok(LlmAnswer {
+                    value,
+                    source: Source::Repaired,
+                    effects,
+                }),
                 Checked::Rejected(reason) => Err(with_cause(cause.as_deref(), reason)),
                 Checked::Invalid(errors) => Err(with_cause(
                     cause.as_deref(),
@@ -1468,25 +1543,26 @@ impl Engine {
     /// `max_tokens` and that fails, [`Engine::check_truncated`] (a complete
     /// value before cut prose is accepted as it is). An answer the provider
     /// did not cut is never salvaged: a missing `}` there is an error to
-    /// repair, not a cut. The flag says whether the reply was cut.
+    /// repair, not a cut. The flag says whether the reply was cut; the
+    /// effects are those of the checked answer.
     fn check_reply(
         &self,
         validator: &SchemaValidator,
         reply: &Reply,
         checks: &Checks<'_>,
-    ) -> (Checked, bool) {
-        let checked = self.check_output(validator, &reply.text, checks);
+    ) -> (Checked, bool, Vec<ResourceEffect>) {
+        let (checked, effects) = self.check_output(validator, &reply.text, checks);
         if reply.truncated.is_none() {
-            return (checked, false);
+            return (checked, false, effects);
         }
         match checked {
             Checked::Invalid(errors) => {
                 match self.check_truncated(validator, &reply.text, checks) {
-                    salvaged @ Checked::Patched(_) => (salvaged, true),
-                    _ => (Checked::Invalid(errors), true),
+                    (salvaged @ Checked::Patched(_), effects) => (salvaged, true, effects),
+                    _ => (Checked::Invalid(errors), true, Vec::new()),
                 }
             }
-            other => (other, true),
+            other => (other, true, effects),
         }
     }
 
@@ -1535,6 +1611,13 @@ impl Engine {
             Err(_) => Err("LLM request timed out".into()),
         }
     }
+}
+
+/// An LLM answer that passed the checks.
+struct LlmAnswer {
+    value: Value,
+    source: Source,
+    effects: Vec<ResourceEffect>,
 }
 
 /// An LLM reply: its text, and, when the provider stopped it at
