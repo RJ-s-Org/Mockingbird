@@ -249,16 +249,6 @@ impl Engine {
                 AnswerEffects::default(),
             );
         };
-        // Effects come first, so a cut can leave nothing else: no answer.
-        if checks.effects_envelope
-            && value.get(EFFECTS_KEY).is_some()
-            && value.get(RESPONSE_KEY).is_none()
-        {
-            return (
-                Checked::Invalid(vec![CUT_SHORT.to_string()]),
-                AnswerEffects::default(),
-            );
-        }
         let (checked, effects) = self.check_parsed(validator, value, text.len(), checks, true);
         let checked = match checked {
             Checked::Valid(v) | Checked::Patched(v) => {
@@ -282,6 +272,12 @@ impl Engine {
         checks: &Checks<'_>,
         fill_missing: bool,
     ) -> (Checked, AnswerEffects) {
+        if checks.effects_envelope && effects_without_answer(validator, &value) {
+            return (
+                Checked::Invalid(vec![NO_RESPONSE.to_string()]),
+                AnswerEffects::default(),
+            );
+        }
         let (value, list) = if checks.effects_envelope {
             unwrap_effects(validator, value)
         } else {
@@ -482,6 +478,10 @@ nothing there. Add no other members.";
 /// The error of output that holds no JSON value.
 pub(crate) const NOT_JSON: &str = "output is not valid JSON";
 
+/// The error of an envelope with effects and no answer.
+pub(crate) const NO_RESPONSE: &str =
+    "the object has \"effects\" but no \"response\": the answer belongs under \"response\"";
+
 /// The error of output cut short with nothing complete in it.
 pub(crate) const CUT_SHORT: &str = "output was cut short before any complete member";
 
@@ -504,7 +504,9 @@ pub(crate) fn repair_request(
 complete answer that is shorter: fewer array items, short strings, no optional members."
                 .to_string(),
         );
-    } else if let Some(value) = crate::extract_json(answer) {
+    } else if let Some(value) = crate::extract_json(answer)
+        && !(checks.effects_envelope && effects_without_answer(validator, &value))
+    {
         let (answer, _) = if checks.effects_envelope {
             unwrap_effects(validator, value)
         } else {
@@ -777,6 +779,19 @@ fn unwrap_effects(validator: &SchemaValidator, value: Value) -> (Value, Option<V
         Some(answer) => (answer, effects),
         None => (Value::Object(map), None),
     }
+}
+
+/// Whether `value`, asked for as an envelope, holds effects and no answer:
+/// `effects` with nothing but `null` beside it. Taken as a plain answer it
+/// would be served, as itself or wrapped into a list, and effects are no
+/// answer. A `null` `response` is one where `null` is (see [`unwrap_effects`]).
+fn effects_without_answer(validator: &SchemaValidator, value: &Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    map.contains_key(EFFECTS_KEY)
+        && map.iter().all(|(k, v)| k == EFFECTS_KEY || v.is_null())
+        && !(map.contains_key(RESPONSE_KEY) && validator.is_valid(&Value::Null))
 }
 
 /// What an answer's effects list came to.

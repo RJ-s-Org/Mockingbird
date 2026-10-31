@@ -2504,6 +2504,70 @@ async fn a_reply_cut_before_its_response_is_no_answer_of_optional_members() {
     assert_eq!(provider.requests().len(), 2);
 }
 
+/// `{"effects": ...}` with no answer beside it, whole, is repaired like a cut
+/// one: nothing is served from it, on an array answer (which would wrap it)
+/// or one whose items its effects would pass as.
+#[tokio::test]
+async fn effects_with_no_response_are_repaired() {
+    let contract = EFFECTS.replace("required: [id, status]", "required: [id]");
+    assert_ne!(contract, EFFECTS);
+    let bundle = compile(contract.as_bytes()).unwrap();
+    for reply in [
+        json!({"effects": []}),
+        json!({"effects": [charge_effect()]}),
+        json!({"effects": [charge_effect()], "response": null}),
+        json!({"effects": [charge_effect()], "other": null}),
+        json!({"effects": null}),
+    ] {
+        let fixed = json!({"effects": [], "response": [cancelled()]});
+        let (provider, engine) = scripted(vec![Ok(reply.to_string()), Ok(fixed.to_string())]);
+        let out = with_target(&bundle, "chargeBooking", &engine).await;
+        assert_eq!(out.body, Some(json!([cancelled()])), "{reply}");
+        assert_eq!(out.source, Source::Repaired, "{reply}");
+        assert!(out.effects.is_empty(), "{reply}");
+        assert_eq!(provider.requests().len(), 2, "{reply}");
+        let repair = provider.requests()[1]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .clone();
+        assert!(repair.contains(r#"no "response""#), "{repair}");
+    }
+}
+
+/// Repaired the same way, it comes to the faker: its effects never apply.
+#[tokio::test]
+async fn effects_with_no_response_twice_fall_back_without_them() {
+    let bundle = effects_bundle();
+    let reply = json!({"effects": [charge_effect()]}).to_string();
+    let (provider, engine) = scripted(vec![Ok(reply.clone()), Ok(reply)]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Fallback);
+    assert!(out.effects.is_empty());
+    assert!(out.body.as_ref().unwrap().get("effects").is_none());
+    assert_eq!(provider.requests().len(), 2);
+}
+
+/// Where `null` is the answer, an envelope saying so holds one.
+#[tokio::test]
+async fn a_null_response_stands_where_null_is_the_answer() {
+    let contract = EFFECTS.replace(
+        r##""200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+        "409""##,
+        r##""200": {description: ok, content: {application/json: {schema: {type: object, nullable: true, required: [id], properties: {id: {type: string}}}}}}
+        "409""##,
+    );
+    assert_ne!(contract, EFFECTS);
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let reply = json!({"effects": [charge_effect()], "response": null});
+    let (provider, engine) = scripted(vec![Ok(reply.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.effects.len(), 1);
+    assert_eq!(provider.requests().len(), 1);
+}
+
 /// An envelope cut inside the answer has its inner answer completed.
 #[tokio::test]
 async fn an_envelope_cut_inside_its_answer_is_completed() {
