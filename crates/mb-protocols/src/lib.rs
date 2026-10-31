@@ -403,6 +403,9 @@ pub struct MockRuntime {
     /// Which stored resources are a plain read's own answer (see
     /// [`call::OwnReads`]).
     own_reads: call::OwnReads,
+    /// Which collection a stored resource was listed or written under (see
+    /// [`call::Collections`]).
+    collections: call::Collections,
     /// GraphQL root fields' narrowed schemas, by selection.
     #[cfg(feature = "graphql")]
     narrowed: graphql::NarrowCache,
@@ -520,6 +523,7 @@ impl MockRuntime {
             index,
             path_aliases: call::PathAliases::default(),
             own_reads: call::OwnReads::default(),
+            collections: call::Collections::default(),
             #[cfg(feature = "graphql")]
             narrowed: graphql::NarrowCache::default(),
         }
@@ -569,6 +573,10 @@ impl MockRuntime {
     }
 
     /// Which stored resources are a plain read's own answer.
+    pub(crate) fn collections(&self) -> &call::Collections {
+        &self.collections
+    }
+
     pub(crate) fn own_reads(&self) -> &call::OwnReads {
         &self.own_reads
     }

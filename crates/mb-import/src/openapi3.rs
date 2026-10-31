@@ -1,6 +1,8 @@
 //! OpenAPI 3.0 / 3.1 -> MCM compiler.
 
-use crate::heuristics::{apply_action_routes, infer_identity, infer_kind, infer_resource_type};
+use crate::heuristics::{
+    apply_action_routes, infer_identity, infer_kind, infer_resource_type, resource_hint,
+};
 use crate::schema::{collect_refs, defs_name, normalize_schema};
 use crate::security::compile_security;
 use crate::{Ctx, ImportError};
@@ -742,25 +744,6 @@ pub(crate) fn check_operation_refs(
     Ok(())
 }
 
-/// Each path of `paths` with the methods it declares.
-pub(crate) fn path_methods<'a>(
-    doc: &'a Value,
-    paths: &'a Map<String, Value>,
-) -> Result<Vec<(&'a str, Vec<HttpMethod>)>, ImportError> {
-    paths
-        .iter()
-        .map(|(path, item)| {
-            let item = deref(doc, item, &format!("/paths/{}", escape(path)))?;
-            let methods = METHODS
-                .iter()
-                .filter(|(key, _)| item.get(*key).is_some())
-                .map(|(_, method)| *method)
-                .collect();
-            Ok((path.as_str(), methods))
-        })
-        .collect()
-}
-
 pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle, ImportError> {
     let info = doc.get("info");
     let title = info
@@ -786,6 +769,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
 
     let mut ids = OperationIds::new(doc)?;
     let mut operations = Vec::new();
+    let mut hints = Vec::new();
     let mut callbacks = Vec::new();
     let empty = Map::new();
     let paths = doc
@@ -848,12 +832,11 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
             if let Some(cbs) = op.get("callbacks") {
                 callbacks.push((op_out.id.clone(), cbs, format!("{at}/callbacks")));
             }
+            hints.push(resource_hint(op, &op_out.id, ctx));
             operations.push(op_out);
         }
     }
-    let methods = path_methods(doc, paths)?;
-    let all_paths: Vec<_> = methods.iter().map(|(p, m)| (*p, m.as_slice())).collect();
-    apply_action_routes(&mut operations, &all_paths, &defs);
+    apply_action_routes(&mut operations, &hints, &defs, ctx);
     check_defs_refs(&mut defs, "/components/schemas/", REF_PREFIX, ctx)?;
 
     let webhooks = compile_webhooks(doc, &mut defs, &callbacks, ctx)?;

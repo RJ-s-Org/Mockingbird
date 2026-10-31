@@ -697,6 +697,8 @@ pub(crate) struct Pending<'a> {
     target_id: Option<String>,
     pub(crate) target: Option<StoredResource>,
     pub(crate) related: Vec<StoredResource>,
+    /// The target's key holds another owner's resource, not the target.
+    foreign_key: bool,
     /// The cache epoch before any state was read, and the answer's key,
     /// when the answer is cached.
     cache: Option<(CacheEpoch, String)>,
@@ -726,6 +728,14 @@ pub(crate) async fn prepare<'a>(
     if let Some(found) = &target {
         target_id = Some(found.id.clone());
     }
+    // What the target's key holds is another owner's: a write must leave it.
+    let foreign_key = !matches!(op.kind, OperationKind::Query)
+        && target.is_none()
+        && guarded(rt, op, call).is_some()
+        && match (resource_type, target_id.as_deref()) {
+            (Some(t), Some(id)) => state.get(session, t, id).await.is_some(),
+            _ => false,
+        };
 
     if rt.unknown_ids == UnknownIds::NotFound
         && matches!(op.kind, OperationKind::Query)
@@ -734,6 +744,15 @@ pub(crate) async fn prepare<'a>(
         && target.is_none()
         && state.available()
         && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+        && !(guarded(rt, op, call).is_some()
+            && any_owner_holds(
+                &mut state,
+                session,
+                t,
+                id,
+                target_param(op).as_deref().unwrap_or_default(),
+            )
+            .await)
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
@@ -793,6 +812,7 @@ pub(crate) async fn prepare<'a>(
             effects: Vec::new(),
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
+            new_record: false,
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -832,6 +852,7 @@ pub(crate) async fn prepare<'a>(
         target_id,
         target,
         related,
+        foreign_key,
         cache: since.zip(key),
     })
 }
@@ -848,7 +869,8 @@ pub(crate) async fn complete(
 ) -> GeneratedResponse {
     let Pending {
         mut state,
-        target_id,
+        mut target_id,
+        foreign_key,
         cache,
         ..
     } = pending;
@@ -856,6 +878,10 @@ pub(crate) async fn complete(
     let session = &plan.session;
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
+    let collection = collection_of(op, call).filter(|_| rt.consistency);
+    // A new record whose id no draw could free: the answer is served, and
+    // nothing else comes of it.
+    let mut unstored = false;
     async {
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
@@ -864,13 +890,26 @@ pub(crate) async fn complete(
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
             }
+            // An action's new record goes under its own id, not over another's.
+            if generated.new_record {
+                unstored =
+                    !place_new_record(rt, &mut state, session, op, t, call, &mut generated).await;
+                if !unstored {
+                    next_numbers(rt, &mut state, session, t, &mut generated).await;
+                }
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let own = generated.body.as_ref().and_then(|b| b.get(field));
+                if let Some(id) = own.and_then(id_string) {
+                    target_id = Some(id);
+                }
+            }
             // A faker list standing in for a failed LLM call seeds nothing,
             // or its items would join the session's later LLM lists.
             let seeding = is_query
                 && rt.consistency
                 && target_id.is_none()
                 && !transient_fallback(&generated);
-            if !is_query || seeding {
+            if (!is_query || seeding) && !unstored {
                 let origin = if is_query {
                     WriteOrigin::Seeded
                 } else {
@@ -882,9 +921,12 @@ pub(crate) async fn complete(
                         session,
                         op,
                         resource_type: t,
-                        target_id: target_id.clone(),
+                        // What the key holds is another's: this write has no
+                        // key of its own to go under.
+                        target_id: target_id.clone().filter(|_| !foreign_key),
                         generated: &generated,
                         request_body: call.body.as_ref(),
+                        collection: collection.clone(),
                         origin,
                     },
                 )
@@ -894,7 +936,14 @@ pub(crate) async fn complete(
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
         {
-            store_wrapped(&mut state, session, resource_type, &generated).await;
+            store_wrapped(
+                &mut state,
+                session,
+                resource_type,
+                &generated,
+                collection.as_ref(),
+            )
+            .await;
         }
         // A request naming a seed asks for that seed's answer, and a query for
         // one view: the cache keeps those apart, so neither is the resource.
@@ -926,17 +975,22 @@ pub(crate) async fn complete(
             && !transient_fallback(&generated)
             && !matches!(op.binding, Binding::Graphql { .. })
             && !matches!(op.kind, OperationKind::Command(Effect::Delete))
+            && !unstored
             && let Some(body) = generated.body.as_ref()
         {
             let schema = op
                 .output_for_status(generated.status)
                 .and_then(|o| o.schema.as_ref());
-            seed_entities(&mut state, session, rt, body, schema).await;
+            // A create's answer may wrap its own resource.
+            let created = resource_type
+                .filter(|_| matches!(op.kind, OperationKind::Command(Effect::Create)))
+                .zip(collection.as_ref());
+            seed_entities(&mut state, session, rt, body, schema, created).await;
         }
         // Last: an effect on what this call just stored sees it.
         if rt.consistency && (200..300).contains(&generated.status) {
-            generated.effect_outcomes =
-                apply_effects(&mut state, session, rt, &generated.effects).await;
+            let outcomes = apply_effects(&mut state, session, rt, &generated.effects).await;
+            generated.effect_outcomes.extend(outcomes);
             if generated.dropped_effects > 0 {
                 metrics::counter!(
                     EFFECTS_METRIC,
@@ -966,15 +1020,17 @@ pub(crate) async fn complete(
         feature = "grpc",
         feature = "soap"
     ))]
-    crate::webhooks::emit::emit(
-        rt,
-        &plan.engine,
-        op,
-        call,
-        &generated,
-        target_id.as_deref(),
-        session,
-    );
+    if !unstored {
+        crate::webhooks::emit::emit(
+            rt,
+            &plan.engine,
+            op,
+            call,
+            &generated,
+            target_id.as_deref(),
+            session,
+        );
+    }
     #[cfg(any(
         feature = "http-rest",
         feature = "graphql",
@@ -1120,6 +1176,7 @@ async fn apply_effect(
     let Some(mut stored) = state.get(session, t, &effect.id).await else {
         return Err("no such resource");
     };
+    let held = stored.clone();
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
@@ -1128,9 +1185,11 @@ async fn apply_effect(
         return Err("the merged resource breaks its schema");
     }
     let merged = stored.data.clone();
+    let carried = stored.clone();
     if !state.upsert(session, stored).await {
         return Err("the store took no write");
     }
+    rt.collections().carry(session, &held, &carried);
     Ok(merged)
 }
 
@@ -1145,6 +1204,28 @@ pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
             .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
 }
 
+/// The id of `generated`'s answer, when the session already holds a resource
+/// under it and the request did not ask for it.
+async fn taken_id(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    resource_type: &str,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) -> Option<String> {
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
+    let requested = call
+        .body
+        .as_ref()
+        .and_then(|b| b.get(field))
+        .and_then(id_string);
+    (requested.as_deref() != Some(id.as_str())
+        && state.get(session, resource_type, &id).await.is_some())
+    .then_some(id)
+}
+
 /// Gives a create's answer a fresh identity when the session already holds
 /// a resource under the generated one and the request did not ask for it.
 async fn unique_create_id(
@@ -1156,25 +1237,21 @@ async fn unique_create_id(
     call: &OperationCall,
     generated: &mut GeneratedResponse,
 ) {
+    if taken_id(state, session, op, resource_type, call, generated)
+        .await
+        .is_none()
+    {
+        return;
+    }
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let Some(body) = generated.body.as_ref() else {
         return;
     };
-    let Some(id) = body.get(field).and_then(id_string) else {
-        return;
-    };
-    let requested = call
-        .body
-        .as_ref()
-        .and_then(|b| b.get(field))
-        .and_then(id_string);
-    if requested.as_deref() == Some(id.as_str())
-        || state.get(session, resource_type, &id).await.is_none()
-    {
-        return;
-    }
     for _ in 0..3 {
-        let Some(fresh) = rt.engine.fresh_identity(&rt.bundle, op, body) else {
+        let Some(fresh) = rt
+            .engine
+            .fresh_identity_at(&rt.bundle, op, generated.status, body, 0)
+        else {
             return;
         };
         let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
@@ -1185,6 +1262,82 @@ async fn unique_create_id(
             return;
         }
     }
+}
+
+/// Keeps an action's new record off a stored one: an answer whose id is taken
+/// takes a fresh one, each retry drawing anew. With none to be had it is not
+/// stored, which the request record says, and its effects are dropped. So is an
+/// effect naming the id it moved from, which meant the answer's own record.
+/// Returns whether the answer can be stored.
+async fn place_new_record(
+    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    resource_type: &str,
+    call: &OperationCall,
+    generated: &mut GeneratedResponse,
+) -> bool {
+    let Some(id) = taken_id(state, session, op, resource_type, call, generated).await else {
+        return true;
+    };
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let mut fresh = None;
+    if let Some(body) = generated.body.as_ref() {
+        for attempt in 0..3 {
+            let draw = rt
+                .engine
+                .fresh_identity_at(&rt.bundle, op, generated.status, body, attempt);
+            let drawn = draw.as_ref().and_then(|d| d.get(field)).and_then(id_string);
+            let Some(drawn) = drawn else {
+                break;
+            };
+            if state.get(session, resource_type, &drawn).await.is_none() {
+                fresh = draw;
+                break;
+            }
+        }
+    }
+    let stored = fresh.is_some();
+    if let Some(fresh) = fresh {
+        generated.body = Some(fresh);
+    }
+    let (dropped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut generated.effects)
+        .into_iter()
+        .partition(|e| !stored || (e.resource_type == resource_type && e.id == id));
+    generated.effects = kept;
+    generated.dropped_effects += dropped.len();
+    let rejected = |effect, reason: &str| EffectOutcome {
+        effect,
+        rejected: Some(reason.to_string()),
+        merged: None,
+    };
+    let reason = if stored {
+        "the answer moved off this id"
+    } else {
+        "the answer was not stored"
+    };
+    generated
+        .effect_outcomes
+        .extend(dropped.into_iter().map(|effect| rejected(effect, reason)));
+    if !stored {
+        tracing::warn!(
+            mock = %rt.name,
+            operation = %op.id,
+            id = %log_capped(&id),
+            "new record not stored: its id is taken and no other could be drawn"
+        );
+        let note = ResourceEffect {
+            resource_type: resource_type.to_string(),
+            id,
+            set: serde_json::Map::new(),
+        };
+        generated.effect_outcomes.push(rejected(
+            note,
+            "new record not stored: its id is taken and no other could be drawn",
+        ));
+    }
+    stored
 }
 
 /// Stored resources scanned for a read by another field, or for the
@@ -1814,6 +1967,7 @@ async fn store_wrapped(
     session: &SessionKey,
     resource_type: Option<&str>,
     generated: &GeneratedResponse,
+    collection: Option<&Collection>,
 ) {
     let Some(Value::Object(body)) = generated.body.as_ref() else {
         return;
@@ -1839,7 +1993,13 @@ async fn store_wrapped(
             data: value.clone(),
         };
         if own {
-            state.upsert(session, resource).await;
+            let stored = resource.clone();
+            if state.upsert(session, resource).await
+                && let Some(collection) = collection
+            {
+                rt.collections()
+                    .remember(session, &stored, collection.clone());
+            }
         } else if rt.consistency
             && !transient_fallback(generated)
             && entity_fits(rt, &resource.resource_type, &resource.data)
@@ -1861,8 +2021,8 @@ async fn store_wrapped(
 /// what its `id` holds. After an earlier parameter (`/repos/{o}/{r}`,
 /// `/orgs/{o}/teams/{t}`) that value is no key, or one owner's answer would
 /// answer for another's: such an answer stores nothing, the response cache
-/// keeping its repeat. So does one on a route ending in an owner and a name
-/// whose `full_name` does not show it is that owner's (see [`owned_name`]).
+/// keeping its repeat. So does one naming its target after an owner that it
+/// does not show (see [`shows_owner`]).
 /// A route read by another field (`/issues/{number}`) stores nothing: its
 /// answer's `id` comes from
 /// the path and is no resource's, so a list would store the issue again.
@@ -1918,14 +2078,16 @@ async fn seed_own_read(
         data: body.clone(),
     };
     if !path_names_identity(identity)
-        && let Some(owned) = owned_name(op, call)
-        && (!body.get("full_name").is_some_and(Value::is_string)
-            || !full_name_fits(&resource, Some(&owned)))
+        && let Some(owner) = owner_of(op, call)
+        && !shows_owner(rt, &resource, &owner)
     {
         return;
     }
     if state.insert_seeded(session, resource.clone()).await {
         rt.own_reads().remember(session, &resource);
+        if let Some(collection) = collection_of(op, call) {
+            rt.collections().remember(session, &resource, collection);
+        }
         return;
     }
     // What is held is shorter than this read (see [`is_summary`]): this answer
@@ -1936,6 +2098,9 @@ async fn seed_own_read(
         && state.upsert(session, resource.clone()).await
     {
         rt.own_reads().remember(session, &resource);
+        if let Some(collection) = collection_of(op, call) {
+            rt.collections().remember(session, &resource, collection);
+        }
     }
 }
 
@@ -1945,8 +2110,9 @@ const MAX_ENTITY_DEPTH: usize = 6;
 const MAX_ENTITIES: usize = 100;
 
 /// Stores what a 2xx answer mentions so that a later read returns it: each
-/// object below the answer's root with an `id` or `number`, a known type (see
-/// [`entity_type`]) and a value its type's read would serve or a shorter form
+/// object below the answer's root with a known type (see
+/// [`entity_type`]), an `id`, a `number` or a field that type is identified by,
+/// and a value its type's read would serve or a shorter form
 /// of one (see [`entity_fits`], [`is_summary`]). What the session already
 /// holds is left as it is.
 async fn seed_entities(
@@ -1955,6 +2121,7 @@ async fn seed_entities(
     rt: &MockRuntime,
     body: &Value,
     schema: Option<&Value>,
+    created: Option<(&str, &Collection)>,
 ) {
     let mut walk = EntityWalk {
         rt,
@@ -1963,7 +2130,13 @@ async fn seed_entities(
     };
     walk.visit(body, schema, "", 0);
     for resource in walk.found {
-        state.insert_seeded(session, resource).await;
+        let stored = resource.clone();
+        if state.insert_seeded(session, resource).await
+            && let Some((_, collection)) = created.filter(|(t, _)| *t == stored.resource_type)
+        {
+            rt.collections()
+                .remember(session, &stored, collection.clone());
+        }
     }
 }
 
@@ -2014,18 +2187,21 @@ impl<'a> EntityWalk<'a> {
     }
 
     fn consider(&mut self, value: &Value, defs: &[&str], member: &str) {
-        let Some(id) = ["id", "number"]
-            .iter()
-            .find_map(|f| value.get(*f).and_then(id_string))
-        else {
-            return;
-        };
         let index = self.rt.index();
         let def = defs
             .iter()
             .copied()
             .find(|d| index.types_by_def.contains_key(*d));
         let Some(resource_type) = entity_type(index, def, member) else {
+            return;
+        };
+        // As a list keys it, then what else the contract identifies the type by.
+        let identity = index.identity_fields(&resource_type).iter();
+        let Some(id) = ["id", "number"]
+            .into_iter()
+            .chain(identity.map(String::as_str))
+            .find_map(|f| value.get(f).and_then(id_string))
+        else {
             return;
         };
         if self.considered >= MAX_ENTITIES {
@@ -2177,11 +2353,12 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
     let Some(param) = identity.path_param.as_deref() else {
         return false;
     };
-    param == identity.field
-        || identity.path_field.is_some()
-        || param.eq_ignore_ascii_case("id")
-        || param.ends_with("Id")
-        || param.ends_with("_id")
+    param == identity.field || identity.path_field.is_some() || id_like(param)
+}
+
+/// Whether a path parameter's name says it holds an id.
+fn id_like(param: &str) -> bool {
+    param.eq_ignore_ascii_case("id") || param.ends_with("Id") || param.ends_with("_id")
 }
 
 /// Whether another path parameter comes before the one naming `op`'s target:
@@ -2541,23 +2718,49 @@ async fn read_context(
     target_id: Option<&str>,
     call: &OperationCall,
 ) -> (Option<StoredResource>, Vec<StoredResource>, Followed) {
+    let mut owner = guarded(state.rt, op, call);
+    if let Some(owner) = &mut owner {
+        owner.writing = !matches!(op.kind, OperationKind::Query);
+    }
+    let owner = owner.as_ref();
+    let rt = state.rt;
     let target = match (op.resource_type.as_deref(), target_id) {
-        (Some(t), Some(id)) => match state.get(session, t, id).await {
+        (Some(t), Some(id)) => match state
+            .get(session, t, id)
+            .await
+            .filter(|hit| owner.is_none_or(|o| key_fits(rt, session, hit, o)))
+        {
             Some(hit) => Some(hit),
-            None => match op.identity.as_ref() {
-                Some(identity) => match identity.path_field.as_deref() {
-                    Some(field) => by_path_fields(state, session, t, &[field], id, None).await,
-                    None if state.rt.consistency
-                        && identity.path_param.is_some()
-                        && !path_names_identity(identity) =>
-                    {
-                        let owned = owned_name(op, call);
-                        by_path_fields(state, session, t, &NAME_FIELDS, id, owned.as_deref()).await
-                    }
-                    None => None,
-                },
-                None => None,
-            },
+            None => {
+                let delete = matches!(op.kind, OperationKind::Command(Effect::Delete));
+                let identity = op.identity.as_ref();
+                let param = target_param(op);
+                let param_is_id = param.as_deref().is_some_and(id_like)
+                    || identity.is_some_and(path_names_identity);
+                // A delete may not declare what its route's read goes by.
+                let read_fields: Vec<&str> = rt
+                    .index()
+                    .path_fields(t)
+                    .iter()
+                    .filter(|_| delete && rt.consistency && !param_is_id)
+                    .map(String::as_str)
+                    .collect();
+                match by_path_fields(state, session, t, &read_fields, id, owner).await {
+                    Some(hit) => Some(hit),
+                    None => match identity.and_then(|i| i.path_field.as_deref()) {
+                        Some(field) => by_path_fields(state, session, t, &[field], id, owner).await,
+                        None if rt.consistency
+                            && param.is_some()
+                            && (delete || identity.is_some())
+                            && identity.is_none_or(|i| !path_names_identity(i)) =>
+                        {
+                            let names = name_fields(param.as_deref().unwrap_or_default());
+                            by_path_fields(state, session, t, &names, id, owner).await
+                        }
+                        None => None,
+                    },
+                }
+            }
         },
         _ => None,
     };
@@ -2573,65 +2776,448 @@ fn path_values<'f>(fields: &'f [String], data: &Value) -> Vec<(&'f str, String)>
         .collect()
 }
 
-/// Fields a path parameter that names no field may mean: `/repos/{o}/{r}`
-/// finds a repository seeded under its numeric id by its `name`.
+/// Fields a path parameter that names no field may mean: `/users/{username}`
+/// finds a user seeded under its numeric id by its `login`. A last resort, when
+/// no member is named for the parameter (see [`name_fields`]).
 const NAME_FIELDS: [&str; 4] = ["name", "login", "slug", "key"];
 
-/// `{o}/{r}` of a route ending in those two parameters, which a stored
-/// `full_name` must end with. Any other route gives none: a person's
-/// `full_name` is no path.
-fn owned_name(op: &Operation, call: &OperationCall) -> Option<String> {
-    let Binding::Http { path, .. } = &op.binding else {
-        return None;
-    };
-    let last = path.rsplit('/').find(|s| !s.is_empty())?;
-    let name = last.strip_prefix('{')?.strip_suffix('}')?;
-    owned_name_of(op, call, name)
+/// Whose a path parameter's value is, as the path says: `/orgs/{org}/teams/`
+/// `{slug}` has `{org}` before `{slug}`, and the path up to it.
+struct Owner {
+    /// The path of the collection the parameter names a member of.
+    collection: Collection,
+    /// The name of the parameter nearest before it, and that parameter's value.
+    param: String,
+    value: String,
+    /// The value of the parameter itself.
+    name: String,
+    /// The path from `value` to `name`: `octo/teams/core`.
+    tail: String,
+    /// For a write, which acts unless the resource is known to be another's.
+    writing: bool,
 }
 
-/// `{o}/{r}` of a route where parameter `{r}`, named `name`, follows
-/// parameter `{o}`.
-fn owned_name_of(op: &Operation, call: &OperationCall, name: &str) -> Option<String> {
+/// A collection a path names: `/orgs/octo/teams` of `/orgs/{}/teams`.
+#[derive(Debug, Clone, PartialEq)]
+struct Collection {
+    template: String,
+    path: String,
+}
+
+/// `path` by segment, a trailing slash aside.
+fn path_segments(path: &str) -> Vec<&str> {
+    path.trim_end_matches('/').split('/').collect()
+}
+
+/// The parameter a path segment wholly is.
+fn segment_param(segment: &str) -> Option<&str> {
+    segment.strip_prefix('{')?.strip_suffix('}')
+}
+
+/// `segments` as a [`Collection`], when `call` gives each parameter a value.
+fn fill_path(call: &OperationCall, segments: &[&str]) -> Option<Collection> {
+    let mut filled = Vec::with_capacity(segments.len());
+    let mut template = Vec::with_capacity(segments.len());
+    for segment in segments {
+        match segment_param(segment) {
+            Some(param) => {
+                filled.push(call.path_params.get(param).and_then(id_string)?);
+                template.push("{}");
+            }
+            None => {
+                filled.push((*segment).to_string());
+                template.push(segment);
+            }
+        }
+    }
+    Some(Collection {
+        template: template.join("/"),
+        path: filled.join("/"),
+    })
+}
+
+/// The [`Owner`] of path parameter `name`, when a parameter comes before it.
+fn owner_of_param(op: &Operation, call: &OperationCall, name: &str) -> Option<Owner> {
     let Binding::Http { path, .. } = &op.binding else {
         return None;
     };
     let param = format!("{{{name}}}");
-    let mut before = path
-        .rsplit('/')
-        .filter(|s| !s.is_empty())
-        .skip_while(|s| *s != param)
-        .skip(1);
-    let owner = before.next()?.strip_prefix('{')?.strip_suffix('}')?;
+    let segments = path_segments(path);
+    let at = segments.iter().position(|s| *s == param)?;
+    let before = segments[..at]
+        .iter()
+        .rposition(|s| segment_param(s).is_some())?;
+    let owner = segment_param(segments[before])?;
     let value = |p: &str| call.path_params.get(p).and_then(id_string);
-    Some(format!("{}/{}", value(owner)?, value(name)?))
+    // A bare `{id}` is named by the collection before it: a project's.
+    let owner_name = match before.checked_sub(1).map(|i| segments[i]) {
+        Some(collection) if mb_mcm::is_generic_id(owner) && segment_param(collection).is_none() => {
+            collection.strip_suffix('s').unwrap_or(collection)
+        }
+        _ => owner,
+    };
+    Some(Owner {
+        collection: fill_path(call, &segments[..at])?,
+        param: owner_name.to_string(),
+        value: value(owner)?,
+        name: value(name)?,
+        tail: fill_path(call, &segments[before..=at])?.path,
+        writing: false,
+    })
 }
 
-/// Whether stored `r`'s `full_name`, when it has one, ends with path
-/// segments `owned`.
-fn full_name_fits(r: &StoredResource, owned: Option<&str>) -> bool {
-    let full_name = r.data.get("full_name").and_then(Value::as_str);
-    match (owned, full_name) {
-        (Some(owned), Some(full_name)) => full_name
-            .strip_suffix(owned)
-            .is_some_and(|rest| rest.is_empty() || rest.ends_with('/')),
-        _ => true,
+/// The path parameter naming what `op` acts on (see [`target_id`]).
+fn target_param(op: &Operation) -> Option<String> {
+    let identity = op.identity.as_ref();
+    if let Some(param) = identity.and_then(|i| i.path_param.clone()) {
+        return Some(param);
     }
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    matches!(
+        op.kind,
+        OperationKind::Command(Effect::Update | Effect::Delete)
+    )
+    .then(|| last_path_param(path))
+    .flatten()
+}
+
+/// The [`Owner`] of what `op` targets, unless its parameter says it is an id:
+/// an id stands on its own, whatever the route it is read by.
+fn owner_of(op: &Operation, call: &OperationCall) -> Option<Owner> {
+    let param = target_param(op)?;
+    if id_like(&param) {
+        return None;
+    }
+    owner_of_param(op, call, &param)
+}
+
+/// [`owner_of`], when consistency is on.
+fn guarded(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Option<Owner> {
+    owner_of(op, call).filter(|_| rt.consistency)
+}
+
+/// The collection a write or a list answer puts its resources in, when a path
+/// parameter makes it one of many: `/orgs/octo/teams` for a list there, a create
+/// there and an update of `/orgs/octo/teams/{slug}` alike. A target parameter in
+/// no segment of its own (`{slug}.json`) gives none.
+fn collection_of(op: &Operation, call: &OperationCall) -> Option<Collection> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let segments = path_segments(path);
+    let end = match target_param(op) {
+        Some(target) => {
+            let param = format!("{{{target}}}");
+            segments.iter().position(|s| *s == param)?
+        }
+        None => segments.len(),
+    };
+    let segments = &segments[..end];
+    segments
+        .iter()
+        .any(|s| segment_param(s).is_some())
+        .then(|| fill_path(call, segments))
+        .flatten()
+}
+
+/// What [`Collections`] holds at most; it is emptied when full.
+const MAX_COLLECTIONS: usize = 4096;
+
+/// Which collection a stored resource was listed or written under, from this
+/// runtime's calls, with a hash of the resource: a change this runtime did not
+/// record (a reset, a fixture) ends it with no bookkeeping. It decides only for
+/// a read with the same template, which the contract says is the same
+/// collection: `/orgs/octo/teams` for `/orgs/{org}/teams/{slug}`, whatever the
+/// resource's members, but not `/orgs/octo/repos` for `/repos/{owner}/{repo}`.
+/// Only a hint: otherwise, as on another node or after a restart, the resource
+/// must show its owner (see [`shows_owner`]).
+#[derive(Debug, Default)]
+pub(crate) struct Collections(std::sync::Mutex<HashMap<OwnRead, (Collection, u64)>>);
+
+impl Collections {
+    fn remember(&self, session: &SessionKey, r: &StoredResource, collection: Collection) {
+        let Ok(mut records) = self.0.lock() else {
+            return;
+        };
+        if records.len() >= MAX_COLLECTIONS {
+            records.clear();
+        }
+        let digest = OwnReads::digest(&r.data);
+        records.insert(OwnReads::key(session, r), (collection, digest));
+    }
+
+    fn forget(&self, session: &SessionKey, r: &StoredResource) {
+        if let Ok(mut records) = self.0.lock() {
+            records.remove(&OwnReads::key(session, r));
+        }
+    }
+
+    /// The collection `r` was recorded under, as it stands.
+    fn get(&self, session: &SessionKey, r: &StoredResource) -> Option<Collection> {
+        let records = self.0.lock().ok()?;
+        let (collection, digest) = records.get(&OwnReads::key(session, r))?;
+        (*digest == OwnReads::digest(&r.data)).then(|| collection.clone())
+    }
+
+    /// Whether a record for `r`'s key exists, as `r` may not be what it recorded.
+    fn has(&self, session: &SessionKey, r: &StoredResource) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|records| records.contains_key(&OwnReads::key(session, r)))
+    }
+
+    /// `old`'s record goes on to what replaced it, `new`.
+    fn carry(&self, session: &SessionKey, old: &StoredResource, new: &StoredResource) {
+        if let Some(collection) = self.get(session, old) {
+            self.remember(session, new, collection);
+        }
+    }
+
+    /// Whether `r` is `owner`'s, when a record can say.
+    fn fits(&self, session: &SessionKey, r: &StoredResource, owner: &Owner) -> Option<bool> {
+        let collection = self.get(session, r)?;
+        (collection.template == owner.collection.template)
+            .then(|| collection.path == owner.collection.path)
+    }
+}
+
+/// Whether `text` is a path ending in `owner`'s value and name: `octo/hello`
+/// (a `full_name`, a `path_with_namespace`) or `…/octo/teams/core` (a `url`).
+fn path_shows(text: &str, owner: &Owner) -> bool {
+    let text = text.trim_end_matches('/');
+    let short = format!("{}/{}", owner.value, owner.name);
+    [short.as_str(), owner.tail.as_str()].iter().any(|path| {
+        text.strip_suffix(path)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('/'))
+    })
+}
+
+/// Whether `text` is a path relative to nothing, ending in `name`: `octo/hello`.
+fn relative_path_ending(text: &str, name: &str) -> bool {
+    !text.contains("://")
+        && !text.starts_with('/')
+        && text
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .is_some_and(|(_, last)| last == name)
+}
+
+/// How a member relates to parameter `param`: named for it, or for its id.
+/// `org` also means `organization`, but `org_ref` and `owner_previous` are
+/// other things.
+fn tied_to_param(member: &str, param: &str) -> bool {
+    let (member, param) = (member.to_lowercase(), param.to_lowercase());
+    member == param
+        || member == format!("{param}_id")
+        || member == format!("{param}id")
+        || (param.len() >= 3
+            && member.starts_with(&param)
+            && member.chars().all(char::is_alphanumeric))
+}
+
+/// What `r` itself says of `owner`, `None` when it says nothing: a relative path
+/// ending in the name decides, all of them having to show the owner (a fork
+/// names its source, and its `full_name` says whose it is); else a member tied
+/// to the owner's parameter, as a value or an object holding it, not one the
+/// contract types as `r`'s own type; else a link showing the owner.
+fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option<bool> {
+    let members = r.data.as_object()?;
+    let strings = || members.values().filter_map(Value::as_str);
+    let mut paths = strings()
+        .filter(|text| relative_path_ending(text, &owner.name))
+        .peekable();
+    if paths.peek().is_some() {
+        return Some(paths.all(|text| path_shows(text, owner)));
+    }
+    let index = rt.index();
+    let schema = index.detail_reads.get(&r.resource_type).and_then(|i| {
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    let (parts, _) = schema_parts(rt.bundle(), schema);
+    let own_type = |member: &str| {
+        let inner = parts.iter().find_map(|p| p.get("properties")?.get(member));
+        let (_, defs) = schema_parts(rt.bundle(), inner);
+        defs.iter()
+            .any(|d| index.types_by_def.get(*d) == Some(&r.resource_type))
+    };
+    let holds = |value: &Value| match value {
+        Value::Object(inner) => inner
+            .values()
+            .any(|v| v.as_str() == Some(owner.value.as_str())),
+        value => id_string(value).as_deref() == Some(owner.value.as_str()),
+    };
+    let is_link = |value: &Value| value.as_str().is_some_and(|text| text.contains("://"));
+    let numeric_owner = owner.value.parse::<f64>().is_ok();
+    let mut tied = members
+        .iter()
+        .filter(|(member, value)| {
+            !mb_mcm::is_generic_id(member)
+                && tied_to_param(member, &owner.param)
+                && !is_link(value)
+                && !own_type(member)
+        })
+        // A number says nothing of an owner the route names by a string.
+        .filter(|(_, value)| {
+            value.is_string() || value.is_object() || (value.is_number() && numeric_owner)
+        })
+        .peekable();
+    if tied.peek().is_some() {
+        return Some(tied.any(|(_, value)| holds(value)));
+    }
+    strings()
+        .any(|text| text.contains("://") && path_shows(text, owner))
+        .then_some(true)
+}
+
+/// Whether `r` shows it is `owner`'s (see [`owner_evidence`]).
+fn shows_owner(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
+    owner_evidence(rt, r, owner) == Some(true)
+}
+
+/// Whether a string of `r` ending in the name does not show `owner`: another
+/// owner's link, or none at all. Weak: a `homepage` may end so.
+fn links_elsewhere(r: &StoredResource, owner: &Owner) -> bool {
+    r.data.as_object().is_some_and(|members| {
+        members.values().filter_map(Value::as_str).any(|text| {
+            text.trim_end_matches('/')
+                .rsplit_once('/')
+                .is_some_and(|(_, last)| last == owner.name)
+                && !path_shows(text, owner)
+        })
+    })
+}
+
+/// Whether `r` is known to be another's: by a record, by what it says, or, when
+/// it says nothing, by a link elsewhere.
+fn known_foreign(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    r: &StoredResource,
+    owner: &Owner,
+) -> bool {
+    rt.collections().fits(session, r, owner).map_or_else(
+        || match owner_evidence(rt, r, owner) {
+            Some(shown) => !shown,
+            None => links_elsewhere(r, owner),
+        },
+        |fits| !fits,
+    )
+}
+
+/// Whether stored `r` may be taken for `owner`'s under the value in `field`. A
+/// write acts on what it cannot tell is another's, or it would leave it behind.
+/// A read needs a record or what `r` shows, as an answer can be generated. A
+/// number cannot show its owner, so it passes unless `r` links elsewhere.
+fn owner_fits(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    r: &StoredResource,
+    owner: &Owner,
+    field: &str,
+) -> bool {
+    if owner.writing {
+        return !known_foreign(rt, session, r, owner);
+    }
+    rt.collections()
+        .fits(session, r, owner)
+        .unwrap_or_else(|| match owner_evidence(rt, r, owner) {
+            Some(shown) => shown,
+            None => r.data.get(field).is_some_and(Value::is_number) && !links_elsewhere(r, owner),
+        })
+}
+
+/// Whether `r`, stored under the value a path gave, is `owner`'s to answer with.
+/// A write takes it unless it is known to be another's. For a read a record
+/// decides; else a key that is no name of `r` is `r`'s id, and stands on its
+/// own unless `r` says otherwise. A name (in one of [`NAME_FIELDS`], or the end of a relative path) must
+/// show its owner, or differ from `r`'s own `id`: only a write through the route
+/// keys it so, as a list or a mention keys by the `id`.
+fn key_fits(rt: &MockRuntime, session: &SessionKey, r: &StoredResource, owner: &Owner) -> bool {
+    if owner.writing {
+        return !known_foreign(rt, session, r, owner);
+    }
+    if let Some(fits) = rt.collections().fits(session, r, owner) {
+        return fits;
+    }
+    let Value::Object(members) = &r.data else {
+        return true;
+    };
+    let is_name = NAME_FIELDS
+        .iter()
+        .any(|field| members.get(*field).and_then(id_string).as_ref() == Some(&r.id))
+        || members
+            .values()
+            .filter_map(Value::as_str)
+            .any(|text| relative_path_ending(text, &r.id));
+    let written = members
+        .get("id")
+        .and_then(id_string)
+        .is_some_and(|id| id != r.id);
+    let evidence = owner_evidence(rt, r, owner);
+    if is_name {
+        written || evidence == Some(true)
+    } else {
+        evidence != Some(false)
+    }
+}
+
+/// The members that may hold a name path parameter `param` gives: one named for
+/// the parameter, which the contract ties to it, and [`NAME_FIELDS`]. Any other
+/// string could hold anything: a `description`, a `default_branch`.
+fn name_fields(param: &str) -> Vec<&str> {
+    let mut fields = NAME_FIELDS.to_vec();
+    if !fields.contains(&param) {
+        fields.push(param);
+    }
+    fields
+}
+
+/// Whether any owner's resource of type `t` goes by `value`: a route that cannot
+/// tell whose it is cannot call it missing.
+async fn any_owner_holds(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    value: &str,
+    param: &str,
+) -> bool {
+    if state.get(session, t, value).await.is_some() {
+        return true;
+    }
+    let rt = state.rt;
+    let mut fields = name_fields(param);
+    fields.extend(rt.index().path_fields(t).iter().map(String::as_str));
+    by_path_fields(state, session, t, &fields, value, None)
+        .await
+        .is_some()
 }
 
 /// The resource of type `t` whose field is `value`, trying `fields` in order
 /// (a read by GitHub's issue number, or a repository's name) and, with
-/// `owned`, only one whose `full_name` fits: the one [`PathAliases`] names
-/// when it still holds the value, else the first of one scan.
+/// `owner`, only one that is theirs: the one [`PathAliases`] names when it still
+/// holds the value, else the first of one scan.
 async fn by_path_fields(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
     fields: &[&str],
     value: &str,
-    owned: Option<&str>,
+    owner: Option<&Owner>,
 ) -> Option<StoredResource> {
+    if fields.is_empty() {
+        return None;
+    }
+    let rt = state.rt;
     let holds = |r: &StoredResource, field: &str| {
-        r.data.get(field).and_then(id_string).as_deref() == Some(value) && full_name_fits(r, owned)
+        r.data.get(field).and_then(id_string).as_deref() == Some(value)
+            && owner.is_none_or(|o| owner_fits(rt, session, r, o, field))
     };
     for field in fields {
         if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
@@ -2642,10 +3228,24 @@ async fn by_path_fields(
         }
     }
     let stored = state.list(session, t, MAX_SCAN).await;
-    let (field, found) = fields.iter().find_map(|field| {
+    let found = fields.iter().find_map(|field| {
         let found = stored.iter().find(|r| holds(r, field))?;
         Some((*field, found))
-    })?;
+    });
+    let Some((field, found)) = found else {
+        // No member holds the name alone, but a path may hold it with its owner.
+        let owner = owner?;
+        return stored
+            .iter()
+            .find(|r| {
+                r.data.as_object().is_some_and(|m| {
+                    m.values()
+                        .filter_map(Value::as_str)
+                        .any(|t| path_shows(t, owner))
+                }) && owner_fits(rt, session, r, owner, "")
+            })
+            .cloned();
+    };
     let values = vec![(field, value.to_string())];
     state
         .rt
@@ -2874,6 +3474,20 @@ async fn related(
     let mut out: Vec<StoredResource> = Vec::new();
     let mut seen = Vec::new();
     follow(state, session, references, &mut seen, target, &mut out).await;
+    // A name only means something under its owner: another's is not named.
+    if index.is_some() {
+        for (field, value) in &call.path_params {
+            let (Some(owner), Some(name)) = (
+                Some(field.as_str())
+                    .filter(|f| !id_like(f))
+                    .and_then(|f| owner_of_param(op, call, f)),
+                id_string(value),
+            ) else {
+                continue;
+            };
+            out.retain(|r| r.id != name || key_fits(rt, session, r, &owner));
+        }
+    }
     let named = out.len();
     if matches!(op.kind, OperationKind::Query)
         && target_id.is_none()
@@ -2951,9 +3565,9 @@ async fn parents_by_name(
         {
             continue;
         }
-        let owned = owned_name_of(op, call, field);
-        let Some(parent) =
-            by_path_fields(state, session, &t, &NAME_FIELDS, &id, owned.as_deref()).await
+        let owner = owner_of_param(op, call, field);
+        let names = name_fields(field);
+        let Some(parent) = by_path_fields(state, session, &t, &names, &id, owner.as_ref()).await
         else {
             continue;
         };
@@ -3194,6 +3808,8 @@ struct WriteRequest<'a> {
     target_id: Option<String>,
     generated: &'a GeneratedResponse,
     request_body: Option<&'a Value>,
+    /// Where the path puts what this writes (see [`collection_of`]).
+    collection: Option<Collection>,
     origin: WriteOrigin,
 }
 
@@ -3208,8 +3824,10 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         target_id,
         generated,
         request_body,
+        collection,
         origin,
     } = w;
+    let rt = state.rt;
     if origin == WriteOrigin::Seeded {
         let Some(items) = generated.body.as_ref().and_then(list_items) else {
             return;
@@ -3228,7 +3846,20 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 id: id.clone(),
                 data: item.clone(),
             };
-            state.insert_seeded(session, resource).await;
+            let stored = resource.clone();
+            let Some(collection) = collection.clone() else {
+                state.insert_seeded(session, resource).await;
+                continue;
+            };
+            if state.insert_seeded(session, resource).await {
+                rt.collections().remember(session, &stored, collection);
+            } else if let Some(held) = state.get(session, resource_type, &id).await
+                && rt.collections().get(session, &held).is_none()
+                && held.data == stored.data
+            {
+                // A mention stored it first: this list says where it belongs.
+                rt.collections().remember(session, &held, collection);
+            }
         }
         return;
     }
@@ -3261,10 +3892,30 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 id,
                 data,
             };
-            state.upsert(session, resource).await;
+            let stored = resource.clone();
+            // A route naming no collection keeps the one it had.
+            let held = match &collection {
+                None if rt.collections().has(session, &stored) => {
+                    state.get(session, resource_type, &stored.id).await
+                }
+                _ => None,
+            };
+            if state.upsert(session, resource).await {
+                match (collection, held) {
+                    (Some(collection), _) => {
+                        rt.collections().remember(session, &stored, collection)
+                    }
+                    (None, Some(held)) => rt.collections().carry(session, &held, &stored),
+                    (None, None) => {}
+                }
+            }
         }
         None => {
+            let gone = state.get(session, resource_type, &id).await;
             state.delete(session, resource_type, &id).await;
+            if let Some(gone) = gone {
+                rt.collections().forget(session, &gone);
+            }
         }
     }
 }

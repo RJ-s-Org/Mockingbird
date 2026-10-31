@@ -50,6 +50,7 @@ Compiling a contract never fails over what the mock cannot represent exactly; it
 | `status_range_expanded` | An OpenAPI response range (`2XX` to `5XX`) stands for the codes of its class the operation does not declare itself: `2XX` for `200` (only when no explicit 2xx is declared), `3XX` for 301, 302, 303, 304, 307 and 308, `4XX` for 400, 401, 403, 404, 405, 409, 410, 415, 422 and 429, `5XX` for 500 to 504. Explicit codes win; `1XX` is ignored. So scenarios and `X-Mockingbird-Status` can force those codes. |
 | `dangling_ref` | A `$ref` names a component schema (`#/components/schemas/X`, `#/definitions/X`) the document does not define; it is stubbed as an open schema that accepts any value. A `$ref` to another file or another kind of component is still an error. |
 | `cookie_param_ignored` | The operation declares cookie parameters; the mock neither validates nor requires them. |
+| `invalid_resource_extension` | A value of an operation's [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) is not valid; it is ignored and inference stands. |
 | `response_header_unresolved` | A response header's `$ref` does not resolve; the header is left out. |
 | `security_scheme_unsupported` | A security requirement uses a scheme the mock cannot check (see [the console guide](console.md)). |
 | `schema_too_large` | A response schema is over the 64 KiB prompt budget; the prompt shows a trimmed schema. |
