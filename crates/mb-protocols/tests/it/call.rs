@@ -2847,3 +2847,300 @@ async fn consistency_off_finds_no_parent_by_name() {
     let prompt = prompt_of(&api, 0);
     assert!(!prompt.contains("acme/widget"), "{prompt}");
 }
+
+/// [`REPOS`] with a string `id`, which a read by name is forced to.
+fn string_id_repos() -> String {
+    let contract = REPOS.replace(
+        "id: {type: integer}\n        name: {type: string}",
+        "id: {type: string}\n        name: {type: string}",
+    );
+    assert_ne!(contract, REPOS);
+    contract
+}
+
+/// [`actions_of`] over a store with the response cache, as a server runs.
+fn cached_actions_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Actions {
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let state = mb_state::CachingStateStore::wrap(
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        Duration::from_secs(3600),
+        100,
+    );
+    let rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state,
+    );
+    Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    }
+}
+
+/// A read by name forces a string `id` to the name, which is no resource's:
+/// it stores nothing there, so another owner's repository of that name is
+/// its own, and the response cache repeats each.
+#[tokio::test]
+async fn string_id_repos_stay_apart_across_owners() {
+    let answer =
+        |id: &str, full_name: &str, stars: u32| {
+            Ok(json!({"id": id, "name": "hello", "full_name": full_name, "stargazers_count": stars})
+            .to_string())
+        };
+    let api = cached_actions_of(
+        &string_id_repos(),
+        vec![answer("r7", "octo/hello", 42), answer("r8", "cat/hello", 9)],
+    );
+    let (_, first) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(first["full_name"], "octo/hello");
+    let (_, other) = read(&api, "/repos/cat/hello").await;
+    assert_eq!(other["full_name"], "cat/hello", "{other}");
+    assert_eq!(other["stargazers_count"], 9);
+    assert_eq!(api.provider.requests().len(), 2);
+    let (source, again) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "cache");
+    assert_eq!(again["stargazers_count"], 42);
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A numeric `id` is the resource's own, but an answer with no `full_name`
+/// does not say whose it is: stored, its name would answer for any owner.
+#[tokio::test]
+async fn a_read_by_name_with_no_full_name_does_not_answer_for_another_owner() {
+    let answer = |id: u32, stars: u32| {
+        Ok(json!({"id": id, "name": "hello", "stargazers_count": stars}).to_string())
+    };
+    let api = cached_actions_of(REPOS, vec![answer(7, 42), answer(8, 9)]);
+    read(&api, "/repos/octo/hello").await;
+    let (_, other) = read(&api, "/repos/cat/hello").await;
+    assert_eq!(other["stargazers_count"], 9, "{other}");
+    let (source, again) = read(&api, "/repos/octo/hello").await;
+    assert_eq!(source, "cache");
+    assert_eq!(again["stargazers_count"], 42);
+}
+
+/// A numeric repository a read answered is the parent a route below it finds.
+#[tokio::test]
+async fn a_read_repo_is_the_parent_of_a_route_below_it() {
+    let provider =
+        Arc::new(ScriptedProvider::new(vec![
+        Ok(json!({"id": 7, "name": "widget", "full_name": "acme/widget", "open_issues_count": 3})
+            .to_string()),
+        Ok(new_issue().to_string()),
+    ]));
+    let rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(NESTED.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    read(&api, "/repos/acme/widget").await;
+    api.call("POST", "/repos/acme/widget/issues", Some(json!({})))
+        .await;
+    let prompt = prompt_of(&api, 1);
+    assert!(
+        prompt.contains(r#"{"type": "repos", "id": "7"}"#),
+        "{prompt}"
+    );
+}
+
+/// `POST /orders/{id}/ship` answers a shipment of its own, with no `GET` on
+/// its path. `POST /bookings/{bookingId}/cancel` answers a record naming its
+/// booking.
+const SHIP: &str = r##"
+openapi: 3.0.0
+info: {title: Ship, version: "1"}
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders/{id}/ship:
+    post:
+      operationId: shipOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Shipment"}}}}
+  /bookings/{bookingId}:
+    get:
+      operationId: getBooking
+      parameters: [{name: bookingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /bookings/{bookingId}/cancel:
+    post:
+      operationId: cancelBooking
+      parameters: [{name: bookingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cancellation"}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Shipment:
+      type: object
+      required: [id, orderId]
+      properties: {id: {type: string}, orderId: {type: string}, carrier: {type: string}}
+    Cancellation:
+      type: object
+      required: [id, bookingId]
+      properties: {id: {type: string}, bookingId: {type: string}}
+"##;
+
+fn shipment() -> Result<String, LlmError> {
+    Ok(json!({"id": "sh_1", "orderId": "o1", "carrier": "UPS"}).to_string())
+}
+
+/// An action named with `{id}` answers a record of its own: that `id` is the
+/// record's, not the parent's.
+#[tokio::test]
+async fn an_id_named_action_keeps_its_own_record_id() {
+    let api = actions_of(SHIP, vec![shipment()]);
+    let (status, _, body) = api.call("POST", "/orders/o1/ship", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "sh_1", "{body}");
+    assert_eq!(body["orderId"], "o1");
+}
+
+/// A member named for a parameter that is more than `id` still names the
+/// target, whatever the answer put there, beside the record's own `id`.
+#[tokio::test]
+async fn a_member_named_for_a_specific_param_still_names_the_target() {
+    let api = actions_of(
+        SHIP,
+        vec![Ok(json!({"id": "can_1", "bookingId": "other"}).to_string())],
+    );
+    let (_, _, body) = api.call("POST", "/bookings/b1/cancel", None).await;
+    assert_eq!(body["bookingId"], "b1", "{body}");
+    assert_eq!(body["id"], "can_1");
+}
+
+/// With consistency off such an action answers the same and looks nothing
+/// up: a read after it is generated.
+#[tokio::test]
+async fn consistency_off_id_named_action_keeps_its_record_and_stores_nothing() {
+    let api = actions_off(
+        SHIP,
+        vec![
+            shipment(),
+            Ok(json!({"id": "o1", "status": "generated"}).to_string()),
+        ],
+    );
+    let (status, _, body) = api.call("POST", "/orders/o1/ship", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "sh_1", "{body}");
+    let (source, order) = read(&api, "/orders/o1").await;
+    assert_ne!(source, "state");
+    assert_eq!(order["status"], "generated");
+}
+
+/// An action on an id the session does not hold answers as on any other:
+/// `unknown_ids: 404` only speaks for reads, and nothing is stored for the
+/// parent or the record.
+#[tokio::test]
+async fn an_action_on_an_unknown_id_answers_and_stores_nothing() {
+    for unknown_ids in [
+        mb_protocols::UnknownIds::Generate,
+        mb_protocols::UnknownIds::NotFound,
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(vec![shipment()]));
+        let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let mut rt = MockRuntime::new(
+            "references",
+            Arc::new(compile(SHIP.as_bytes()).unwrap()),
+            Arc::new(Engine::new(
+                Some(Arc::clone(&provider) as Arc<dyn Provider>),
+                EngineConfig::default(),
+            )),
+            Arc::clone(&state) as Arc<dyn StateStore>,
+        );
+        rt.unknown_ids = unknown_ids;
+        let api = Actions {
+            router: http_rest::router(Arc::new(rt)),
+            provider,
+        };
+        let (status, _, body) = api.call("POST", "/orders/nope/ship", None).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["id"], "sh_1", "{body}");
+        let session = SessionKey {
+            workspace: "default".into(),
+            mock: "references".into(),
+            session: "default".into(),
+        };
+        for id in ["nope", "sh_1"] {
+            assert!(state.get(&session, "orders", id).await.unwrap().is_none());
+        }
+    }
+}
+
+/// `things` has a read with no schema, so nothing says what one looks like:
+/// a mention of one is not stored.
+#[tokio::test]
+async fn a_mention_of_a_type_with_no_schema_is_not_stored() {
+    const UNSHAPED: &str = r##"
+openapi: 3.0.0
+info: {title: Unshaped, version: "1"}
+paths:
+  /things:
+    get:
+      operationId: getThings
+      responses:
+        "200": {description: ok}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {type: string}
+                  things: {type: object}
+"##;
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(json!({
+        "id": "o1",
+        "things": {"id": "t1", "anything": "the model said"}
+    })
+    .to_string())]));
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(UNSHAPED.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    let api = Actions {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    };
+    read(&api, "/orders/o1").await;
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "references".into(),
+        session: "default".into(),
+    };
+    assert!(state.get(&session, "things", "t1").await.unwrap().is_none());
+}

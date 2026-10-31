@@ -2358,9 +2358,10 @@ fn cut(partial: &str) -> LlmError {
     }
 }
 
-/// A cut envelope is closed, and the complete effects before the cut stand.
+/// A cut envelope is closed and its answer served, but none of its effects
+/// stand: each is counted as dropped.
 #[tokio::test]
-async fn a_cut_envelope_keeps_its_complete_effects() {
+async fn a_cut_envelope_drops_its_effects() {
     let bundle = effects_bundle();
     let partial = format!(
         r#"{{"response": {}, "effects": [{}, {{"type": "charges", "id": "c"#,
@@ -2371,8 +2372,38 @@ async fn a_cut_envelope_keeps_its_complete_effects() {
     let out = with_target(&bundle, "cancelBooking", &engine).await;
     assert_eq!(out.source, Source::Patched);
     assert_eq!(out.body, Some(cancelled()));
-    assert_eq!(out.effects.len(), 1);
-    assert_eq!(out.effects[0].id, "ch1");
+    assert!(out.effects.is_empty());
+    assert!(out.dropped_effects >= 1, "{}", out.dropped_effects);
+}
+
+/// A `set` cut inside a value says nothing it was going to say: it does not
+/// apply what it got as far as.
+#[tokio::test]
+async fn an_effect_cut_inside_its_set_does_not_apply() {
+    let bundle = effects_bundle();
+    let partial = format!(
+        r#"{{"response": {}, "effects": [{{"type": "charges", "id": "ch1", "set": {{"status": "refunded", "note": "unfin"#,
+        cancelled(),
+    );
+    let (_, engine) = scripted(vec![Err(cut(&partial))]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Patched);
+    assert_eq!(out.body, Some(cancelled()));
+    assert!(out.effects.is_empty(), "{:?}", out.effects);
+    assert_eq!(out.dropped_effects, 1);
+}
+
+/// A complete envelope before cut prose was still a cut reply: its effects
+/// are dropped too.
+#[tokio::test]
+async fn a_complete_envelope_cut_after_it_drops_its_effects() {
+    let bundle = effects_bundle();
+    let partial = json!({"response": cancelled(), "effects": [charge_effect()]}).to_string();
+    let (_, engine) = scripted(vec![Err(cut(&partial))]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.body, Some(cancelled()));
+    assert!(out.effects.is_empty(), "{:?}", out.effects);
+    assert_eq!(out.dropped_effects, 1);
 }
 
 /// An envelope cut inside the answer has its inner answer completed.

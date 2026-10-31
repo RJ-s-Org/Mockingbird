@@ -1006,6 +1006,43 @@ components:
         assert_eq!(identity.field, "bookingId");
     }
 
+    /// `{id}` says nothing about the answer's own `id`, in any spelling: the
+    /// identity is the read's.
+    #[test]
+    fn a_generic_id_param_does_not_name_the_target() {
+        for param in ["id", "Id", "ID", "_id"] {
+            let contract = format!(
+                r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /orders/{{{param}}}:
+    get:
+      operationId: getOrder
+      parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
+      responses:
+        "200":
+          description: ok
+          content: {{application/json: {{schema: {{type: object, required: [id], properties: {{id: {{type: string}}}}}}}}}}
+  /orders/{{{param}}}/ship:
+    post:
+      operationId: shipOrder
+      parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
+      responses:
+        "201":
+          description: ok
+          content: {{application/json: {{schema: {{type: object, properties: {{{param}: {{type: string}}, orderId: {{type: string}}}}}}}}}}
+"##
+            );
+            let b = compile(contract.as_bytes()).unwrap();
+            let op = b.operation("shipOrder").unwrap();
+            assert_eq!(op.kind, OperationKind::Command(Effect::Other), "{param}");
+            let identity = op.identity.as_ref().unwrap();
+            assert_eq!(identity.path_param.as_deref(), Some(param), "{param}");
+            assert_eq!(identity.field, "id", "{param}");
+        }
+    }
+
     #[test]
     fn an_action_without_a_read_or_a_body_still_names_its_target() {
         let b = actions();

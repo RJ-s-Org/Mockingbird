@@ -512,6 +512,16 @@ pub struct Identity {
     pub path_field: Option<String>,
 }
 
+/// Whether a path parameter's name is a bare id with no resource in it (`id`,
+/// `Id`, `_id`). Such a name says nothing about a member of the same name in
+/// an action's answer, which is the answer's own; `bookingId` and `intent` do.
+#[must_use]
+pub fn is_generic_id(name: &str) -> bool {
+    name.strip_prefix('_')
+        .unwrap_or(name)
+        .eq_ignore_ascii_case("id")
+}
+
 impl Bundle {
     /// The payload definition of the webhook `op_id` fires as `event_type`:
     /// a callback of the operation, else a webhook named (ASCII

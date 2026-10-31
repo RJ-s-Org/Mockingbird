@@ -341,9 +341,10 @@ pub(crate) fn apply_action_routes(
         } else {
             // The answer is not the resource, so the identity is the read's,
             // except that a member named for the parameter names the target.
+            // A bare `{id}` names nothing there: an `id` is the answer's own.
             let read = read.and_then(|r| r.identity.as_ref());
-            let names_target =
-                schema_properties(answer, defs).is_some_and(|p| p.contains_key(&param));
+            let names_target = !mb_mcm::is_generic_id(&param)
+                && schema_properties(answer, defs).is_some_and(|p| p.contains_key(&param));
             let field = if names_target {
                 param.clone()
             } else {

@@ -772,6 +772,14 @@ pub(crate) struct AnswerEffects {
 }
 
 impl AnswerEffects {
+    /// These effects with every one dropped.
+    pub(crate) fn all_dropped(self) -> Self {
+        Self {
+            dropped: self.dropped + self.kept.len(),
+            kept: Vec::new(),
+        }
+    }
+
     /// Keeps the effects that fit under `cap` bytes beside an answer of
     /// `answer_bytes`, in order; the rest are dropped.
     fn fit(&mut self, answer_bytes: usize, cap: usize) {

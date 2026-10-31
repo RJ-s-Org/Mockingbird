@@ -1559,7 +1559,8 @@ impl Engine {
     /// value before cut prose is accepted as it is). An answer the provider
     /// did not cut is never salvaged: a missing `}` there is an error to
     /// repair, not a cut. The flag says whether the reply was cut; the
-    /// effects are those of the checked answer.
+    /// effects are those of the checked answer, and a cut reply applies none
+    /// (a `set` may stop mid-value): they count as dropped.
     fn check_reply(
         &self,
         validator: &SchemaValidator,
@@ -1570,19 +1571,16 @@ impl Engine {
         if reply.truncated.is_none() {
             return (checked, false, effects);
         }
-        match checked {
+        let (checked, effects) = match checked {
             Checked::Invalid(errors) => {
                 match self.check_truncated(validator, &reply.text, checks) {
-                    (salvaged @ Checked::Patched(_), effects) => (salvaged, true, effects),
-                    _ => (
-                        Checked::Invalid(errors),
-                        true,
-                        guards::AnswerEffects::default(),
-                    ),
+                    (salvaged @ Checked::Patched(_), effects) => (salvaged, effects),
+                    _ => (Checked::Invalid(errors), guards::AnswerEffects::default()),
                 }
             }
-            other => (other, true, effects),
-        }
+            other => (other, effects),
+        };
+        (checked, true, effects.all_dropped())
     }
 
     async fn complete(
@@ -1960,7 +1958,8 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
 /// `identity.input_field`), as a string or (when the schema wants one) a
 /// number. The answer of an action that does not return its resource is a
 /// record of its own: only a member named for the path parameter names the
-/// target, and any other `id` is the record's.
+/// target, unless that parameter is a bare id (`{id}`, see
+/// [`mb_mcm::is_generic_id`]), and any other `id` is the record's.
 fn force_identity(
     validator: &SchemaValidator,
     op: &Operation,
@@ -1972,7 +1971,10 @@ fn force_identity(
     };
     if op.kind == OperationKind::Command(Effect::Other)
         && op.is_action()
-        && identity.path_param.as_ref() != Some(&identity.field)
+        && identity
+            .path_param
+            .as_deref()
+            .is_none_or(|p| p != identity.field || mb_mcm::is_generic_id(p))
     {
         return body;
     }

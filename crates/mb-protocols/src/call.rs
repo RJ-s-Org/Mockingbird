@@ -911,6 +911,7 @@ pub(crate) async fn complete(
                 session,
                 rt,
                 op,
+                call,
                 target_id.as_deref(),
                 &generated,
             )
@@ -1010,6 +1011,19 @@ pub(crate) async fn complete(
 /// (`applied` or `rejected`).
 const EFFECTS_METRIC: &str = "mb_effects_total";
 
+/// Characters of an answer's own text that a log line carries, in one field.
+const MAX_LOGGED_CHARS: usize = 64;
+
+/// `text`, which an LLM wrote, cut to fit a log line.
+fn log_capped(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut capped: String = chars.by_ref().take(MAX_LOGGED_CHARS).collect();
+    if chars.next().is_some() {
+        capped.push('…');
+    }
+    capped
+}
+
 /// Applies what an answer says it changed in other resources, in this session
 /// only, and counts each effect. A rejected effect costs itself: the answer is
 /// served and the next effect still applies.
@@ -1024,8 +1038,8 @@ async fn apply_effects(
         let result = apply_effect(state, session, rt, effect).await;
         tracing::info!(
             mock = %rt.name,
-            resource_type = %effect.resource_type,
-            id = %effect.id,
+            resource_type = %log_capped(&effect.resource_type),
+            id = %log_capped(&effect.id),
             rejected = result.as_ref().err().copied(),
             "effect of an answer"
         );
@@ -1099,9 +1113,6 @@ async fn apply_effect(
         .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
     {
         return Err("it sets an identity field");
-    }
-    if !index.detail_reads.contains_key(t) && !index.other_shapes.contains_key(t) {
-        return Err("no schema to check against");
     }
     let Some(mut stored) = state.get(session, t, &effect.id).await else {
         return Err("no such resource");
@@ -1844,14 +1855,19 @@ async fn store_wrapped(
 /// be stored and change what repeating this read returns. It goes under the
 /// target id when the path names the identity. A path parameter naming no
 /// field (`/repos/{o}/{r}`) is no key, or one owner's answer would answer for
-/// another's, so that answer goes under its own id. A route read by another
-/// field (`/issues/{number}`) stores nothing: its answer's `id` comes from
+/// another's: that answer goes under its own id, or stores nothing, the
+/// response cache keeping its repeat, when it has none (its `id` is that
+/// parameter's value, forced there) or, on a route ending in an owner and a
+/// name, its `full_name` does not show it is that owner's (see
+/// [`owned_name`]). A route read by another field (`/issues/{number}`) stores
+/// nothing: its answer's `id` comes from
 /// the path and is no resource's, so a list would store the issue again.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     op: &Operation,
+    call: &OperationCall,
     target_id: Option<&str>,
     generated: &GeneratedResponse,
 ) {
@@ -1885,7 +1901,9 @@ async fn seed_own_read(
     let id = if path_names_identity(identity) {
         Some(target_id.to_string())
     } else {
-        body.get(&identity.field).and_then(id_string)
+        body.get(&identity.field)
+            .and_then(id_string)
+            .filter(|id| id != target_id)
     };
     let Some(id) = id else {
         return;
@@ -1895,6 +1913,12 @@ async fn seed_own_read(
         id,
         data: body.clone(),
     };
+    if !path_names_identity(identity)
+        && let Some(owned) = owned_name(op, call)
+        && (body.get("full_name").is_none() || !full_name_fits(&resource, Some(&owned)))
+    {
+        return;
+    }
     if state.insert_seeded(session, resource.clone()).await {
         rt.own_reads().remember(session, &resource);
         return;
@@ -1917,9 +1941,9 @@ const MAX_ENTITIES: usize = 100;
 
 /// Stores what a 2xx answer mentions so that a later read returns it: each
 /// object below the answer's root with an `id` or `number`, a known type (see
-/// [`entity_type`]) and, where its type has a read by path parameter, a value
-/// that read would serve or a shorter form of one (see [`is_summary`]). What
-/// the session already holds is left as it is.
+/// [`entity_type`]) and a value its type's read would serve or a shorter form
+/// of one (see [`entity_fits`], [`is_summary`]). What the session already
+/// holds is left as it is.
 async fn seed_entities(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -2018,7 +2042,7 @@ impl<'a> EntityWalk<'a> {
 /// Whether `value` suits resource type `t`: its by-path read would serve it
 /// (stored unservable, a later read would fall to the faker), else its list
 /// items or singleton read accept it. A type with neither has nothing to
-/// check against.
+/// check against, so nothing suits it.
 fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
     let index = rt.index();
     let bundle = rt.bundle();
@@ -2030,7 +2054,7 @@ fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
         },
     };
     let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
-        return true;
+        return false;
     };
     rt.engine.serve_stored(bundle, op, value, shape).is_some()
 }
@@ -3571,6 +3595,17 @@ paths:
         assert_eq!(entity_type(index, None, "items"), None);
         assert_eq!(entity_type(index, None, "nothing"), None);
         assert_eq!(entity_type(index, None, ""), None);
+    }
+
+    /// What an LLM wrote into a log field is bounded, in characters.
+    #[test]
+    fn log_fields_are_capped() {
+        assert_eq!(log_capped("ch_1"), "ch_1");
+        let exact = "é".repeat(MAX_LOGGED_CHARS);
+        assert_eq!(log_capped(&exact), exact);
+        let long = log_capped(&"é".repeat(MAX_LOGGED_CHARS * 100));
+        assert_eq!(long.chars().count(), MAX_LOGGED_CHARS + 1);
+        assert!(long.ends_with('…'));
     }
 
     /// The runtime's index answers what scanning the bundle answers.
