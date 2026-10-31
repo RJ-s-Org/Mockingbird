@@ -40,6 +40,26 @@ A singular `POST <static>/{param}/<verb>` with no `GET` on its path and no route
 
 A bundle takes this on recompile, and stored bundles are not recompiled on their own. For a mock managed through the API, upload the contract again. For a mock from the config file, restart: with an in-memory control store that is enough, but with a persistent one a mock keeps its active version while the contract's digest matches it, so also change a byte of the contract, such as a comment.
 
+### Action routes come from the contract's structure
+
+`POST <static>/{param}/<static>` used to be an action only if its last segment did not end in `s`, it had no `GET` on its path and no route below it. The spelling no longer counts, and [the contract decides](import.md#how-a-post-under-a-resource-is-read). On recompile:
+
+- A `POST` whose successes declare no body acts on its parent, even with a `GET` beside it or a longer static tail: Jira's `POST /issue/{issueIdOrKey}/transitions` and Auth0's `POST /users/{id}/roles`.
+- A `POST` with a `GET` beside it that reads something else acts on its parent: Spotify's `POST /playlists/{id}/items`.
+- A `POST` with no `GET` beside it, no route below it and an answer nothing reads now acts on its parent when it answers `200`, or `201` with no identity, whatever its spelling: `POST /v1/customers/{id}/sources` (`200`), GitHub's `POST /app/installations/{id}/access_tokens`. `/{id}/process` and `/{id}/address` also become actions.
+- A `POST` answering `201` with an identity of its own, with no read of it, is a create, whatever its spelling. Such a route with a singular tail used to act on its parent.
+- A `POST` whose answer has an identity and is served by another resource's `GET` is a create under that read's type: PayPal's `POST /captures/{capture_id}/refund` is a create of `refunds`, so `GET /refunds/{id}` serves it. It was a command on `captures` that stored nothing.
+
+For each operation that changes, these follow:
+
+- its `kind`, `resource_type` and `identity` in the compiled bundle. Routes, operation ids and `source_digest` stay the same;
+- its webhook event type, from `roles.created` to `user.updated`, and from `capture.updated` to `refund.created`;
+- what state it writes: resources stored under the old type in a session or snapshot are no longer read by these operations, and `on_state_change` triggers on that type stop firing for them.
+
+Set [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) on an operation to keep what it was. Contracts without the extension behave as inference says.
+
+Stored bundles take this the way they take action routes, with the same steps: upload the contract again, or restart a mock from the config file, changing a byte of the contract if the control store is persistent.
+
 ### Resources composed with `allOf` have an identity
 
 A resource whose schema is an `allOf` at its root used to compile with no identity. The importer now reads the members of its `allOf` branches, so every such resource has one on recompile. On those contracts:

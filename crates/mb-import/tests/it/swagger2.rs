@@ -1,5 +1,5 @@
 #![cfg(test)]
-use mb_import::{SourceFormat, compile, sniff};
+use mb_import::{SourceFormat, compile, compile_with_warnings, sniff};
 use mb_mcm::{Bundle, Effect, OperationKind};
 use serde_json::json;
 
@@ -284,4 +284,67 @@ fn action_routes_act_on_their_parent() {
         cancel.identity.as_ref().unwrap().path_param.as_deref(),
         Some("intent")
     );
+}
+
+#[test]
+fn action_routes_read_the_contract_as_openapi_does() {
+    let param = json!([{"name": "id", "in": "path", "required": true, "type": "string"}]);
+    let list = json!({"type": "array", "items": {"$ref": "#/definitions/Item"}});
+    let item = json!({"$ref": "#/definitions/Item"});
+    let src = json!({
+        "swagger": "2.0",
+        "info": {"title": "Actions", "version": "1"},
+        "paths": {
+            "/issues/{id}/transitions": {
+                "get": {"operationId": "listTransitions", "parameters": param,
+                    "responses": {"200": {"description": "ok", "schema": list}}},
+                "post": {"operationId": "transition", "parameters": param,
+                    "responses": {"204": {"description": "done"}}},
+            },
+            "/lists/{id}/entries": {
+                "get": {"operationId": "listEntries", "parameters": param,
+                    "responses": {"200": {"description": "ok", "schema": list}}},
+                "post": {"operationId": "addEntry", "parameters": param,
+                    "responses": {"200": {"description": "ok", "schema": item}}},
+            },
+            "/jobs/{id}/process": {"post": {"operationId": "process", "parameters": param,
+                "responses": {"200": {"description": "ok", "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}},
+            "/jobs/{id}/sync": {"post": {
+                "operationId": "sync",
+                "parameters": param,
+                "x-mockingbird-resource": {"action": true, "type": "batches", "identity": "ok"},
+                "responses": {"200": {"description": "ok", "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}},
+            }},
+            "/jobs/{id}/bad": {"post": {
+                "operationId": "bad",
+                "parameters": param,
+                "x-mockingbird-resource": {"action": "yes"},
+                "responses": {"200": {"description": "ok", "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}},
+            }},
+        },
+        "definitions": {"Item": {"type": "object", "properties": {"id": {"type": "string"}}}},
+    });
+    let (b, warnings) = compile_with_warnings(src.to_string().as_bytes()).unwrap();
+    let transition = b.operation("transition").unwrap();
+    assert_eq!(transition.kind, OperationKind::Command(Effect::Other));
+    assert_eq!(transition.resource_type.as_deref(), Some("issues"));
+    let entry = b.operation("addEntry").unwrap();
+    assert_eq!(entry.kind, OperationKind::Command(Effect::Create));
+    assert_eq!(entry.resource_type.as_deref(), Some("entries"));
+    let process = b.operation("process").unwrap();
+    assert_eq!(process.kind, OperationKind::Command(Effect::Other));
+    assert_eq!(process.resource_type.as_deref(), Some("jobs"));
+    let sync = b.operation("sync").unwrap();
+    assert_eq!(sync.kind, OperationKind::Command(Effect::Other));
+    assert_eq!(sync.resource_type.as_deref(), Some("batches"));
+    assert_eq!(sync.identity.as_ref().unwrap().field, "ok");
+    let invalid: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "invalid_resource_extension")
+        .collect();
+    assert_eq!(invalid.len(), 1, "{warnings:?}");
+    assert_eq!(invalid[0].operation.as_deref(), Some("bad"));
+    let bad = b.operation("bad").unwrap();
+    assert_eq!(bad.kind, OperationKind::Command(Effect::Other));
+    assert_eq!(bad.resource_type.as_deref(), Some("jobs"));
 }

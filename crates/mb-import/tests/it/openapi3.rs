@@ -889,7 +889,7 @@ paths:
       operationId: refundCapture
       parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
       responses:
-        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
   /repos/{number}/close:
     post:
       operationId: closeWithNoDetail
@@ -1029,7 +1029,7 @@ paths:
       operationId: shipOrder
       parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
       responses:
-        "201":
+        "200":
           description: ok
           content: {{application/json: {{schema: {{type: object, properties: {{{param}: {{type: string}}, orderId: {{type: string}}}}}}}}}}
 "##
@@ -1118,18 +1118,24 @@ components:
         for id in ["confirmIntent", "cancelBooking", "refundCapture"] {
             assert!(b.operation(id).unwrap().is_action(), "{id}");
         }
-        for id in ["createIntent", "getIntent", "addSource", "createIssue"] {
+        for id in ["createIntent", "getIntent", "createIssue"] {
             assert!(!b.operation(id).unwrap().is_action(), "{id}");
         }
     }
 
+    /// Nothing reads what `POST /v1/customers/{id}/sources` answers, and a
+    /// `200` does not say it created anything: its spelling does not count.
     #[test]
-    fn a_plural_tail_stays_a_collection() {
+    fn a_plural_tail_nothing_reads_acts_on_its_parent() {
         let b = actions();
         let op = b.operation("addSource").unwrap();
-        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
-        assert_eq!(op.resource_type.as_deref(), Some("sources"));
-        assert_eq!(op.identity.as_ref().unwrap().path_param, None);
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("customers"));
+        assert_eq!(
+            op.identity.as_ref().unwrap().path_param.as_deref(),
+            Some("id")
+        );
+        assert!(op.is_action());
     }
 
     #[test]
@@ -1168,5 +1174,596 @@ components:
         let op = b.operation("streamReply").unwrap();
         assert_eq!(op.kind, OperationKind::StreamServer);
         assert_eq!(op.resource_type.as_deref(), Some("reply"));
+    }
+}
+
+/// What the contract says about a `POST` under `<static>/{param}`, with no
+/// word of its path read as English.
+mod action_structure {
+    use super::*;
+    use mb_import::compile_with_warnings;
+
+    const STRUCTURE: &str = r##"
+openapi: 3.0.0
+info: {title: Structure, version: "1"}
+paths:
+  /jobs/{id}/process:
+    post:
+      operationId: process
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /users/{id}/address:
+    post:
+      operationId: address
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /lists/{id}/entries:
+    get:
+      operationId: listEntries
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addEntry
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /pages/{id}/entries:
+    get:
+      operationId: pageEntries
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Item"}}
+                  has_more: {type: boolean}
+    post:
+      operationId: addWrapped
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, properties: {data: {$ref: "#/components/schemas/Item"}}}}}
+  /sums/{id}/entries:
+    get:
+      operationId: listSummaries
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/ItemSummary"}}}}}}
+    post:
+      operationId: addFull
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /playlists/{id}/tracks:
+    get:
+      operationId: listTracks
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addTracks
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /blobs/{id}/parts:
+    get:
+      operationId: listParts
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object}}}}}
+    post:
+      operationId: addPart
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /blobs/{id}/chunks:
+    get:
+      operationId: listChunks
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addChunk
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object}}}}}
+  /states/{id}/phase:
+    get:
+      operationId: getPhase
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {state: {type: string}}}}}}}
+    post:
+      operationId: movePhase
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /issues/{key}/transitions:
+    get:
+      operationId: listTransitions
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: transition
+      responses: {"204": {description: done}}
+  /docs/{id}/tags:
+    post:
+      operationId: tagDoc
+      responses: {"200": {description: done}}
+  /docs/{id}/tags/{tag}:
+    delete:
+      operationId: untagDoc
+      responses: {"204": {description: done}}
+  /batches/{id}/run:
+    post:
+      operationId: runBatch
+      responses: {"202": {description: accepted}}
+  /folders/{id}/files:
+    get:
+      operationId: listFiles
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addFile
+      responses: {"201": {description: created}}
+  /mixed/{id}/things:
+    get:
+      operationId: listThings
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}}
+    post:
+      operationId: addThing
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "204": {description: already there}
+  /deep/{id}/y/z:
+    post:
+      operationId: deepNoBody
+      responses: {"204": {description: done}}
+  /deeper/{id}/y/z:
+    post:
+      operationId: deepWithBody
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /repos/{o}/{r}/close:
+    post:
+      operationId: closeUnderTwoParams
+      responses: {"204": {description: done}}
+  /tasks/{id}/sync:
+    post:
+      operationId: syncNoBody
+      responses: {"204": {description: done}}
+  /tasks/{id}/search:
+    post:
+      operationId: searchWithBody
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /stars/{id}/star:
+    put:
+      operationId: putStar
+      responses: {"204": {description: done}}
+  /blocks/{id}/children:
+    patch:
+      operationId: patchChildren
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /charges/{id}/refund:
+    post:
+      operationId: refundCharge
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+  /refunds/{refund_id}:
+    get:
+      operationId: getRefund
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+  /charges/{id}/dispute:
+    post:
+      operationId: disputeCharge
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Dispute"}}}}}
+  /disputes:
+    get:
+      operationId: listDisputes
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Dispute"}}}}}}
+  /posts/{id}/comments:
+    post:
+      operationId: comment
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /installs/{id}/tokens:
+    post:
+      operationId: mintToken
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}}
+  /orders:
+    get:
+      operationId: listOrders
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Order"}}}}}}
+  /orders/{id}/close:
+    post:
+      operationId: closeOrder
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /Accounts/{Sid}/Calls.json:
+    post:
+      operationId: createCall
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}}
+  /Accounts/{Sid}/Calls/{CallSid}.json:
+    delete:
+      operationId: deleteCall
+      responses: {"204": {description: done}}
+components:
+  schemas:
+    Ack: {type: object, properties: {accepted: {type: boolean}}}
+    Item: {type: object, properties: {id: {type: string}, name: {type: string}}}
+    ItemSummary: {type: object, properties: {id: {type: string}}}
+    Snapshot: {type: object, properties: {snapshot_id: {type: string}}}
+    Refund: {type: object, properties: {id: {type: string}, amount: {type: integer}}}
+    Dispute: {type: object, properties: {id: {type: string}, reason: {type: string}}}
+    Comment: {type: object, properties: {id: {type: string}, body: {type: string}}}
+    Order: {type: object, properties: {id: {type: string}, status: {type: string}}}
+"##;
+
+    fn other(b: &Bundle, id: &str, parent: &str, param: &str) {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other), "{id}");
+        assert_eq!(op.resource_type.as_deref(), Some(parent), "{id}");
+        assert_eq!(
+            op.identity.as_ref().and_then(|i| i.path_param.as_deref()),
+            Some(param),
+            "{id}"
+        );
+        assert!(op.is_action(), "{id}");
+    }
+
+    fn create(b: &Bundle, id: &str, resource: &str) {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create), "{id}");
+        assert_eq!(op.resource_type.as_deref(), Some(resource), "{id}");
+        assert!(!op.is_action(), "{id}");
+    }
+
+    fn structure() -> Bundle {
+        compile(STRUCTURE.as_bytes()).unwrap()
+    }
+
+    /// `process` and `address` end in `s`; that says nothing.
+    #[test]
+    fn the_spelling_of_a_tail_does_not_count() {
+        let b = structure();
+        other(&b, "process", "jobs", "id");
+        other(&b, "address", "users", "id");
+    }
+
+    #[test]
+    fn a_get_beside_it_that_lists_its_answer_makes_a_collection() {
+        let b = structure();
+        create(&b, "addEntry", "entries");
+        // In envelopes, and a shorter item with the same identity.
+        create(&b, "addWrapped", "entries");
+        create(&b, "addFull", "entries");
+    }
+
+    #[test]
+    fn a_get_beside_it_that_reads_something_else_leaves_an_action() {
+        let b = structure();
+        other(&b, "addTracks", "playlists", "id");
+        other(&b, "movePhase", "states", "id");
+    }
+
+    /// An open schema on either side tells them apart from nothing.
+    #[test]
+    fn a_get_beside_it_that_cannot_be_compared_makes_a_collection() {
+        let b = structure();
+        create(&b, "addPart", "parts");
+        create(&b, "addChunk", "chunks");
+    }
+
+    #[test]
+    fn a_post_with_no_body_acts_on_its_parent_whatever_is_beside_it() {
+        let b = structure();
+        other(&b, "transition", "issues", "key");
+        other(&b, "tagDoc", "docs", "id");
+        other(&b, "runBatch", "batches", "id");
+    }
+
+    /// A `201` says it created something, with or without a body; one of
+    /// several successes having a body means a client can be told.
+    #[test]
+    fn a_created_or_a_body_among_the_successes_is_not_a_bodyless_action() {
+        let b = structure();
+        create(&b, "addFile", "files");
+        create(&b, "addThing", "things");
+    }
+
+    #[test]
+    fn a_static_tail_of_two_segments_needs_no_body_to_act() {
+        let b = structure();
+        other(&b, "deepNoBody", "deep", "id");
+        create(&b, "deepWithBody", "z");
+    }
+
+    /// Two parameters in a row name one resource together: the contract does
+    /// not say which of them is its identity.
+    #[test]
+    fn a_tail_under_two_params_stays_as_it_was_without_a_body() {
+        create(&structure(), "closeUnderTwoParams", "close");
+    }
+
+    #[test]
+    fn no_body_beats_a_read_verb() {
+        let b = structure();
+        other(&b, "syncNoBody", "tasks", "id");
+        assert_eq!(
+            b.operation("searchWithBody").unwrap().kind,
+            OperationKind::Query
+        );
+    }
+
+    #[test]
+    fn put_and_patch_on_a_tail_write_what_their_path_names() {
+        let b = structure();
+        for (id, resource) in [("putStar", "star"), ("patchChildren", "children")] {
+            let op = b.operation(id).unwrap();
+            assert_eq!(op.kind, OperationKind::Command(Effect::Update), "{id}");
+            assert_eq!(op.resource_type.as_deref(), Some(resource), "{id}");
+        }
+    }
+
+    /// The created record has to land where its read looks.
+    #[test]
+    fn an_answer_read_elsewhere_is_created_under_that_read() {
+        let b = structure();
+        create(&b, "refundCharge", "refunds");
+        create(&b, "disputeCharge", "disputes");
+    }
+
+    #[test]
+    fn a_created_answer_with_an_identity_is_a_record_without_a_read() {
+        let b = structure();
+        create(&b, "comment", "comments");
+        // A `201` with no identity is not a record a client could name.
+        other(&b, "mintToken", "installs", "id");
+    }
+
+    /// Its parent's list is no read elsewhere: the parent is what it acts on.
+    #[test]
+    fn the_parents_own_list_is_not_a_read_elsewhere() {
+        other(&structure(), "closeOrder", "orders", "id");
+    }
+
+    /// `Calls.json` and `Calls/{CallSid}.json` are one route with its detail.
+    #[test]
+    fn a_format_suffix_does_not_hide_a_detail_route() {
+        create(&structure(), "createCall", "Calls");
+    }
+
+    fn example(rel: &str) -> Bundle {
+        let path = format!("{}/../../examples/apis/{rel}", env!("CARGO_MANIFEST_DIR"));
+        compile(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// `POST .../transitions` answers `204` beside a `GET` of the same path.
+    #[test]
+    fn jiras_transition_acts_on_its_issue() {
+        let b = example("jira/jira.openapi.yaml");
+        other(&b, "doTransition", "issue", "issueIdOrKey");
+        let identity = b.operation("doTransition").unwrap().identity.clone();
+        let read = b.operation("getIssue").unwrap().identity.clone().unwrap();
+        let identity = identity.unwrap();
+        assert_eq!(identity.field, read.field);
+        assert_eq!(identity.path_field, read.path_field);
+        assert_eq!(
+            b.operation("getTransitions").unwrap().kind,
+            OperationKind::Query
+        );
+        create(&b, "addComment", "comment");
+    }
+
+    #[test]
+    fn real_contracts_classify_by_structure() {
+        let auth0 = example("auth0-management/auth0-management.openapi.yaml");
+        other(&auth0, "post_user_roles", "users", "id");
+        let spotify = example("spotify/spotify.openapi.yaml");
+        other(
+            &spotify,
+            "add-items-to-playlist",
+            "playlists",
+            "playlist_id",
+        );
+        other(
+            &spotify,
+            "add-tracks-to-playlist",
+            "playlists",
+            "playlist_id",
+        );
+        let github = example("github-rest/github-rest.openapi.yaml");
+        other(
+            &github,
+            "apps/create-installation-access-token",
+            "installations",
+            "installation_id",
+        );
+        create(&github, "issues/create-comment", "comments");
+        let paypal = example("paypal/paypal-payments.openapi.yaml");
+        create(&paypal, "captures.refund", "refunds");
+        let twilio = example("twilio/twilio.openapi.yaml");
+        create(&twilio, "CreateCall", "Calls");
+        create(&twilio, "CreateMessage", "Messages");
+        let discord = example("discord/discord.openapi.yaml");
+        create(&discord, "create_message", "messages");
+        create(&discord, "create_interaction_response", "callback");
+    }
+
+    fn with_ext(path: &str, method: &str, status: &str, ext: &str) -> String {
+        format!(
+            r##"
+openapi: 3.0.0
+info: {{title: Ext, version: "1"}}
+paths:
+  /things/{{id}}:
+    get:
+      operationId: getThing
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Thing"}}}}}}}}}}
+  {path}:
+    {method}:
+      operationId: subject
+      x-mockingbird-resource: {ext}
+      responses: {status}
+components:
+  schemas:
+    Thing: {{type: object, properties: {{id: {{type: string}}, sku: {{type: string}}}}}}
+"##
+        )
+    }
+
+    const THING: &str = r##"{"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}"##;
+    const NOTE: &str = r##"{"200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}}"##;
+
+    fn subject(contract: &str) -> (mb_mcm::Operation, Vec<String>) {
+        let (b, warnings) = compile_with_warnings(contract.as_bytes()).unwrap();
+        let op = b.operation("subject").unwrap().clone();
+        let codes = warnings
+            .into_iter()
+            .filter(|w| w.code == "invalid_resource_extension")
+            .map(|w| {
+                assert_eq!(w.operation.as_deref(), Some("subject"));
+                assert!(w.message.contains("x-mockingbird-resource"), "{w:?}");
+                w.message
+            })
+            .collect();
+        (op, codes)
+    }
+
+    /// The tail says nothing English here: it would be read as a read.
+    #[test]
+    fn the_extension_makes_a_read_verb_an_action() {
+        let c = with_ext("/things/{id}/sync", "post", NOTE, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("things"));
+        assert!(op.is_action());
+    }
+
+    #[test]
+    fn the_extension_makes_a_read_verb_a_write_of_its_own() {
+        let c = with_ext("/things/{id}/history", "post", NOTE, "{action: false}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("history"));
+        assert!(!op.is_action());
+    }
+
+    #[test]
+    fn the_extension_overrides_what_inference_decides() {
+        // Inference: an action. Declared: a collection.
+        let c = with_ext("/things/{id}/note", "post", NOTE, "{action: false}");
+        let (op, _) = subject(&c);
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("note"));
+        // Inference: a create with no parent. Declared: an action, deep down.
+        let c = with_ext("/things/{id}/a/b", "post", THING, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update));
+        assert_eq!(op.resource_type.as_deref(), Some("things"));
+        // PUT is left alone by inference, not by the contract's author.
+        let c = with_ext(
+            "/things/{id}/star",
+            "put",
+            r#"{"204": {description: ok}}"#,
+            "{action: true}",
+        );
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("things"));
+    }
+
+    #[test]
+    fn the_extension_names_the_type_and_the_identity() {
+        let c = with_ext(
+            "/parts/{id}",
+            "put",
+            THING,
+            "{type: widgets, identity: sku}",
+        );
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update));
+        assert_eq!(op.resource_type.as_deref(), Some("widgets"));
+        let identity = op.identity.unwrap();
+        assert_eq!(identity.field, "sku");
+        assert_eq!(identity.path_param.as_deref(), Some("id"));
+        // On an action, the type and the identity of what it acts on.
+        let c = with_ext(
+            "/things/{id}/ship",
+            "post",
+            NOTE,
+            "{action: true, type: widgets, identity: sku}",
+        );
+        let (op, warnings) = subject(&c);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("widgets"));
+        let identity = op.identity.unwrap();
+        assert_eq!(identity.field, "sku");
+        assert_eq!(identity.path_param.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn an_invalid_extension_warns_and_inference_stands() {
+        let inferred = with_ext("/things/{id}/note", "post", NOTE, "{}");
+        let (expected, warnings) = subject(&inferred);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for ext in [
+            "true",
+            "[a]",
+            "{type: 1}",
+            "{type: ''}",
+            "{identity: 1}",
+            "{identity: ''}",
+            "{identity: nowhere}",
+            "{action: 'yes'}",
+            "{resource: things}",
+        ] {
+            let c = with_ext("/things/{id}/note", "post", NOTE, ext);
+            let (op, warnings) = subject(&c);
+            assert_eq!(warnings.len(), 1, "{ext}: {warnings:?}");
+            assert_eq!(op.kind, expected.kind, "{ext}");
+            assert_eq!(op.resource_type, expected.resource_type, "{ext}");
+            assert_eq!(op.identity, expected.identity, "{ext}");
+        }
+    }
+
+    #[test]
+    fn an_impossible_action_warns_and_inference_stands() {
+        let c = with_ext("/standalone", "post", NOTE, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("standalone"));
+        let c = with_ext("/things/{id}/view", "get", NOTE, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Query);
+        let streams =
+            r#"{"200": {description: ok, content: {text/event-stream: {schema: {type: object}}}}}"#;
+        let c = with_ext("/things/{id}/reply", "post", streams, "{action: true}");
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::StreamServer);
+    }
+
+    /// A route is judged by the reads as declared, wherever they sort.
+    #[test]
+    fn a_route_lands_where_a_read_declares_its_type() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: Ext, version: "1"}
+paths:
+  /a/{id}/refund:
+    post:
+      operationId: subject
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+  /z/{refund_id}:
+    get:
+      operationId: getRefund
+      x-mockingbird-resource: {type: refunds}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}}
+components:
+  schemas:
+    Refund: {type: object, properties: {id: {type: string}}}
+"##;
+        let (op, warnings) = subject(contract);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("refunds"));
+    }
+
+    /// One bad member does not cost the good ones.
+    #[test]
+    fn a_valid_member_beside_an_invalid_one_holds() {
+        let c = with_ext(
+            "/things/{id}/note",
+            "post",
+            NOTE,
+            "{type: widgets, action: 'yes'}",
+        );
+        let (op, warnings) = subject(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(op.resource_type.as_deref(), Some("widgets"));
     }
 }

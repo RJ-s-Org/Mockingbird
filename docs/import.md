@@ -19,6 +19,42 @@ Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploa
 
 Many documentation pages carry their own OpenAPI definition: a fenced ```` ```yaml ```` or ```` ```json ```` block, a `<script type="application/json">` blob, or the page data of a ReadMe site (`script#ssr-props`, `script#__NEXT_DATA__`, `data-initial-props`, including definitions stored as JSON strings such as `oasDefinition`). An OpenAPI 3.x definition found there is taken as written: its operations (with every operation of the definition, not only the one the page describes), components and servers go into the draft with confidence 1.0 and the provenance `embedded OpenAPI`, and the block is removed from the text the LLM reads. When the definitions cover every endpoint the page names, no LLM is called (and none is needed). On a page with both, the block wins: the LLM only fills in operations without a block. A block operation that does not compile is skipped with an `invalid_operation` warning; a block that does not parse stays in the text for the LLM. A Swagger 2.0 block is converted to OpenAPI 3.0 first (definitions, parameters, `in: body` and `formData` parameters as request bodies, `consumes` and `produces`, response headers, security definitions, and `host` with `basePath` as the server) and then taken as written the same way.
 
+## How a `POST` under a resource is read
+
+The compiler decides from the contract, not the words of the path, whether `POST <static>/{param}/<static>` adds a record of its own or acts on the resource `{param}` names. OpenAPI 3 and Swagger 2.0 read it the same way, in this order:
+
+1. **No success response declares a body** (`204`, or `200` or `202` with no content, for every 2xx it lists): it acts on the parent, even with a `GET` beside it. This also holds under a longer static tail (`/x/{id}/y/z`). A `201` does not count, because it says something was made.
+2. **A route below it** (`<path>/{...}`): a collection.
+3. **A `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not: `POST /v1/playlists/{id}/items` answers a snapshot id, so it acts on the playlist.
+4. **An answer the same as the parent's `GET`**: it replaces the parent (an update).
+5. **An answer with an identity of its own**: a record of its own when another resource's `GET` serves that schema, by path or in a list, stored under that read's type (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it), or when the status is `201`.
+6. **Anything else**: nothing can read what it answers, so it acts on the parent and stores nothing.
+
+A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read.
+
+### Correcting it: `x-mockingbird-resource`
+
+Inference needs no help from a contract. When it is wrong, an OpenAPI 3 or Swagger 2.0 operation can say so:
+
+```yaml
+paths:
+  /jobs/{id}/sync:
+    post:
+      x-mockingbird-resource:
+        action: true    # acts on what its path names; false: it writes a record of its own
+        type: batches   # the resource type
+        identity: key   # the member that identifies it
+```
+
+All three members are optional, and each overrides what inference decides for that operation.
+
+- `action: true` needs a path ending `<static>/{param}/<static>...` and a method other than `GET`, `HEAD` or `OPTIONS`. It takes any tail, also on `PUT` and `PATCH`, and it beats a read verb in the last segment.
+- `action: false` makes a `POST` a write of its own, also when its last segment is a read verb.
+- `type` also applies to a read, and rule 5 stores a record under the type its read declares.
+- `identity` must be a member of what the operation answers, or for an action of what the parent's `GET` answers. An answer that declares no members cannot contradict it.
+
+A value that is not valid gives an `invalid_resource_extension` warning, and inference stands for that member: the extension's other valid members still apply. That covers a value that is not an object, a member of the wrong type, an unknown member, an impossible `action: true`, and an `identity` the operation does not declare.
+
 ## Merge or replace
 
 An import **merges** into the mock's newest draft or active version when it has one: new operations are added, an operation with the same method and path (parameter names aside) is replaced, and nothing is removed. Base components win over incoming ones with the same name (a differing one gives a `conflicting_component` warning), and an incoming operation id already used by a kept operation gets a `_2` suffix (the original goes in `x-original-operation-id`). Re-importing the same documentation therefore gives the same operations and ids. `mode: replace` makes the draft hold only what the import found. When the base is not an OpenAPI 3 document (a GraphQL or protobuf mock, say), a default import is stored unmerged with a `merge_skipped` warning, while an explicit `mode: merge` fails the job. Two imports running at once each merge into the same base; the later draft does not include the earlier one's operations.
