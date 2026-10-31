@@ -680,7 +680,8 @@ impl Engine {
                 if let Some(user) = messages.last_mut() {
                     if effects_envelope {
                         user.content.push_str("\n\n");
-                        user.content.push_str(&prompt::effects_note(&ctx));
+                        user.content
+                            .push_str(&prompt::effects_note(op, status, &ctx));
                     } else if items_envelope {
                         user.content.push_str("\n\n");
                         user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);

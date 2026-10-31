@@ -2386,3 +2386,150 @@ async fn an_envelope_cut_inside_its_answer_is_completed() {
     assert_eq!(out.body, Some(cancelled()));
     assert!(out.effects.is_empty());
 }
+
+/// An action answering with its resource, one answering with a record of
+/// its own, a write on the resource itself and a read.
+const ACTIONS_PROMPT: &str = r##"
+openapi: 3.0.0
+info: {title: Actions, version: "1"}
+paths:
+  /v1/payment_intents/{intent}:
+    get:
+      operationId: getIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+    post:
+      operationId: updateIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /v1/payment_intents/{intent}/confirm:
+    post:
+      operationId: confirmIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+        "402": {description: declined, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /bookings/{bookingId}:
+    get:
+      operationId: getBooking
+      parameters: [{name: bookingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}, status: {type: string}}}}}}
+  /bookings/{bookingId}/cancel.json:
+    post:
+      operationId: cancelBooking
+      parameters: [{name: bookingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cancellation"}}}}
+components:
+  schemas:
+    Intent:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Cancellation:
+      type: object
+      required: [bookingId]
+      properties: {bookingId: {type: string}}
+"##;
+
+/// The prompt of one generation of `op` of [`ACTIONS_PROMPT`], its target
+/// stored as `target` when given.
+async fn action_prompt(
+    op: &str,
+    target: Option<StoredResource>,
+    forced_status: Option<u16>,
+) -> String {
+    let bundle = compile(ACTIONS_PROMPT.as_bytes()).unwrap();
+    let (provider, engine) = scripted(vec![Ok(json!({"id": "x", "status": "s"}).to_string())]);
+    let call = OperationCall {
+        operation_id: op.into(),
+        ..OperationCall::default()
+    };
+    let ctx = GenerationContext {
+        target: target.as_ref(),
+        forced_status,
+        ..GenerationContext::default()
+    };
+    engine
+        .generate(&bundle, bundle.operation(op).unwrap(), &call, ctx)
+        .await
+        .unwrap();
+    provider.requests()[0]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone()
+}
+
+/// The intent the journey's prompt showed: it had no payment method, and
+/// models kept it so, reasoning that it could not be confirmed.
+fn unpaid_intent() -> StoredResource {
+    StoredResource {
+        resource_type: "payment_intents".into(),
+        id: "pi_1".into(),
+        data: json!({"id": "pi_1", "status": "requires_payment_method", "payment_method": null}),
+    }
+}
+
+/// A successful action's prompt says it succeeded and names it.
+#[tokio::test]
+async fn an_action_prompt_says_it_succeeded() {
+    let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
+    assert!(prompt.contains("requires_payment_method"), "{prompt}");
+    assert!(
+        prompt.contains(
+            "This is a successful `confirm`: the call succeeded, so the resource has moved to \
+             the state that follows `confirm`, whatever it needed before."
+        ),
+        "{prompt}"
+    );
+}
+
+/// Nothing is said of an action answered with an error, of a write on the
+/// resource itself, or of a read.
+#[tokio::test]
+async fn only_a_successful_action_says_it_succeeded() {
+    for prompt in [
+        action_prompt("confirmIntent", Some(unpaid_intent()), Some(402)).await,
+        action_prompt("updateIntent", Some(unpaid_intent()), None).await,
+        action_prompt("getIntent", Some(unpaid_intent()), None).await,
+    ] {
+        assert!(!prompt.contains("successful"), "{prompt}");
+        assert!(!prompt.contains("must include"), "{prompt}");
+    }
+}
+
+/// An action answering something else changes its target only through an
+/// effect, so its prompt asks for one by type and id, and a verb is named
+/// without a path's format suffix.
+#[tokio::test]
+async fn an_other_action_prompt_asks_for_the_effect_on_its_target() {
+    let booking = StoredResource {
+        resource_type: "bookings".into(),
+        id: "b1".into(),
+        data: json!({"id": "b1", "status": "confirmed"}),
+    };
+    let prompt = action_prompt("cancelBooking", Some(booking), None).await;
+    assert!(prompt.contains("successful `cancel`"), "{prompt}");
+    assert!(
+        prompt.contains(
+            r#"The response is not <existing_resource>, so it changes only through "effects": they must include what `cancel` changes on it, as {"type": "bookings", "id": "b1", "set": {...}}."#
+        ),
+        "{prompt}"
+    );
+}
+
+/// An action answering with the resource shows the change in its answer, and
+/// one with no target has nothing to change.
+#[tokio::test]
+async fn an_effect_is_asked_for_only_of_an_other_action_with_a_target() {
+    let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
+    assert!(!prompt.contains("must include"), "{prompt}");
+    let prompt = action_prompt("cancelBooking", None, None).await;
+    assert!(prompt.contains("successful `cancel`"), "{prompt}");
+    assert!(!prompt.contains("must include"), "{prompt}");
+}
