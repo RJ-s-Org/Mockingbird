@@ -211,7 +211,7 @@ impl Engine {
     }
 
     /// Parse LLM output, unwrap the envelope `checks` asked for, if any
-    /// (`{"items": [...]}`, or `{"response": ..., "effects": [...]}`, whose
+    /// (`{"items": [...]}`, or `{"effects": [...], "response": ...}`, whose
     /// effects come back beside the verdict on the answer), enforce the size
     /// cap, scrub PII, fill what the output budget left out (see
     /// [`crate::budget`]), then validate. A value breaking an asserted format
@@ -249,6 +249,16 @@ impl Engine {
                 AnswerEffects::default(),
             );
         };
+        // Effects come first, so a cut can leave nothing else: no answer.
+        if checks.effects_envelope
+            && value.get(EFFECTS_KEY).is_some()
+            && value.get(RESPONSE_KEY).is_none()
+        {
+            return (
+                Checked::Invalid(vec![CUT_SHORT.to_string()]),
+                AnswerEffects::default(),
+            );
+        }
         let (checked, effects) = self.check_parsed(validator, value, text.len(), checks, true);
         let checked = match checked {
             Checked::Valid(v) | Checked::Patched(v) => {
@@ -434,7 +444,7 @@ pub(crate) struct Checks<'a> {
     /// The array the schema describes was asked for as
     /// `{"items": [...]}` (see [`items_envelope`]).
     pub items_envelope: bool,
-    /// The answer was asked for as `{"response": ..., "effects": [...]}`
+    /// The answer was asked for as `{"effects": [...], "response": ...}`
     /// (see [`effects_envelope`]). The array the schema describes is then
     /// the `response`, never also under `items`.
     pub effects_envelope: bool,
@@ -462,11 +472,12 @@ pub(crate) const MAX_EFFECTS: usize = 10;
 
 /// The instruction added to the prompt when an answer is asked for with its
 /// effects. A repair request repeats it.
-pub(crate) const EFFECTS_ENVELOPE_NOTE: &str = "Output one JSON object: {\"response\": <the answer \
-the schema describes>, \"effects\": [{\"type\": <resource type>, \"id\": <resource id>, \"set\": \
-{<member>: <new value>}}]}. \"effects\" lists what this call changes in the resources it was shown: \
-only the members that change, never an id, and nothing it does not change. Leave it empty when \
-the call changes nothing there. Add no other members.";
+pub(crate) const EFFECTS_ENVELOPE_NOTE: &str = "Output one JSON object: {\"effects\": [{\"type\": \
+<resource type>, \"id\": <resource id>, \"set\": {<member>: <new value>}}], \"response\": <the \
+answer the schema describes>}. Decide what changes first, then write the response so it shows that \
+state. \"effects\" lists what this call changes in the resources it was shown: only the members \
+that change, never an id, and nothing it does not change. Leave it empty when the call changes \
+nothing there. Add no other members.";
 
 /// The error of output that holds no JSON value.
 pub(crate) const NOT_JSON: &str = "output is not valid JSON";
@@ -661,7 +672,7 @@ pub(crate) fn items_schema(mut schema: Value) -> Value {
 }
 
 /// Whether an answer of `validator`'s schema to `op` with status `status` is
-/// asked for with its effects, as `{"response": ..., "effects": [...]}`: a
+/// asked for with its effects, as `{"effects": [...], "response": ...}`: a
 /// call that acts while resources are stored around it (see
 /// [`crate::prompt::acts`]), unless the answer itself has a member of those
 /// names, which an envelope could not be told apart from.
@@ -694,14 +705,16 @@ fn effect_list_schema() -> Value {
     })
 }
 
-/// `schema` as the object [`effects_envelope`] asks for. The effects are not
-/// required: the answer stays usable with none.
+/// `schema` as the object [`effects_envelope`] asks for. A provider enforcing
+/// this schema writes only what it requires, so both members are, and models
+/// otherwise leave the effects out; they may be empty. This only asks: an
+/// answer with no effects is still taken (see [`unwrap_effects`]).
 pub(crate) fn effects_schema(mut schema: Value) -> Value {
     let defs = schema.as_object_mut().and_then(|root| root.remove("$defs"));
     let mut wrapped = serde_json::json!({
         "type": "object",
-        "required": [RESPONSE_KEY],
-        "properties": {RESPONSE_KEY: schema, EFFECTS_KEY: effect_list_schema()},
+        "required": [EFFECTS_KEY, RESPONSE_KEY],
+        "properties": {EFFECTS_KEY: effect_list_schema(), RESPONSE_KEY: schema},
     });
     if let (Some(defs), Some(root)) = (defs, wrapped.as_object_mut()) {
         root.insert("$defs".to_string(), defs);
@@ -709,9 +722,10 @@ pub(crate) fn effects_schema(mut schema: Value) -> Value {
     wrapped
 }
 
-/// The answer's schema inside its `{"response": ..., "effects": [...]}`
+/// The answer's schema inside its `{"effects": [...], "response": ...}`
 /// wrapping, else `schema`: recordings stay comparable whichever way an
-/// answer was asked for.
+/// answer was asked for, those from when the wrapping required only
+/// `response` included.
 #[must_use]
 pub fn without_effects_schema(schema: &Value) -> Value {
     let Some(root) = schema.as_object() else {
@@ -722,7 +736,10 @@ pub fn without_effects_schema(schema: &Value) -> Value {
         .all(|k| matches!(k.as_str(), "type" | "required" | "properties" | "$defs"));
     let properties = root.get("properties").and_then(Value::as_object);
     let wrapping = keys_match
-        && root.get("required") == Some(&serde_json::json!([RESPONSE_KEY]))
+        && root.get("required").is_some_and(|required| {
+            *required == serde_json::json!([EFFECTS_KEY, RESPONSE_KEY])
+                || *required == serde_json::json!([RESPONSE_KEY])
+        })
         && properties
             .is_some_and(|p| p.len() == 2 && p.get(EFFECTS_KEY) == Some(&effect_list_schema()));
     let Some(mut inner) = properties

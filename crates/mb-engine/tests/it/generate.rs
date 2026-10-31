@@ -1988,10 +1988,87 @@ async fn an_envelope_answer_yields_body_and_effects() {
         panic!("a schema was asked for");
     };
     assert_eq!(schema["type"], "object");
-    assert_eq!(schema["required"], json!(["response"]));
+    assert_eq!(schema["required"], json!(["effects", "response"]));
     assert!(schema["properties"]["response"].is_object());
     assert_eq!(schema["properties"]["effects"]["type"], "array");
     assert!(schema["$defs"]["Booking"].is_object());
+}
+
+/// The schema sent asks for effects too, and stays an array that may be empty.
+#[tokio::test]
+async fn the_sent_schema_requires_effects_and_response() {
+    let bundle = effects_bundle();
+    let answer = json!({"effects": [], "response": cancelled()});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.body, Some(cancelled()));
+    let mb_llm::ResponseFormat::JsonSchema { schema, .. } = &provider.requests()[0].response_format
+    else {
+        panic!("a schema was asked for");
+    };
+    assert_eq!(schema["required"], json!(["effects", "response"]));
+    assert!(schema["properties"]["effects"].get("minItems").is_none());
+    // Both spellings of the wrapping are told from the answer's own schema.
+    let inner = mb_engine::without_effects_schema(schema);
+    assert!(inner.get("required") != Some(&json!(["effects", "response"])));
+    assert!(
+        inner
+            .get("properties")
+            .is_none_or(|p| p.get("effects").is_none())
+    );
+    let mut older = schema.clone();
+    older["required"] = json!(["response"]);
+    assert_eq!(mb_engine::without_effects_schema(&older), inner);
+}
+
+/// Member order does not matter: effects may come first, as asked.
+#[tokio::test]
+async fn an_envelope_with_effects_first_is_unwrapped() {
+    let bundle = effects_bundle();
+    let text = format!(
+        r#"{{"effects": [{}], "response": {}}}"#,
+        charge_effect(),
+        cancelled()
+    );
+    let (provider, engine) = scripted(vec![Ok(text)]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body, Some(cancelled()));
+    assert_eq!(out.effects.len(), 1);
+    assert_eq!(out.effects[0].id, "ch1");
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// The prompt asks for effects first, and to decide them first.
+#[tokio::test]
+async fn the_prompt_asks_for_effects_before_the_response() {
+    let bundle = effects_bundle();
+    let answer = json!({"effects": [], "response": cancelled()});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    with_target(&bundle, "cancelBooking", &engine).await;
+    let prompt = provider.requests()[0].messages[1].content.clone();
+    let effects = prompt.find(r#"{"effects": ["#).expect("effects first");
+    let response = prompt.find(r#""response": <the answer"#).expect("response");
+    assert!(effects < response, "{prompt}");
+    assert!(
+        prompt
+            .contains("Decide what changes first, then write the response so it shows that state"),
+        "{prompt}"
+    );
+}
+
+/// A reply cut among its effects, before any `response`, holds no answer: it
+/// is repaired, not served as an answer made up around its `effects`.
+#[tokio::test]
+async fn a_reply_cut_before_its_response_is_repaired() {
+    let bundle = effects_bundle();
+    let partial = format!(r#"{{"effects": [{}, {{"type": "charges""#, charge_effect());
+    let answer = json!({"effects": [], "response": cancelled()});
+    let (provider, engine) = scripted(vec![Err(cut(&partial)), Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.body, Some(cancelled()), "{:?}", out.body);
+    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(provider.requests().len(), 2);
 }
 
 /// A model may ignore the envelope: its plain answer costs nothing more.
@@ -2404,6 +2481,27 @@ async fn a_complete_envelope_cut_after_it_drops_its_effects() {
     assert_eq!(out.body, Some(cancelled()));
     assert!(out.effects.is_empty(), "{:?}", out.effects);
     assert_eq!(out.dropped_effects, 1);
+}
+
+/// The same where the answer requires nothing: `{"effects": [...]}` would
+/// validate, and be served with a member the contract does not declare.
+#[tokio::test]
+async fn a_reply_cut_before_its_response_is_no_answer_of_optional_members() {
+    let contract = EFFECTS.replace(
+        r##""200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+        "409""##,
+        r##""200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+        "409""##,
+    );
+    assert_ne!(contract, EFFECTS);
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let partial = format!(r#"{{"effects": [{}, {{"type": "charges""#, charge_effect());
+    let answer = json!({"effects": [], "response": {"note": "done"}});
+    let (provider, engine) = scripted(vec![Err(cut(&partial)), Ok(answer.to_string())]);
+    let out = with_target(&bundle, "cancelBooking", &engine).await;
+    assert_eq!(out.body, Some(json!({"note": "done"})), "{:?}", out.body);
+    assert_eq!(out.source, Source::Repaired);
+    assert_eq!(provider.requests().len(), 2);
 }
 
 /// An envelope cut inside the answer has its inner answer completed.

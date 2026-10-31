@@ -2448,7 +2448,8 @@ async fn a_refused_schema_still_asks_for_the_envelope() {
     assert_eq!(sent[1]["response_format"]["type"], "json_object");
     let messages = sent[1]["messages"].as_array().unwrap();
     let prompt = messages.last().unwrap()["content"].as_str().unwrap();
-    assert!(prompt.contains(r#"{"response": <the answer"#), "{prompt}");
+    assert!(prompt.contains(r#"{"effects": ["#), "{prompt}");
+    assert!(prompt.contains(r#""response": <the answer"#), "{prompt}");
 }
 
 /// The request log shows what each effect did, and why not.
