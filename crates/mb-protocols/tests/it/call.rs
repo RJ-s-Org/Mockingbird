@@ -2675,3 +2675,175 @@ async fn consistency_off_stores_no_searched_offer() {
     let prompt = prompt_of(&api, 1);
     assert!(!prompt.contains("<existing_resource>"), "{prompt}");
 }
+
+/// A repository and the collection nested under it, as on GitHub.
+const NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Nested, version: "1"}
+paths:
+  /repos/{owner}/{repo}:
+    get:
+      operationId: getRepo
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}
+  /repos/{owner}/{repo}/issues:
+    post:
+      operationId: createIssue
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+    get:
+      operationId: listIssues
+      parameters:
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: repo, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}
+components:
+  schemas:
+    Repo:
+      type: object
+      required: [id, name, full_name, open_issues_count]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        full_name: {type: string}
+        open_issues_count: {type: integer}
+    Issue:
+      type: object
+      required: [id, title]
+      properties: {id: {type: integer}, title: {type: string}}
+"##;
+
+/// [`NESTED`] with repository 7, `acme/widget`, stored.
+async fn nested(consistency: bool, answer: Value) -> (Actions, Arc<MemoryStore>) {
+    nested_of(NESTED, consistency, answer).await
+}
+
+/// `contract` with repository 7, `acme/widget`, stored.
+async fn nested_of(
+    contract: &str,
+    consistency: bool,
+    answer: Value,
+) -> (Actions, Arc<MemoryStore>) {
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    rt.consistency = consistency;
+    store(
+        &state,
+        "repos",
+        "7",
+        json!({"id": 7, "name": "widget", "full_name": "acme/widget", "open_issues_count": 3}),
+    )
+    .await;
+    let router = http_rest::router(Arc::new(rt));
+    (Actions { router, provider }, state)
+}
+
+fn new_issue() -> Value {
+    json!({"id": 1, "title": "Crash"})
+}
+
+/// A nested collection's prompt holds the parent its path names, so an answer
+/// can change it; the parent is keyed by a numeric id, not by that name.
+#[tokio::test]
+async fn a_new_issue_can_count_on_the_repo_its_path_names() {
+    let effect = json!({"type": "repos", "id": "7", "set": {"open_issues_count": 4}});
+    let (api, _) = nested(true, json!({"response": new_issue(), "effects": [effect]})).await;
+    let (status, _, body) = api
+        .call("POST", "/repos/acme/widget/issues", Some(json!({})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["title"], "Crash");
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt)
+            .iter()
+            .any(|l| l.contains("acme/widget")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#"{"type": "repos", "id": "7"}"#),
+        "{prompt}"
+    );
+    let (source, repo) = read(&api, "/repos/acme/widget").await;
+    assert_eq!(source, "state");
+    assert_eq!(repo["open_issues_count"], 4);
+}
+
+/// The real contract's route reaches the repository the same way.
+#[tokio::test]
+async fn a_new_github_issue_is_shown_its_repo() {
+    let path = format!(
+        "{}/../../examples/apis/github-rest/github-rest.openapi.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let contract = std::fs::read_to_string(path).unwrap();
+    let (api, _) = nested_of(&contract, true, new_issue()).await;
+    api.call(
+        "POST",
+        "/repos/acme/widget/issues",
+        Some(json!({"title": "Crash"})),
+    )
+    .await;
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt)
+            .iter()
+            .any(|l| l.contains("acme/widget")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(r#"{"type": "repos", "id": "7"}"#),
+        "{prompt}"
+    );
+}
+
+/// A list nested under the parent is told of it too.
+#[tokio::test]
+async fn a_nested_list_prompt_holds_the_parent_its_path_names() {
+    let (api, _) = nested(true, json!([new_issue()])).await;
+    read(&api, "/repos/acme/widget/issues").await;
+    let prompt = prompt_of(&api, 0);
+    assert!(
+        related_of(&prompt)
+            .iter()
+            .any(|l| l.contains("acme/widget")),
+        "{prompt}"
+    );
+}
+
+/// Another owner's repository of that name is not the parent.
+#[tokio::test]
+async fn a_nested_route_does_not_take_another_owners_repo() {
+    let (api, _) = nested(true, new_issue()).await;
+    api.call("POST", "/repos/other/widget/issues", Some(json!({})))
+        .await;
+    let prompt = prompt_of(&api, 0);
+    assert!(related_of(&prompt).is_empty(), "{prompt}");
+    assert!(!prompt.contains("acme/widget"), "{prompt}");
+}
+
+/// With consistency off the path's names find nothing stored.
+#[tokio::test]
+async fn consistency_off_finds_no_parent_by_name() {
+    let (api, _) = nested(false, new_issue()).await;
+    api.call("POST", "/repos/acme/widget/issues", Some(json!({})))
+        .await;
+    let prompt = prompt_of(&api, 0);
+    assert!(!prompt.contains("acme/widget"), "{prompt}");
+}

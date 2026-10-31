@@ -718,7 +718,7 @@ pub(crate) async fn prepare<'a>(
     // Before any state is read: an answer generated from older state must
     // not be cached after a write that lands meanwhile.
     let since = rt.state.response_cache().map(|c| c.epoch(session));
-    let (target, mut related, followed) =
+    let (target, mut related, mut followed) =
         read_context(&mut state, session, op, target_id.as_deref(), call)
             .instrument(state_span())
             .await;
@@ -802,6 +802,16 @@ pub(crate) async fn prepare<'a>(
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
     async {
+        parents_by_name(
+            &mut state,
+            session,
+            op,
+            call,
+            target.as_ref(),
+            &mut followed,
+            &mut related,
+        )
+        .await;
         follow_hops(&mut state, session, target.as_ref(), followed, &mut related).await;
         if is_query
             && target_missing
@@ -2532,14 +2542,26 @@ fn owned_name(op: &Operation, call: &OperationCall) -> Option<String> {
     let Binding::Http { path, .. } = &op.binding else {
         return None;
     };
-    let mut segments = path.rsplit('/').filter(|s| !s.is_empty());
-    let mut value = || {
-        let name = segments.next()?.strip_prefix('{')?.strip_suffix('}')?;
-        call.path_params.get(name).and_then(id_string)
+    let last = path.rsplit('/').find(|s| !s.is_empty())?;
+    let name = last.strip_prefix('{')?.strip_suffix('}')?;
+    owned_name_of(op, call, name)
+}
+
+/// `{o}/{r}` of a route where parameter `{r}`, named `name`, follows
+/// parameter `{o}`.
+fn owned_name_of(op: &Operation, call: &OperationCall, name: &str) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
     };
-    let name = value()?;
-    let owner = value()?;
-    Some(format!("{owner}/{name}"))
+    let param = format!("{{{name}}}");
+    let mut before = path
+        .rsplit('/')
+        .filter(|s| !s.is_empty())
+        .skip_while(|s| *s != param)
+        .skip(1);
+    let owner = before.next()?.strip_prefix('{')?.strip_suffix('}')?;
+    let value = |p: &str| call.path_params.get(p).and_then(id_string);
+    Some(format!("{}/{}", value(owner)?, value(name)?))
 }
 
 /// Whether stored `r`'s `full_name`, when it has one, ends with path
@@ -2849,6 +2871,60 @@ struct Followed {
     named: usize,
     /// The references looked up so far (see [`follow`]).
     seen: Vec<Reference>,
+}
+
+/// Adds to `out`, after what the request names, the parents its path names by
+/// name where a lookup by id found nothing: `{repo}` in
+/// `/repos/{owner}/{repo}/issues` is a repository stored under its numeric id
+/// (see [`NAME_FIELDS`]). Only a path parameter [`related`] looked up as a
+/// reference, other than the one naming the target (already searched for), so
+/// this stays within [`MAX_REFERENCES`]. Separate from [`related`], for what
+/// [`follow_hops`] is. Nothing with consistency off.
+async fn parents_by_name(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    call: &OperationCall,
+    target: Option<&StoredResource>,
+    followed: &mut Followed,
+    out: &mut Vec<StoredResource>,
+) {
+    let rt = state.rt;
+    if !rt.consistency {
+        return;
+    }
+    let own = op.identity.as_ref().and_then(|i| i.path_param.as_deref());
+    for (field, value) in &call.path_params {
+        let (Some(id), false) = (id_string(value), own == Some(field.as_str())) else {
+            continue;
+        };
+        let Some(t) = entity_type(rt.index(), None, field) else {
+            continue;
+        };
+        let reference = (vec![t.clone()], id.clone());
+        let found = |r: &StoredResource| r.resource_type == t && r.id == id;
+        if !followed.seen.contains(&reference)
+            || target.is_some_and(found)
+            || out[..followed.named].iter().any(found)
+        {
+            continue;
+        }
+        let owned = owned_name_of(op, call, field);
+        let Some(parent) =
+            by_path_fields(state, session, &t, &NAME_FIELDS, &id, owned.as_deref()).await
+        else {
+            continue;
+        };
+        let is_target =
+            target.is_some_and(|r| r.resource_type == parent.resource_type && r.id == parent.id);
+        if is_target || holds(&out[..followed.named], &parent) {
+            continue;
+        }
+        // Listed already, it moves up among what the request names.
+        out.retain(|r| r.resource_type != parent.resource_type || r.id != parent.id);
+        out.insert(followed.named, parent);
+        followed.named += 1;
+    }
 }
 
 /// Adds to `out`, as gathered by [`related`], what the target and the
@@ -3900,6 +3976,87 @@ paths:
 
     /// A read answered from the store never reaches a prompt, so it looks up
     /// its target and nothing the target refers to.
+    /// The search for a parent by name is a generation's: a read the store
+    /// answers makes no scan, and a generation one, then none.
+    #[cfg(feature = "http-rest")]
+    #[tokio::test]
+    async fn only_a_generation_scans_for_a_parent_by_name() {
+        use tower::ServiceExt;
+        const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Nested, version: "1"}
+paths:
+  /repos/{repo}:
+    get:
+      operationId: getRepo
+      parameters: [{name: repo, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}
+  /repos/{repo}/issues/{id}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Repo:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Issue:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+"##;
+        let spy = Arc::new(ListSpy {
+            inner: MemoryStore::new(Duration::from_secs(3600)),
+            gets: Default::default(),
+            lists: Default::default(),
+        });
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            spy.clone(),
+        );
+        let s = SessionKey {
+            workspace: "default".into(),
+            mock: "m".into(),
+            session: DEFAULT_SESSION.into(),
+        };
+        for (t, id, data) in [
+            ("repos", "7", json!({"id": "7", "name": "widget"})),
+            ("issues", "i1", json!({"id": "i1"})),
+        ] {
+            let stored = StoredResource {
+                resource_type: t.into(),
+                id: id.into(),
+                data,
+            };
+            spy.inner.upsert(&s, stored).await.unwrap();
+        }
+        let router = crate::http_rest::router(Arc::new(rt));
+        let get = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let request = axum::http::Request::get(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                router.oneshot(request).await.unwrap()
+            }
+        };
+        let served = get("/repos/widget/issues/i1").await;
+        assert_eq!(served.headers()["x-mockingbird-source"], "state");
+        assert_eq!(spy.lists(), 0);
+        get("/repos/widget/issues/new1").await;
+        assert_eq!(spy.lists(), 1);
+        get("/repos/widget/issues/new2").await;
+        assert_eq!(spy.lists(), 1);
+    }
+
     #[cfg(feature = "http-rest")]
     #[tokio::test]
     async fn a_served_read_makes_one_get() {
