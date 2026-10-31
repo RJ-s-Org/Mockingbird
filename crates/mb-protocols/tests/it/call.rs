@@ -3638,36 +3638,147 @@ components:
     assert_eq!(third["id"], "i3");
 }
 
-/// `id` as an enum with every value taken: no fresh id exists. The answer is
-/// served and what is stored stays.
+/// An action answering an `id` from an enum with every value taken: no fresh
+/// id exists. The answer is served, what is stored stays, nothing else happens
+/// for it, and the request record says so.
 #[tokio::test]
-async fn an_id_that_cannot_be_freed_stores_nothing() {
+async fn a_new_record_whose_id_cannot_be_freed_stores_nothing() {
     let contract = SAME_SHAPE.replace(
         "properties: {id: {type: string}, status: {type: string}}",
-        "properties: {id: {type: string, enum: [o1, o2]}, status: {type: string}}",
+        "properties: {id: {type: string, enum: [o1, o2]}, status: {type: string}, other: {type: object, properties: {id: {type: string}, kind: {type: string}}}}",
     );
     let order = |id: &str, status: &str| Ok(json!({"id": id, "status": status}).to_string());
-    let h = actions_of(
-        &contract,
-        vec![
-            order("o1", "first"),
-            order("o2", "second"),
-            order("o2", "from an action"),
-            order("o1", "from a create"),
-        ],
+    let records = Arc::new(crate::support::Records::default());
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        order("o1", "first"),
+        order("o2", "second"),
+        Ok(json!({
+            "effects": [{"type": "orders", "id": "o1", "set": {"status": "changed"}}],
+            "response": {"id": "o2", "status": "from an action"},
+        })
+        .to_string()),
+    ]));
+    let mut rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
     );
-    h.call("POST", "/orders", None).await;
-    h.call("POST", "/orders", None).await;
-    let (status, _, answer) = h.call("POST", "/orders/o1/capture", None).await;
-    assert_eq!(status, StatusCode::CREATED);
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    let router = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    router.clone().oneshot(post("/orders")).await.unwrap();
+    router.clone().oneshot(post("/orders")).await.unwrap();
+    let resp = router
+        .clone()
+        .oneshot(post("/orders/o1/capture"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let answer: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(answer, json!({"id": "o2", "status": "from an action"}));
-    let (status, _, answer) = h.call("POST", "/orders", None).await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(answer["status"], "from a create");
-    let (_, _, first) = h.call("GET", "/orders/o1", None).await;
-    assert_eq!(first["status"], "first");
-    let (_, _, second) = h.call("GET", "/orders/o2", None).await;
+    let record = records.wait(3).await.remove(2);
+    let effects = record.request["effects"].as_array().unwrap();
+    assert_eq!(effects.len(), 2, "{effects:?}");
+    assert_eq!(effects[0]["id"], "o1");
+    assert_eq!(effects[0]["outcome"], "rejected");
+    assert_eq!(effects[1]["id"], "o2");
+    assert_eq!(effects[1]["outcome"], "rejected");
+    assert!(
+        effects[1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not stored"),
+        "{effects:?}"
+    );
+    let get = |uri: &str| Request::get(uri).body(Body::empty()).unwrap();
+    for (uri, status) in [("/orders/o1", "first"), ("/orders/o2", "second")] {
+        let resp = router.clone().oneshot(get(uri)).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let read: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read["status"], status, "{uri}");
+    }
+}
+
+/// Offline, a plain string id draws from a small pool, so creates run out of
+/// free ids: each still reads back as what it answered, overwriting if it must.
+#[tokio::test]
+async fn sixty_offline_creates_read_back() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Things, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+  /things/{id}:
+    get:
+      operationId: getThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+"##;
+    let rt = MockRuntime::new(
+        "things",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    let router = http_rest::router(Arc::new(rt));
+    let json_of = |resp: axum::response::Response| async move {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<Value>(&bytes).unwrap()
+    };
+    for i in 0..60 {
+        let name = format!("thing {i}");
+        let req = Request::post("/things")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"name": name}).to_string()))
+            .unwrap();
+        let created = json_of(router.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(created["name"], name.as_str());
+        let uri = format!("/things/{}", created["id"].as_str().unwrap());
+        let req = Request::get(uri).body(Body::empty()).unwrap();
+        let read = json_of(router.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(read, created, "create {i}");
+    }
+}
+
+/// A create whose `enum` id is all taken upserts, as ever.
+#[tokio::test]
+async fn a_create_repeating_an_enum_id_upserts() {
+    let contract = SAME_SHAPE.replace(
+        "properties: {id: {type: string}, status: {type: string}}",
+        "properties: {id: {type: string, enum: [o1]}, status: {type: string}}",
+    );
+    let order = |status: &str| Ok(json!({"id": "o1", "status": status}).to_string());
+    let h = actions_of(&contract, vec![order("first"), order("second")]);
+    h.call("POST", "/orders", None).await;
+    let (_, _, second) = h.call("POST", "/orders", None).await;
     assert_eq!(second["status"], "second");
+    let (_, _, read) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(read["status"], "second");
 }
 
 /// A fixed seed and the same answer draw the same first fresh id each time, so
@@ -3699,27 +3810,62 @@ async fn a_seeded_repeat_still_finds_a_fresh_id() {
 }
 
 /// An effect naming the id the answer moved away from means the answer's own
-/// record, not the one that holds that id.
+/// record, not the one that holds that id. It is dropped and shows as rejected
+/// in the request record.
 #[tokio::test]
 async fn an_effect_on_a_rewritten_id_is_dropped() {
     let order = |id: &str, status: &str| Ok(json!({"id": id, "status": status}).to_string());
-    let h = actions_of(
-        SAME_SHAPE,
-        vec![
-            order("o1", "open"),
-            order("o2", "first"),
-            Ok(json!({
-                "effects": [{"type": "orders", "id": "o2", "set": {"status": "changed"}}],
-                "response": {"id": "o2", "status": "second"},
-            })
-            .to_string()),
-        ],
+    let records = Arc::new(crate::support::Records::default());
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        order("o1", "open"),
+        order("o2", "first"),
+        Ok(json!({
+            "effects": [
+                {"type": "orders", "id": "o2", "set": {"status": "changed"}},
+                {"type": "orders", "id": "o1", "set": {"status": "linked"}},
+            ],
+            "response": {"id": "o2", "status": "second"},
+        })
+        .to_string()),
+    ]));
+    let mut rt = MockRuntime::new(
+        "actions",
+        Arc::new(compile(SAME_SHAPE.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
     );
-    h.call("POST", "/orders", None).await;
-    h.call("POST", "/orders/o1/capture", None).await;
-    let (_, _, second) = h.call("POST", "/orders/o1/capture", None).await;
-    assert_ne!(second["id"], "o2");
-    let (_, _, kept) = h.call("GET", "/orders/o2", None).await;
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    let router = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    router.clone().oneshot(post("/orders")).await.unwrap();
+    for _ in 0..2 {
+        router
+            .clone()
+            .oneshot(post("/orders/o1/capture"))
+            .await
+            .unwrap();
+    }
+    let record = records.wait(3).await.remove(2);
+    let effects = record.request["effects"].as_array().unwrap();
+    let rejected: Vec<&Value> = effects
+        .iter()
+        .filter(|e| e["outcome"] == "rejected")
+        .collect();
+    assert_eq!(rejected.len(), 1, "{effects:?}");
+    assert_eq!(rejected[0]["id"], "o2");
+    assert_eq!(effects.len(), 2, "{effects:?}");
+    let resp = router
+        .clone()
+        .oneshot(Request::get("/orders/o2").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let kept: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(kept["status"], "first");
 }
 

@@ -857,3 +857,54 @@ components:
         ["comment.created", "comment.created", "comment.updated"]
     );
 }
+
+/// A new record that could not be stored did not happen: no event says so.
+#[tokio::test]
+async fn an_unstored_new_record_sends_no_event() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /orders/{id}/copy:
+    post:
+      operationId: copy
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+components:
+  schemas:
+    Order: {type: object, properties: {id: {type: string, enum: [o1, o2]}}}
+"##;
+    let order = |id: &str| Ok(json!({"id": id}).to_string());
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        order("o1"),
+        order("o2"),
+        order("o2"),
+    ]));
+    let server = receiver(200).await;
+    let (d, _log) = dispatcher_with(vec![to(&server, &["*"])], fast());
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(60))),
+    );
+    rt.webhooks = Some(d);
+    let app = http_rest::router(Arc::new(rt));
+    let post = |uri: &str| Request::post(uri).body(Body::empty()).unwrap();
+    for uri in ["/orders", "/orders", "/orders/o1/copy"] {
+        let resp = app.clone().oneshot(post(uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sent(&server).await.len(), 2);
+}

@@ -2814,3 +2814,28 @@ async fn a_scenario_set_keeps_a_new_records_id() {
     assert_eq!(body["id"], "o2");
     assert_eq!(body["status"], "set");
 }
+
+/// A redraw is validated against the status it answers, not the lowest success.
+#[test]
+fn a_fresh_identity_validates_against_the_answered_status() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Things, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, required: [ok], properties: {ok: {type: boolean}}, additionalProperties: false}}}}
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+components:
+  schemas:
+    Thing: {type: object, required: [id], properties: {id: {type: string}}, additionalProperties: false}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let op = bundle.operation("createThing").unwrap();
+    let engine = Engine::new(None, EngineConfig::default());
+    let body = json!({"id": "t1"});
+    let fresh = engine.fresh_identity_at(&bundle, op, 201, &body, 0);
+    assert_ne!(fresh.unwrap()["id"], "t1");
+}

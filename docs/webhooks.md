@@ -26,7 +26,7 @@ A call whose LLM answer changes another stored resource (an [effect](concepts.md
 
 ## The event
 
-**Event type.** `<resource>.<verb>`. The verb is `created` for creates and for [a new record an action answers](import.md#an-update-that-answers-another-record), `deleted` for deletes and `updated` for everything else (Stripe's `POST /v1/customers/{id}` is an update). The resource is the path segment before a trailing `{param}` (`/v1/customers/{customer}` → `customer`), else the operation's resource type, singularised: `POST /v1/payment_intents` → `payment_intent.created`.
+**Event type.** `<resource>.<verb>`. The verb is `created` for creates and for [a new record an action answers](import.md#an-update-that-answers-another-record) (which sends nothing if it could not be stored), `deleted` for deletes and `updated` for everything else (Stripe's `POST /v1/customers/{id}` is an update). The resource is the path segment before a trailing `{param}` (`/v1/customers/{customer}` → `customer`), else the operation's resource type, singularised: `POST /v1/payment_intents` → `payment_intent.created`.
 
 **Body.** When the contract describes the payload, the mock generates it from that schema (with the LLM, or the faker offline):
 

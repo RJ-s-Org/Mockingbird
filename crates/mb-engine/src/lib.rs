@@ -1173,23 +1173,23 @@ impl Engine {
     /// `id`) replaced by a different faker value that keeps it valid
     /// against `op`'s success schema; `None` when none is found.
     pub fn fresh_identity(&self, bundle: &Bundle, op: &Operation, body: &Value) -> Option<Value> {
-        self.fresh_identity_at(bundle, op, body, 0)
+        let status = success_status(op.success_output()?.status);
+        self.fresh_identity_at(bundle, op, status, body, 0)
     }
 
-    /// [`Engine::fresh_identity`], drawn anew for each `attempt`: a fixed seed
-    /// and the same body otherwise draw the same identity, however taken it is.
+    /// [`Engine::fresh_identity`] for an answer of `status`, drawn anew for
+    /// each `attempt`: a fixed seed and the same body otherwise draw the same
+    /// identity, however taken it is.
     pub fn fresh_identity_at(
         &self,
         bundle: &Bundle,
         op: &Operation,
+        status: u16,
         body: &Value,
         attempt: u32,
     ) -> Option<Value> {
-        let variant = op.success_output()?;
-        let schema = variant.schema.as_ref()?;
-        let validator = self
-            .validator(bundle, op, success_status(variant.status), schema)
-            .ok()?;
+        let schema = op.output_for_status(status)?.schema.as_ref()?;
+        let validator = self.validator(bundle, op, status, schema).ok()?;
         let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
         let current = body.get(field)?;
         let id_schema = consistency::property_schema(bundle, schema, field)?;

@@ -879,21 +879,24 @@ pub(crate) async fn complete(
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
     let collection = collection_of(op, call).filter(|_| rt.consistency);
+    // A new record whose id no draw could free: the answer is served, and
+    // nothing else comes of it.
+    let mut unstored = false;
     async {
-        // A record's id no draw could free: the answer is served, not stored.
-        let mut id_taken = false;
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
-            let makes_record =
-                matches!(op.kind, OperationKind::Command(Effect::Create)) || generated.new_record;
-            if makes_record {
-                id_taken =
-                    !unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
+            if matches!(op.kind, OperationKind::Command(Effect::Create)) {
+                unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
             }
             // An action's new record goes under its own id, not over another's.
             if generated.new_record {
+                unstored =
+                    !place_new_record(rt, &mut state, session, op, t, call, &mut generated).await;
+                if !unstored {
+                    next_numbers(rt, &mut state, session, t, &mut generated).await;
+                }
                 let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
                 let own = generated.body.as_ref().and_then(|b| b.get(field));
                 if let Some(id) = own.and_then(id_string) {
@@ -906,7 +909,7 @@ pub(crate) async fn complete(
                 && rt.consistency
                 && target_id.is_none()
                 && !transient_fallback(&generated);
-            if (!is_query || seeding) && !id_taken {
+            if (!is_query || seeding) && !unstored {
                 let origin = if is_query {
                     WriteOrigin::Seeded
                 } else {
@@ -932,7 +935,6 @@ pub(crate) async fn complete(
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
-            && !id_taken
         {
             store_wrapped(
                 &mut state,
@@ -973,6 +975,7 @@ pub(crate) async fn complete(
             && !transient_fallback(&generated)
             && !matches!(op.binding, Binding::Graphql { .. })
             && !matches!(op.kind, OperationKind::Command(Effect::Delete))
+            && !unstored
             && let Some(body) = generated.body.as_ref()
         {
             let schema = op
@@ -986,8 +989,8 @@ pub(crate) async fn complete(
         }
         // Last: an effect on what this call just stored sees it.
         if rt.consistency && (200..300).contains(&generated.status) {
-            generated.effect_outcomes =
-                apply_effects(&mut state, session, rt, &generated.effects).await;
+            let outcomes = apply_effects(&mut state, session, rt, &generated.effects).await;
+            generated.effect_outcomes.extend(outcomes);
             if generated.dropped_effects > 0 {
                 metrics::counter!(
                     EFFECTS_METRIC,
@@ -1017,15 +1020,17 @@ pub(crate) async fn complete(
         feature = "grpc",
         feature = "soap"
     ))]
-    crate::webhooks::emit::emit(
-        rt,
-        &plan.engine,
-        op,
-        call,
-        &generated,
-        target_id.as_deref(),
-        session,
-    );
+    if !unstored {
+        crate::webhooks::emit::emit(
+            rt,
+            &plan.engine,
+            op,
+            call,
+            &generated,
+            target_id.as_deref(),
+            session,
+        );
+    }
     #[cfg(any(
         feature = "http-rest",
         feature = "graphql",
@@ -1199,11 +1204,30 @@ pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
             .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
 }
 
-/// Gives the answer of a call making a record a fresh identity when the
-/// session already holds a resource under the generated one and the request
-/// did not ask for it. An effect naming the id it moved from meant the answer's
-/// own record, so it is dropped. Returns whether the answer's id is free to
-/// write under; `false` when no draw could free it.
+/// The id of `generated`'s answer, when the session already holds a resource
+/// under it and the request did not ask for it.
+async fn taken_id(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    resource_type: &str,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) -> Option<String> {
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
+    let requested = call
+        .body
+        .as_ref()
+        .and_then(|b| b.get(field))
+        .and_then(id_string);
+    (requested.as_deref() != Some(id.as_str())
+        && state.get(session, resource_type, &id).await.is_some())
+    .then_some(id)
+}
+
+/// Gives a create's answer a fresh identity when the session already holds
+/// a resource under the generated one and the request did not ask for it.
 async fn unique_create_id(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
@@ -1212,42 +1236,108 @@ async fn unique_create_id(
     resource_type: &str,
     call: &OperationCall,
     generated: &mut GeneratedResponse,
-) -> bool {
-    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    let Some(body) = generated.body.clone() else {
-        return true;
-    };
-    let Some(id) = body.get(field).and_then(id_string) else {
-        return true;
-    };
-    let requested = call
-        .body
-        .as_ref()
-        .and_then(|b| b.get(field))
-        .and_then(id_string);
-    if requested.as_deref() == Some(id.as_str())
-        || state.get(session, resource_type, &id).await.is_none()
+) {
+    if taken_id(state, session, op, resource_type, call, generated)
+        .await
+        .is_none()
     {
-        return true;
+        return;
     }
-    let before = generated.effects.len();
-    generated
-        .effects
-        .retain(|e| e.resource_type != resource_type || e.id != id);
-    generated.dropped_effects += before - generated.effects.len();
-    for attempt in 0..3 {
-        let Some(fresh) = rt.engine.fresh_identity_at(&rt.bundle, op, &body, attempt) else {
-            return false;
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let Some(body) = generated.body.as_ref() else {
+        return;
+    };
+    for _ in 0..3 {
+        let Some(fresh) = rt
+            .engine
+            .fresh_identity_at(&rt.bundle, op, generated.status, body, 0)
+        else {
+            return;
         };
         let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
-            return false;
+            return;
         };
         if state.get(session, resource_type, &fresh_id).await.is_none() {
             generated.body = Some(fresh);
-            return true;
+            return;
         }
     }
-    false
+}
+
+/// Keeps an action's new record off a stored one: an answer whose id is taken
+/// takes a fresh one, each retry drawing anew. With none to be had it is not
+/// stored, which the request record says, and its effects are dropped. So is an
+/// effect naming the id it moved from, which meant the answer's own record.
+/// Returns whether the answer can be stored.
+async fn place_new_record(
+    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    resource_type: &str,
+    call: &OperationCall,
+    generated: &mut GeneratedResponse,
+) -> bool {
+    let Some(id) = taken_id(state, session, op, resource_type, call, generated).await else {
+        return true;
+    };
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let mut fresh = None;
+    if let Some(body) = generated.body.as_ref() {
+        for attempt in 0..3 {
+            let draw = rt
+                .engine
+                .fresh_identity_at(&rt.bundle, op, generated.status, body, attempt);
+            let drawn = draw.as_ref().and_then(|d| d.get(field)).and_then(id_string);
+            let Some(drawn) = drawn else {
+                break;
+            };
+            if state.get(session, resource_type, &drawn).await.is_none() {
+                fresh = draw;
+                break;
+            }
+        }
+    }
+    let stored = fresh.is_some();
+    if let Some(fresh) = fresh {
+        generated.body = Some(fresh);
+    }
+    let (dropped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut generated.effects)
+        .into_iter()
+        .partition(|e| !stored || (e.resource_type == resource_type && e.id == id));
+    generated.effects = kept;
+    generated.dropped_effects += dropped.len();
+    let rejected = |effect, reason: &str| EffectOutcome {
+        effect,
+        rejected: Some(reason.to_string()),
+        merged: None,
+    };
+    let reason = if stored {
+        "the answer moved off this id"
+    } else {
+        "the answer was not stored"
+    };
+    generated
+        .effect_outcomes
+        .extend(dropped.into_iter().map(|effect| rejected(effect, reason)));
+    if !stored {
+        tracing::warn!(
+            mock = %rt.name,
+            operation = %op.id,
+            id = %log_capped(&id),
+            "new record not stored: its id is taken and no other could be drawn"
+        );
+        let note = ResourceEffect {
+            resource_type: resource_type.to_string(),
+            id,
+            set: serde_json::Map::new(),
+        };
+        generated.effect_outcomes.push(rejected(
+            note,
+            "new record not stored: its id is taken and no other could be drawn",
+        ));
+    }
+    stored
 }
 
 /// Stored resources scanned for a read by another field, or for the
