@@ -438,6 +438,7 @@ impl CallState {
                 .await
                 .map_err(engine_failure)?;
             rep.usage = generated.usage;
+            call::record_effects(&mut rep.request, &generated);
             let (message, json, source) = tracing::info_span!("mb.encode")
                 .in_scope(|| self.response(&call, generated.body, generated.source))?;
             sleep(plan.delay).await;

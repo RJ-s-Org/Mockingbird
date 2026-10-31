@@ -366,6 +366,39 @@ async fn offline_answers_are_seeded_and_the_seed_header_overrides_it() {
     assert_eq!(ignored, first);
 }
 
+/// The seed header overrides a plain read's stored answer for one request,
+/// and the plain read keeps its answer.
+#[tokio::test]
+async fn the_seed_header_overrides_a_plain_reads_answer() {
+    let want = body_json(seeded_get(&offline(), "/orders/o1", Some("7")).await).await;
+    let h = offline();
+    let plain = body_json(seeded_get(&h, "/orders/o1", None).await).await;
+    let seeded = body_json(seeded_get(&h, "/orders/o1", Some("7")).await).await;
+    assert_eq!(seeded, want);
+    assert_eq!(
+        body_json(seeded_get(&h, "/orders/o1", None).await).await,
+        plain
+    );
+}
+
+/// A created resource is still what a read names, seed header or not.
+#[tokio::test]
+async fn the_seed_header_does_not_hide_a_created_resource() {
+    let h = offline();
+    let created = body_json(
+        send(
+            &h,
+            post_json("/orders", r#"{"customerId":"c1","total":10}"#),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let read = seeded_get(&h, &format!("/orders/{id}"), Some("7")).await;
+    assert_eq!(header_str(&read, "x-mockingbird-source"), "state");
+    assert_eq!(body_json(read).await, created);
+}
+
 #[tokio::test(start_paused = true)]
 async fn latency_override_delays() {
     let h = offline();

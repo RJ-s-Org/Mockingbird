@@ -5,13 +5,15 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mb_engine::{Engine, GeneratedResponse, MessageContext, OperationCall};
+use mb_engine::{EffectOutcome, Engine, GeneratedResponse, MessageContext, OperationCall};
 use mb_mcm::{Channel, ChannelBinding, Direction, Operation, OperationKind, WebhookDef};
 use mb_state::SessionKey;
 use serde_json::{Map, json};
 
 use super::deliver::OutboundEvent;
-use super::event::{envelope, envelope_object, event_type, new_event_id, read_event_type};
+use super::event::{
+    envelope, envelope_object, event_type, new_event_id, read_event_type, singular,
+};
 use crate::MockRuntime;
 
 /// Sends `op`'s webhook event when the mock has targets for it and the
@@ -96,6 +98,50 @@ pub(crate) fn emit(
             &targets,
         );
     });
+}
+
+/// Sends `<resource>.updated` for each applied effect of a call to `op`, to
+/// the targets matching that event or `op`, with the merged resource as
+/// `data.object`. Always the envelope: a contract payload describes what the
+/// call itself sends, not a change to another resource.
+pub(crate) fn emit_effects(
+    rt: &MockRuntime,
+    op: &Operation,
+    outcomes: &[EffectOutcome],
+    session: &SessionKey,
+) {
+    let Some(dispatcher) = &rt.webhooks else {
+        return;
+    };
+    for outcome in outcomes {
+        let Some(merged) = &outcome.merged else {
+            continue;
+        };
+        let event_type = format!("{}.updated", singular(&outcome.effect.resource_type));
+        let targets = dispatcher.matching(&op.id, &event_type);
+        if targets.is_empty() {
+            continue;
+        }
+        let event_id = new_event_id();
+        let payload = envelope(&event_id, &event_type, unix_now(), merged.clone());
+        let body = match serde_json::to_vec(&payload) {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::warn!(error = %e, "webhook payload did not serialise");
+                continue;
+            }
+        };
+        dispatcher.send(
+            OutboundEvent {
+                event_id,
+                event_type,
+                operation: op.id.clone(),
+                session: session.session.clone(),
+                body,
+            },
+            &targets,
+        );
+    }
 }
 
 /// A publish channel standing in for a contract webhook, so the engine

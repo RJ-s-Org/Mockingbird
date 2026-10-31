@@ -512,6 +512,16 @@ pub struct Identity {
     pub path_field: Option<String>,
 }
 
+/// Whether a path parameter's name is a bare id with no resource in it (`id`,
+/// `Id`, `_id`). Such a name says nothing about a member of the same name in
+/// an action's answer, which is the answer's own; `bookingId` and `intent` do.
+#[must_use]
+pub fn is_generic_id(name: &str) -> bool {
+    name.strip_prefix('_')
+        .unwrap_or(name)
+        .eq_ignore_ascii_case("id")
+}
+
 impl Bundle {
     /// The payload definition of the webhook `op_id` fires as `event_type`:
     /// a callback of the operation, else a webhook named (ASCII
@@ -872,6 +882,21 @@ fn collect_def_refs(value: &Value, out: &mut Vec<String>) {
 }
 
 impl Operation {
+    /// Whether this is an action route: an HTTP call on a resource named
+    /// earlier in its path (`POST /payment_intents/{intent}/confirm`), so
+    /// its identity's path parameter is not the path's last segment.
+    #[must_use]
+    pub fn is_action(&self) -> bool {
+        let Binding::Http { path, .. } = &self.binding else {
+            return false;
+        };
+        let Some(param) = self.identity.as_ref().and_then(|i| i.path_param.as_deref()) else {
+            return false;
+        };
+        let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default();
+        !last.contains(&format!("{{{param}}}"))
+    }
+
     /// The schema of one response stream item (the single response, for
     /// client streaming): the success output's schema, for streaming kinds.
     #[must_use]

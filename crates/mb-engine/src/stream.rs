@@ -408,9 +408,13 @@ impl StreamState {
     /// `Patched`; otherwise one repair call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str, cut: bool) -> (Value, Source) {
         let checks = Checks::default();
-        let checked = match self.engine.check_output(&self.validator, line, &checks) {
+        let checked = match self.engine.check_output(&self.validator, line, &checks).0 {
             Checked::Invalid(errors) if cut => {
-                match self.engine.check_truncated(&self.validator, line, &checks) {
+                match self
+                    .engine
+                    .check_truncated(&self.validator, line, &checks)
+                    .0
+                {
                     salvaged @ Checked::Patched(_) => salvaged,
                     _ => Checked::Invalid(errors),
                 }
@@ -489,7 +493,10 @@ impl StreamState {
             Ok(Err(e)) => return Err(e.to_string()),
             Err(_) => return Err("LLM repair timed out".into()),
         };
-        match engine.check_output(&self.validator, &text, &Checks::default()) {
+        match engine
+            .check_output(&self.validator, &text, &Checks::default())
+            .0
+        {
             Checked::Valid(value) | Checked::Patched(value) => Ok(value),
             Checked::Rejected(reason) => Err(reason),
             Checked::Invalid(errors) => Err(errors.join("; ")),

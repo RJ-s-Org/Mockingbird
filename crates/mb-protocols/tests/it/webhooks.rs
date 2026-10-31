@@ -7,6 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
+use mb_llm::{Provider, ScriptedProvider};
 use mb_protocols::webhooks::deliver::{
     DispatchSettings, MAX_RETRIES, OutboundEvent, ResolvedTarget, SecretBytes, WebhookDispatcher,
 };
@@ -15,7 +16,7 @@ use mb_protocols::webhooks::log::{
 };
 use mb_protocols::webhooks::sign::{Signing, stripe_signature};
 use mb_protocols::{MockRuntime, http_rest};
-use mb_state::MemoryStore;
+use mb_state::{MemoryStore, SessionKey, StateStore, StoredResource};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};
@@ -569,4 +570,174 @@ paths:
     );
     assert_eq!(sent(&named).await.len(), 1);
     assert!(sent(&star).await.is_empty());
+}
+
+const CANCELS: &str = r##"
+openapi: 3.0.0
+info: {title: Cancels, version: "1"}
+paths:
+  /bookings/{id}/cancel:
+    post:
+      operationId: cancelBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, required: [reason], properties: {reason: {type: string}}}}}}
+  /bookings/{id}:
+    get:
+      operationId: getBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+  /charges/{id}:
+    get:
+      operationId: getCharge
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, note: {type: string}}
+"##;
+
+/// A runtime over [`CANCELS`] answering with `effects`, with booking `b1` and
+/// charge `ch1` stored.
+async fn cancels(
+    consistency: bool,
+    effects: Value,
+    targets: Vec<ResolvedTarget>,
+) -> (Router, SharedDeliveryLog) {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let session = SessionKey {
+        workspace: "default".into(),
+        mock: "m".into(),
+        session: "default".into(),
+    };
+    for (resource_type, id, data) in [
+        ("bookings", "b1", json!({"id": "b1", "status": "held"})),
+        (
+            "charges",
+            "ch1",
+            json!({"id": "ch1", "status": "paid", "note": "kept"}),
+        ),
+    ] {
+        let resource = StoredResource {
+            resource_type: resource_type.into(),
+            id: id.into(),
+            data,
+        };
+        state.upsert(&session, resource).await.unwrap();
+    }
+    let answer = json!({"response": {"reason": "asked"}, "effects": effects});
+    let provider = ScriptedProvider::new(vec![Ok(answer.to_string())]);
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(CANCELS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::new(provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        state as Arc<dyn StateStore>,
+    );
+    rt.consistency = consistency;
+    let (d, log) = dispatcher_with(targets, fast());
+    rt.webhooks = Some(d);
+    (http_rest::router(Arc::new(rt)), log)
+}
+
+/// An applied effect is an update of its resource: `<resource>.updated`, with
+/// the merged resource as `data.object`, to the targets that match it.
+#[tokio::test]
+async fn an_applied_effect_sends_an_updated_event() {
+    let server = receiver(200).await;
+    let other = receiver(200).await;
+    let effects = json!([{"type": "charges", "id": "ch1", "set": {"status": "refunded"}}]);
+    let targets = vec![
+        to(&server, &["charge.updated"]),
+        to(&other, &["order.created"]),
+    ];
+    let (router, log) = cancels(true, effects, targets).await;
+    let req = Request::post("/bookings/b1/cancel")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let r = wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    assert_eq!(
+        (r.operation.as_str(), r.event_type.as_str()),
+        ("cancelBooking", "charge.updated")
+    );
+    let sent_events = sent(&server).await;
+    assert_eq!(sent_events.len(), 1);
+    assert_eq!(sent_events[0]["type"], "charge.updated");
+    assert_eq!(sent_events[0]["object"], "event");
+    assert_eq!(
+        sent_events[0]["data"]["object"],
+        json!({"id": "ch1", "status": "refunded", "note": "kept"})
+    );
+    assert!(sent(&other).await.is_empty());
+}
+
+/// A target taking everything gets the call's own event and the effect's.
+#[tokio::test]
+async fn a_catch_all_target_gets_the_call_and_its_effects() {
+    let server = receiver(200).await;
+    let effects = json!([{"type": "charges", "id": "ch1", "set": {"status": "refunded"}}]);
+    let (router, log) = cancels(true, effects, vec![to(&server, &["*"])]).await;
+    let req = Request::post("/bookings/b1/cancel")
+        .body(Body::empty())
+        .unwrap();
+    router.oneshot(req).await.unwrap();
+    wait_until(Duration::from_secs(5), Duration::from_millis(10), || {
+        let log = log.clone();
+        async move {
+            let done = log
+                .list("default", "m", 200)
+                .iter()
+                .filter(|r| r.status == DeliveryStatus::Delivered)
+                .count();
+            if done == 2 {
+                Ok(())
+            } else {
+                Err(format!("{done} delivered"))
+            }
+        }
+    })
+    .await;
+    let mut types: Vec<String> = sent(&server)
+        .await
+        .iter()
+        .map(|e| e["type"].as_str().unwrap().to_string())
+        .collect();
+    types.sort();
+    assert_eq!(types, ["booking.updated", "charge.updated"]);
+}
+
+/// A rejected effect changed nothing, and with consistency off none applies:
+/// no event says otherwise.
+#[tokio::test]
+async fn an_effect_not_applied_sends_no_event() {
+    for (consistency, effects) in [
+        (
+            true,
+            json!([{"type": "charges", "id": "nope", "set": {"status": "x"}}]),
+        ),
+        (
+            false,
+            json!([{"type": "charges", "id": "ch1", "set": {"status": "x"}}]),
+        ),
+    ] {
+        let server = receiver(200).await;
+        let (router, _log) =
+            cancels(consistency, effects, vec![to(&server, &["charge.updated"])]).await;
+        let req = Request::post("/bookings/b1/cancel")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(sent(&server).await.is_empty());
+    }
 }

@@ -3850,6 +3850,7 @@ dependencies = [
  "matchit 0.9.2",
  "mb-ext",
  "metrics 0.24.6",
+ "metrics-util 0.20.4",
  "mockingbird-engine",
  "mockingbird-import",
  "mockingbird-llm",

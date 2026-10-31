@@ -122,6 +122,9 @@ struct CallLog {
     declared_body_type: Option<String>,
     /// Why the request failed validation, if it did.
     validation: Vec<String>,
+    /// What became of the answer's effects, as the record's `request` keeps
+    /// them; `null` when it listed none.
+    effects: Value,
     /// The response is an event stream, which reports the call itself when
     /// its body is dropped and sleeps any latency before its first event.
     streaming: bool,
@@ -143,6 +146,7 @@ impl CallLog {
             delay: None,
             declared_body_type: None,
             validation: Vec::new(),
+            effects: Value::Null,
             streaming: false,
         }
     }
@@ -164,6 +168,9 @@ impl CallLog {
         self.usage = generated.usage;
         let resp = respond(&generated);
         if self.record {
+            let mut recorded = Value::Null;
+            call::record_effects(&mut recorded, &generated);
+            self.effects = recorded["effects"].take();
             self.response = generated.body;
         }
         resp
@@ -629,6 +636,9 @@ async fn report(
         });
         if !log.validation.is_empty() {
             request["validation"] = json!(log.validation);
+        }
+        if !log.effects.is_null() {
+            request["effects"] = log.effects;
         }
         request
     } else {
@@ -1316,6 +1326,9 @@ mod tests {
             source: mb_engine::Source::Fallback,
             usage: Default::default(),
             fallback_reason: None,
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         }
     }
 

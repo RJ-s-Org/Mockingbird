@@ -12,6 +12,8 @@ Status: approved 2026-10-30, revised after the pilot: slices 2 and 3 go ahead, s
 - **Template assembly stays a candidate for the fallback path:** its answers were schema-valid with LLM-written values, where the faker's are random. It has not been tested in that role.
 - **Learned invariants (slice 4) stay optional:** the judge still names durations that contradict timestamps, so the case for them is unchanged, and they need their own test.
 
+[Delivered on full-document generation](../../benchmarks/journeys-2026-10-30/README.md): journey checks rose from 54% to 96%, and steps 1 to 3 of the delivery order are done. A confirm moving its status on stays below its bar on weaker models. Steps 4 and 5 wait for a test that supports them.
+
 The sections below keep the design as it was approved.
 
 ## Goal

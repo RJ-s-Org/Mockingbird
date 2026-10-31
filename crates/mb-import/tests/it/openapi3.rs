@@ -841,3 +841,332 @@ components:
     assert_eq!(empty.len(), 1, "{warnings:?}");
     assert_eq!(empty[0].operation.as_deref(), Some("blob"));
 }
+
+mod action_routes {
+    use super::*;
+
+    const ACTIONS: &str = r##"
+openapi: 3.0.0
+info: {title: Actions, version: "1"}
+paths:
+  /v1/payment_intents:
+    post:
+      operationId: createIntent
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /v1/payment_intents/{intent}:
+    get:
+      operationId: getIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /v1/payment_intents/{intent}/confirm:
+    post:
+      operationId: confirmIntent
+      parameters: [{name: intent, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Intent"}}}}
+  /bookings/{id}:
+    get:
+      operationId: getBooking
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Booking"}}}}
+  /bookings/{bookingId}/cancel:
+    post:
+      operationId: cancelBooking
+      parameters: [{name: bookingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cancellation"}}}}
+  /captures/{capture_id}:
+    get:
+      operationId: getCapture
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Capture"}}}}
+  /captures/{capture_id}/refund:
+    post:
+      operationId: refundCapture
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /repos/{number}/close:
+    post:
+      operationId: closeWithNoDetail
+      parameters: [{name: number, in: path, required: true, schema: {type: string}}]
+      responses:
+        "204": {description: closed}
+  /v1/customers/{id}/sources:
+    post:
+      operationId: addSource
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /repos/{o}/{r}/issues:
+    post:
+      operationId: createIssue
+      parameters:
+        - {name: o, in: path, required: true, schema: {type: string}}
+        - {name: r, in: path, required: true, schema: {type: string}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /repos/{o}/{r}/merge:
+    post:
+      operationId: mergeUnderAParam
+      parameters:
+        - {name: o, in: path, required: true, schema: {type: string}}
+        - {name: r, in: path, required: true, schema: {type: string}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /things/{id}/note:
+    get:
+      operationId: getNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+    post:
+      operationId: postNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /things/{id}/item:
+    post:
+      operationId: postItem
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /things/{id}/item/{item}:
+    delete:
+      operationId: deleteItem
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: item, in: path, required: true, schema: {type: string}}
+      responses:
+        "204": {description: gone}
+  /v1/databases/{database_id}/query:
+    post:
+      operationId: queryDatabase
+      parameters: [{name: database_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /chats/{id}/reply:
+    post:
+      operationId: streamReply
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {text/event-stream: {schema: {$ref: "#/components/schemas/Refund"}}}}
+components:
+  schemas:
+    Intent:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Booking:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Cancellation:
+      type: object
+      required: [bookingId, status]
+      properties: {bookingId: {type: string}, status: {type: string}}
+    Capture:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, capture_id: {type: string}}
+    Refund:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+"##;
+
+    fn actions() -> Bundle {
+        compile(ACTIONS.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn confirm_acts_on_its_payment_intent() {
+        let b = actions();
+        let op = b.operation("confirmIntent").unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update));
+        assert_eq!(op.resource_type.as_deref(), Some("payment_intents"));
+        let identity = op.identity.as_ref().unwrap();
+        assert_eq!(identity.path_param.as_deref(), Some("intent"));
+        assert_eq!(identity.field, "id");
+    }
+
+    #[test]
+    fn cancel_with_its_own_response_is_other() {
+        let b = actions();
+        let op = b.operation("cancelBooking").unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("bookings"));
+        let identity = op.identity.as_ref().unwrap();
+        assert_eq!(identity.path_param.as_deref(), Some("bookingId"));
+        // The answer names its booking.
+        assert_eq!(identity.field, "bookingId");
+    }
+
+    /// `{id}` says nothing about the answer's own `id`, in any spelling: the
+    /// identity is the read's.
+    #[test]
+    fn a_generic_id_param_does_not_name_the_target() {
+        for param in ["id", "Id", "ID", "_id"] {
+            let contract = format!(
+                r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /orders/{{{param}}}:
+    get:
+      operationId: getOrder
+      parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
+      responses:
+        "200":
+          description: ok
+          content: {{application/json: {{schema: {{type: object, required: [id], properties: {{id: {{type: string}}}}}}}}}}
+  /orders/{{{param}}}/ship:
+    post:
+      operationId: shipOrder
+      parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
+      responses:
+        "201":
+          description: ok
+          content: {{application/json: {{schema: {{type: object, properties: {{{param}: {{type: string}}, orderId: {{type: string}}}}}}}}}}
+"##
+            );
+            let b = compile(contract.as_bytes()).unwrap();
+            let op = b.operation("shipOrder").unwrap();
+            assert_eq!(op.kind, OperationKind::Command(Effect::Other), "{param}");
+            let identity = op.identity.as_ref().unwrap();
+            assert_eq!(identity.path_param.as_deref(), Some(param), "{param}");
+            assert_eq!(identity.field, "id", "{param}");
+        }
+    }
+
+    #[test]
+    fn an_action_without_a_read_or_a_body_still_names_its_target() {
+        let b = actions();
+        let op = b.operation("closeWithNoDetail").unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(op.resource_type.as_deref(), Some("repos"));
+        let identity = op.identity.as_ref().unwrap();
+        assert_eq!(identity.path_param.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn an_other_action_finds_its_target_as_the_read_does() {
+        let b = actions();
+        let read = b.operation("getCapture").unwrap().identity.clone().unwrap();
+        let op = b.operation("refundCapture").unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other));
+        let identity = op.identity.as_ref().unwrap();
+        assert_eq!(identity.path_param.as_deref(), Some("capture_id"));
+        assert_eq!(identity.field, read.field);
+        assert_eq!(identity.path_field, read.path_field);
+        assert_eq!(identity.path_field.as_deref(), Some("capture_id"));
+    }
+
+    /// A resource composed with `allOf` has the members of its branches, so
+    /// its read by path knows what the path names.
+    #[test]
+    fn an_all_of_resource_has_an_identity() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: Composed, version: "1"}
+paths:
+  /offers/{offerId}:
+    get:
+      operationId: getOffer
+      parameters: [{name: offerId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Offer"}}}}
+  /tickets/{ticket_number}:
+    get:
+      operationId: getTicket
+      parameters: [{name: ticket_number, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+components:
+  schemas:
+    Base: {type: object, properties: {id: {type: string}}}
+    Summary:
+      allOf:
+        - $ref: "#/components/schemas/Base"
+        - {type: object, properties: {price: {type: string}}}
+    Offer:
+      allOf:
+        - $ref: "#/components/schemas/Summary"
+        - {type: object, properties: {taxes: {type: string}}}
+    Ticket:
+      type: object
+      properties: {id: {type: string}}
+      allOf:
+        - {type: object, properties: {number: {type: string}}}
+"##;
+        let b = compile(contract.as_bytes()).unwrap();
+        let identity = b.operation("getOffer").unwrap().identity.clone().unwrap();
+        assert_eq!(identity.path_param.as_deref(), Some("offerId"));
+        assert_eq!(identity.field, "id");
+        let identity = b.operation("getTicket").unwrap().identity.clone().unwrap();
+        assert_eq!(identity.field, "id");
+        assert_eq!(identity.path_field.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn is_action_tells_an_action_from_a_write_on_the_resource() {
+        let b = actions();
+        for id in ["confirmIntent", "cancelBooking", "refundCapture"] {
+            assert!(b.operation(id).unwrap().is_action(), "{id}");
+        }
+        for id in ["createIntent", "getIntent", "addSource", "createIssue"] {
+            assert!(!b.operation(id).unwrap().is_action(), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_plural_tail_stays_a_collection() {
+        let b = actions();
+        let op = b.operation("addSource").unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("sources"));
+        assert_eq!(op.identity.as_ref().unwrap().path_param, None);
+    }
+
+    #[test]
+    fn a_tail_with_a_get_or_detail_route_stays_a_collection() {
+        let b = actions();
+        for (id, resource) in [
+            ("createIssue", "issues"),
+            ("postNote", "note"),
+            ("postItem", "item"),
+        ] {
+            let op = b.operation(id).unwrap();
+            assert_eq!(op.kind, OperationKind::Command(Effect::Create), "{id}");
+            assert_eq!(op.resource_type.as_deref(), Some(resource), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_tail_under_two_params_stays_a_collection() {
+        let op = actions();
+        let op = op.operation("mergeUnderAParam").unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.resource_type.as_deref(), Some("merge"));
+    }
+
+    #[test]
+    fn a_read_verb_tail_stays_a_read() {
+        let b = actions();
+        let op = b.operation("queryDatabase").unwrap();
+        assert_eq!(op.kind, OperationKind::Query);
+        assert_eq!(op.resource_type.as_deref(), Some("databases"));
+    }
+
+    #[test]
+    fn a_streaming_tail_keeps_its_stream() {
+        let b = actions();
+        let op = b.operation("streamReply").unwrap();
+        assert_eq!(op.kind, OperationKind::StreamServer);
+        assert_eq!(op.resource_type.as_deref(), Some("reply"));
+    }
+}

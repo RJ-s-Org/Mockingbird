@@ -7,10 +7,12 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::http::HeaderMap;
-use mb_engine::consistency::{ENVELOPE_KEYS, item_identity, list_items, list_members};
+use mb_engine::consistency::{
+    ENVELOPE_KEYS, item_identity, list_items, list_members, property_schema,
+};
 use mb_engine::{
-    EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext, OFFLINE_REASON,
-    OperationCall, Source,
+    EffectOutcome, EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext,
+    OFFLINE_REASON, OperationCall, ResourceEffect, Source,
 };
 use mb_ext::{CallInfo, Rejection, Tenancy, UsageEvent};
 use mb_llm::Usage;
@@ -624,8 +626,8 @@ pub(crate) async fn generate_once(
 }
 
 /// The stored target and related resources a read-only generation of `call`
-/// takes into account (as [`generate_once`] reads them); the session is
-/// marked used.
+/// takes into account (as [`generate_once`] reads them, but for the hops,
+/// which its callers do not read); the session is marked used.
 #[cfg(feature = "graphql")]
 pub(crate) async fn read_state(
     rt: &MockRuntime,
@@ -634,7 +636,7 @@ pub(crate) async fn read_state(
 ) -> (Option<StoredResource>, Vec<StoredResource>) {
     let mut state = StateAccess::new(rt);
     let target_id = target_id(plan.op, call);
-    let read = read_context(
+    let (target, related, _) = read_context(
         &mut state,
         &plan.session,
         plan.op,
@@ -644,7 +646,7 @@ pub(crate) async fn read_state(
     .instrument(state_span())
     .await;
     state.touch(&plan.session).instrument(state_span()).await;
-    read
+    (target, related)
 }
 
 /// [`generate_once`] with a 2xx response schema narrowed to what the caller
@@ -716,9 +718,10 @@ pub(crate) async fn prepare<'a>(
     // Before any state is read: an answer generated from older state must
     // not be cached after a write that lands meanwhile.
     let since = rt.state.response_cache().map(|c| c.epoch(session));
-    let (target, related) = read_context(&mut state, session, op, target_id.as_deref(), call)
-        .instrument(state_span())
-        .await;
+    let (target, mut related, mut followed) =
+        read_context(&mut state, session, op, target_id.as_deref(), call)
+            .instrument(state_span())
+            .await;
     // Found by another field (an issue's `number`): writes go to its id.
     if let Some(found) = &target {
         target_id = Some(found.id.clone());
@@ -736,6 +739,15 @@ pub(crate) async fn prepare<'a>(
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
     }
+
+    let target_missing = target.is_none();
+    // A read naming a seed asks for that seed's answer, not for what a plain
+    // read answered; a resource stored by a write or a fixture still stands.
+    let target = target.filter(|stored| {
+        !(matches!(op.kind, OperationKind::Query)
+            && mb_engine::seed::request_seed(call).is_some()
+            && rt.own_reads().holds(session, stored))
+    });
 
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
@@ -778,12 +790,42 @@ pub(crate) async fn prepare<'a>(
             source,
             usage: Usage::default(),
             fallback_reason,
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
+            dropped_effects: 0,
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(served);
     }
+
+    // Last, so that a 404, a stored or a cached answer costs none of this.
+    async {
+        parents_by_name(
+            &mut state,
+            session,
+            op,
+            call,
+            target.as_ref(),
+            &mut followed,
+            &mut related,
+        )
+        .await;
+        follow_hops(&mut state, session, target.as_ref(), followed, &mut related).await;
+        if is_query
+            && target_missing
+            && let Some(id) = target_id.as_deref()
+        {
+            for resource in referrers(&mut state, session, op, id).await {
+                if !holds(&related, &resource) {
+                    related.push(resource);
+                }
+            }
+        }
+    }
+    .instrument(state_span())
+    .await;
 
     Prepared::Pending(Pending {
         state,
@@ -852,7 +894,57 @@ pub(crate) async fn complete(
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
         {
-            store_wrapped(&mut state, session, &generated).await;
+            store_wrapped(&mut state, session, resource_type, &generated).await;
+        }
+        // A request naming a seed asks for that seed's answer, and a query for
+        // one view: the cache keeps those apart, so neither is the resource.
+        if rt.consistency
+            && plain(plan)
+            && mb_engine::seed::request_seed(call).is_none()
+            && call.query.is_empty()
+            && !transient_fallback(&generated)
+            && (200..300).contains(&generated.status)
+            && !matches!(op.binding, Binding::Graphql { .. })
+        {
+            seed_own_read(
+                &mut state,
+                session,
+                rt,
+                op,
+                call,
+                target_id.as_deref(),
+                &generated,
+            )
+            .await;
+        }
+        // An operation with no resource type is stateless, GraphQL stores the
+        // objects of its answers under their own types, and a delete's answer
+        // may name what it just removed.
+        if (200..300).contains(&generated.status)
+            && resource_type.is_some()
+            && rt.consistency
+            && !transient_fallback(&generated)
+            && !matches!(op.binding, Binding::Graphql { .. })
+            && !matches!(op.kind, OperationKind::Command(Effect::Delete))
+            && let Some(body) = generated.body.as_ref()
+        {
+            let schema = op
+                .output_for_status(generated.status)
+                .and_then(|o| o.schema.as_ref());
+            seed_entities(&mut state, session, rt, body, schema).await;
+        }
+        // Last: an effect on what this call just stored sees it.
+        if rt.consistency && (200..300).contains(&generated.status) {
+            generated.effect_outcomes =
+                apply_effects(&mut state, session, rt, &generated.effects).await;
+            if generated.dropped_effects > 0 {
+                metrics::counter!(
+                    EFFECTS_METRIC,
+                    "mock" => rt.name.clone(),
+                    "outcome" => "rejected"
+                )
+                .increment(generated.dropped_effects as u64);
+            }
         }
         state.touch(session).await;
     }
@@ -883,6 +975,13 @@ pub(crate) async fn complete(
         target_id.as_deref(),
         session,
     );
+    #[cfg(any(
+        feature = "http-rest",
+        feature = "graphql",
+        feature = "grpc",
+        feature = "soap"
+    ))]
+    crate::webhooks::emit::emit_effects(rt, op, &generated.effect_outcomes, session);
 
     // Seeded first, then cached: a later list never clears a cached one.
     // A fallback is cached too: a schema the LLM cannot answer in time
@@ -906,6 +1005,133 @@ pub(crate) async fn complete(
         );
     }
     generated
+}
+
+/// Counter of the effects an answer listed, by `mock` and `outcome`
+/// (`applied` or `rejected`).
+const EFFECTS_METRIC: &str = "mb_effects_total";
+
+/// Characters of an answer's own text that a log line carries, in one field.
+const MAX_LOGGED_CHARS: usize = 64;
+
+/// `text`, which an LLM wrote, cut to fit a log line.
+fn log_capped(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut capped: String = chars.by_ref().take(MAX_LOGGED_CHARS).collect();
+    if chars.next().is_some() {
+        capped.push('…');
+    }
+    capped
+}
+
+/// Applies what an answer says it changed in other resources, in this session
+/// only, and counts each effect. A rejected effect costs itself: the answer is
+/// served and the next effect still applies.
+async fn apply_effects(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    effects: &[ResourceEffect],
+) -> Vec<EffectOutcome> {
+    let mut outcomes = Vec::with_capacity(effects.len());
+    for effect in effects {
+        let result = apply_effect(state, session, rt, effect).await;
+        tracing::info!(
+            mock = %rt.name,
+            resource_type = %log_capped(&effect.resource_type),
+            id = %log_capped(&effect.id),
+            rejected = result.as_ref().err().copied(),
+            "effect of an answer"
+        );
+        let outcome = if result.is_ok() {
+            "applied"
+        } else {
+            "rejected"
+        };
+        metrics::counter!(EFFECTS_METRIC, "mock" => rt.name.clone(), "outcome" => outcome)
+            .increment(1);
+        let (merged, rejected) = match result {
+            Ok(merged) => (Some(merged), None),
+            Err(reason) => (None, Some(reason.to_string())),
+        };
+        outcomes.push(EffectOutcome {
+            effect: effect.clone(),
+            rejected,
+            merged,
+        });
+    }
+    outcomes
+}
+
+/// Adds what became of `generated`'s effects to a request record's `request`
+/// (nothing when it listed none), under `effects`.
+pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse) {
+    if generated.effect_outcomes.is_empty() {
+        return;
+    }
+    let recorded = generated.effect_outcomes.iter().map(|o| {
+        let mut record = serde_json::json!({
+            "type": o.effect.resource_type,
+            "id": o.effect.id,
+            "set": o.effect.set,
+            "outcome": if o.rejected.is_some() { "rejected" } else { "applied" },
+        });
+        if let Some(reason) = &o.rejected {
+            record["reason"] = Value::from(reason.as_str());
+        }
+        record
+    });
+    if request.is_null() {
+        *request = serde_json::json!({});
+    }
+    if let Value::Object(request) = request {
+        match request.get_mut("effects") {
+            Some(Value::Array(list)) => list.extend(recorded),
+            _ => {
+                request.insert("effects".to_string(), Value::Array(recorded.collect()));
+            }
+        }
+    }
+}
+
+/// Merges `effect` into the stored resource it names and returns the result;
+/// `Err` says why not. The resource must exist (an effect never creates one,
+/// and never deletes one), keep its identity and, merged, still suit its type,
+/// which must have a schema to check against (see [`entity_fits`]).
+async fn apply_effect(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    effect: &ResourceEffect,
+) -> Result<Value, &'static str> {
+    let t = effect.resource_type.as_str();
+    let index = rt.index();
+    let identity = index.identity_fields(t);
+    if effect
+        .set
+        .keys()
+        .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
+    {
+        return Err("it sets an identity field");
+    }
+    if !index.detail_reads.contains_key(t) && !index.other_shapes.contains_key(t) {
+        return Err("no schema to check against");
+    }
+    let Some(mut stored) = state.get(session, t, &effect.id).await else {
+        return Err("no such resource");
+    };
+    let Value::Object(data) = &mut stored.data else {
+        return Err("the stored resource is not an object");
+    };
+    data.extend(effect.set.clone());
+    if !entity_fits(rt, t, &stored.data) {
+        return Err("the merged resource breaks its schema");
+    }
+    let merged = stored.data.clone();
+    if !state.upsert(session, stored).await {
+        return Err("the store took no write");
+    }
+    Ok(merged)
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
@@ -979,18 +1205,45 @@ pub(crate) struct BundleIndex {
     /// Per resource type: the fields its operations take from the path
     /// (GitHub's issue `number`), sorted and deduplicated.
     path_fields: HashMap<String, Vec<String>>,
+    /// Per resource type: the fields its operations identify it by, those
+    /// [`BundleIndex::path_fields`] holds included, sorted and deduplicated.
+    identity_fields: HashMap<String, Vec<String>>,
     /// The members every query operation's success schema lists.
     listed: HashSet<String>,
     /// Per operation, by position: the members its success schema lists.
     list_members: Vec<Vec<String>>,
+    /// The resource type each `$defs` name is, from the query operations
+    /// whose success schema or list items are that `$ref`: a read by path
+    /// parameter first (`/repos/{owner}/{repo}`, not `/search/repositories`,
+    /// names GitHub's `repository`), then a list, then any other read. A
+    /// list under a member naming a type read by path is that type.
+    types_by_def: HashMap<String, String>,
+    /// The resource types of the query operations.
+    read_types: HashSet<String>,
+    /// Per resource type, the position of its first query by path parameter
+    /// with a success schema: the read a stored resource must suit.
+    detail_reads: HashMap<String, usize>,
+    /// Per resource type with no such read, what a stored resource must
+    /// suit instead, with the position of the read it comes from: a list's
+    /// item schema, else a singleton read's success schema (`/user`).
+    other_shapes: HashMap<String, (usize, Value)>,
+    /// Per resource type, the types whose answers have a reference field of
+    /// it (see [`reference_targets`]), sorted and deduplicated.
+    referrers: HashMap<String, Vec<String>>,
 }
 
 impl BundleIndex {
     pub(crate) fn new(bundle: &mb_mcm::Bundle) -> Self {
         let mut by_id = HashMap::with_capacity(bundle.operations.len());
         let mut path_fields: HashMap<String, Vec<String>> = HashMap::new();
+        let mut identity_fields: HashMap<String, Vec<String>> = HashMap::new();
         let mut list_members_of = Vec::with_capacity(bundle.operations.len());
         let mut listed = HashSet::new();
+        let mut read_types = HashSet::new();
+        let mut detail_reads = HashMap::new();
+        let mut ranked_defs = RankedDefs::new();
+        let mut shapes = TypeShapes::new();
+        let mut referrers: HashMap<String, Vec<String>> = HashMap::new();
         for (i, op) in bundle.operations.iter().enumerate() {
             by_id.entry(op.id.clone()).or_insert(i);
             if let (Some(t), Some(field)) = (
@@ -1002,20 +1255,47 @@ impl BundleIndex {
                     .or_default()
                     .push(field.to_string());
             }
+            if let (Some(t), Some(identity)) = (op.resource_type.as_deref(), op.identity.as_ref()) {
+                let fields = identity_fields.entry(t.to_string()).or_default();
+                fields.push(identity.field.clone());
+                fields.extend(identity.path_field.iter().cloned());
+            }
             let members = op
                 .success_output()
                 .and_then(|o| o.schema.as_ref())
                 .map(|schema| list_members(bundle, schema))
                 .unwrap_or_default();
+            if let Some(t) = op.resource_type.as_deref() {
+                record_referrers(bundle, op, t, &members, &mut referrers);
+            }
             if matches!(op.kind, OperationKind::Query) {
                 listed.extend(members.iter().cloned());
+                if let Some(t) = op.resource_type.as_deref() {
+                    read_types.insert(t.to_string());
+                    let by_path = op.identity.as_ref().is_some_and(|i| i.path_param.is_some())
+                        && !op.is_action();
+                    if by_path && op.success_output().is_some_and(|o| o.schema.is_some()) {
+                        detail_reads.entry(t.to_string()).or_insert(i);
+                    }
+                    let lists = list_item_schemas(bundle, op, &members);
+                    rank_defs(op, t, by_path, &lists, &mut ranked_defs);
+                    record_shapes(op, i, t, by_path, &members, &lists, &mut shapes);
+                }
             }
             list_members_of.push(members);
         }
-        for fields in path_fields.values_mut() {
+        for fields in path_fields
+            .values_mut()
+            .chain(identity_fields.values_mut())
+            .chain(referrers.values_mut())
+        {
             fields.sort_unstable();
             fields.dedup();
         }
+        // Lists under a member of a type read by path hold that type: the
+        // `offers` of a flight search are offers.
+        let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
+        let in_detail_reads = |name: &String| by_path_types.contains(name);
         #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
         #[cfg(any(test, feature = "events"))]
@@ -1027,8 +1307,25 @@ impl BundleIndex {
             #[cfg(any(test, feature = "events"))]
             channel_by_id,
             path_fields,
+            identity_fields,
             listed,
             list_members: list_members_of,
+            types_by_def: ranked_defs
+                .into_iter()
+                .map(|(def, (_, t, member))| {
+                    let t = member
+                        .and_then(|m| [format!("{m}s"), m].into_iter().find(in_detail_reads))
+                        .unwrap_or(t);
+                    (def, t)
+                })
+                .collect(),
+            read_types,
+            detail_reads,
+            other_shapes: shapes
+                .into_iter()
+                .map(|(t, (_, i, schema))| (t, (i, schema)))
+                .collect(),
+            referrers,
         }
     }
 
@@ -1049,9 +1346,260 @@ impl BundleIndex {
             .map_or(&[], Vec::as_slice)
     }
 
+    fn identity_fields(&self, resource_type: &str) -> &[String] {
+        self.identity_fields
+            .get(resource_type)
+            .map_or(&[], Vec::as_slice)
+    }
+
     fn list_members(&self, op: usize) -> &[String] {
         self.list_members.get(op).map_or(&[], Vec::as_slice)
     }
+
+    fn referrers(&self, resource_type: &str) -> &[String] {
+        self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Records in `referrers` the types the fields of `op`'s answers (as type
+/// `t`, its list items included) refer to.
+fn record_referrers(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    t: &str,
+    members: &[String],
+    referrers: &mut HashMap<String, Vec<String>>,
+) {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let items = list_item_schemas(bundle, op, members);
+    let shapes = std::iter::once(schema).chain(items.iter().map(|(_, s)| s));
+    for shape in shapes {
+        for part in schema_parts(bundle, Some(shape)).0 {
+            let Some(properties) = part.get("properties").and_then(Value::as_object) else {
+                continue;
+            };
+            for (field, property) in properties {
+                for target in reference_targets(bundle, field, property) {
+                    referrers.entry(target).or_default().push(t.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// The types a field of an answer's schema can refer to: `<x>s` and `<x>`
+/// for `<x>Id`/`<x>_id`, or for a member `<x>` that can hold a string.
+fn reference_targets(bundle: &mb_mcm::Bundle, field: &str, property: &Value) -> Vec<String> {
+    let prefix = reference_prefix(field)
+        .or_else(|| (!field.is_empty() && holds_a_string(bundle, property)).then_some(field));
+    prefix.map_or_else(Vec::new, |x| vec![format!("{x}s"), x.to_string()])
+}
+
+/// Whether `schema` admits a string, or a list of them.
+fn holds_a_string(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
+    let string = |s: &Value| {
+        schema_parts(bundle, Some(s))
+            .0
+            .iter()
+            .any(|p| match p.get("type") {
+                Some(Value::String(t)) => t == "string",
+                Some(Value::Array(types)) => types.iter().any(|t| t == "string"),
+                _ => false,
+            })
+    };
+    string(schema)
+        || schema_parts(bundle, Some(schema))
+            .0
+            .iter()
+            .filter_map(|p| p.get("items"))
+            .any(string)
+}
+
+/// The item schemas of `op`'s success schema: each of its list `members`'
+/// (with the member), and the root's when it is an array itself.
+fn list_item_schemas(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    members: &[String],
+) -> Vec<(Option<String>, Value)> {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return Vec::new();
+    };
+    let items_of = |list: &Value| {
+        let (parts, _) = schema_parts(bundle, Some(list));
+        parts.iter().find_map(|p| p.get("items")).cloned()
+    };
+    let mut out: Vec<(Option<String>, Value)> = members
+        .iter()
+        .filter_map(|m| {
+            let items = items_of(&property_schema(bundle, schema, m)?)?;
+            Some((Some(m.clone()), items))
+        })
+        .collect();
+    out.extend(items_of(schema).map(|items| (None, items)));
+    out
+}
+
+/// Per `$defs` name: the best rank seen, the type of the read it was seen in
+/// and, for a list, the non-envelope member holding it.
+type RankedDefs = HashMap<String, (u8, String, Option<String>)>;
+
+/// Records in `ranked` the `$defs` names `op` reads as resource type `t`,
+/// keeping the best-ranked type of each (see [`BundleIndex::types_by_def`]).
+fn rank_defs(
+    op: &Operation,
+    t: &str,
+    by_path: bool,
+    lists: &[(Option<String>, Value)],
+    ranked: &mut RankedDefs,
+) {
+    const DETAIL: u8 = 0;
+    const LIST: u8 = 1;
+    const OTHER: u8 = 2;
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let mut found: Vec<(u8, String, Option<String>)> = Vec::new();
+    if let Some(def) = def_name(schema) {
+        found.push((if by_path { DETAIL } else { OTHER }, def.to_string(), None));
+    }
+    let items = lists.iter().filter_map(|(member, items)| {
+        let member = member
+            .as_ref()
+            .filter(|m| !ENVELOPE_KEYS.contains(&m.as_str()));
+        Some((LIST, def_name(items)?.to_string(), member.cloned()))
+    });
+    found.extend(items);
+    for (rank, def, member) in found {
+        let held = ranked
+            .entry(def)
+            .or_insert_with(|| (rank, t.to_string(), member.clone()));
+        if rank < held.0 {
+            *held = (rank, t.to_string(), member);
+        }
+    }
+}
+
+/// Per resource type: the best rank seen, the read's position and the schema.
+type TypeShapes = HashMap<String, (u8, usize, Value)>;
+
+/// Records in `shapes` what query `op` (at position `i`, of type `t`) says a
+/// resource looks like (see [`BundleIndex::other_shapes`]): a list's items
+/// describe the type the member names and, for the root, an envelope or an
+/// only member, `t`; with no list, its success schema describes `t`.
+fn record_shapes(
+    op: &Operation,
+    i: usize,
+    t: &str,
+    by_path: bool,
+    members: &[String],
+    lists: &[(Option<String>, Value)],
+    shapes: &mut TypeShapes,
+) {
+    const ITEMS: u8 = 0;
+    const SINGLETON: u8 = 1;
+    let mut record = |t: &str, rank: u8, schema: &Value| {
+        let held = shapes
+            .entry(t.to_string())
+            .or_insert_with(|| (rank, i, schema.clone()));
+        if rank < held.0 {
+            *held = (rank, i, schema.clone());
+        }
+    };
+    for (member, items) in lists {
+        match member.as_deref() {
+            None => record(t, ITEMS, items),
+            Some(m) if ENVELOPE_KEYS.contains(&m) || members.len() == 1 => {
+                record(t, ITEMS, items);
+                if !ENVELOPE_KEYS.contains(&m) {
+                    record(m, ITEMS, items);
+                }
+            }
+            Some(m) => record(m, ITEMS, items),
+        }
+    }
+    if lists.is_empty()
+        && !by_path
+        && let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref())
+    {
+        record(t, SINGLETON, schema);
+    }
+}
+
+/// The `$defs` name `schema` is a `$ref` to.
+fn def_name(schema: &Value) -> Option<&str> {
+    schema.get("$ref")?.as_str()?.strip_prefix("#/$defs/")
+}
+
+/// Schemas [`schema_parts`] returns, at most.
+const MAX_SCHEMA_PARTS: usize = 32;
+
+/// What `schema` is made of, its `$ref`s followed and its
+/// `anyOf`/`oneOf`/`allOf` branches flattened, with the `$defs` names met.
+fn schema_parts<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    schema: Option<&'a Value>,
+) -> (Vec<&'a Value>, Vec<&'a str>) {
+    fn visit<'a>(
+        bundle: &'a mb_mcm::Bundle,
+        schema: &'a Value,
+        depth: usize,
+        parts: &mut Vec<&'a Value>,
+        defs: &mut Vec<&'a str>,
+    ) {
+        if depth > 8 || parts.len() >= MAX_SCHEMA_PARTS {
+            return;
+        }
+        if let Some(def) = def_name(schema) {
+            defs.push(def);
+            if let Some(target) = bundle.defs.get(def) {
+                visit(bundle, target, depth + 1, parts, defs);
+            }
+            return;
+        }
+        parts.push(schema);
+        for key in ["anyOf", "oneOf", "allOf"] {
+            for branch in schema
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                visit(bundle, branch, depth + 1, parts, defs);
+            }
+        }
+    }
+    let (mut parts, mut defs) = (Vec::new(), Vec::new());
+    if let Some(schema) = schema {
+        visit(bundle, schema, 0, &mut parts, &mut defs);
+    }
+    (parts, defs)
+}
+
+/// The resource type of an object found under `member`, shaped by `$defs`
+/// entry `def`: the def's type, else the listed type named `member` or
+/// `<member>s`, one a read can name by path first (GitHub's `user` member is
+/// a `/users/{username}`, not the caller's `/user`).
+pub(crate) fn entity_type(index: &BundleIndex, def: Option<&str>, member: &str) -> Option<String> {
+    if let Some(t) = def.and_then(|d| index.types_by_def.get(d)) {
+        return Some(t.clone());
+    }
+    if member.is_empty() {
+        return None;
+    }
+    let names = [member.to_string(), format!("{member}s")];
+    // An envelope's member (`items`) names no type of its own.
+    let is_type = |name: &String| {
+        index.read_types.contains(name)
+            || (index.listed.contains(name) && !ENVELOPE_KEYS.contains(&name.as_str()))
+    };
+    names
+        .iter()
+        .find(|name| index.detail_reads.contains_key(*name))
+        .or_else(|| names.iter().find(|name| is_type(name)))
+        .cloned()
 }
 
 /// Aliases [`PathAliases`] holds at most; it is emptied when full.
@@ -1113,6 +1661,59 @@ impl PathAliases {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.0.lock().map(|a| a.len()).unwrap_or_default()
+    }
+}
+
+/// Answers [`OwnReads`] holds at most; it is emptied when full.
+const MAX_OWN_READS: usize = 4096;
+
+/// Which stored resources are a plain read's own answer, not a write's or a
+/// fixture's: a read naming a seed is not answered from them. Remembered
+/// from this runtime's reads with a hash of the answer, so any later write
+/// that changes the resource ends it with no bookkeeping. Only a hint: on
+/// another node, after a restart or once emptied, the resource counts as
+/// written and answers such a read as any stored one does.
+#[derive(Debug, Default)]
+pub(crate) struct OwnReads(std::sync::Mutex<HashMap<OwnRead, u64>>);
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct OwnRead {
+    session: SessionKey,
+    resource_type: String,
+    id: String,
+}
+
+impl OwnReads {
+    fn key(session: &SessionKey, r: &StoredResource) -> OwnRead {
+        OwnRead {
+            session: session.clone(),
+            resource_type: r.resource_type.clone(),
+            id: r.id.clone(),
+        }
+    }
+
+    fn digest(data: &Value) -> u64 {
+        use std::hash::{DefaultHasher, Hasher};
+        let mut hasher = DefaultHasher::new();
+        hash_canonical(data, &mut hasher);
+        hasher.finish()
+    }
+
+    fn remember(&self, session: &SessionKey, r: &StoredResource) {
+        let Ok(mut reads) = self.0.lock() else {
+            return;
+        };
+        if reads.len() >= MAX_OWN_READS {
+            reads.clear();
+        }
+        reads.insert(Self::key(session, r), Self::digest(&r.data));
+    }
+
+    /// Whether `r` is, as it stands, a plain read's own answer.
+    fn holds(&self, session: &SessionKey, r: &StoredResource) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|reads| reads.get(&Self::key(session, r)) == Some(&Self::digest(&r.data)))
     }
 }
 
@@ -1203,16 +1804,22 @@ const WRAPPED_IDS: [&str; 4] = ["id", "ts", "sid", "uuid"];
 /// Stores each object a create's answer wraps under a member `<x>` (Slack's
 /// `chat.postMessage` → `{ok, ts, message: {...}}`) as a resource of type
 /// `<x>s` when a read lists `<x>s` (`conversations.history`'s `messages`),
-/// so that read is generated knowing it.
+/// so that read is generated knowing it. The create's own member, one of the
+/// operation's own type (`resource_type`), replaces what the session holds.
+/// Any other is a mention, stored under what [`seed_entities`] requires of
+/// one: it replaces what is held only when that cannot key it, having no
+/// `id` or `number` (Slack's `ts`), and otherwise is stored only when new.
 async fn store_wrapped(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
+    resource_type: Option<&str>,
     generated: &GeneratedResponse,
 ) {
     let Some(Value::Object(body)) = generated.body.as_ref() else {
         return;
     };
-    let listed = &state.rt.index().listed;
+    let rt = state.rt;
+    let listed = &rt.index().listed;
     for (member, value) in body {
         let plural = format!("{member}s");
         if !value.is_object() || !listed.contains(&plural) {
@@ -1224,13 +1831,263 @@ async fn store_wrapped(
         else {
             continue;
         };
+        let own = resource_type == Some(member.as_str()) || resource_type == Some(plural.as_str());
+        let unkeyed = value.get("id").is_none() && value.get("number").is_none();
         let resource = StoredResource {
             resource_type: plural,
             id,
             data: value.clone(),
         };
-        state.upsert(session, resource).await;
+        if own {
+            state.upsert(session, resource).await;
+        } else if rt.consistency
+            && !transient_fallback(generated)
+            && entity_fits(rt, &resource.resource_type, &resource.data)
+        {
+            if unkeyed {
+                state.upsert(session, resource).await;
+            } else {
+                state.insert_seeded(session, resource).await;
+            }
+        }
     }
+}
+
+/// Stores a generated read by id as the resource it read, when it answers
+/// with its type's by-path schema: otherwise a later answer's mention would
+/// be stored and change what repeating this read returns. It goes under the
+/// target id when the path names the identity. A path parameter naming no
+/// field goes under its own id, or under the parameter's value when that is
+/// what its `id` holds. After an earlier parameter (`/repos/{o}/{r}`,
+/// `/orgs/{o}/teams/{t}`) that value is no key, or one owner's answer would
+/// answer for another's: such an answer stores nothing, the response cache
+/// keeping its repeat. So does one on a route ending in an owner and a name
+/// whose `full_name` does not show it is that owner's (see [`owned_name`]).
+/// A route read by another field (`/issues/{number}`) stores nothing: its
+/// answer's `id` comes from
+/// the path and is no resource's, so a list would store the issue again.
+async fn seed_own_read(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    op: &Operation,
+    call: &OperationCall,
+    target_id: Option<&str>,
+    generated: &GeneratedResponse,
+) {
+    let (true, Some(t), Some(target_id), Some(identity), Some(body)) = (
+        matches!(op.kind, OperationKind::Query),
+        op.resource_type.as_deref(),
+        target_id,
+        op.identity.as_ref(),
+        generated.body.as_ref(),
+    ) else {
+        return;
+    };
+    let index = rt.index();
+    let detail_schema = index.detail_reads.get(t).and_then(|i| {
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    let own_schema = op
+        .output_for_status(generated.status)
+        .and_then(|o| o.schema.as_ref());
+    if detail_schema.is_none() || detail_schema != own_schema {
+        return;
+    }
+    if identity.path_field.is_some() {
+        return;
+    }
+    let id = if path_names_identity(identity) {
+        Some(target_id.to_string())
+    } else {
+        body.get(&identity.field)
+            .and_then(id_string)
+            .filter(|id| id != target_id || !follows_a_param(op, identity))
+    };
+    let Some(id) = id else {
+        return;
+    };
+    let resource = StoredResource {
+        resource_type: t.to_string(),
+        id,
+        data: body.clone(),
+    };
+    if !path_names_identity(identity)
+        && let Some(owned) = owned_name(op, call)
+        && (!body.get("full_name").is_some_and(Value::is_string)
+            || !full_name_fits(&resource, Some(&owned)))
+    {
+        return;
+    }
+    if state.insert_seeded(session, resource.clone()).await {
+        rt.own_reads().remember(session, &resource);
+        return;
+    }
+    // What is held is shorter than this read (see [`is_summary`]): this answer
+    // was generated knowing it, and a later read can be served.
+    if let Some(held) = state.get(session, t, &resource.id).await
+        && !entity_fits(rt, t, &held.data)
+        && entity_fits(rt, t, &resource.data)
+        && state.upsert(session, resource.clone()).await
+    {
+        rt.own_reads().remember(session, &resource);
+    }
+}
+
+/// How deep an answer is walked for entities: containers below its root.
+const MAX_ENTITY_DEPTH: usize = 6;
+/// Entities one answer may seed.
+const MAX_ENTITIES: usize = 100;
+
+/// Stores what a 2xx answer mentions so that a later read returns it: each
+/// object below the answer's root with an `id` or `number`, a known type (see
+/// [`entity_type`]) and a value its type's read would serve or a shorter form
+/// of one (see [`entity_fits`], [`is_summary`]). What the session already
+/// holds is left as it is.
+async fn seed_entities(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    rt: &MockRuntime,
+    body: &Value,
+    schema: Option<&Value>,
+) {
+    let mut walk = EntityWalk {
+        rt,
+        considered: 0,
+        found: Vec::new(),
+    };
+    walk.visit(body, schema, "", 0);
+    for resource in walk.found {
+        state.insert_seeded(session, resource).await;
+    }
+}
+
+/// One walk of an answer for [`seed_entities`].
+struct EntityWalk<'a> {
+    rt: &'a MockRuntime,
+    /// Objects taken for entities, stored or refused.
+    considered: usize,
+    found: Vec<StoredResource>,
+}
+
+impl<'a> EntityWalk<'a> {
+    fn visit(&mut self, value: &Value, schema: Option<&'a Value>, member: &str, depth: usize) {
+        if depth > MAX_ENTITY_DEPTH || self.considered >= MAX_ENTITIES {
+            return;
+        }
+        let bundle: &'a mb_mcm::Bundle = self.rt.bundle();
+        let (parts, defs) = schema_parts(bundle, schema);
+        match value {
+            Value::Array(items) => {
+                let item = parts.iter().find_map(|p| p.get("items"));
+                for value in items {
+                    self.visit(value, item, member, depth + 1);
+                }
+            }
+            Value::Object(fields) => {
+                if depth > 0 {
+                    self.consider(value, &defs, member);
+                }
+                for (field, value) in fields {
+                    if !value.is_object() && !value.is_array() {
+                        continue;
+                    }
+                    let inner = parts
+                        .iter()
+                        .find_map(|p| p.get("properties")?.get(field.as_str()));
+                    // `data` in Stripe's `charges: {data: [...]}` holds `charges`.
+                    let named = if ENVELOPE_KEYS.contains(&field.as_str()) {
+                        member
+                    } else {
+                        field
+                    };
+                    self.visit(value, inner, named, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn consider(&mut self, value: &Value, defs: &[&str], member: &str) {
+        let Some(id) = ["id", "number"]
+            .iter()
+            .find_map(|f| value.get(*f).and_then(id_string))
+        else {
+            return;
+        };
+        let index = self.rt.index();
+        let def = defs
+            .iter()
+            .copied()
+            .find(|d| index.types_by_def.contains_key(*d));
+        let Some(resource_type) = entity_type(index, def, member) else {
+            return;
+        };
+        if self.considered >= MAX_ENTITIES {
+            return;
+        }
+        self.considered += 1;
+        if entity_fits(self.rt, &resource_type, value)
+            || is_summary(self.rt, &resource_type, defs, value)
+        {
+            self.found.push(StoredResource {
+                resource_type,
+                id,
+                data: value.clone(),
+            });
+        }
+    }
+}
+
+/// Whether `value` suits resource type `t`: its by-path read would serve it
+/// (stored unservable, a later read would fall to the faker), else its list
+/// items or singleton read accept it. A type with neither has nothing to
+/// check against, so nothing suits it.
+fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
+    let index = rt.index();
+    let bundle = rt.bundle();
+    let (read, shape) = match index.detail_reads.get(t) {
+        Some(i) => (Some(*i), None),
+        None => match index.other_shapes.get(t) {
+            Some((i, schema)) => (Some(*i), Some(schema)),
+            None => (None, None),
+        },
+    };
+    let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
+        return false;
+    };
+    rt.engine.serve_stored(bundle, op, value, shape).is_some()
+}
+
+/// Whether `value`, shaped by `defs`, is a shorter form of resource type `t`:
+/// valid as one of those definitions, which its by-path read's schema is
+/// composed of (a search's `FlightOffer`, of `Offer`). It is stored though
+/// that read would not serve it: the read is generated knowing it and keeps
+/// what it holds, and the answer takes its place (see [`seed_own_read`]).
+fn is_summary(rt: &MockRuntime, t: &str, defs: &[&str], value: &Value) -> bool {
+    let bundle = rt.bundle();
+    let Some(op) = rt
+        .index()
+        .detail_reads
+        .get(t)
+        .and_then(|i| bundle.operations.get(*i))
+    else {
+        return false;
+    };
+    let read = op.success_output().and_then(|o| o.schema.as_ref());
+    let (_, read_defs) = schema_parts(bundle, read);
+    let Some(def) = defs.iter().find(|d| read_defs.contains(d)) else {
+        return false;
+    };
+    let shape = serde_json::json!({"$ref": format!("#/$defs/{def}")});
+    rt.engine
+        .serve_stored(bundle, op, value, Some(&shape))
+        .is_some()
 }
 
 /// The response cache key of a read: its operation, path parameters,
@@ -1327,6 +2184,19 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
         || param.ends_with("_id")
 }
 
+/// Whether another path parameter comes before the one naming `op`'s target:
+/// that value then only means something under the earlier one.
+fn follows_a_param(op: &Operation, identity: &mb_mcm::Identity) -> bool {
+    let (Binding::Http { path, .. }, Some(param)) = (&op.binding, identity.path_param.as_deref())
+    else {
+        return false;
+    };
+    let own = format!("{{{param}}}");
+    path.split('/')
+        .take_while(|s| !s.contains(&own))
+        .any(|s| s.contains('{'))
+}
+
 /// Whether no scenario applies to the call and no status is forced (an
 /// injected chaos error forces one).
 fn plain(plan: &CallPlan<'_>) -> bool {
@@ -1354,10 +2224,18 @@ pub(crate) async fn open_stream(
     let mut state = StateAccess::new(rt);
     let target_id = target_id(op, &call);
     let (target, related) = async {
-        let context =
+        let (target, mut related, followed) =
             read_context(&mut state, &plan.session, op, target_id.as_deref(), &call).await;
+        follow_hops(
+            &mut state,
+            &plan.session,
+            target.as_ref(),
+            followed,
+            &mut related,
+        )
+        .await;
         state.touch(&plan.session).await;
-        context
+        (target, related)
     }
     .instrument(state_span())
     .await;
@@ -1654,34 +2532,37 @@ pub(crate) fn recorded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<Str
     safe_headers(rt, headers, true)
 }
 
-/// The target (when `target_id` is set) and the related resources.
+/// The target (when `target_id` is set), the related resources before any
+/// hop, and what [`follow_hops`] needs to add those.
 async fn read_context(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
     target_id: Option<&str>,
     call: &OperationCall,
-) -> (Option<StoredResource>, Vec<StoredResource>) {
+) -> (Option<StoredResource>, Vec<StoredResource>, Followed) {
     let target = match (op.resource_type.as_deref(), target_id) {
         (Some(t), Some(id)) => match state.get(session, t, id).await {
             Some(hit) => Some(hit),
-            None => match op.identity.as_ref().and_then(|i| i.path_field.as_deref()) {
-                Some(field) => by_path_field(state, session, t, field, id).await,
+            None => match op.identity.as_ref() {
+                Some(identity) => match identity.path_field.as_deref() {
+                    Some(field) => by_path_fields(state, session, t, &[field], id, None).await,
+                    None if state.rt.consistency
+                        && identity.path_param.is_some()
+                        && !path_names_identity(identity) =>
+                    {
+                        let owned = owned_name(op, call);
+                        by_path_fields(state, session, t, &NAME_FIELDS, id, owned.as_deref()).await
+                    }
+                    None => None,
+                },
                 None => None,
             },
         },
         _ => None,
     };
-    let related = related(
-        state,
-        session,
-        op,
-        target_id.is_some(),
-        &call.query,
-        call.body.as_ref(),
-    )
-    .await;
-    (target, related)
+    let (related, followed) = related(state, session, op, target_id, target.as_ref(), call).await;
+    (target, related, followed)
 }
 
 /// The value `data` holds for each of `fields`, as (field, value).
@@ -1692,35 +2573,85 @@ fn path_values<'f>(fields: &'f [String], data: &Value) -> Vec<(&'f str, String)>
         .collect()
 }
 
-/// The resource of type `t` whose `field` is `value` (a read by GitHub's
-/// issue number): the one [`PathAliases`] names when it still holds the
-/// value, else the first of a scan.
-async fn by_path_field(
+/// Fields a path parameter that names no field may mean: `/repos/{o}/{r}`
+/// finds a repository seeded under its numeric id by its `name`.
+const NAME_FIELDS: [&str; 4] = ["name", "login", "slug", "key"];
+
+/// `{o}/{r}` of a route ending in those two parameters, which a stored
+/// `full_name` must end with. Any other route gives none: a person's
+/// `full_name` is no path.
+fn owned_name(op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let last = path.rsplit('/').find(|s| !s.is_empty())?;
+    let name = last.strip_prefix('{')?.strip_suffix('}')?;
+    owned_name_of(op, call, name)
+}
+
+/// `{o}/{r}` of a route where parameter `{r}`, named `name`, follows
+/// parameter `{o}`.
+fn owned_name_of(op: &Operation, call: &OperationCall, name: &str) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let param = format!("{{{name}}}");
+    let mut before = path
+        .rsplit('/')
+        .filter(|s| !s.is_empty())
+        .skip_while(|s| *s != param)
+        .skip(1);
+    let owner = before.next()?.strip_prefix('{')?.strip_suffix('}')?;
+    let value = |p: &str| call.path_params.get(p).and_then(id_string);
+    Some(format!("{}/{}", value(owner)?, value(name)?))
+}
+
+/// Whether stored `r`'s `full_name`, when it has one, ends with path
+/// segments `owned`.
+fn full_name_fits(r: &StoredResource, owned: Option<&str>) -> bool {
+    let full_name = r.data.get("full_name").and_then(Value::as_str);
+    match (owned, full_name) {
+        (Some(owned), Some(full_name)) => full_name
+            .strip_suffix(owned)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('/')),
+        _ => true,
+    }
+}
+
+/// The resource of type `t` whose field is `value`, trying `fields` in order
+/// (a read by GitHub's issue number, or a repository's name) and, with
+/// `owned`, only one whose `full_name` fits: the one [`PathAliases`] names
+/// when it still holds the value, else the first of one scan.
+async fn by_path_fields(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
-    field: &str,
+    fields: &[&str],
     value: &str,
+    owned: Option<&str>,
 ) -> Option<StoredResource> {
-    let holds =
-        |r: &StoredResource| r.data.get(field).and_then(id_string).as_deref() == Some(value);
-    if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
-        && let Some(hit) = state.get(session, t, &id).await
-        && holds(&hit)
-    {
-        return Some(hit);
+    let holds = |r: &StoredResource, field: &str| {
+        r.data.get(field).and_then(id_string).as_deref() == Some(value) && full_name_fits(r, owned)
+    };
+    for field in fields {
+        if let Some(id) = state.rt.path_aliases().id_of(session, t, field, value)
+            && let Some(hit) = state.get(session, t, &id).await
+            && holds(&hit, field)
+        {
+            return Some(hit);
+        }
     }
-    let found = state
-        .list(session, t, MAX_SCAN)
-        .await
-        .into_iter()
-        .find(|r| holds(r))?;
+    let stored = state.list(session, t, MAX_SCAN).await;
+    let (field, found) = fields.iter().find_map(|field| {
+        let found = stored.iter().find(|r| holds(r, field))?;
+        Some((*field, found))
+    })?;
     let values = vec![(field, value.to_string())];
     state
         .rt
         .path_aliases()
         .remember(session, t, &found.id, values);
-    Some(found)
+    Some(found.clone())
 }
 
 /// State-store access for one call. The first failing call marks the mock
@@ -1910,60 +2841,239 @@ pub(crate) async fn store_resources(
     .await;
 }
 
-/// Resources the response should stay consistent with: recent items for a
-/// list query, plus anything referenced by `<x>Id` fields.
+/// Resources the response should stay consistent with, nearest first: what
+/// the request names, then recent items for a list query. [`follow_hops`]
+/// adds what those refer to. With consistency off, only the `<x>Id` members
+/// and global ids of the query and body are followed.
 async fn related(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     op: &Operation,
-    has_target: bool,
-    query: &Map<String, Value>,
-    body: Option<&Value>,
-) -> Vec<StoredResource> {
+    target_id: Option<&str>,
+    target: Option<&StoredResource>,
+    call: &OperationCall,
+) -> (Vec<StoredResource>, Followed) {
+    let rt = state.rt;
+    let index = rt.consistency.then(|| rt.index());
+    let mut references = Vec::new();
+    if index.is_some() {
+        for (field, value) in &call.path_params {
+            if let Some(id) = id_string(value) {
+                references_in(field, &Value::String(id), 0, index, &mut references);
+            }
+        }
+    }
+    for (field, value) in &call.query {
+        references_in(field, value, 0, index, &mut references);
+    }
+    if let Some(Value::Object(fields)) = &call.body {
+        for (field, value) in fields {
+            references_in(field, value, 0, index, &mut references);
+        }
+    }
     let mut out: Vec<StoredResource> = Vec::new();
+    let mut seen = Vec::new();
+    follow(state, session, references, &mut seen, target, &mut out).await;
+    let named = out.len();
     if matches!(op.kind, OperationKind::Query)
-        && !has_target
+        && target_id.is_none()
         && let Some(t) = op.resource_type.as_deref()
     {
-        out = state.list(session, t, LIST_CONTEXT_LIMIT).await;
+        let mut listed = state.list(session, t, LIST_CONTEXT_LIMIT).await;
         // Lists the answer holds that other reads stored: Plaid's
         // `/auth/get` answers the `accounts` that `/accounts/get` seeded.
-        let members = state
-            .rt
+        let members = rt
             .index()
             .operation(&op.id)
-            .map(|i| state.rt.index().list_members(i))
+            .map(|i| rt.index().list_members(i))
             .unwrap_or_default();
         let others = members
             .iter()
             .filter(|m| m.as_str() != t && !ENVELOPE_KEYS.contains(&m.as_str()));
         for member in others.take(MAX_LIST_MEMBERS) {
-            if out.len() >= LIST_CONTEXT_LIMIT {
+            if listed.len() >= LIST_CONTEXT_LIMIT {
                 break;
             }
-            let room = LIST_CONTEXT_LIMIT - out.len();
-            out.extend(state.list(session, member, room).await);
+            let room = LIST_CONTEXT_LIMIT - listed.len();
+            listed.extend(state.list(session, member, room).await);
+        }
+        for item in listed {
+            if !holds(&out, &item) {
+                out.push(item);
+            }
         }
     }
-    let mut references = Vec::new();
-    for (field, value) in query {
-        references_in(field, value, 0, &mut references);
+    (out, Followed { named, seen })
+}
+
+/// What [`related`] followed, for [`follow_hops`] to go on from.
+struct Followed {
+    /// How many of the related resources the request itself names; they
+    /// come first.
+    named: usize,
+    /// The references looked up so far (see [`follow`]).
+    seen: Vec<Reference>,
+}
+
+/// Adds to `out`, after what the request names, the parents its path names by
+/// name where a lookup by id found nothing: `{repo}` in
+/// `/repos/{owner}/{repo}/issues` is a repository stored under its numeric id
+/// (see [`NAME_FIELDS`]). Only a path parameter [`related`] looked up as a
+/// reference, other than the one naming the target (already searched for), so
+/// this stays within [`MAX_REFERENCES`]. Separate from [`related`], for what
+/// [`follow_hops`] is. Nothing with consistency off.
+async fn parents_by_name(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    call: &OperationCall,
+    target: Option<&StoredResource>,
+    followed: &mut Followed,
+    out: &mut Vec<StoredResource>,
+) {
+    let rt = state.rt;
+    if !rt.consistency {
+        return;
     }
-    if let Some(Value::Object(fields)) = body {
-        for (field, value) in fields {
-            references_in(field, value, 0, &mut references);
+    let own = op.identity.as_ref().and_then(|i| i.path_param.as_deref());
+    for (field, value) in &call.path_params {
+        let (Some(id), false) = (id_string(value), own == Some(field.as_str())) else {
+            continue;
+        };
+        let Some(t) = entity_type(rt.index(), None, field) else {
+            continue;
+        };
+        let reference = (vec![t.clone()], id.clone());
+        let found = |r: &StoredResource| r.resource_type == t && r.id == id;
+        if !followed.seen.contains(&reference)
+            || target.is_some_and(found)
+            || out[..followed.named].iter().any(found)
+        {
+            continue;
         }
+        let owned = owned_name_of(op, call, field);
+        let Some(parent) =
+            by_path_fields(state, session, &t, &NAME_FIELDS, &id, owned.as_deref()).await
+        else {
+            continue;
+        };
+        let is_target =
+            target.is_some_and(|r| r.resource_type == parent.resource_type && r.id == parent.id);
+        if is_target || holds(&out[..followed.named], &parent) {
+            continue;
+        }
+        // Listed already, it moves up among what the request names.
+        out.retain(|r| r.resource_type != parent.resource_type || r.id != parent.id);
+        out.insert(followed.named, parent);
+        followed.named += 1;
     }
-    for (types, id) in references.into_iter().take(MAX_REFERENCES) {
+}
+
+/// Adds to `out`, as gathered by [`related`], what the target and the
+/// resources the request names refer to. Separate from [`related`] because
+/// only a generation needs it: an answer served from the store or the cache
+/// must not pay for these lookups. Nothing with consistency off.
+async fn follow_hops(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    target: Option<&StoredResource>,
+    followed: Followed,
+    out: &mut Vec<StoredResource>,
+) {
+    let rt = state.rt;
+    if !rt.consistency {
+        return;
+    }
+    let index = Some(rt.index());
+    let Followed { named, mut seen } = followed;
+    let (mut own, mut start, mut end) = (target, 0, named);
+    for _ in 0..MAX_RELATED_HOPS {
+        let mut references = Vec::new();
+        for resource in own.take().into_iter().chain(&out[start..end]) {
+            references_in("", &resource.data, 0, index, &mut references);
+        }
+        start = out.len();
+        follow(state, session, references, &mut seen, target, out).await;
+        end = out.len();
+    }
+}
+
+/// A reference: the types to look in, and the id.
+type Reference = (Vec<String>, String);
+
+/// Adds to `out` the resources `references` name, other than `target`.
+/// `seen` holds the references looked up so far in this call: at most
+/// [`MAX_REFERENCES`], so that what is followed first is what is nearest.
+async fn follow(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    references: Vec<Reference>,
+    seen: &mut Vec<Reference>,
+    target: Option<&StoredResource>,
+    out: &mut Vec<StoredResource>,
+) {
+    for reference in references {
+        if seen.len() >= MAX_REFERENCES {
+            return;
+        }
+        if seen.contains(&reference) {
+            continue;
+        }
+        seen.push(reference.clone());
+        let (types, id) = reference;
         for t in types {
+            if target.is_some_and(|r| r.resource_type == t && r.id == id) {
+                break;
+            }
             if let Some(hit) = state.get(session, &t, &id).await {
-                if !out
-                    .iter()
-                    .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
-                {
+                let is_target =
+                    target.is_some_and(|r| r.resource_type == hit.resource_type && r.id == hit.id);
+                if !is_target && !holds(out, &hit) {
                     out.push(hit);
                 }
                 break;
+            }
+        }
+    }
+}
+
+/// Whether `resources` already holds `resource`.
+fn holds(resources: &[StoredResource], resource: &StoredResource) -> bool {
+    resources
+        .iter()
+        .any(|r| r.resource_type == resource.resource_type && r.id == resource.id)
+}
+
+/// The stored resources that refer to `id` of `op`'s resource type, for a
+/// read of an id the session does not hold: at most [`MAX_SCAN`] resources
+/// of the types the contract says can refer to it are read, newest first,
+/// and at most what a prompt shows ([`mb_engine::prompt::MAX_RELATED`]) kept.
+async fn referrers(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    op: &Operation,
+    id: &str,
+) -> Vec<StoredResource> {
+    let rt = state.rt;
+    let Some(wanted) = op.resource_type.as_deref().filter(|_| rt.consistency) else {
+        return Vec::new();
+    };
+    let index = rt.index();
+    let types = index.referrers(wanted);
+    let each = MAX_SCAN / types.len().clamp(1, MAX_REFERENCES);
+    let mut out = Vec::new();
+    for t in types.iter().take(MAX_REFERENCES) {
+        for resource in state.list(session, t, each).await {
+            let mut references = Vec::new();
+            references_in("", &resource.data, 0, Some(index), &mut references);
+            let refers = references
+                .iter()
+                .any(|(types, to)| to == id && types.iter().any(|t| t == wanted));
+            if refers {
+                out.push(resource);
+                if out.len() >= mb_engine::prompt::MAX_RELATED {
+                    return out;
+                }
             }
         }
     }
@@ -1980,7 +3090,7 @@ pub(crate) async fn referenced(
 ) -> Vec<StoredResource> {
     let mut references = Vec::new();
     for (field, value) in args {
-        references_in(field, value, 0, &mut references);
+        references_in(field, value, 0, None, &mut references);
     }
     let mut state = StateAccess::new(rt);
     let mut out: Vec<StoredResource> = Vec::new();
@@ -2005,11 +3115,24 @@ pub(crate) async fn referenced(
 /// Reference lookups per call, at most.
 const MAX_REFERENCES: usize = 16;
 
+/// How far references are followed out of what a request names and of its
+/// target: to what those refer to, and no further.
+const MAX_RELATED_HOPS: usize = 1;
+
 /// The resources `value` (under member `field`) refers to, as the types to
-/// look in and the id: a `<x>Id`/`<x>_id` member (types `<x>s`, `<x>`), or
-/// a global id `gid://<app>/<Type>/…` (type `<type>`), here or in nested
-/// objects and lists (GraphQL input objects, `lines: [{merchandiseId}]`).
-fn references_in(field: &str, value: &Value, depth: usize, out: &mut Vec<(Vec<String>, String)>) {
+/// look in and the id, here or in nested objects and lists (GraphQL input
+/// objects, `lines: [{merchandiseId}]`): a `<x>Id`/`<x>_id` member (types
+/// `<x>s`, `<x>`), or a global id `gid://<app>/<Type>/…` (type `<type>`).
+/// With `index`, which is `None` when consistency is off, also a `<x>Id`
+/// holding a number, and a string member named after a resource type
+/// (`customer`, `payment_intent`; see [`entity_type`]).
+fn references_in(
+    field: &str,
+    value: &Value,
+    depth: usize,
+    index: Option<&BundleIndex>,
+    out: &mut Vec<Reference>,
+) {
     if depth > 4 || out.len() >= MAX_REFERENCES {
         return;
     }
@@ -2019,16 +3142,26 @@ fn references_in(field: &str, value: &Value, depth: usize, out: &mut Vec<(Vec<St
                 out.push((vec![t], id.clone()));
             } else if let Some(prefix) = reference_prefix(field) {
                 out.push((vec![format!("{prefix}s"), prefix.to_string()], id.clone()));
+            } else if let Some(t) = index.and_then(|i| entity_type(i, None, field)) {
+                out.push((vec![t], id.clone()));
+            }
+        }
+        Value::Number(id) if index.is_some() => {
+            if let Some(prefix) = reference_prefix(field) {
+                out.push((
+                    vec![format!("{prefix}s"), prefix.to_string()],
+                    id.to_string(),
+                ));
             }
         }
         Value::Array(items) => {
             for item in items {
-                references_in(field, item, depth + 1, out);
+                references_in(field, item, depth + 1, index, out);
             }
         }
         Value::Object(obj) => {
             for (k, v) in obj {
-                references_in(k, v, depth + 1, out);
+                references_in(k, v, depth + 1, index, out);
             }
         }
         _ => {}
@@ -2451,6 +3584,48 @@ paths:
             .collect()
     }
 
+    /// A list under a member naming a type read by path is that type, and
+    /// one under any other member stays the type of its read.
+    #[test]
+    fn a_listed_def_takes_its_members_type() {
+        let path = format!(
+            "{}/../../docs/benchmarks/contracts/travel.openapi.yaml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let rt = runtime_of(compile(&std::fs::read(path).unwrap()).unwrap());
+        let index = rt.index();
+        assert_eq!(index.types_by_def["Offer"], "offers");
+        assert_eq!(index.types_by_def["FlightOffer"], "offers");
+        assert_eq!(index.types_by_def["PassengerRecord"], "bookings");
+    }
+
+    /// GitHub's `repository` is the detail route's type, not a list's.
+    #[test]
+    fn entity_types_of_the_github_contract() {
+        let rt = runtime_of(example("github-rest/github-rest.openapi.yaml"));
+        let index = rt.index();
+        assert_eq!(index.types_by_def["repository"], "repos");
+        assert_eq!(
+            entity_type(index, Some("repository"), "ignored").as_deref(),
+            Some("repos")
+        );
+        assert_eq!(entity_type(index, None, "repo").as_deref(), Some("repos"));
+        assert_eq!(entity_type(index, None, "items"), None);
+        assert_eq!(entity_type(index, None, "nothing"), None);
+        assert_eq!(entity_type(index, None, ""), None);
+    }
+
+    /// What an LLM wrote into a log field is bounded, in characters.
+    #[test]
+    fn log_fields_are_capped() {
+        assert_eq!(log_capped("ch_1"), "ch_1");
+        let exact = "é".repeat(MAX_LOGGED_CHARS);
+        assert_eq!(log_capped(&exact), exact);
+        let long = log_capped(&"é".repeat(MAX_LOGGED_CHARS * 100));
+        assert_eq!(long.chars().count(), MAX_LOGGED_CHARS + 1);
+        assert!(long.ends_with('…'));
+    }
+
     /// The runtime's index answers what scanning the bundle answers.
     #[test]
     fn bundle_index_matches_a_scan() {
@@ -2747,13 +3922,18 @@ paths:
         assert_eq!(hashes.len(), distinct.len());
     }
 
-    /// Counts `list` calls on a memory store.
+    /// Counts `get` and `list` calls on a memory store.
     struct ListSpy {
         inner: MemoryStore,
+        gets: std::sync::atomic::AtomicUsize,
         lists: std::sync::atomic::AtomicUsize,
     }
 
     impl ListSpy {
+        fn gets(&self) -> usize {
+            self.gets.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
         fn lists(&self) -> usize {
             self.lists.load(std::sync::atomic::Ordering::SeqCst)
         }
@@ -2767,6 +3947,7 @@ paths:
             t: &str,
             id: &str,
         ) -> Result<Option<StoredResource>, StateError> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.get(s, t, id).await
         }
         async fn list(
@@ -2819,6 +4000,7 @@ paths:
     fn issue_reads() -> (Arc<ListSpy>, MockRuntime, Operation) {
         let spy = Arc::new(ListSpy {
             inner: MemoryStore::new(Duration::from_secs(3600)),
+            gets: Default::default(),
             lists: Default::default(),
         });
         let rt = MockRuntime::new(
@@ -2845,9 +4027,149 @@ paths:
         }
     }
 
+    /// A read answered from the store never reaches a prompt, so it looks up
+    /// its target and nothing the target refers to.
+    /// The search for a parent by name is a generation's: a read the store
+    /// answers makes no scan, and a generation one, then none.
+    #[cfg(feature = "http-rest")]
+    #[tokio::test]
+    async fn only_a_generation_scans_for_a_parent_by_name() {
+        use tower::ServiceExt;
+        const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Nested, version: "1"}
+paths:
+  /repos/{repo}:
+    get:
+      operationId: getRepo
+      parameters: [{name: repo, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}
+  /repos/{repo}/issues/{id}:
+    get:
+      operationId: getIssue
+      parameters:
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+components:
+  schemas:
+    Repo:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Issue:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+"##;
+        let spy = Arc::new(ListSpy {
+            inner: MemoryStore::new(Duration::from_secs(3600)),
+            gets: Default::default(),
+            lists: Default::default(),
+        });
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            spy.clone(),
+        );
+        let s = SessionKey {
+            workspace: "default".into(),
+            mock: "m".into(),
+            session: DEFAULT_SESSION.into(),
+        };
+        for (t, id, data) in [
+            ("repos", "7", json!({"id": "7", "name": "widget"})),
+            ("issues", "i1", json!({"id": "i1"})),
+        ] {
+            let stored = StoredResource {
+                resource_type: t.into(),
+                id: id.into(),
+                data,
+            };
+            spy.inner.upsert(&s, stored).await.unwrap();
+        }
+        let router = crate::http_rest::router(Arc::new(rt));
+        let get = |uri: &'static str| {
+            let router = router.clone();
+            async move {
+                let request = axum::http::Request::get(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                router.oneshot(request).await.unwrap()
+            }
+        };
+        let served = get("/repos/widget/issues/i1").await;
+        assert_eq!(served.headers()["x-mockingbird-source"], "state");
+        assert_eq!(spy.lists(), 0);
+        get("/repos/widget/issues/new1").await;
+        assert_eq!(spy.lists(), 1);
+        get("/repos/widget/issues/new2").await;
+        assert_eq!(spy.lists(), 1);
+    }
+
+    #[cfg(feature = "http-rest")]
+    #[tokio::test]
+    async fn a_served_read_makes_one_get() {
+        use tower::ServiceExt;
+        const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Served, version: "1"}
+paths:
+  /customers/{customer}:
+    get:
+      operationId: getCustomer
+      parameters: [{name: customer, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties: {id: {type: string}, offerId: {type: string}, customer: {type: string}}
+"##;
+        let spy = Arc::new(ListSpy {
+            inner: MemoryStore::new(Duration::from_secs(3600)),
+            gets: Default::default(),
+            lists: Default::default(),
+        });
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            spy.clone(),
+        );
+        let s = SessionKey {
+            workspace: "default".into(),
+            mock: "m".into(),
+            session: DEFAULT_SESSION.into(),
+        };
+        let data = json!({"id": "c1", "offerId": "of1", "customer": "c2"});
+        let stored = StoredResource {
+            resource_type: "customers".into(),
+            id: "c1".into(),
+            data,
+        };
+        spy.inner.upsert(&s, stored).await.unwrap();
+        let request = axum::http::Request::get("/customers/c1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = crate::http_rest::router(Arc::new(rt))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["x-mockingbird-source"], "state");
+        assert_eq!(spy.gets(), 1);
+        assert_eq!(spy.lists(), 0);
+    }
+
     async fn read_by(rt: &MockRuntime, op: &Operation, number: &str) -> Option<String> {
         let mut state = StateAccess::new(rt);
-        let (target, _) = read_context(
+        let (target, _, _) = read_context(
             &mut state,
             &session("s"),
             op,

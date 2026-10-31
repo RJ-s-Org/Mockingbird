@@ -28,6 +28,28 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 - nodes of the previous release keep working against the migrated schema during a rolling upgrade (they ignore the new columns);
 - no data needs converting. Existing mocks have no chaos and no limits until you set them.
 
+## Upgrading past 0.1.0 (unreleased)
+
+### Action routes act on their parent resource
+
+A singular `POST <static>/{param}/<verb>` with no `GET` on its path and no route below it, such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:
+
+- its operation's `kind`, `resource_type` and `identity` in the compiled bundle, while `source_digest`, which hashes the source, does not;
+- its webhook event type, from `confirm.created` to `payment_intent.updated`, or for a command that answers a record of its own, from `cancel.created` to `booking.updated`;
+- what state it writes: resources stored under the old type (`confirm`) in a session or a session snapshot are no longer read by anything, and `on_state_change` triggers on that type stop firing.
+
+A bundle takes this on recompile, and stored bundles are not recompiled on their own. For a mock managed through the API, upload the contract again. For a mock from the config file, restart: with an in-memory control store that is enough, but with a persistent one a mock keeps its active version while the contract's digest matches it, so also change a byte of the contract, such as a comment.
+
+### Resources composed with `allOf` have an identity
+
+A resource whose schema is an `allOf` at its root used to compile with no identity. The importer now reads the members of its `allOf` branches, so every such resource has one on recompile. On those contracts:
+
+- reads by path start serving stored resources, where they were generated knowing nothing stored;
+- `unknown_ids: 404` starts answering `404` where it generated;
+- webhook and `on_state_change` trigger behaviour follows the identity.
+
+Stored bundles take this the way they take action routes, with the same steps: upload the contract again, or restart a mock from the config file, changing a byte of the contract if the control store is persistent.
+
 ## Upgrading to 0.1.0
 
 ### Relative paths in the config file follow the file

@@ -559,6 +559,13 @@ async fn a_request_touches_its_session_at_most_once() {
     assert!(store.touches.load(Ordering::SeqCst) <= 1);
 
     store.touches.store(0, Ordering::SeqCst);
+    // A first read by id stores its answer, a write that refreshes the session.
+    let resp = send(&router, get_with("/orders/o1", &[])).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(store.touches.load(Ordering::SeqCst) <= 1);
+
+    store.touches.store(0, Ordering::SeqCst);
+    // Its repeat only reads.
     let resp = send(&router, get_with("/orders/o1", &[])).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(store.touches.load(Ordering::SeqCst), 1);

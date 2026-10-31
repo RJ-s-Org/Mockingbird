@@ -1,0 +1,664 @@
+{
+  "seed": "mb-world-b-2026-10-31",
+  "models": [
+    "deepseek/deepseek-v4.1-flash-1017#round2",
+    "deepseek/deepseek-v4.1-flash-1017#world",
+    "nvidia/nemotron-3.5-lightning#round2",
+    "nvidia/nemotron-3.5-lightning#world",
+    "openai/gpt-6-luna#round2",
+    "openai/gpt-6-luna#world"
+  ],
+  "pool": {
+    "candidates": 54,
+    "no_common_rep": [],
+    "duplicates_ignored": 0,
+    "warnings": []
+  },
+  "strata": [
+    {
+      "stratum": "api_type:rest",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "candidates": 34
+    },
+    {
+      "stratum": "api_type:graphql",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "candidates": 8
+    },
+    {
+      "stratum": "api_type:grpc",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "candidates": 2
+    },
+    {
+      "stratum": "api_type:soap",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "candidates": 5
+    },
+    {
+      "stratum": "api_type:asyncapi",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "candidates": 5
+    },
+    {
+      "stratum": "domain:travel",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "candidates": 5
+    },
+    {
+      "stratum": "domain:payments",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "candidates": 7
+    }
+  ],
+  "strata_skipped": [],
+  "presentation_order": [
+    "batch-05",
+    "batch-01",
+    "batch-04",
+    "batch-06",
+    "batch-03",
+    "batch-02",
+    "batch-07"
+  ],
+  "recheck_batches": [
+    "batch-05",
+    "batch-01"
+  ],
+  "batches": [
+    {
+      "batch_id": "batch-01",
+      "file": "judge/batch-01.json",
+      "stratum": "api_type:rest",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "api_type": "rest",
+      "domain": "travel",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 34,
+      "judged": [
+        "fa321dcb03",
+        "65252b8abe",
+        "33f87e04d1",
+        "5e7201ed3d",
+        "4fd55d7103"
+      ],
+      "auto": [
+        "d3608d3290"
+      ]
+    },
+    {
+      "batch_id": "batch-02",
+      "file": "judge/batch-02.json",
+      "stratum": "api_type:graphql",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "api_type": "graphql",
+      "domain": "devtools",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 8,
+      "judged": [
+        "23f8ccf0dc",
+        "4a2247a7b4",
+        "ef2816b476",
+        "3643687ebd",
+        "832fa751e3",
+        "e2f6622818"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-03",
+      "file": "judge/batch-03.json",
+      "stratum": "api_type:grpc",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "api_type": "grpc",
+      "domain": "generic",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 2,
+      "judged": [
+        "f1a054664e",
+        "65f25d011b",
+        "ba83d257b4",
+        "56c94c3f86",
+        "25bd2ab670",
+        "994dc57737"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-04",
+      "file": "judge/batch-04.json",
+      "stratum": "api_type:soap",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "api_type": "soap",
+      "domain": "generic",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 5,
+      "judged": [
+        "31e0c07bf9",
+        "6b7b389022",
+        "015d0ad0e2",
+        "900100e6c7",
+        "8bee2b6892",
+        "d546fff179"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-05",
+      "file": "judge/batch-05.json",
+      "stratum": "api_type:asyncapi",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "api_type": "asyncapi",
+      "domain": "ecommerce",
+      "target_kind": "channel",
+      "rep": 0,
+      "pool_candidates": 5,
+      "judged": [
+        "f06cd88857",
+        "71fa1fe63d",
+        "80d86ea7ba",
+        "c4d1feff17",
+        "a4684be418",
+        "fef0b88589"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-06",
+      "file": "judge/batch-06.json",
+      "stratum": "domain:travel",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "api_type": "rest",
+      "domain": "travel",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 5,
+      "judged": [
+        "6250a677ae",
+        "e0a4986d3e",
+        "34ccf30470",
+        "9427e92afc",
+        "c7833f3abf",
+        "a1ec2696c4"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-07",
+      "file": "judge/batch-07.json",
+      "stratum": "domain:payments",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "api_type": "rest",
+      "domain": "payments",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 7,
+      "judged": [
+        "bcce29a8a1",
+        "fd09f8bbc1",
+        "58fd044ae5",
+        "d1db80296d",
+        "7b75f185ab",
+        "8cda82e835"
+      ],
+      "auto": []
+    }
+  ],
+  "items": {
+    "65252b8abe": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "33f87e04d1": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "d3608d3290": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "auto": true,
+      "auto_reason": "fallback",
+      "auto_scores": {
+        "realism": 1,
+        "coherence": 1
+      }
+    },
+    "4fd55d7103": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fa321dcb03": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "5e7201ed3d": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-01",
+      "contract": "rest/travel-booking",
+      "target": "createBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e2f6622818": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "ef2816b476": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "4a2247a7b4": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "23f8ccf0dc": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "3643687ebd": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "832fa751e3": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-02",
+      "contract": "graphql/devtools-github",
+      "target": "Query.user",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "994dc57737": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "56c94c3f86": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "f1a054664e": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "25bd2ab670": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "ba83d257b4": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "65f25d011b": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-03",
+      "contract": "grpc/route-guide",
+      "target": "RouteGuide.GetFeature",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "900100e6c7": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "015d0ad0e2": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "8bee2b6892": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "d546fff179": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "6b7b389022": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "31e0c07bf9": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "c4d1feff17": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "80d86ea7ba": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "71fa1fe63d": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a4684be418": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fef0b88589": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "f06cd88857": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "9427e92afc": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e0a4986d3e": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "6250a677ae": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "34ccf30470": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "c7833f3abf": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "a1ec2696c4": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-booking",
+      "target": "getBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "7b75f185ab": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#round2",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "bcce29a8a1": {
+      "model": "deepseek/deepseek-v4.1-flash-1017#world",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "58fd044ae5": {
+      "model": "nvidia/nemotron-3.5-lightning#round2",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "fd09f8bbc1": {
+      "model": "nvidia/nemotron-3.5-lightning#world",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "d1db80296d": {
+      "model": "openai/gpt-6-luna#round2",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "8cda82e835": {
+      "model": "openai/gpt-6-luna#world",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    }
+  }
+}

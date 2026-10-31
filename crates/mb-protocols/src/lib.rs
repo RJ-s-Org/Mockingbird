@@ -400,6 +400,9 @@ pub struct MockRuntime {
     /// Which stored resource a path field value names, from this
     /// runtime's writes (see [`call::PathAliases`]).
     path_aliases: call::PathAliases,
+    /// Which stored resources are a plain read's own answer (see
+    /// [`call::OwnReads`]).
+    own_reads: call::OwnReads,
     /// GraphQL root fields' narrowed schemas, by selection.
     #[cfg(feature = "graphql")]
     narrowed: graphql::NarrowCache,
@@ -516,6 +519,7 @@ impl MockRuntime {
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),
+            own_reads: call::OwnReads::default(),
             #[cfg(feature = "graphql")]
             narrowed: graphql::NarrowCache::default(),
         }
@@ -562,6 +566,11 @@ impl MockRuntime {
     /// [`call::PathAliases`]).
     pub(crate) fn path_aliases(&self) -> &call::PathAliases {
         &self.path_aliases
+    }
+
+    /// Which stored resources are a plain read's own answer.
+    pub(crate) fn own_reads(&self) -> &call::OwnReads {
+        &self.own_reads
     }
 
     /// Narrowed schemas of GraphQL root fields, by selection.

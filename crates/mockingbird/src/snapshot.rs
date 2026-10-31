@@ -326,7 +326,12 @@ fn keys(req: &ChatRequest) -> (String, String) {
         ResponseFormat::Text => json!("text"),
         ResponseFormat::JsonObject => json!("json_object"),
         ResponseFormat::JsonSchema { name, schema } => {
-            json!(["json_schema", name, mb_engine::without_items_schema(schema)])
+            let answer = mb_engine::without_effects_schema(schema);
+            json!([
+                "json_schema",
+                name,
+                mb_engine::without_items_schema(&answer)
+            ])
         }
     };
     let messages: Vec<Value> = req
@@ -1105,6 +1110,57 @@ mod tests {
             keys(&r)
         };
         assert_eq!(with(&array).1, with(&wrapped).1);
+    }
+
+    /// A recording of an answer asked for with its effects replays as the
+    /// same operation, whether or not this request asks for them, and an
+    /// array answer under the envelope is the bare array too.
+    #[test]
+    fn asking_for_effects_keeps_its_operation_key() {
+        let plain = json!({"$ref": "#/$defs/T", "$defs": {"T": {"type": "string"}}});
+        let list = json!({"type": "array", "items": {"$ref": "#/$defs/T"}, "$defs": {"T": {"type": "string"}}});
+        let effects = json!({
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "required": ["type", "id", "set"],
+                "properties": {
+                    "type": {"type": "string"},
+                    "id": {"type": "string"},
+                    "set": {"type": "object"},
+                },
+            },
+        });
+        let wrapped = |response: Value| {
+            json!({
+                "type": "object",
+                "required": ["response"],
+                "properties": {"response": response, "effects": effects},
+                "$defs": {"T": {"type": "string"}}
+            })
+        };
+        let with = |schema: &Value| {
+            let mut r = req("sys", "user");
+            r.response_format = ResponseFormat::JsonSchema {
+                name: "cancel".into(),
+                schema: schema.clone(),
+            };
+            keys(&r)
+        };
+        assert_eq!(
+            with(&plain).1,
+            with(&wrapped(json!({"$ref": "#/$defs/T"}))).1
+        );
+        let wrapped_list = wrapped(json!({"type": "array", "items": {"$ref": "#/$defs/T"}}));
+        assert_eq!(with(&list).1, with(&wrapped_list).1);
+        // A resource that merely has those members stays what it is.
+        let resource = json!({
+            "type": "object",
+            "required": ["response"],
+            "properties": {"response": {"type": "string"}, "effects": {"type": "array"}},
+        });
+        assert_ne!(with(&resource).1, with(&json!({"type": "string"})).1);
     }
 
     fn req(system: &str, user: &str) -> ChatRequest {

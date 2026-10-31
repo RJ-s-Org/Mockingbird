@@ -9,8 +9,8 @@ use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
-use crate::Engine;
 use crate::validate::SchemaValidator;
+use crate::{Engine, ResourceEffect};
 
 /// Gauge of generation permits held.
 pub const IN_FLIGHT_METRIC: &str = "mb_generation_in_flight";
@@ -210,20 +210,25 @@ impl Engine {
         }
     }
 
-    /// Parse LLM output, unwrap the `{"items": [...]}` envelope when
-    /// `checks` asked for one, enforce the size cap, scrub PII, fill what
-    /// the output budget left out (see [`crate::budget`]), then validate. A
-    /// value breaking an asserted format (see
-    /// [`SchemaValidator::for_output`]) is refilled locally unless `echoes`
-    /// holds it; a format error alone never makes the answer `Invalid`.
+    /// Parse LLM output, unwrap the envelope `checks` asked for, if any
+    /// (`{"items": [...]}`, or `{"effects": [...], "response": ...}`, whose
+    /// effects come back beside the verdict on the answer), enforce the size
+    /// cap, scrub PII, fill what the output budget left out (see
+    /// [`crate::budget`]), then validate. A value breaking an asserted format
+    /// (see [`SchemaValidator::for_output`]) is refilled locally unless
+    /// `echoes` holds it; a format error alone never makes the answer
+    /// `Invalid`.
     pub(crate) fn check_output(
         &self,
         validator: &SchemaValidator,
         text: &str,
         checks: &Checks<'_>,
-    ) -> Checked {
+    ) -> (Checked, AnswerEffects) {
         let Some(value) = crate::extract_json(text) else {
-            return Checked::Invalid(vec![NOT_JSON.to_string()]);
+            return (
+                Checked::Invalid(vec![NOT_JSON.to_string()]),
+                AnswerEffects::default(),
+            );
         };
         self.check_parsed(validator, value, text.len(), checks, false)
     }
@@ -237,23 +242,79 @@ impl Engine {
         validator: &SchemaValidator,
         text: &str,
         checks: &Checks<'_>,
-    ) -> Checked {
+    ) -> (Checked, AnswerEffects) {
         let Some(value) = crate::salvage::close_truncated(text) else {
-            return Checked::Invalid(vec![CUT_SHORT.to_string()]);
+            return (
+                Checked::Invalid(vec![CUT_SHORT.to_string()]),
+                AnswerEffects::default(),
+            );
         };
-        match self.check_parsed(validator, value, text.len(), checks, true) {
+        let (checked, effects) = self.check_parsed(validator, value, text.len(), checks, true);
+        let checked = match checked {
             Checked::Valid(v) | Checked::Patched(v) => {
                 tracing::info!("salvaged an answer cut short");
                 Checked::Patched(v)
             }
             other => other,
+        };
+        (checked, effects)
+    }
+
+    /// [`Engine::check_answer`] of a parsed `value` (of `text_len` bytes),
+    /// out of the effects envelope when `checks` asked for one. The effects
+    /// are LLM output like the answer: their PII is replaced and their size
+    /// counts towards the cap, though one too large costs only itself.
+    fn check_parsed(
+        &self,
+        validator: &SchemaValidator,
+        value: Value,
+        text_len: usize,
+        checks: &Checks<'_>,
+        fill_missing: bool,
+    ) -> (Checked, AnswerEffects) {
+        if checks.effects_envelope && effects_without_answer(validator, &value) {
+            return (
+                Checked::Invalid(vec![NO_RESPONSE.to_string()]),
+                AnswerEffects::default(),
+            );
+        }
+        let (value, list) = if checks.effects_envelope {
+            unwrap_effects(validator, value)
+        } else {
+            (value, None)
+        };
+        let mut effects = list.map_or_else(AnswerEffects::default, parse_effects);
+        for effect in &mut effects.kept {
+            let mut set = Value::Object(std::mem::take(&mut effect.set));
+            self.scrub(&mut set);
+            if let Value::Object(scrubbed) = set {
+                effect.set = scrubbed;
+            }
+        }
+        if let Some(cap) = self.guards.max_response_bytes {
+            effects.fit(
+                serde_json::to_vec(&value).map_or(text_len, |b| b.len()),
+                cap,
+            );
+        }
+        let checked = self.check_answer(validator, value, text_len, checks, fill_missing);
+        (checked, effects)
+    }
+
+    /// Replaces the PII in `value`, counting it.
+    fn scrub(&self, value: &mut Value) {
+        if let Some(scrubber) = &self.guards.scrubber {
+            for (pattern, n) in scrubber.scrub_value(value) {
+                metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)
+                    .increment(n as u64);
+            }
         }
     }
 
-    /// [`Engine::check_output`] of a parsed `value` (of `text_len` bytes);
-    /// with `fill_missing`, every missing required member is filled when
-    /// the value does not validate without that.
-    fn check_parsed(
+    /// The checks of an answer out of any effects envelope; with
+    /// `fill_missing`, every missing required member is filled when the value
+    /// does not validate without that.
+    fn check_answer(
         &self,
         validator: &SchemaValidator,
         mut value: Value,
@@ -273,12 +334,7 @@ impl Engine {
                 ));
             }
         }
-        if let Some(scrubber) = &self.guards.scrubber {
-            for (pattern, n) in scrubber.scrub_value(&mut value) {
-                metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)
-                    .increment(n as u64);
-            }
-        }
+        self.scrub(&mut value);
         if let Some(fill) = fill
             && let Some(filled) = self.fill(validator, &value, fill)
         {
@@ -375,8 +431,8 @@ pub(crate) struct Fill<'a> {
 }
 
 /// What [`Engine::check_output`] needs besides the text: the output-budget
-/// fill, if any, the request values the answer may echo, and whether the
-/// answer was asked for as an [`ITEMS_KEY`] envelope.
+/// fill, if any, the request values the answer may echo, and the envelope
+/// the answer was asked for in, if any.
 #[derive(Default)]
 pub(crate) struct Checks<'a> {
     pub fill: Option<&'a Fill<'a>>,
@@ -384,6 +440,10 @@ pub(crate) struct Checks<'a> {
     /// The array the schema describes was asked for as
     /// `{"items": [...]}` (see [`items_envelope`]).
     pub items_envelope: bool,
+    /// The answer was asked for as `{"effects": [...], "response": ...}`
+    /// (see [`effects_envelope`]). The array the schema describes is then
+    /// the `response`, never also under `items`.
+    pub effects_envelope: bool,
 }
 
 /// The member an array answer is asked for under (see [`items_envelope`]).
@@ -395,8 +455,32 @@ pub(crate) const ITEMS_ENVELOPE_NOTE: &str = "The response schema describes a JS
 only an object is allowed at the top level. Output {\"items\": [...]}: one object whose only \
 member, \"items\", is the array the schema describes. Add no other members.";
 
+/// The member an answer is asked for under beside its effects (see
+/// [`effects_envelope`]).
+const RESPONSE_KEY: &str = "response";
+
+/// The member an answer's effects are asked for under (see
+/// [`effects_envelope`]).
+const EFFECTS_KEY: &str = "effects";
+
+/// The most effects one answer applies; the rest are dropped.
+pub(crate) const MAX_EFFECTS: usize = 10;
+
+/// The instruction added to the prompt when an answer is asked for with its
+/// effects. A repair request repeats it.
+pub(crate) const EFFECTS_ENVELOPE_NOTE: &str = "Output one JSON object: {\"effects\": [{\"type\": \
+<resource type>, \"id\": <resource id>, \"set\": {<member>: <new value>}}], \"response\": <the \
+answer the schema describes>}. Decide what changes first, then write the response so it shows that \
+state. \"effects\" lists what this call changes in the resources it was shown: only the members \
+that change, never an id, and nothing it does not change. Leave it empty when the call changes \
+nothing there. Add no other members.";
+
 /// The error of output that holds no JSON value.
 pub(crate) const NOT_JSON: &str = "output is not valid JSON";
+
+/// The error of an envelope with effects and no answer.
+pub(crate) const NO_RESPONSE: &str =
+    "the object has \"effects\" but no \"response\": the answer belongs under \"response\"";
 
 /// The error of output cut short with nothing complete in it.
 pub(crate) const CUT_SHORT: &str = "output was cut short before any complete member";
@@ -420,8 +504,15 @@ pub(crate) fn repair_request(
 complete answer that is shorter: fewer array items, short strings, no optional members."
                 .to_string(),
         );
-    } else if let Some(value) = crate::extract_json(answer) {
-        hints.extend(shape_hints(validator, &value, checks.items_envelope));
+    } else if let Some(value) = crate::extract_json(answer)
+        && !(checks.effects_envelope && effects_without_answer(validator, &value))
+    {
+        let (answer, _) = if checks.effects_envelope {
+            unwrap_effects(validator, value)
+        } else {
+            (value, None)
+        };
+        hints.extend(shape_hints(validator, &answer, checks.items_envelope));
     }
     let mut request = String::new();
     for hint in &hints {
@@ -435,6 +526,10 @@ complete answer that is shorter: fewer array items, short strings, no optional m
     for e in errors {
         request.push_str("- ");
         request.push_str(e);
+        request.push('\n');
+    }
+    if checks.effects_envelope {
+        request.push_str(EFFECTS_ENVELOPE_NOTE);
         request.push('\n');
     }
     request.push_str("Return only corrected JSON.");
@@ -576,6 +671,217 @@ pub(crate) fn items_schema(mut schema: Value) -> Value {
         root.insert("$defs".to_string(), defs);
     }
     wrapped
+}
+
+/// Whether an answer of `validator`'s schema to `op` with status `status` is
+/// asked for with its effects, as `{"effects": [...], "response": ...}`: a
+/// call that acts while resources are stored around it (see
+/// [`crate::prompt::acts`]), unless the answer itself has a member of those
+/// names, which an envelope could not be told apart from.
+pub(crate) fn effects_envelope(
+    op: &mb_mcm::Operation,
+    status: u16,
+    ctx: &crate::GenerationContext<'_>,
+    validator: &SchemaValidator,
+) -> bool {
+    crate::prompt::acts(op, status, ctx)
+        && !validator
+            .declared_property_names()
+            .is_some_and(|d| d.contains(RESPONSE_KEY) || d.contains(EFFECTS_KEY))
+}
+
+/// The schema of the list of effects in an envelope.
+fn effect_list_schema() -> Value {
+    serde_json::json!({
+        "type": "array",
+        "maxItems": MAX_EFFECTS,
+        "items": {
+            "type": "object",
+            "required": ["type", "id", "set"],
+            "properties": {
+                "type": {"type": "string"},
+                "id": {"type": "string"},
+                "set": {"type": "object"},
+            },
+        },
+    })
+}
+
+/// `schema` as the object [`effects_envelope`] asks for. A provider enforcing
+/// this schema writes only what it requires, so both members are, and models
+/// otherwise leave the effects out; they may be empty. This only asks: an
+/// answer with no effects is still taken (see [`unwrap_effects`]).
+pub(crate) fn effects_schema(mut schema: Value) -> Value {
+    let defs = schema.as_object_mut().and_then(|root| root.remove("$defs"));
+    let mut wrapped = serde_json::json!({
+        "type": "object",
+        "required": [EFFECTS_KEY, RESPONSE_KEY],
+        "properties": {EFFECTS_KEY: effect_list_schema(), RESPONSE_KEY: schema},
+    });
+    if let (Some(defs), Some(root)) = (defs, wrapped.as_object_mut()) {
+        root.insert("$defs".to_string(), defs);
+    }
+    wrapped
+}
+
+/// The answer's schema inside its `{"effects": [...], "response": ...}`
+/// wrapping, else `schema`: recordings stay comparable whichever way an
+/// answer was asked for, those from when the wrapping required only
+/// `response` included.
+#[must_use]
+pub fn without_effects_schema(schema: &Value) -> Value {
+    let Some(root) = schema.as_object() else {
+        return schema.clone();
+    };
+    let keys_match = root
+        .keys()
+        .all(|k| matches!(k.as_str(), "type" | "required" | "properties" | "$defs"));
+    let properties = root.get("properties").and_then(Value::as_object);
+    let wrapping = keys_match
+        && root.get("required").is_some_and(|required| {
+            *required == serde_json::json!([EFFECTS_KEY, RESPONSE_KEY])
+                || *required == serde_json::json!([RESPONSE_KEY])
+        })
+        && properties
+            .is_some_and(|p| p.len() == 2 && p.get(EFFECTS_KEY) == Some(&effect_list_schema()));
+    let Some(mut inner) = properties
+        .and_then(|p| p.get(RESPONSE_KEY))
+        .filter(|_| wrapping)
+        .cloned()
+    else {
+        return schema.clone();
+    };
+    if let (Some(defs), Some(inner)) = (root.get("$defs"), inner.as_object_mut()) {
+        inner.insert("$defs".to_string(), defs.clone());
+    }
+    inner
+}
+
+/// The answer and its effects list when `value` is the envelope asked for,
+/// else `value` as it is (a model may answer plainly). It is the envelope when
+/// it has `response`, with nothing but `effects` beside it (other members may
+/// be `null`). A `null` `response` is an answer only where `null` is one.
+fn unwrap_effects(validator: &SchemaValidator, value: Value) -> (Value, Option<Value>) {
+    let Value::Object(mut map) = value else {
+        return (value, None);
+    };
+    let envelope = map
+        .iter()
+        .all(|(k, v)| k == RESPONSE_KEY || k == EFFECTS_KEY || v.is_null())
+        && map
+            .get(RESPONSE_KEY)
+            .is_some_and(|r| !r.is_null() || validator.is_valid(&Value::Null));
+    if !envelope {
+        return (Value::Object(map), None);
+    }
+    let effects = map.remove(EFFECTS_KEY);
+    match map.remove(RESPONSE_KEY) {
+        Some(answer) => (answer, effects),
+        None => (Value::Object(map), None),
+    }
+}
+
+/// Whether `value`, asked for as an envelope, holds effects and no answer:
+/// `effects` with nothing but `null` beside it. Taken as a plain answer it
+/// would be served, as itself or wrapped into a list, and effects are no
+/// answer. A `null` `response` is one where `null` is (see [`unwrap_effects`]).
+fn effects_without_answer(validator: &SchemaValidator, value: &Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    map.contains_key(EFFECTS_KEY)
+        && map.iter().all(|(k, v)| k == EFFECTS_KEY || v.is_null())
+        && !(map.contains_key(RESPONSE_KEY) && validator.is_valid(&Value::Null))
+}
+
+/// What an answer's effects list came to.
+#[derive(Default)]
+pub(crate) struct AnswerEffects {
+    /// The effects to apply.
+    pub kept: Vec<ResourceEffect>,
+    /// The effects it listed that are not among them.
+    pub dropped: usize,
+}
+
+impl AnswerEffects {
+    /// These effects with every one dropped.
+    pub(crate) fn all_dropped(self) -> Self {
+        Self {
+            dropped: self.dropped + self.kept.len(),
+            kept: Vec::new(),
+        }
+    }
+
+    /// Keeps the effects that fit under `cap` bytes beside an answer of
+    /// `answer_bytes`, in order; the rest are dropped.
+    fn fit(&mut self, answer_bytes: usize, cap: usize) {
+        let mut size = answer_bytes;
+        let before = self.kept.len();
+        self.kept.retain(|effect| {
+            let bytes = serde_json::to_vec(&effect.set).map_or(0, |b| b.len());
+            let fits = size + bytes <= cap;
+            if fits {
+                size += bytes;
+            }
+            fits
+        });
+        let dropped = before - self.kept.len();
+        if dropped > 0 {
+            tracing::info!(dropped, cap, "dropped effects over the response size cap");
+            self.dropped += dropped;
+        }
+    }
+}
+
+/// The well-formed effects of `list`, at most [`MAX_EFFECTS`]; a malformed or
+/// surplus one costs only itself. `null` lists none, and anything else that is
+/// not an array counts as one malformed effect.
+fn parse_effects(list: Value) -> AnswerEffects {
+    let items = match list {
+        Value::Array(items) => items,
+        Value::Null => return AnswerEffects::default(),
+        _ => {
+            return AnswerEffects {
+                kept: Vec::new(),
+                dropped: 1,
+            };
+        }
+    };
+    let listed = items.len();
+    let kept: Vec<ResourceEffect> = items
+        .into_iter()
+        .filter_map(parse_effect)
+        .take(MAX_EFFECTS)
+        .collect();
+    AnswerEffects {
+        dropped: listed - kept.len(),
+        kept,
+    }
+}
+
+/// `{"type": .., "id": .., "set": {..}}` with a type, an id (a resource with
+/// a numeric id is stored under its string form) and something to set.
+fn parse_effect(item: Value) -> Option<ResourceEffect> {
+    let Value::Object(mut item) = item else {
+        return None;
+    };
+    let resource_type = match item.remove("type")? {
+        Value::String(t) if !t.is_empty() => t,
+        _ => return None,
+    };
+    let id = match item.remove("id")? {
+        Value::String(id) if !id.is_empty() => id,
+        Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),
+        _ => return None,
+    };
+    match item.remove("set")? {
+        Value::Object(set) if !set.is_empty() => Some(ResourceEffect {
+            resource_type,
+            id,
+            set,
+        }),
+        _ => None,
+    }
 }
 
 /// `doc`'s root schema object, following local `$ref`s within `doc`.

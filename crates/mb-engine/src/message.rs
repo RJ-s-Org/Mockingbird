@@ -83,7 +83,7 @@ impl Engine {
             )
             .await
         {
-            Ok(generated) => generated,
+            Ok(answer) => (answer.value, answer.source),
             Err(reason) => {
                 tracing::warn!(channel = %channel.id, %reason, "LLM message generation fell back to faker");
                 (
