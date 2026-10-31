@@ -350,7 +350,8 @@ fn is_opaque(schema: Option<&Value>, defs: &Map<String, Value>) -> bool {
     !has_members(Some(schema)) && !has_members(schema.get("items"))
 }
 
-/// What an answer is about: itself, and what a one-member envelope holds.
+/// What an answer is about: itself, and the object a one-member envelope
+/// holds. A lone string is the answer's own member, not what it wraps.
 fn answered_things(schema: &Value, defs: &Map<String, Value>) -> Vec<Value> {
     let mut things = Vec::new();
     if let Some(resolved) = resolve(schema, defs) {
@@ -359,6 +360,7 @@ fn answered_things(schema: &Value, defs: &Map<String, Value>) -> Vec<Value> {
     if let Some(props) = schema_properties(Some(schema), defs)
         && props.len() == 1
         && let Some(sole) = props.values().next().and_then(|v| resolve(v, defs))
+        && schema_properties(Some(sole), defs).is_some_and(|p| !p.is_empty())
     {
         things.push(sole.clone());
     }
@@ -399,29 +401,6 @@ fn reads_back(read: Option<&Value>, answer: Option<&Value>, defs: &Map<String, V
     })
 }
 
-/// Methods whose answer on a route says what its record looks like, in the
-/// order they are believed: with no `GET`, a `PATCH`, `PUT` or `DELETE` that
-/// answers is the evidence there is.
-const RECORD_METHODS: [HttpMethod; 4] = [
-    HttpMethod::Get,
-    HttpMethod::Patch,
-    HttpMethod::Put,
-    HttpMethod::Delete,
-];
-
-/// The operations of `route` that say what its record looks like, most
-/// believed first.
-fn record_ops(operations: &[Operation], route: impl Fn(&[&str]) -> bool) -> Vec<&Operation> {
-    let on = |wanted: &HttpMethod, op: &&Operation| {
-        http_path(op).is_some_and(|(method, path)| method == *wanted && route(&segments(path)))
-            && answer(op).is_some()
-    };
-    RECORD_METHODS
-        .iter()
-        .flat_map(|wanted| operations.iter().filter(|op| on(wanted, op)))
-        .collect()
-}
-
 /// The `allOf` branches of `schema`, with those of its branches, resolved.
 fn all_of_branches<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Vec<&'a Value> {
     let mut branches = Vec::new();
@@ -453,30 +432,29 @@ fn same_record(a: &Value, b: &Value, defs: &Map<String, Value>) -> bool {
         .any(|a| b.iter().any(|b| a == b || composes(a, b) || composes(b, a)))
 }
 
-/// The read by path of another resource than `target` that serves the record
-/// `answer` is. The parent's own reads do not count: those are what it acts
-/// on. Nor does a list, which holds its items for any number of reasons.
-/// Unless the route says it `created` something, the read must know what
-/// identifies the record: otherwise a shared answer is all they have in common.
+/// The type a `GET` by path of another resource than `target` serves `answer`
+/// under, when one type does: that is the contract's statement that it is a
+/// record there. The parent's own reads are what it acts on.
 fn read_elsewhere<'a>(
     answer: &Value,
     target: &ParentTarget,
-    created: bool,
     operations: &'a [Operation],
     defs: &Map<String, Value>,
 ) -> Option<&'a Operation> {
     if is_opaque(Some(answer), defs) {
         return None;
     }
-    record_ops(operations, |route| {
+    let mut reads = gets(operations, |route| {
         route.last().is_some_and(|last| is_param(last))
     })
-    .into_iter()
-    .find(|read| {
+    .filter(|read| {
         read.resource_type.as_deref() != Some(&target.resource_type)
-            && (created || read.identity.is_some())
             && self::answer(read).is_some_and(|served| same_record(answer, served, defs))
-    })
+    });
+    let read = reads.next()?;
+    reads
+        .all(|other| other.resource_type == read.resource_type)
+        .then_some(read)
 }
 
 /// The output of a declared `201`, which says the route made something,
@@ -512,37 +490,21 @@ fn record_identity(
     known.or_else(|| identity_for(None, record_schema(op), defs))
 }
 
-/// Whether the request supplies the content of a new record: a body it must
-/// send, with members, or one that requires some.
-fn supplies_content(op: &Operation, defs: &Map<String, Value>) -> bool {
-    let Some(body) = &op.input.body else {
-        return false;
-    };
-    let requires_members = resolve(body, defs)
-        .and_then(|s| s.get("required"))
-        .and_then(Value::as_array)
-        .is_some_and(|r| !r.is_empty());
-    requires_members || (op.input.body_required && !is_opaque(Some(body), defs))
-}
-
-/// The structural test of a `POST` to `<static>/{param}/<static>...`, in
-/// order. The spelling of the path is not part of it (only [`READ_VERBS`] is,
-/// and that yields to a declared body and to `x-mockingbird-resource`).
+/// The structural test of a `POST` to `<static>/{param}/<static>...`. When the
+/// contract does not decide, it acts on the parent, which is harmless: the
+/// answer is served and the parent changes only through validated effects.
+/// The spelling of the path is not part of it (only [`READ_VERBS`] is, and that
+/// yields to a declared body and to `x-mockingbird-resource`). In order:
 ///
-/// 1. No success declares a body ([`declares_no_body`]): it acts on the
-///    parent, whatever is beside it, and at any depth of tail. Nothing below
-///    applies to a tail of two or more segments, which stays [`Route::Undecided`].
-/// 2. A route below it (`<path>/{...}`) makes it a collection.
-/// 3. A `GET` on its path that [`reads_back`] its answer makes it a collection.
-///    A `GET` of something else does not.
-/// 4. An answer the parent's record has ([`same_record`]): a child, under the
-///    parent's type, when it declares a `201`, has an identity and
-///    [`supplies_content`] (`POST /comments/{id}/replies`). Otherwise it acts on
-///    the parent, whose stored record it replaces when the schemas are equal
-///    (`POST /orders/{id}/capture`, also on a `201`).
-/// 5. An answer [`read_elsewhere`] is a record of that read's type and identity.
-/// 6. A declared `201` is a record of its own. With no identity it stores nothing.
-/// 7. Otherwise nothing can read what it answers, and it acts on the parent.
+/// 1. No success declares a body ([`declares_no_body`]): it acts on the parent.
+///    Nothing below applies to a tail of two or more segments ([`Route::Undecided`]).
+/// 2. A route below it (`<path>/{...}`), or a `GET` on its path that
+///    [`reads_back`] its answer: a collection.
+/// 3. The parent's `GET` answers the same record: it acts on the parent. The
+///    runtime goes by the identity the answer carries.
+/// 4. A `GET` by path elsewhere serves it ([`read_elsewhere`]): a record there.
+/// 5. A declared `201`: a record of its own, which stores nothing with no identity.
+/// 6. Otherwise it acts on the parent.
 fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Value>) -> Route {
     let Some((HttpMethod::Post, path)) = http_path(op) else {
         return Route::Undecided;
@@ -569,48 +531,32 @@ fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Valu
                 && is_param(other[segs.len()])
         })
     });
-    if has_detail {
-        return own(None, None);
-    }
     let answered = record_schema(op);
-    if gets(operations, |route| same_route(route, &segs))
-        .any(|read| reads_back(answer(read), answered, defs))
+    if has_detail
+        || gets(operations, |route| same_route(route, &segs))
+            .any(|read| reads_back(answer(read), answered, defs))
     {
         return own(None, None);
     }
-    let created = created_output(op).is_some();
-    let Some(answered) = answered else {
-        return if created {
-            own(None, None)
-        } else {
-            Route::Action(target)
-        };
-    };
-    let parent = parent_read(operations, path, target.tail)
-        .filter(|read| answer(read).is_some_and(|a| same_record(answered, a, defs)));
-    if let Some(parent) = parent {
-        let identity = record_identity(op, Some(parent), defs);
-        return if created && identity.is_some() && supplies_content(op, defs) {
-            Route::Collection {
-                resource_type: Some(target.resource_type),
-                identity,
-            }
-        } else {
-            Route::Action(target)
-        };
+    if let Some(answered) = answered {
+        let is_parents = parent_read(operations, path, target.tail)
+            .and_then(answer)
+            .is_some_and(|read| same_record(answered, read, defs));
+        if is_parents {
+            return Route::Action(target);
+        }
+        if let Some(read) = read_elsewhere(answered, &target, operations, defs) {
+            return own(read.resource_type.clone(), Some(read));
+        }
     }
-    if let Some(read) = read_elsewhere(answered, &target, created, operations, defs) {
-        return own(read.resource_type.clone(), Some(read));
-    }
-    if created {
+    if created_output(op).is_some() {
         return own(None, None);
     }
     Route::Action(target)
 }
 
-/// The operation saying what the record a route with a `tail` of static
-/// segments acts on looks like: at `<static>/{param}`, whatever that route
-/// names its parameters.
+/// The `GET` of the resource a route with a `tail` of static segments acts
+/// on: `<static>/{param}`, whatever that route names its parameters.
 fn parent_read<'a>(
     operations: &'a [Operation],
     action_path: &str,
@@ -618,14 +564,12 @@ fn parent_read<'a>(
 ) -> Option<&'a Operation> {
     let action = segments(action_path);
     let parent = action.get(..action.len().checked_sub(tail)?)?;
-    record_ops(operations, |read| same_route(read, parent))
-        .first()
-        .copied()
+    gets(operations, |read| same_route(read, parent)).next()
 }
 
 /// Points the operation at `index` at its parent resource. Its kind is an
-/// update when it answers with what the parent's `GET` answers, so the answer
-/// replaces the resource; otherwise it stores nothing and the resource is
+/// update when it answers the very schema of the parent's `GET`, and that
+/// schema declares something; otherwise it stores nothing and the resource is
 /// only its context.
 fn act_on_parent(
     index: usize,
@@ -636,7 +580,7 @@ fn act_on_parent(
     let op = &operations[index];
     let read = http_path(op).and_then(|(_, path)| parent_read(operations, path, target.tail));
     let answered = answer(op);
-    let replaces = answered.is_some() && answered == read.and_then(answer);
+    let replaces = !is_opaque(answered, defs) && answered == read.and_then(answer);
     let param = target.path_param;
     let (effect, identity) = if replaces {
         let identity = identity_for(Some(&param), answered, defs);
@@ -769,8 +713,12 @@ fn identity_is_declared(
     let has_it = |schema: Option<&Value>| {
         schema_properties(schema, defs).is_some_and(|p| p.contains_key(field))
     };
-    let answered = answer(op);
-    if has_it(answered) || schema_properties(answered, defs).is_none_or(|p| p.is_empty()) {
+    let answers = [answer(op), record_schema(op)];
+    if answers.iter().any(|a| has_it(*a))
+        || answers
+            .iter()
+            .all(|a| schema_properties(*a, defs).is_none_or(|p| p.is_empty()))
+    {
         return true;
     }
     http_path(op)

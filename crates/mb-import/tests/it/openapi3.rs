@@ -1598,54 +1598,168 @@ components:
         )
     }
 
-    /// A `201` whose request supplies the record makes a child of the
-    /// parent's shape, under the parent's type so that its `GET` reads it.
-    #[test]
-    fn a_created_child_of_the_parents_shape_does_not_replace_it() {
-        for (parent, tail) in [
-            ("comments", "replies"),
-            ("documents", "copies"),
-            ("folders", "folders"),
-        ] {
-            let b = parent_and_child(parent, tail, "201", NEW_BODY);
-            create(&b, "subject", parent);
-            let identity = b.operation("subject").unwrap().identity.clone().unwrap();
-            assert_eq!(identity.field, "id", "{parent}");
-            assert_eq!(identity.path_param, None, "{parent}");
-        }
+    fn update_of(b: &Bundle, id: &str, parent: &str) {
+        let op = b.operation(id).unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Update), "{id}");
+        assert_eq!(op.resource_type.as_deref(), Some(parent), "{id}");
+        assert!(op.is_action(), "{id}");
     }
 
-    /// PayPal's capture and authorize: a `201` answering the order itself,
-    /// with no request that could be a new one. A tail's word cannot tell
-    /// them from a reply, the request can.
+    /// An answer of the parent's own schema is an update whatever the status
+    /// and the request: nothing in the contract tells a reply from a capture.
+    /// The runtime goes by the identity the answer carries.
     #[test]
-    fn a_created_answer_of_the_parents_shape_with_no_content_replaces_it() {
-        let optional = "requestBody: {content: {application/json: {schema: {type: object}}}}";
-        for request in ["summary: none", optional] {
-            let b = parent_and_child("orders", "capture", "201", request);
-            let op = b.operation("subject").unwrap();
-            assert_eq!(op.kind, OperationKind::Command(Effect::Update), "{request}");
-            assert_eq!(op.resource_type.as_deref(), Some("orders"), "{request}");
-            assert!(op.is_action(), "{request}");
+    fn an_answer_of_the_parents_schema_is_an_update() {
+        let required = r##"requestBody: {required: true, content: {application/json: {schema: {type: object, required: [amount], properties: {amount: {type: integer}}}}}}"##;
+        let optional = r##"requestBody: {content: {application/json: {schema: {type: object, properties: {body: {type: string}}}}}}"##;
+        let one_of = r##"requestBody: {required: true, content: {application/json: {schema: {oneOf: [{type: object, properties: {a: {type: string}}}, {type: object, properties: {b: {type: string}}}]}}}}"##;
+        let text = "requestBody: {required: true, content: {text/plain: {schema: {type: string}}}}";
+        for request in ["summary: none", NEW_BODY, required, optional, one_of, text] {
+            for status in ["200", "201"] {
+                for (parent, tail) in [
+                    ("comments", "replies"),
+                    ("documents", "copies"),
+                    ("orders", "capture"),
+                ] {
+                    update_of(
+                        &parent_and_child(parent, tail, status, request),
+                        "subject",
+                        parent,
+                    );
+                }
+            }
         }
         let paypal = example("paypal/paypal-orders.openapi.yaml");
         for id in ["orders.capture", "orders.authorize", "orders.confirm"] {
-            let op = paypal.operation(id).unwrap();
-            assert_eq!(op.kind, OperationKind::Command(Effect::Update), "{id}");
-            assert_eq!(op.resource_type.as_deref(), Some("orders"), "{id}");
+            update_of(&paypal, id, "orders");
         }
     }
 
+    /// Two open objects are not the parent's schema by an exact statement.
     #[test]
-    fn a_200_of_the_parents_shape_is_an_update_until_corrected() {
-        let b = parent_and_child("comments", "replies", "200", NEW_BODY);
-        let op = b.operation("subject").unwrap();
-        assert_eq!(op.kind, OperationKind::Command(Effect::Update));
-        assert_eq!(op.resource_type.as_deref(), Some("comments"));
+    fn an_opaque_answer_does_not_overwrite_its_parent() {
+        let open = r##"responses: {"200": {description: ok, content: {application/json: {schema: {type: object}}}}}"##;
+        let b = shaped(
+            &format!(
+                "  /jobs/{{id}}:\n    get:\n      operationId: read\n      {open}\n  /jobs/{{id}}/run:\n    post:\n      operationId: subject\n      {open}\n"
+            ),
+            "    Unused: {type: object}\n",
+        );
+        other(&b, "subject", "jobs", "id");
+    }
+
+    #[test]
+    fn action_false_with_a_type_corrects_an_update() {
         let corrected =
             format!("{NEW_BODY}\n      x-mockingbird-resource: {{action: false, type: comments}}");
         let b = parent_and_child("comments", "replies", "200", &corrected);
         create(&b, "subject", "comments");
+    }
+
+    /// `Operation` also answers a `DELETE` elsewhere, which serves no record.
+    #[test]
+    fn a_shared_answer_needs_a_get_by_path_to_rename_the_type() {
+        let answer = body_of("200", "Operation");
+        let without = format!(
+            "  /instances/{{id}}/start:\n    post:\n      operationId: subject\n      {answer}\n  /disks/{{id}}:\n    delete:\n      operationId: dropDisk\n      {answer}\n"
+        );
+        let schemas = "    Operation: {type: object, properties: {name: {type: string}, done: {type: boolean}}}\n";
+        other(&shaped(&without, schemas), "subject", "instances", "id");
+        let with = format!(
+            "{without}  /operations/{{name}}:\n    get:\n      operationId: getOperation\n      {answer}\n"
+        );
+        create(&shaped(&with, schemas), "subject", "operations");
+    }
+
+    /// Two reads serve it: the contract does not say which it is.
+    #[test]
+    fn two_reads_serving_an_answer_rename_nothing() {
+        let answer = body_of("200", "Rec");
+        let b = shaped(
+            &format!(
+                "  /a/{{id}}/go:\n    post:\n      operationId: subject\n      {answer}\n  /x/{{id}}:\n    get:\n      operationId: x\n      {answer}\n  /y/{{id}}:\n    get:\n      operationId: y\n      {answer}\n"
+            ),
+            "    Rec: {type: object, properties: {id: {type: string}}}\n",
+        );
+        other(&b, "subject", "a", "id");
+    }
+
+    /// One string member is no envelope: `{snapshot_id}` is not `{id}`.
+    #[test]
+    fn an_envelope_unwraps_only_to_an_object() {
+        let snapshot = r##"responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {snapshot_id: {type: string}}}}}}}"##;
+        let id = r##"responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}}"##;
+        let b = shaped(
+            &format!(
+                "  /volumes/{{id}}/snapshots:\n    post:\n      operationId: subject\n      {snapshot}\n  /disks/{{id}}:\n    get:\n      operationId: getDisk\n      {id}\n  /notes/{{id}}:\n    get:\n      operationId: getNote\n      {id}\n  /notes/{{id}}/pin:\n    post:\n      operationId: pin\n      {snapshot}\n"
+            ),
+            "    Unused: {type: object}\n",
+        );
+        other(&b, "subject", "volumes", "id");
+        other(&b, "pin", "notes", "id");
+    }
+
+    /// Neither has a `GET`, so nothing says `Ack` is the order.
+    #[test]
+    fn an_answer_shared_with_a_delete_does_not_overwrite_its_parent() {
+        let ack = body_of("200", "Ack");
+        let b = shaped(
+            &format!(
+                "  /orders/{{id}}:\n    delete:\n      operationId: dropOrder\n      {ack}\n  /orders/{{id}}/ship:\n    post:\n      operationId: subject\n      {ack}\n"
+            ),
+            "    Ack: {type: object, properties: {ok: {type: boolean}}}\n",
+        );
+        other(&b, "subject", "orders", "id");
+    }
+
+    /// A read that wraps its record serves it just the same.
+    #[test]
+    fn a_read_side_envelope_counts_at_any_status() {
+        let refund = r##"{"$ref": "#/components/schemas/Refund"}"##;
+        let b = shaped(
+            &format!(
+                r##"  /charges/{{id}}/refund:
+    post:
+      operationId: subject
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {refund}}}}}}}}}
+  /refunds/{{id}}:
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{data: {refund}}}}}}}}}}}}}
+"##
+            ),
+            "    Refund: {type: object, properties: {id: {type: string}}}\n",
+        );
+        create(&b, "subject", "refunds");
+        assert_eq!(
+            b.operation("subject")
+                .unwrap()
+                .identity
+                .as_ref()
+                .unwrap()
+                .field,
+            "id"
+        );
+    }
+
+    /// Whichever success declares it, `identity` is declared.
+    #[test]
+    fn the_identity_hint_reads_the_declared_201_too() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: Ext, version: "1"}
+paths:
+  /a/{id}/b:
+    post:
+      operationId: subject
+      x-mockingbird-resource: {identity: sku}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}}
+        "201": {description: ok, content: {application/json: {schema: {type: object, properties: {sku: {type: string}}}}}}
+"##;
+        let (op, warnings) = subject(contract);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(op.identity.unwrap().field, "sku");
     }
 
     /// Whatever names its identity: the read elsewhere knows it.
@@ -1700,10 +1814,10 @@ components:
         }
     }
 
-    /// A `200` needs the read to say what identifies it: a shared answer
-    /// with no identity says nothing about being that record.
+    /// Serving it by path is the contract's statement, with no identity name
+    /// needed.
     #[test]
-    fn a_200_read_elsewhere_with_no_identity_stays_an_action() {
+    fn a_200_read_elsewhere_needs_no_identity() {
         let b = shaped(
             &format!(
                 "  /jobs/{{id}}/run:\n    post:\n      operationId: subject\n      {}\n  /stats/{{day}}:\n    get:\n      operationId: read\n      {}\n",
@@ -1712,7 +1826,7 @@ components:
             ),
             "    Ack: {type: object, properties: {ok: {type: boolean}}}\n",
         );
-        other(&b, "subject", "jobs", "id");
+        create(&b, "subject", "stats");
     }
 
     /// Any declared `201` counts, and it says what the identity is.
@@ -1804,50 +1918,6 @@ components:
         for id in ["wrapped", "shorter", "shorter200"] {
             create(&b, id, "refunds");
         }
-    }
-
-    /// With no `GET`, a `PATCH` or an answering `DELETE` says the record is
-    /// there and what it looks like.
-    #[test]
-    fn a_patch_or_delete_is_evidence_of_a_record_when_no_get_is() {
-        let task = r##"{"$ref": "#/components/schemas/Task"}"##;
-        let answering = format!(
-            r##"responses: {{"200": {{description: ok, content: {{application/json: {{schema: {task}}}}}}}}}"##
-        );
-        let b = shaped(
-            &format!(
-                r##"  /tasks/{{id}}:
-    patch:
-      operationId: patchTask
-      {answering}
-  /tasks/{{id}}/complete:
-    post:
-      operationId: complete
-      {answering}
-  /projects/{{id}}/tasks:
-    post:
-      operationId: addTask
-      {answering}
-  /jobs/{{id}}:
-    delete:
-      operationId: deleteJob
-      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Job"}}}}}}}}}}
-  /jobs/{{id}}/stop:
-    post:
-      operationId: stop
-      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Job"}}}}}}}}}}
-"##
-            ),
-            "    Task: {type: object, properties: {id: {type: string}, done: {type: boolean}}}\n    Job: {type: object, properties: {id: {type: string}, state: {type: string}}}\n",
-        );
-        for id in ["complete", "stop"] {
-            assert_eq!(
-                b.operation(id).unwrap().kind,
-                OperationKind::Command(Effect::Update),
-                "{id}"
-            );
-        }
-        create(&b, "addTask", "tasks");
     }
 
     fn with_ext(path: &str, method: &str, status: &str, ext: &str) -> String {

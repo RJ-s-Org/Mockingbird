@@ -46,13 +46,12 @@ A bundle takes this on recompile, and stored bundles are not recompiled on their
 
 - A `POST` whose successes declare no body acts on its parent and stores nothing, even with a `GET` beside it or a longer static tail: Jira's `POST /issue/{issueIdOrKey}/transitions` and Auth0's `POST /users/{id}/roles`. It sends no webhook unless the contract gives it a payload.
 - A bodyless `POST` whose last segment is a read verb (`POST /jobs/{id}/sync` answering `204`) was a read and is now an action on its parent.
-- A plural tail that answers what the parent's `GET` answers (`POST /orders/{id}/items` answering the order, with nothing below it) was a create of `items` and is now an update of the order, unless it declares a `201` and its request supplies the content.
+- A plural tail that answers what the parent's `GET` answers (`POST /orders/{id}/items` answering the order, with nothing below it) was a create of `items` and is now an update of the order.
+- An update on an action route whose LLM answer carries an identity other than its target's is [a new record of the parent's type](import.md#an-update-that-answers-another-record), stored under its own id, with the target untouched. That id used to be overwritten with the target's. A faker answer or an answer with no identity updates the target as before.
 - A `POST` answering `200`, whose `GET` beside it reads something else or that has no `GET` and nothing else reading its answer, acts on its parent whatever its spelling: `POST /v1/customers/{id}/sources`, `/{id}/process`, `/{id}/address`.
 - A singular tail declaring a `201`, which acted on its parent unless it answered the parent's record, is now a create of its own, even with no identity (when it stores nothing). It loses its parent as a target: with no identity path parameter it has no stored target, and its prompt shows the parent only if the path parameter is named for a type (`{booking_id}`, not `{id}`).
-- A `POST` whose answer another resource's route serves by path is a create under that route's type: PayPal's `POST /captures/{capture_id}/refund` is a create of `refunds`, so `GET /refunds/{id}` serves it. It was a command on `captures` that stored nothing, and it now has no capture as its target.
+- A `POST` whose answer another resource's `GET` serves by path is a create under that route's type: PayPal's `POST /captures/{capture_id}/refund` is a create of `refunds`, so `GET /refunds/{id}` serves it. It was a command on `captures` that stored nothing, and it now has no capture as its target.
 - A `POST` declaring a `201` beside a `200` is judged by the `201`.
-
-A `201` answering the parent's record with no request content stays an update (PayPal's `POST /orders/{id}/capture`). `POST /documents/{id}/copies` answering a `201` of the document with no request body looks the same, so it also replaces the document: correct it with `x-mockingbird-resource: {action: false, type: documents}`.
 
 For each operation that changes, these follow:
 

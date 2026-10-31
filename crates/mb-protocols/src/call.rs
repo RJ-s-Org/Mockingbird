@@ -849,11 +849,21 @@ pub(crate) async fn complete(
     let Pending {
         mut state,
         target_id,
+        target,
         cache,
         ..
     } = pending;
     let op = plan.op;
     let session = &plan.session;
+    // An action's answer may be a new record of the parent's type.
+    let target_id = mb_engine::action_record_id(
+        op,
+        call,
+        target.as_ref(),
+        &generated.source,
+        generated.body.as_ref(),
+    )
+    .or(target_id);
     let resource_type = op.resource_type.as_deref();
     let is_query = matches!(op.kind, OperationKind::Query);
     async {

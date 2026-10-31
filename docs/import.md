@@ -21,15 +21,22 @@ Many documentation pages carry their own OpenAPI definition: a fenced ```` ```ya
 
 ## How a `POST` under a resource is read
 
-The compiler decides from the contract, not the words of the path, whether `POST <static>/{param}/<static>` adds a record of its own or acts on the resource `{param}` names. OpenAPI 3 and Swagger 2.0 read it the same way, in this order:
+The compiler decides from the contract, not the words of the path, whether `POST <static>/{param}/<static>` adds a record of its own or acts on the resource `{param}` names. When the contract does not decide, it acts on the parent, which is harmless: the answer is served, the parent is shown as context, and the parent changes only through validated effects. OpenAPI 3 and Swagger 2.0 read it the same way, in this order:
 
-1. **No success response declares a body** (`204`, or `200` or `202` with no content, for every 2xx it lists): it acts on the parent and stores nothing, even with a `GET` beside it. This also holds under a longer static tail (`/x/{id}/y/z`). A declared `201` does not count, because it says something was made. Such a call sends no webhook unless the contract gives it a payload.
-2. **A route below it** (`<path>/{...}`): a collection.
-3. **A `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not.
-4. **An answer of the parent's record**, the same schema as the parent's `GET`, through a one-member envelope or an `allOf` shorter form: a child record under the parent's type when it declares a `201`, has an identity and the request supplies the content (a required body with members, or a body schema with `required` members), as in `POST /comments/{id}/replies`. Otherwise it acts on the parent, as in `POST /orders/{id}/capture`, and a schema equal to the `GET`'s replaces the stored record. So a `200` of this shape, or a `201` with no such request, is an update: correct one that makes a new record with `action: false` and `type`.
-5. **An answer another resource's route serves by path**: a record of that route's type, with its identity (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it). The match is the same schema, through a one-member envelope or an `allOf` shorter form; members in common are not enough. Unless the status is `201`, that route must know the record's identity. A list does not count. Where no `GET` exists, a `PATCH`, `PUT` or `DELETE` that declares an answer stands in for it, in 4 as well.
-6. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no identity it stores nothing.
-7. **Anything else**: nothing can read what it answers, so it acts on the parent and stores nothing.
+1. **No success response declares a body** (`204`, or `200` or `202` with no content, for every 2xx it lists): it acts on the parent and stores nothing, even with a `GET` beside it or under a longer static tail (`/x/{id}/y/z`). A declared `201` does not count, because it says something was made. Such a call sends no webhook unless the contract gives it a payload.
+2. **A route below it** (`<path>/{...}`), or **a `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not.
+3. **The parent's `GET` answers the same record**: it acts on the parent. With the very schema of that `GET` it is an update, [decided at runtime](#an-update-that-answers-another-record).
+4. **Another resource's `GET` by path serves the same record**: a record of that route's type, with its identity (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it). If `GET`s of several types serve it, the contract does not say which, and this rule does not apply.
+5. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no identity it stores nothing.
+6. **Anything else**: it acts on the parent and stores nothing.
+
+The same record means the same schema, through a one-member envelope that holds an object (on either side), or a shorter form the other composes with `allOf`. Members in common are not enough: `{id, status}` beside a `Refund` that does not compose it does not match. An envelope with other members beside its record (`{data: User, links: ...}`) is not unwrapped, because nothing but the member's name says which one is the record.
+
+Where a `POST` lists several successes, these rules read the `201`. The mock answers with the lowest success unless the call forces another status, so a `POST` listing an empty `200` and a `201` with a body answers empty and stores nothing.
+
+### An update that answers another record
+
+`POST /comments/{id}/replies` and `POST /orders/{id}/capture` can both answer their parent's schema, and the contract cannot tell them apart. So the LLM's answer does: an identity that differs from the target's is a new record of the parent's type, stored under its own id, and the parent is untouched. The target's identity, or none, updates the parent. A faker's answer always updates the parent, since its id is invented.
 
 A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read.
 
@@ -51,8 +58,8 @@ All three members are optional, and each overrides what inference decides for th
 
 - `action: true` needs a path ending `<static>/{param}/<static>...` and a method other than `GET`, `HEAD` or `OPTIONS`. It takes any tail, also on `PUT` and `PATCH`, and it beats a read verb in the last segment.
 - `action: false` makes a `POST` a write of its own, also when its last segment is a read verb. On anything else (another method, a stream, a `POST` ending in a parameter) it is ignored with a warning.
-- `type` is an identifier-like name: letters, digits, `_`, `-` and `.`, starting with a letter, digit or `_`. On a read, rule 5 stores records under it. It does not change the webhook event type of a route ending in a parameter, which is named after its last static segment.
-- `identity` must be a member of what the operation answers, or for an action of what the parent's `GET` answers. An answer that declares no members cannot contradict it. It sets that operation's identity field, after inference: it does not decide whether a route is an action or a record, or set the identity of other operations on the same resource.
+- `type` is an identifier-like name: letters, digits, `_`, `-` and `.`, starting with a letter, digit or `_`. On a `GET`, rule 4 stores records under it. It does not change the webhook event type of a route ending in a parameter, which is named after its last static segment.
+- `identity` must be a member of what the operation answers, in its `201` or its lowest success, or for an action of what the parent's `GET` answers. An answer that declares no members cannot contradict it. It sets that operation's identity field after inference, so it does not decide whether that route is an action or a record. On a `GET`, what is inferred from that `GET` takes it: an action on that resource, and a record that `GET` serves.
 
 A value that is not valid gives an `invalid_resource_extension` warning, and inference stands for that member: the extension's other valid members still apply. That covers a value that is not an object, a member of the wrong type, an unknown member, an impossible `action`, and an `identity` the operation does not declare.
 

@@ -1835,6 +1835,8 @@ fn reflect(
     let Some(body) = response.body.take() else {
         return response;
     };
+    let new_record =
+        action_record_id(op, call, ctx.target, &response.source, Some(&body)).is_some();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
             Some(target) => overlay_target(validator, target, body),
@@ -1846,6 +1848,7 @@ fn reflect(
         OperationKind::Command(Effect::Update) => {
             let from_llm = !matches!(response.source, Source::Fallback);
             let body = match ctx.target {
+                _ if new_record => body,
                 Some(target) if op.is_action() && from_llm => fill_omitted(validator, body, target),
                 target => overlay(validator, body, target.map(|t| &t.data)),
             };
@@ -1857,8 +1860,54 @@ fn reflect(
             body
         }
     };
-    response.body = Some(force_identity(validator, op, call, body));
+    response.body = Some(if new_record {
+        body
+    } else {
+        force_identity(validator, op, call, body)
+    });
     response
+}
+
+/// The id of the new record an action's LLM answer is: of the parent's schema
+/// (an update, see [`Operation::is_action`]), carrying an identity that is not
+/// its target's. A reply `c2` under `/comments/c1/replies` is stored as `c2`
+/// and `c1` is untouched. An answer with no identity, or the target's, is about
+/// the target, and a faker's invented id says nothing.
+#[must_use]
+pub fn action_record_id(
+    op: &Operation,
+    call: &OperationCall,
+    target: Option<&StoredResource>,
+    source: &Source,
+    body: Option<&Value>,
+) -> Option<String> {
+    if op.kind != OperationKind::Command(Effect::Update)
+        || !op.is_action()
+        || !matches!(source, Source::Llm | Source::Patched | Source::Repaired)
+    {
+        return None;
+    }
+    let text = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    let identity = op.identity.as_ref()?;
+    let body = body?;
+    let id = text(body.get(&identity.field)?)?;
+    // What the path names: the identity, or the member `path_field` says.
+    let named = identity.path_field.as_ref().unwrap_or(&identity.field);
+    let named = text(body.get(named)?)?;
+    let in_path = identity
+        .path_param
+        .as_ref()
+        .and_then(|p| call.path_params.get(p))
+        .and_then(text);
+    let is_target = in_path.as_ref() == Some(&named)
+        || target.is_some_and(|t| {
+            t.id == id || t.data.get(&identity.field).and_then(text).as_ref() == Some(&id)
+        });
+    (!is_target).then_some(id)
 }
 
 /// After a scenario `set`: re-apply only the request-body overlay (creates

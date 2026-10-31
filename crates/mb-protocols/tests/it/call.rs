@@ -183,7 +183,7 @@ fn intent(status: &str) -> Result<String, LlmError> {
 async fn confirm_changes_the_resource_a_read_returns() {
     let h = actions(vec![
         intent("requires_confirmation"),
-        Ok(json!({"id": "pi_other", "status": "succeeded", "amount": 500}).to_string()),
+        Ok(json!({"id": "pi_1", "status": "succeeded", "amount": 500}).to_string()),
     ]);
     let id = h.create_intent().await;
 
@@ -3311,6 +3311,85 @@ async fn an_effect_on_a_type_with_no_read_says_it_has_no_schema() {
     assert_eq!(effects[0]["reason"], "no schema to check against");
 }
 
+/// Actions that answer their parent's own schema, with no request that tells
+/// a new record from the same one.
+const SAME_SHAPE: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    post:
+      operationId: createOrder
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders/{id}/capture:
+    post:
+      operationId: capture
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [status]
+      properties: {id: {type: string}, status: {type: string}}
+"##;
+
+/// A capture that answers its order's id updates that order.
+#[tokio::test]
+async fn an_action_answering_its_targets_id_updates_the_target() {
+    let order = |status: &str| Ok(json!({"id": "o1", "status": status}).to_string());
+    let h = actions_of(SAME_SHAPE, vec![order("open"), order("captured")]);
+    h.call("POST", "/orders", None).await;
+    let (status, _, captured) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(captured, json!({"id": "o1", "status": "captured"}));
+    let (_, _, stored) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(stored, json!({"id": "o1", "status": "captured"}));
+}
+
+/// With no identity in the answer it is about the target, as ever.
+#[tokio::test]
+async fn an_action_answering_no_identity_updates_the_target() {
+    let h = actions_of(
+        SAME_SHAPE,
+        vec![
+            Ok(json!({"id": "o1", "status": "open"}).to_string()),
+            Ok(json!({"status": "captured"}).to_string()),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let (_, _, captured) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(captured, json!({"id": "o1", "status": "captured"}));
+    let (_, _, stored) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(stored, json!({"id": "o1", "status": "captured"}));
+}
+
+/// A faker answer invents its id, which says nothing about a new record.
+#[tokio::test]
+async fn a_fallback_action_answer_updates_the_target() {
+    let h = actions_of(
+        SAME_SHAPE,
+        vec![
+            Ok(json!({"id": "o1", "status": "open"}).to_string()),
+            Err(LlmError::Timeout),
+            Err(LlmError::Timeout),
+            Err(LlmError::Timeout),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let (_, source, captured) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(source, "fallback");
+    assert_eq!(captured["id"], "o1");
+}
+
 /// `POST /comments/{id}/replies` answers a comment: the reply is a comment of
 /// its own, read by the parent's `GET`, and the parent stays as it was.
 #[tokio::test]
@@ -3373,4 +3452,25 @@ components:
     assert_eq!(parent, json!({"id": "c1", "body": "first"}));
     let (_, _, stored) = h.call("GET", "/comments/c2", None).await;
     assert_eq!(stored, json!({"id": "c2", "body": "second"}));
+}
+
+/// A new record's omitted members are not filled in from its parent.
+#[tokio::test]
+async fn a_new_record_from_an_action_takes_nothing_from_its_parent() {
+    let contract = SAME_SHAPE.replace(
+        "properties: {id: {type: string}, status: {type: string}}",
+        "properties: {id: {type: string}, status: {type: string}, note: {type: string}}",
+    );
+    let h = actions_of(
+        &contract,
+        vec![
+            Ok(json!({"id": "o1", "status": "open", "note": "the parent's"}).to_string()),
+            Ok(json!({"id": "o2", "status": "open"}).to_string()),
+        ],
+    );
+    h.call("POST", "/orders", None).await;
+    let (_, _, answer) = h.call("POST", "/orders/o1/capture", None).await;
+    assert_eq!(answer, json!({"id": "o2", "status": "open"}));
+    let (_, _, parent) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(parent["note"], "the parent's");
 }
