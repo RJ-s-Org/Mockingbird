@@ -144,11 +144,11 @@ pub struct GenerationContext<'a> {
     /// Successful writes the target does not show yet, oldest first: what the
     /// answer must reflect. Scrubbed by whoever kept them. For the prompt only.
     pub earlier_requests: &'a [Value],
-    /// Those of [`GenerationContext::earlier_requests`] written to the target
-    /// itself (an update's or a create's own body, and only what the contract
-    /// says it holds), oldest first: they stand over what the answer wrote. A
-    /// child's or an action's body says nothing of the target's members.
-    pub earlier_own_bodies: &'a [Value],
+    /// What the latest write said of the target itself, when that was an update's
+    /// or a create's own body (only what the contract says the target holds): it
+    /// stands over what the answer wrote. Last write wins, so with any later write
+    /// there is none, and a child's or an action's body is never one.
+    pub earlier_own_body: Option<&'a Value>,
 }
 
 /// What a credential's value becomes in a body kept beyond its request (see
@@ -1881,7 +1881,7 @@ fn reflect(
     let ahead = from_llm && !ctx.earlier_requests.is_empty();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
-            Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_bodies),
+            Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
             Some(target) => overlay_target(validator, target, body),
             None => body,
         },
@@ -1896,7 +1896,7 @@ fn reflect(
             } else {
                 let body = match ctx.target {
                     Some(target) if ahead => {
-                        caught_up(validator, body, target, ctx.earlier_own_bodies)
+                        caught_up(validator, body, target, ctx.earlier_own_body)
                     }
                     Some(target) if op.is_action() && from_llm => {
                         fill_omitted(validator, body, target)
@@ -2031,52 +2031,89 @@ fn fill_omitted(validator: &SchemaValidator, answer: Value, target: &StoredResou
 }
 
 /// An answer told of earlier requests, over the stored copy it is ahead of: the
-/// copy fills what the answer left out, at any depth, and what was written to the
-/// target itself (`own`) stands over what the answer wrote, as a request's own body
-/// does (see [`overlay_request`]). What was redacted is not a value to keep.
+/// copy fills what the answer left out, at any depth, and what the latest write said
+/// of the target itself (`own`) stands over what the answer wrote, as a request's own
+/// body does (see [`overlay_request`]). What was redacted is not a value to keep.
 fn caught_up(
     validator: &SchemaValidator,
     answer: Value,
     target: &StoredResource,
-    own: &[Value],
+    own: Option<&Value>,
 ) -> Value {
-    let filled = deep_fill(&answer, &target.data);
-    let mut body = if validator.is_valid(&filled) {
+    let root = validator.schema();
+    let filled = deep_fill(root, Some(root), &answer, &target.data);
+    let body = if validator.is_valid(&filled) {
         filled
     } else {
         fill_omitted(validator, answer, target)
     };
-    for written in own {
-        let Some(Value::Object(fields)) = without_redacted(written) else {
-            continue;
-        };
-        let Value::Object(current) = &body else {
-            return body;
-        };
-        let over: Map<String, Value> = fields
-            .into_iter()
-            .map(|(k, v)| {
-                let merged = match current.get(&k) {
-                    Some(held) => deep_over(held, &v),
-                    None => v,
-                };
-                (k, merged)
-            })
-            .collect();
-        body = overlay(validator, body, Some(&Value::Object(over)));
-    }
-    body
+    let Some(Value::Object(fields)) = own.and_then(without_redacted) else {
+        return body;
+    };
+    let Value::Object(current) = &body else {
+        return body;
+    };
+    let over: Map<String, Value> = fields
+        .into_iter()
+        .map(|(k, v)| {
+            let merged = match current.get(&k) {
+                Some(held) => deep_over(held, &v),
+                None => v,
+            };
+            (k, merged)
+        })
+        .collect();
+    overlay(validator, body, Some(&Value::Object(over)))
 }
 
-/// `answer` with every member of `stored` it omits, at any depth.
-fn deep_fill(answer: &Value, stored: &Value) -> Value {
+/// What one level of a schema in `root` says, by its `$ref`s and `allOf`s: whether it
+/// has a `oneOf` or `anyOf`, and member `key`'s schema if asked for.
+fn schema_level<'a>(
+    root: &'a Value,
+    node: &'a Value,
+    key: Option<&str>,
+    depth: usize,
+) -> (bool, Option<&'a Value>) {
+    if depth > 8 {
+        return (false, None);
+    }
+    if let Some(target) = node
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix('#'))
+        .and_then(|pointer| root.pointer(pointer))
+    {
+        return schema_level(root, target, key, depth + 1);
+    }
+    let mut union = node.get("oneOf").is_some() || node.get("anyOf").is_some();
+    let mut member = key.and_then(|k| node.get("properties")?.get(k));
+    for branch in node
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (below, found) = schema_level(root, branch, key, depth + 1);
+        union |= below;
+        member = member.or(found);
+    }
+    (union, member)
+}
+
+/// `answer` with every member of `stored` it omits, at any depth, but not within a
+/// `oneOf` or `anyOf`: the branch the answer took stands, with no member of another.
+fn deep_fill(root: &Value, schema: Option<&Value>, answer: &Value, stored: &Value) -> Value {
     let (Value::Object(answer_members), Value::Object(stored_members)) = (answer, stored) else {
         return answer.clone();
     };
+    if schema.is_some_and(|node| schema_level(root, node, None, 0).0) {
+        return answer.clone();
+    }
     let mut out = answer_members.clone();
     for (k, v) in stored_members {
+        let inner = schema.and_then(|node| schema_level(root, node, Some(k), 0).1);
         match out.get_mut(k) {
-            Some(held) => *held = deep_fill(held, v),
+            Some(held) => *held = deep_fill(root, inner, held, v),
             None => {
                 out.insert(k.clone(), v.clone());
             }

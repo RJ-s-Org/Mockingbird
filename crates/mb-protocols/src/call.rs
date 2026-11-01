@@ -671,7 +671,7 @@ pub(crate) async fn generate_pending(
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
         earlier_requests: &pending.earlier.told,
-        earlier_own_bodies: &pending.earlier.own,
+        earlier_own_body: pending.earlier.own.as_ref(),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     if generated.source == Source::Fallback {

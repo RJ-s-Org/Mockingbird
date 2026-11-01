@@ -57,9 +57,10 @@ pub(super) struct Earlier {
     /// The requests as a prompt shows them: with no time, or no prompt would
     /// ever repeat, and order says what time would.
     pub(super) told: Vec<Value>,
-    /// What the requests wrote to the resource itself, oldest first: all an answer
-    /// has to keep of them. A child's or an action's body has none.
-    pub(super) own: Vec<Value>,
+    /// What the latest write said of the resource itself, if it was an update's or
+    /// a create's own body: all an answer has to keep. Last write wins, so any later
+    /// write replaces or clears it, and older bodies are only told.
+    pub(super) own: Option<Value>,
     /// Catch-ups that failed since the last write.
     attempts: u64,
     /// This call's catch-up failed, so its answer is not one to repeat.
@@ -130,61 +131,70 @@ pub(super) async fn recall(
         return Earlier::default();
     }
     let key = memory_key(t, id, held);
-    let (shown, attempts) = read_memory(state, &plan.session, &key).await;
-    let told = shown
+    let memory = read_memory(state, &plan.session, &key).await;
+    let told = memory
+        .requests
         .iter()
         .map(|request| {
             let mut told = request.clone();
             if let Value::Object(members) = &mut told {
                 members.remove("at");
-                members.remove("own");
             }
             told
         })
         .collect();
-    let own = shown
-        .iter()
-        .filter_map(|request| request.get("own").cloned())
-        .collect();
     Earlier {
         key: Some(key),
-        shown,
+        shown: memory.requests,
         told,
-        own,
-        attempts,
+        own: memory.own,
+        attempts: memory.attempts,
         failed_now: false,
         stored_answer: None,
     }
 }
 
-/// The requests a memory holds, and its failed catch-ups.
-async fn read_memory(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    key: &str,
-) -> (Vec<Value>, u64) {
+/// One resource's memory, as kept.
+#[derive(Default)]
+struct Memory {
+    requests: Vec<Value>,
+    attempts: u64,
+    own: Option<Value>,
+}
+
+async fn read_memory(state: &mut StateAccess<'_>, session: &SessionKey, key: &str) -> Memory {
     let Some(doc) = state.get(session, INTERNAL_TYPE, key).await else {
-        return (Vec::new(), 0);
+        return Memory::default();
     };
     let requests = doc.data.get("requests").and_then(Value::as_array).cloned();
-    let attempts = doc.data.get("attempts").and_then(Value::as_u64);
-    (requests.unwrap_or_default(), attempts.unwrap_or(0))
+    Memory {
+        requests: requests.unwrap_or_default(),
+        attempts: doc
+            .data
+            .get("attempts")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        own: doc.data.get("own").cloned(),
+    }
 }
 
 async fn write_memory(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     key: &str,
-    requests: &[Value],
-    attempts: u64,
+    memory: &Memory,
 ) {
+    let mut data = serde_json::json!({ "requests": memory.requests, "attempts": memory.attempts });
+    if let Some(own) = &memory.own {
+        data["own"] = own.clone();
+    }
     state
         .upsert(
             session,
             StoredResource {
                 resource_type: INTERNAL_TYPE.to_string(),
                 id: key.to_string(),
-                data: serde_json::json!({ "requests": requests, "attempts": attempts }),
+                data,
             },
         )
         .await;
@@ -279,11 +289,12 @@ pub(super) async fn failed_attempt(
     let Some(key) = earlier.key.clone() else {
         return;
     };
-    let (requests, attempts) = read_memory(state, &plan.session, &key).await;
-    let attempts = attempts + 1;
+    let mut memory = read_memory(state, &plan.session, &key).await;
+    memory.attempts += 1;
+    let attempts = memory.attempts;
     earlier.attempts = attempts;
     earlier.failed_now = true;
-    write_memory(state, &plan.session, &key, &requests, attempts).await;
+    write_memory(state, &plan.session, &key, &memory).await;
     if attempts >= MAX_ATTEMPTS {
         tracing::warn!(
             mock = %state.rt.name,
@@ -440,6 +451,11 @@ impl<'a> Level<'a> {
         out
     }
 
+    /// The schema `properties` give member `key`, leaving maps aside.
+    fn named(&self, key: &str) -> Option<&'a Value> {
+        self.properties.iter().find_map(|p| p.get(key))
+    }
+
     /// What it says of member `key`: `None` when it does not declare it, and an
     /// inner `None` when it allows it with no schema to go by.
     fn member(&self, key: &str) -> Option<Option<&'a Value>> {
@@ -558,46 +574,12 @@ fn pinned_members<'a>(rt: &'a MockRuntime, t: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// What `t`'s `request` says of the resource itself, within the caps.
+/// What `t`'s `request` says of the resource itself, if that fits the caps. One that
+/// does not is no own body at all: a part of it, or a mark of it, is not the resource.
 fn own_part(rt: &MockRuntime, t: &str, request: &Value) -> Option<Value> {
     let pinned = pinned_members(rt, t);
-    declared_part(rt.bundle(), read_schema(rt, t), request, &pinned).map(within_cap)
-}
-
-/// So an older request's body cannot revert `written` in a catch-up, it goes over
-/// what the newest remembered request wrote, which a catch-up applies last.
-async fn protect_in_memory(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    key: &str,
-    written: &Value,
-) {
-    let (mut requests, attempts) = read_memory(state, session, key).await;
-    let Some(Value::Object(newest)) = requests.last_mut() else {
-        return;
-    };
-    let own = match newest.get("own") {
-        Some(own) => deep_merged(own, written),
-        None => written.clone(),
-    };
-    newest.insert("own".to_string(), own);
-    write_memory(state, session, key, &requests, attempts).await;
-}
-
-/// `over` on `base`, objects member by member.
-fn deep_merged(base: &Value, over: &Value) -> Value {
-    let (Value::Object(base_members), Value::Object(over_members)) = (base, over) else {
-        return over.clone();
-    };
-    let mut out = base_members.clone();
-    for (key, value) in over_members {
-        let merged = match out.get(key) {
-            Some(below) => deep_merged(below, value),
-            None => value.clone(),
-        };
-        out.insert(key.clone(), merged);
-    }
-    Value::Object(out)
+    declared_part(rt.bundle(), read_schema(rt, t), request, &pinned)
+        .filter(|own| own.to_string().len() <= MAX_BODY_BYTES)
 }
 
 /// A 204 update's `request` on stored `held`, as far as its read's schema declares
@@ -653,13 +635,15 @@ fn apply_update(
     (kept, (!left.is_empty()).then_some(Value::Object(left)))
 }
 
-/// Whether a member named `name` holds a credential, when its schema does not say:
-/// by name (see [`is_sensitive`]), or as one of the mock's own credential names.
-fn is_credential_name(rt: &MockRuntime, name: &str) -> bool {
+/// Whether `name` is one of the mock's own credential names.
+fn is_own_credential(rt: &MockRuntime, name: &str) -> bool {
     let own = rt.credential_names();
-    is_sensitive(name)
-        || own.headers.contains(&name.to_ascii_lowercase())
-        || own.query.contains(name)
+    own.headers.contains(&name.to_ascii_lowercase()) || own.query.contains(name)
+}
+
+/// Whether a member named `name` holds a credential, when a contract does not say.
+fn is_credential_name(rt: &MockRuntime, name: &str) -> bool {
+    is_sensitive(name) || is_own_credential(rt, name)
 }
 
 /// Whether `value` under `name` is a count, not a credential: `max_tokens: 100`.
@@ -677,12 +661,19 @@ fn schema_hides(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
     })
 }
 
-/// `value` with every credential replaced, at any depth: what its schema marks
-/// `writeOnly` or `format: password`, else, as the last resort, a member named as
-/// one or a `{"name": "Authorization", "value": ...}` pair.
-fn redact_credentials(rt: &MockRuntime, value: &mut Value, schema: Option<&Value>) {
+/// `value` with every credential replaced, at any depth. The contract speaks first:
+/// what either schema marks `writeOnly` or `format: password`, and the mock's own
+/// credential names. A member the read schema (`read`) declares otherwise is one the
+/// API returns, so only a name ending in a credential word hides it. Otherwise, as the
+/// last resort, a name holding one does, or a `{"name": "Authorization", "value": ...}`
+/// pair.
+fn redact_credentials(
+    rt: &MockRuntime,
+    value: &mut Value,
+    schema: Option<&Value>,
+    read: Option<&Value>,
+) {
     let bundle = rt.bundle();
-    let (parts, _) = schema_parts(bundle, schema);
     match value {
         Value::Object(members) => {
             let named_pair = ["name", "key", "header"]
@@ -692,21 +683,37 @@ fn redact_credentials(rt: &MockRuntime, value: &mut Value, schema: Option<&Value
             if named_pair && let Some(paired) = members.get_mut("value") {
                 *paired = Value::from(REDACTED);
             }
+            let (parts, _) = schema_parts(bundle, schema);
+            let returned = Level::of(bundle, read);
             for (key, member) in members.iter_mut() {
                 let inner = parts.iter().find_map(|p| p.get("properties")?.get(key));
+                let read_inner = returned.named(key);
+                let by_name = match read_inner {
+                    Some(_) => mb_mcm::credentials::ends_in_credential(key),
+                    None => is_credential_name(rt, key) && !is_count(key, member),
+                };
                 if schema_hides(bundle, inner)
-                    || (is_credential_name(rt, key) && !is_count(key, member))
+                    || schema_hides(bundle, read_inner)
+                    || is_own_credential(rt, key)
+                    || by_name
                 {
                     *member = Value::from(REDACTED);
                 } else {
-                    redact_credentials(rt, member, inner);
+                    redact_credentials(rt, member, inner, read_inner);
                 }
             }
         }
         Value::Array(items) => {
-            let inner = parts.iter().find_map(|p| p.get("items"));
+            let inner = schema_parts(bundle, schema)
+                .0
+                .iter()
+                .find_map(|p| p.get("items"));
+            let read_inner = schema_parts(bundle, read)
+                .0
+                .iter()
+                .find_map(|p| p.get("items"));
             for item in items {
-                redact_credentials(rt, item, inner);
+                redact_credentials(rt, item, inner, read_inner);
             }
         }
         _ => {}
@@ -717,7 +724,12 @@ fn redact_credentials(rt: &MockRuntime, value: &mut Value, schema: Option<&Value
 /// log's own redaction, then the PII the engine scrubs from answers and effects.
 fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value) -> Value {
     let mut body = body.clone();
-    redact_credentials(rt, &mut body, plan.op.input.body.as_ref());
+    let read = plan
+        .op
+        .resource_type
+        .as_deref()
+        .and_then(|t| read_schema(rt, t));
+    redact_credentials(rt, &mut body, plan.op.input.body.as_ref(), read);
     if let Some(recorder) = &rt.recorder {
         recorder.redact(&mut body);
     }
@@ -750,6 +762,16 @@ fn carries(request: &Value, stored: &Value) -> bool {
             .iter()
             .all(|(key, inner)| stored.get(key).is_some_and(|held| carries(inner, held))),
         other => other == stored,
+    }
+}
+
+/// Whether all `value` holds is what was redacted: a catch-up could show none of it.
+fn only_redacted(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text == REDACTED,
+        Value::Object(members) => members.values().all(only_redacted),
+        Value::Array(items) => items.iter().all(only_redacted),
+        _ => false,
     }
 }
 
@@ -838,41 +860,56 @@ async fn parent_of(
     None
 }
 
-/// Adds `entry` to a memory, within the caps. A new request is worth trying for,
-/// so the count of failed catch-ups starts over.
-async fn remember(state: &mut StateAccess<'_>, session: &SessionKey, key: &str, entry: &Value) {
-    let (mut requests, _) = read_memory(state, session, key).await;
-    requests.push(entry.clone());
-    let excess = requests.len().saturating_sub(MAX_REMEMBERED);
-    requests.drain(..excess);
-    let size = |requests: &[Value]| {
-        serde_json::json!({ "requests": requests })
+/// Adds `entry` to a memory, within the caps, with what it said of the resource
+/// itself in place of any older own body. A new request is worth trying for, so the
+/// count of failed catch-ups starts over.
+async fn remember(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    key: &str,
+    entry: &Value,
+    own: Option<Value>,
+) {
+    let mut memory = read_memory(state, session, key).await;
+    memory.requests.push(entry.clone());
+    let excess = memory.requests.len().saturating_sub(MAX_REMEMBERED);
+    memory.requests.drain(..excess);
+    memory.attempts = 0;
+    memory.own = own;
+    let size = |requests: &[Value], own: Option<&Value>| {
+        serde_json::json!({ "requests": requests, "own": own })
             .to_string()
             .len()
     };
-    while requests.len() > 1 && size(&requests) > MAX_BYTES {
-        requests.remove(0);
+    while memory.requests.len() > 1 && size(&memory.requests, memory.own.as_ref()) > MAX_BYTES {
+        memory.requests.remove(0);
     }
-    write_memory(state, session, key, &requests, 0).await;
+    write_memory(state, session, key, &memory).await;
+}
+
+/// Ends what an older own body may overlay: a later write has the last word.
+async fn clear_own(state: &mut StateAccess<'_>, session: &SessionKey, key: &str) {
+    let mut memory = read_memory(state, session, key).await;
+    if memory.own.take().is_some() {
+        write_memory(state, session, key, &memory).await;
+    }
 }
 
 /// Takes from a memory the requests `shown`, and nothing a write added since: this
-/// answer was not told of those.
+/// answer was not told of those, whose own body, if any, stands.
 async fn forget_shown(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     key: &str,
     shown: &[Value],
 ) {
-    let (requests, _) = read_memory(state, session, key).await;
-    let left: Vec<Value> = requests
-        .into_iter()
-        .filter(|r| !shown.contains(r))
-        .collect();
-    if left.is_empty() {
+    let mut memory = read_memory(state, session, key).await;
+    memory.requests.retain(|r| !shown.contains(r));
+    if memory.requests.is_empty() {
         state.delete(session, INTERNAL_TYPE, key).await;
     } else {
-        write_memory(state, session, key, &left, 0).await;
+        memory.attempts = 0;
+        write_memory(state, session, key, &memory).await;
     }
 }
 
@@ -921,7 +958,9 @@ struct Tell {
 /// before it serves, on any node.
 ///
 /// Only an update's or a create's body is the resource's own, for a catch-up to
-/// keep. A child's or an action's is told, and is about something else.
+/// keep, and only the latest write's: last write wins. A child's or an action's is
+/// told, and is about something else, and like an applied effect or a fully applied
+/// update it ends what an older body may overlay.
 pub(super) async fn after_write(
     state: &mut StateAccess<'_>,
     rt: &MockRuntime,
@@ -988,6 +1027,7 @@ pub(super) async fn after_write(
                 .filter(|_| !w.earlier.shown.is_empty())
             {
                 forget_shown(state, session, key, &w.earlier.shown).await;
+                clear_own(state, session, key).await;
             }
         }
         Effect::Update if generated.body.is_some() => {
@@ -1029,15 +1069,19 @@ pub(super) async fn after_write(
             }
         }
     }
-    // What an effect just wrote stands over what older requests wrote.
+    // Last write wins: what an older body said of what this write touched is over.
     for outcome in generated
         .effect_outcomes
         .iter()
         .filter(|o| o.rejected.is_none())
     {
         let key = memory_key(&outcome.effect.resource_type, &outcome.effect.id, true);
-        let written = Value::Object(outcome.effect.set.clone());
-        protect_in_memory(state, session, &key, &written).await;
+        clear_own(state, session, &key).await;
+    }
+    if target.is_none()
+        && let Some(key) = w.earlier.key.as_deref().filter(|_| w.earlier.own.is_some())
+    {
+        clear_own(state, session, key).await;
     }
     let tells_parent =
         effect == Effect::Create || (effect == Effect::Other && generated.body.is_none());
@@ -1055,15 +1099,12 @@ pub(super) async fn after_write(
     if target.is_none() && parent.is_none() {
         return;
     }
-    let entry = |body: Option<Value>, own: Option<Value>| {
+    let entry = |body: Option<Value>| {
         let mut entry = Map::new();
         entry.insert("operation".to_string(), Value::from(op.id.as_str()));
         entry.insert("path".to_string(), Value::from(route(op)));
         if let Some(body) = body {
             entry.insert("body".to_string(), within_cap(body));
-        }
-        if let Some(own) = own {
-            entry.insert("own".to_string(), own);
         }
         entry.insert(
             "at".to_string(),
@@ -1073,7 +1114,7 @@ pub(super) async fn after_write(
     };
     if let Some(tell) = target {
         let key = memory_key(t, &tell.id, tell.stored);
-        remember(state, session, &key, &entry(tell.body, tell.own)).await;
+        remember(state, session, &key, &entry(tell.body), tell.own).await;
         if tell.publish
             && let Some(held) = w.held
         {
@@ -1082,7 +1123,7 @@ pub(super) async fn after_write(
     }
     if let Some(parent) = parent {
         let key = memory_key(&parent.resource_type, &parent.id, true);
-        remember(state, session, &key, &entry(request, None)).await;
+        remember(state, session, &key, &entry(request), None).await;
     }
 }
 
@@ -1113,6 +1154,9 @@ async fn update_without_answer(
         };
     };
     let t = held.resource_type.as_str();
+    // The path says whose it is: a member saying otherwise is not applied or told.
+    let raw = &without_contradictions(rt, plan, w.call, held, raw);
+    let request = request.map(|r| without_contradictions(rt, plan, w.call, held, r));
     let (merged, rest) = apply_update(rt, held, raw);
     let changed = merged != held.data;
     if changed {
@@ -1124,20 +1168,15 @@ async fn update_without_answer(
             rt.collections().carry(session, held, &resource);
         }
     }
-    let own = request.and_then(|r| own_part(rt, t, r));
+    let own = request.as_ref().and_then(|r| own_part(rt, t, r));
     // What is left, as it may be kept: every credential has gone by now, since a
-    // scrubbed request has the same shape. What the copy holds has nothing to tell.
-    let kept = match (request, &rest) {
+    // scrubbed request has the same shape. What the copy holds has nothing to tell,
+    // and what was redacted nothing a catch-up could show.
+    let kept = match (&request, &rest) {
         (Some(request), Some(rest)) => Some(kept_part(request, rest)),
         _ => None,
     };
-    let Some(kept) = kept.filter(|kept| !carries(kept, &merged)) else {
-        if changed && let Some(own) = &own {
-            let key = memory_key(t, &held.id, true);
-            protect_in_memory(state, session, &key, own).await;
-        }
-        return None;
-    };
+    let kept = kept.filter(|kept| !carries(kept, &merged) && !only_redacted(kept))?;
     Some(Tell {
         id: acted_on?.to_string(),
         body: Some(kept),
@@ -1145,6 +1184,44 @@ async fn update_without_answer(
         stored: true,
         publish: !changed,
     })
+}
+
+/// Whether `data` says it is not `owner`'s, as a write taking it would see (see
+/// [`known_foreign`]), with no record of where it was stored to go by.
+fn says_foreign(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> bool {
+    match owner_evidence(rt, r, owner) {
+        Some(shown) => !shown,
+        None => links_elsewhere(r, owner),
+    }
+}
+
+/// `body` without the members that would make `held` say it is another owner's than
+/// the path names (see [`guarded`]).
+fn without_contradictions(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &StoredResource,
+    body: &Value,
+) -> Value {
+    let (Some(owner), Value::Object(fields), Value::Object(stored)) =
+        (guarded(rt, plan.op, call), body, &held.data)
+    else {
+        return body.clone();
+    };
+    if says_foreign(rt, held, &owner) {
+        return body.clone();
+    }
+    let kept = fields.iter().filter(|(key, value)| {
+        let mut data = stored.clone();
+        data.insert((*key).clone(), (*value).clone());
+        let candidate = StoredResource {
+            data: Value::Object(data),
+            ..held.clone()
+        };
+        !says_foreign(rt, &candidate, &owner)
+    });
+    Value::Object(kept.map(|(k, v)| (k.clone(), v.clone())).collect())
 }
 
 /// The part of scrubbed `request` that `rest` is the raw form of.
@@ -1424,7 +1501,7 @@ service Items {
             "authored": "kept",
             "pairs": [{"key": "Cookie", "value": "c"}, {"key": "colour", "value": "red"}],
         });
-        redact_credentials(&rt, &mut body, None);
+        redact_credentials(&rt, &mut body, None, None);
         assert_eq!(
             body,
             json!({

@@ -65,6 +65,20 @@ pub fn is_credential_name(name: &str) -> bool {
     ANYWHERE.iter().any(|n| normalized.contains(n)) || WHOLE_WORD.iter().any(|w| has_word(name, w))
 }
 
+/// Whether `name` ends in a credential word: `client_secret`, `api_key` and
+/// `user_pin`, not `session_title`, `token_count`, `tokenizer` or `secretary`. For a
+/// member a contract says an API returns, where a credential word inside its name
+/// says little.
+#[must_use]
+pub fn ends_in_credential(name: &str) -> bool {
+    let mut normalized = String::with_capacity(name.len());
+    normalize_into(name, &mut normalized);
+    ANYWHERE.iter().any(|n| normalized.ends_with(n))
+        || WHOLE_WORD
+            .iter()
+            .any(|w| normalized.ends_with(w) && has_word(name, w))
+}
+
 /// Whether a number under `name`, once normalized, is a count and no credential:
 /// `max_tokens: 100`. A plural is not what a credential goes by.
 #[must_use]
@@ -132,6 +146,31 @@ mod tests {
             "public_key_id",
         ] {
             assert!(!is_credential_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn what_a_name_ends_in() {
+        for name in [
+            "password",
+            "client_secret",
+            "api_key",
+            "access_token",
+            "user_pin",
+        ] {
+            assert!(ends_in_credential(name), "{name}");
+        }
+        for name in [
+            "session_title",
+            "sessions_count",
+            "auth_method",
+            "pin_id",
+            "tokenizer",
+            "secretary",
+            "token_count",
+            "spin",
+        ] {
+            assert!(!ends_in_credential(name), "{name}");
         }
     }
 

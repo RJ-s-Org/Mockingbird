@@ -191,7 +191,8 @@ impl RequestRecorder for StoreRecorder {
     /// live settings.
     fn redact(&self, value: &mut Value) {
         let settings = self.settings.load();
-        redact_normalized(value, &settings.redact_fields, true, &mut String::new());
+        let keep = Some(settings.default_fields.as_slice());
+        redact_normalized(value, &settings.redact_fields, keep, &mut String::new());
     }
 
     /// Queues the record for the writer. The only work done here is a
@@ -345,13 +346,18 @@ struct Settings {
     retention: u32,
     /// The redacted fields, normalized (see [`normalize_fields`]).
     redact_fields: Vec<String>,
+    /// The fields every config starts with, normalized. An operator who adds a
+    /// field means it wherever it appears; these are broad words.
+    default_fields: Vec<String>,
 }
 
 impl Settings {
     fn new(retention: u32, redact_fields: Vec<String>) -> Self {
+        let defaults = crate::file_config::ObservabilityConfig::default().redact_fields;
         Self {
             retention,
             redact_fields: normalize_fields(&redact_fields),
+            default_fields: normalize_fields(&defaults),
         }
     }
 }
@@ -403,9 +409,9 @@ impl Writer {
     async fn write(&mut self, mut r: RequestRecord) {
         let settings = self.settings.load_full();
         let mut scratch = String::new();
-        redact_normalized(&mut r.request, &settings.redact_fields, false, &mut scratch);
+        redact_normalized(&mut r.request, &settings.redact_fields, None, &mut scratch);
         if let Some(response) = &mut r.response {
-            redact_normalized(response, &settings.redact_fields, false, &mut scratch);
+            redact_normalized(response, &settings.redact_fields, None, &mut scratch);
         }
         if let Some(body) = r.request.get_mut("body") {
             truncate_body(body);
@@ -534,7 +540,7 @@ impl std::io::Write for Preview {
 /// `api_key` and `x-api-key`; it also redacts `tokenizer_version`, erring
 /// on the side of hiding a value.
 pub fn redact(value: &mut Value, fields: &[String]) {
-    redact_normalized(value, &normalize_fields(fields), false, &mut String::new());
+    redact_normalized(value, &normalize_fields(fields), None, &mut String::new());
 }
 
 /// `fields` normalized (see [`normalize_key_into`]), empty ones dropped.
@@ -551,14 +557,14 @@ fn normalize_fields(fields: &[String]) -> Vec<String> {
 }
 
 /// [`redact`] with `fields` already normalized; `scratch` holds each
-/// normalized key in turn, so no key allocates. With `keep_counts`, for what is
-/// kept and shown again rather than logged, a number under a plural key that a
-/// field only partly matches stays (`max_tokens` for `token`): a field naming the
-/// key itself still wins.
+/// normalized key in turn, so no key allocates. With `keeping`, the broad fields, for
+/// what is kept and shown again rather than logged, one of those matches only where
+/// a key ends in it: `access_token`, not `max_tokens` or `tokenizer`. A field naming
+/// the key itself, and any field an operator added, still matches as ever.
 fn redact_normalized(
     value: &mut Value,
     fields: &[String],
-    keep_counts: bool,
+    keeping: Option<&[String]>,
     scratch: &mut String,
 ) {
     if fields.is_empty() {
@@ -568,22 +574,23 @@ fn redact_normalized(
         Value::Object(map) => {
             for (key, v) in map.iter_mut() {
                 mb_mcm::credentials::normalize_into(key, scratch);
-                if fields.iter().any(|f| scratch.contains(f.as_str())) {
-                    let count = keep_counts
-                        && v.is_number()
-                        && mb_mcm::credentials::is_count_name(scratch)
-                        && !fields.iter().any(|f| f == scratch);
-                    if !count {
-                        *v = Value::String(REDACTED.to_string());
+                let matches = fields.iter().any(|f| {
+                    if keeping.is_some_and(|broad| broad.contains(f)) {
+                        scratch.ends_with(f.as_str())
+                    } else {
+                        scratch.contains(f.as_str())
                     }
+                });
+                if matches {
+                    *v = Value::String(REDACTED.to_string());
                 } else {
-                    redact_normalized(v, fields, keep_counts, scratch);
+                    redact_normalized(v, fields, keeping, scratch);
                 }
             }
         }
         Value::Array(items) => {
             for v in items {
-                redact_normalized(v, fields, keep_counts, scratch);
+                redact_normalized(v, fields, keeping, scratch);
             }
         }
         _ => {}
@@ -614,9 +621,15 @@ mod tests {
             json!({"access_token": REDACTED, "nested": {"note": "b"}})
         );
 
-        let mut count = json!({"max_tokens": 100, "tokens": "a"});
+        let mut count = json!({"max_tokens": 100, "tokenizer": "a"});
         recorder.redact(&mut count);
-        assert_eq!(count, json!({"max_tokens": 100, "tokens": REDACTED}));
+        assert_eq!(count, json!({"max_tokens": 100, "tokenizer": "a"}));
+
+        // A field of the operator's own matches wherever it appears.
+        recorder.set_settings(10, vec!["ssn".to_string()]);
+        let mut own = json!({"ssn_last4": "1"});
+        recorder.redact(&mut own);
+        assert_eq!(own, json!({"ssn_last4": REDACTED}));
 
         // An operator naming the member itself wins, for a number too.
         recorder.set_settings(10, vec!["max_tokens".to_string()]);

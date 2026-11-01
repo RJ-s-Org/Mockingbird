@@ -266,6 +266,52 @@ paths:
         content: {application/json: {schema: {type: object, additionalProperties: true}}}
       responses:
         "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+  /orgs/{org}/groups:
+    post:
+      operationId: createGroup
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Group"}}}}
+  /orgs/{org}/groups/{slug}:
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}}
+      - {name: slug, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getGroup
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Group"}}}}
+    put:
+      operationId: putGroup
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "204": {description: replaced}
+  /accounts/{account_id}:
+    parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAccount
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}
+    put:
+      operationId: putAccount
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "204": {description: replaced}
+  /accounts/{account_id}/refresh:
+    parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: refreshAccount
+      requestBody:
+        required: false
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "204": {description: refreshed}
   /orgs/{org}/teams/{slug}/archive:
     parameters:
       - {name: org, in: path, required: true, schema: {type: string}}
@@ -423,6 +469,35 @@ components:
       properties:
         id: {type: string}
         login: {type: string}
+    Group:
+      type: object
+      required: [id, slug, organization]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        organization: {type: string}
+        name: {type: string}
+    Account:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        session_title: {type: string}
+        sessions_count: {type: integer}
+        auth_method: {type: string}
+        pin_id: {type: string}
+        tokenizer: {type: string}
+        secretary: {type: string}
+        token_count: {type: integer}
+        access_token: {type: string}
+        client_secret: {type: string}
+        api_key: {type: string}
+        password: {type: string}
+        hidden: {type: string, writeOnly: true}
+        pay:
+          oneOf:
+            - {type: object, required: [type, iban], properties: {type: {enum: [bank]}, iban: {type: string}}}
+            - {type: object, required: [type, number], properties: {type: {enum: [card]}, number: {type: string}}}
     Member:
       type: object
       required: [id, login]
@@ -1647,14 +1722,288 @@ async fn a_value_elsewhere_in_the_copy_is_not_the_member() {
     assert_eq!(memory[0].data["requests"][0]["body"], json!({"alias": "x"}));
 }
 
-/// A redacted member was never compared, so it is not taken as shown.
+/// A remainder holding only what was redacted cannot be shown by a catch-up, so
+/// it is not remembered and costs no call; nor is the secret stored or served.
 #[tokio::test]
-async fn a_redacted_member_is_not_taken_as_shown() {
+async fn a_remainder_of_redacted_values_is_not_remembered() {
     let h = things(vec![pet("old")]);
     h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
-    h.call("PUT", "/pets/p1", Some(json!({"token_count": 5})))
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"name": "new", "password": "hunter2-kept-out"})),
+    )
+    .await;
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+    let (_, source, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read["name"], "new");
+    assert!(!read.to_string().contains("hunter2"), "{read}");
+    assert_eq!(h.calls(), 1, "no call for what cannot be shown");
+}
+
+/// A redacted member beside one that can be shown is told, as redacted.
+#[tokio::test]
+async fn a_redacted_member_goes_with_what_can_be_told() {
+    let h = things(vec![pet("old")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"password": "hunter2-kept-out", "client_ref": "abc"})),
+    )
+    .await;
+    let memory = h.memory().await;
+    assert_eq!(
+        memory[0].data["requests"][0]["body"],
+        json!({"password": "[redacted]", "client_ref": "abc"})
+    );
+}
+
+/// The last write wins: an older own body cannot stand over what an action did.
+#[tokio::test]
+async fn an_action_ends_what_an_older_create_can_overlay() {
+    let h = things(vec![
+        json!({"id": "i1"}),
+        json!({"id": "i1", "title": "t", "status": "submitted"}),
+    ]);
+    h.call(
+        "POST",
+        "/items",
+        Some(json!({"title": "t", "status": "draft"})),
+    )
+    .await;
+    h.call("POST", "/items/i1/close", None).await;
+    let (_, source, read) = h.call("GET", "/items/i1", None).await;
+    assert_eq!(source, "llm");
+    assert_eq!(read["status"], "submitted");
+    assert!(block(&h.prompt(1)).unwrap().contains("draft"), "still told");
+    let stored = h
+        .store
+        .get(&session(), "items", "i1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["status"], "submitted");
+}
+
+/// As it cannot over what an action did after an update with a remainder.
+#[tokio::test]
+async fn an_action_ends_what_an_older_update_can_overlay() {
+    let h = things(vec![pet("old"), pet("after the action")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"name": "reopened", "extra": "e"})),
+    )
+    .await;
+    h.call("POST", "/pets/p1/birthday", None).await;
+    let (_, _, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(read["name"], "after the action");
+}
+
+/// A newer update answering short is the last word, not the older one.
+#[tokio::test]
+async fn a_short_update_replaces_an_older_own_body() {
+    let h = things(vec![
+        json!({"id": "w1", "colour": "red"}),
+        json!({"id": "w1"}),
+        json!({"id": "w1", "colour": "green"}),
+        json!({"id": "w1", "colour": "green"}),
+    ]);
+    h.call("GET", "/widgets/w1", None).await;
+    h.call(
+        "PUT",
+        "/widgets/w1",
+        Some(json!({"colour": "blue", "extra": "e"})),
+    )
+    .await;
+    h.call("PUT", "/widgets/w1", Some(json!({"colour": "green"})))
         .await;
-    assert_eq!(h.memory().await.len(), 1);
+    let (_, _, read) = h.call("GET", "/widgets/w1", None).await;
+    assert_eq!(read["colour"], "green");
+    let stored = h
+        .store
+        .get(&session(), "widgets", "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["colour"], "green");
+}
+
+/// A child's create that tells a record ends what an older body can overlay.
+#[tokio::test]
+async fn a_childs_create_ends_what_an_older_body_can_overlay() {
+    let post = json!({"id": "po1", "body": "text", "status": "open"});
+    let h = harness(
+        THINGS.as_bytes(),
+        vec![
+            Ok(json!({"id": "c1", "body": "hi"}).to_string()),
+            Ok(json!({"id": "po1", "body": "text", "status": "commented"}).to_string()),
+        ],
+    );
+    hold(&h, "posts", "po1", post).await;
+    let mut older = StoredResource {
+        resource_type: MEMORY.into(),
+        id: "posts/po1".into(),
+        data: json!({"requests": [{"operation": "x", "path": "/x", "at": "t"}],
+            "attempts": 0, "own": {"status": "older"}}),
+    };
+    older.data["own"] = json!({"status": "older"});
+    h.store.upsert(&session(), older).await.unwrap();
+    h.call("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
+        .await;
+    let (_, _, read) = h.call("GET", "/posts/po1", None).await;
+    assert_eq!(read["status"], "commented");
+}
+
+/// A body too large to keep whole clears the older one, and is never kept as a
+/// cut string or a marker that could reach the record.
+#[tokio::test]
+async fn an_oversized_own_body_brings_back_nothing() {
+    let big = "g".repeat(5 * 1024);
+    let huge = "h".repeat(70 * 1024);
+    for name in [big, huge] {
+        let h = things(vec![pet("old"), json!({"id": "p1", "name": "model"})]);
+        h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+        h.call(
+            "PUT",
+            "/pets/p1",
+            Some(json!({"name": "older", "extra": "e"})),
+        )
+        .await;
+        h.call("PUT", "/pets/p1", Some(json!({"name": name, "extra": "f"})))
+            .await;
+        for doc in h.memory().await {
+            assert!(doc.data.get("own").is_none(), "cleared, not cut: {doc:?}");
+        }
+        let (_, _, read) = h.call("GET", "/pets/p1", None).await;
+        assert_ne!(read["name"], "older");
+        let text = read.to_string();
+        assert!(
+            !text.contains("truncated") && !text.contains("bytes"),
+            "{text}"
+        );
+        let stored = h
+            .store
+            .get(&session(), "pets", "p1")
+            .await
+            .unwrap()
+            .unwrap();
+        let text = stored.data.to_string();
+        assert!(
+            !text.contains("truncated") && !text.contains("bytes"),
+            "{text}"
+        );
+    }
+}
+
+/// A member contradicting the owner in the path is neither applied nor remembered:
+/// the path wins, and it costs no call.
+#[tokio::test]
+async fn a_member_naming_another_owner_is_not_applied() {
+    let group = json!({"id": "g1", "slug": "core", "organization": "octo", "name": "Core"});
+    let h = things(vec![group.clone()]);
+    let (status, _, _) = h
+        .call("POST", "/orgs/octo/groups", Some(json!({"name": "Core"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = h
+        .call(
+            "PUT",
+            "/orgs/octo/groups/core",
+            Some(json!({"organization": "acme", "name": "Renamed"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+    let (_, source, read) = h.call("GET", "/orgs/octo/groups/core", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read["organization"], "octo");
+    assert_eq!(read["name"], "Renamed");
+    assert_eq!(h.calls(), 1, "no call");
+    let (_, source, _) = h.call("GET", "/orgs/acme/groups/core", None).await;
+    assert_ne!(source, "state", "no acme read serves it");
+}
+
+/// With a remainder too, a contradiction spends no catch-up.
+#[tokio::test]
+async fn a_member_naming_another_owner_is_not_told() {
+    let group = json!({"id": "g1", "slug": "core", "organization": "octo"});
+    let h = things(vec![group.clone()]);
+    h.call("POST", "/orgs/octo/groups", Some(json!({"name": "Core"})))
+        .await;
+    h.call(
+        "PUT",
+        "/orgs/octo/groups/core",
+        Some(json!({"organization": "acme", "extra": "e"})),
+    )
+    .await;
+    let memory = h.memory().await;
+    assert_eq!(memory[0].data["requests"][0]["body"], json!({"extra": "e"}));
+    assert!(memory[0].data["own"].is_null(), "{memory:?}");
+}
+
+/// A member the read schema declares plainly is one the API returns: redacted only
+/// when its name ends in a credential. Undeclared, the name alone decides.
+#[tokio::test]
+async fn a_declared_member_is_redacted_only_by_its_last_word() {
+    let h = things(vec![]);
+    hold(&h, "accounts", "a1", json!({"id": "a1"})).await;
+    h.call(
+        "POST",
+        "/accounts/a1/refresh",
+        Some(json!({
+            "session_title": "kept-1",
+            "auth_method": "kept-2",
+            "pin_id": "kept-3",
+            "tokenizer": "kept-4",
+            "secretary": "kept-5",
+            "sessions_count": 41,
+            "token_count": 42,
+            "password": "gone-1",
+            "client_secret": "gone-2",
+            "api_key": "gone-3",
+            "access_token": "gone-4",
+            "hidden": "gone-5",
+            "session_note": "gone-6",
+        })),
+    )
+    .await;
+    let kept = h.memory().await[0].data.to_string();
+    assert!(!kept.contains("gone-"), "{kept}");
+    for value in [
+        "kept-1", "kept-2", "kept-3", "kept-4", "kept-5", ":41", ":42",
+    ] {
+        assert!(kept.contains(value), "{value} in {kept}");
+    }
+}
+
+/// The answer's branch of a union stands: no member of another is filled in.
+#[tokio::test]
+async fn a_catch_up_fills_nothing_across_union_branches() {
+    let h = things(vec![
+        json!({"id": "a1", "pay": {"type": "card", "number": "4"}}),
+    ]);
+    hold(
+        &h,
+        "accounts",
+        "a1",
+        json!({"id": "a1", "pay": {"type": "bank", "iban": "DE1"}}),
+    )
+    .await;
+    h.call("POST", "/accounts/a1/refresh", None).await;
+    let (_, source, read) = h.call("GET", "/accounts/a1", None).await;
+    assert_eq!(source, "llm");
+    assert_eq!(read["pay"], json!({"type": "card", "number": "4"}));
+    let stored = h
+        .store
+        .get(&session(), "accounts", "a1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["pay"], json!({"type": "card", "number": "4"}));
 }
 
 /// What was redacted is not a value: not overlaid, stored or served, however deep.
@@ -1708,7 +2057,7 @@ async fn a_catch_up_cannot_revert_what_the_update_applied() {
 /// A newer update, fully applied, is not reverted by an older one's memory.
 #[tokio::test]
 async fn an_older_body_cannot_revert_a_newer_update() {
-    let h = things(vec![pet("old"), pet("old")]);
+    let h = things(vec![pet("old"), pet("second")]);
     h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
     h.call(
         "PUT",

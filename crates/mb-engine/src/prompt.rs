@@ -180,7 +180,7 @@ fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) 
         scenario: ctx.scenario.as_ref(),
         response_schema: None,
         earlier_requests: &[],
-        earlier_own_bodies: &[],
+        earlier_own_body: None,
     };
     let mut s = user_message(call, &unary, false, None, false);
     if !ctx.request_stream.is_empty() {
