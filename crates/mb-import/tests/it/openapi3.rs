@@ -2148,3 +2148,137 @@ components:
         assert_eq!(op.resource_type.as_deref(), Some("widgets"));
     }
 }
+
+fn op<'a>(bundle: &'a mb_mcm::Bundle, id: &str) -> &'a mb_mcm::Operation {
+    bundle.operation(id).unwrap()
+}
+
+/// A path by id over `$ref`s the routes share: one user, its lookups, and what
+/// must not be taken for either.
+const SHARED_SCHEMAS: &str = r##"
+openapi: 3.0.0
+info: {title: Shared, version: "1"}
+paths:
+  /users:
+    post:
+      operationId: createUser
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+  /users/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+    delete:
+      operationId: deleteUser
+      responses: {"204": {description: gone}}
+  /users-by-email:
+    get:
+      operationId: usersByEmail
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}}
+  /people-page:
+    get:
+      operationId: peoplePage
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}, people: {type: array, items: {$ref: "#/components/schemas/User"}}}}}}}}
+  /teams/{team}/members:
+    parameters: [{name: team, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: teamMembers
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}}
+  /me:
+    get:
+      operationId: me
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+  /admins:
+    get:
+      operationId: listAdmins
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}}
+    post:
+      operationId: createAdmin
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Other"}}}}}
+  /hinted:
+    get:
+      operationId: hinted
+      x-mockingbird-resource: {type: chosen}
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}}
+  /tokens:
+    post:
+      operationId: createToken
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {token_id: {type: string}}}}}}}
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        user_id: {type: string}
+        email: {type: string}
+    Other:
+      type: object
+      properties:
+        other: {type: string}
+"##;
+
+#[test]
+fn a_member_named_for_its_own_type_identifies_a_type_read_by_path() {
+    let bundle = compile(SHARED_SCHEMAS.as_bytes()).unwrap();
+    let read = op(&bundle, "getUser").identity.as_ref().unwrap();
+    assert_eq!(read.field, "user_id");
+    assert_eq!(read.path_param.as_deref(), Some("id"));
+    let create = op(&bundle, "createUser").identity.as_ref().unwrap();
+    assert_eq!(create.field, "user_id");
+    assert_eq!(create.path_param, None);
+    // No route reads a token by path: its answer is no record to keep.
+    assert_eq!(op(&bundle, "createToken").identity, None);
+}
+
+#[test]
+fn a_lookup_answering_a_types_items_reads_as_that_type() {
+    let bundle = compile(SHARED_SCHEMAS.as_bytes()).unwrap();
+    let type_of = |id: &str| op(&bundle, id).resource_type.as_deref();
+    assert_eq!(type_of("usersByEmail"), Some("users"));
+    assert_eq!(type_of("peoplePage"), Some("users"));
+    // Under a parent the path decides who is listed.
+    assert_eq!(type_of("teamMembers"), Some("members"));
+    // Not a list: one record, which may not be stored as any.
+    assert_eq!(type_of("me"), Some("me"));
+    // Has routes of its own, so it is a type of its own.
+    assert_eq!(type_of("listAdmins"), Some("admins"));
+    assert_eq!(type_of("hinted"), Some("chosen"));
+}
+
+#[test]
+fn a_lookup_of_two_types_stays_its_own() {
+    let contract = SHARED_SCHEMAS.replace(
+        "  /tokens:\n",
+        r##"  /staff/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getStaff
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+  /tokens:
+"##,
+    );
+    let bundle = compile(contract.as_bytes()).unwrap();
+    assert_eq!(
+        op(&bundle, "usersByEmail").resource_type.as_deref(),
+        Some("users-by-email")
+    );
+}
+
+#[test]
+fn the_auth0_example_reads_one_user_on_every_route() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/apis/auth0-management/auth0-management.openapi.yaml"
+    );
+    let bundle = compile(&std::fs::read(path).unwrap()).unwrap();
+    for id in ["post_users", "get_users_by_id", "patch_users_by_id"] {
+        let identity = op(&bundle, id).identity.as_ref().unwrap();
+        assert_eq!(identity.field, "user_id", "{id}");
+    }
+    assert_eq!(
+        op(&bundle, "get_users-by-email").resource_type.as_deref(),
+        Some("users")
+    );
+    // An access token is no record.
+    assert_eq!(op(&bundle, "oauth_token").identity, None);
+}
