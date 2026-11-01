@@ -1079,11 +1079,13 @@ async fn a_routes_memory_is_capped() {
     );
 }
 
-/// Spotify's add answers only a snapshot id. The read is told a write happened: its
-/// `uris` are no member of a playlist item, so they stay out, as does its query.
+/// Spotify's add answers only a snapshot id, and its `uris` are declared by its request
+/// schema, as a member or the whole body. Its query is never told.
 #[tokio::test]
-async fn spotifys_add_is_told_to_its_read_without_its_uris() {
+async fn spotifys_uris_are_told_to_its_read_and_its_query_is_not() {
     const URI: &str = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
+    const OTHER: &str = "spotify:track:0VjIjW4GlUZAMYd2vXMi3b";
+    const IN_QUERY: &str = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
     const ROUTE: &str = "/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items";
     let empty_page = json!({
         "href": "https://api.spotify.com/v1/playlists/p1/items",
@@ -1091,23 +1093,100 @@ async fn spotifys_add_is_told_to_its_read_without_its_uris() {
     });
     let h = harness_with(
         &contract("spotify/spotify.openapi.yaml"),
-        vec![json!({"snapshot_id": "snap-1"}), empty_page],
+        vec![
+            json!({"snapshot_id": "snap-1"}),
+            json!({"snapshot_id": "snap-2"}),
+            empty_page,
+        ],
         |_| {},
     );
     let posted = h
         .call(
             "POST",
-            &format!("{ROUTE}?uris={URI}"),
-            Some(json!({"uris": [URI]})),
+            &format!("{ROUTE}?uris={IN_QUERY}"),
+            Some(json!({"uris": [URI], "pass": "hush", "otp": "hush", "code": "hush", "value": "hush"})),
         )
         .await;
     assert_eq!(posted.0, StatusCode::CREATED, "{posted:?}");
+    let posted = h.call("POST", ROUTE, Some(json!([OTHER]))).await;
+    assert_eq!(posted.0, StatusCode::CREATED, "{posted:?}");
     h.call("GET", ROUTE, None).await;
-    let prompt = h.prompt(1);
+    let prompt = h.prompt(2);
     let told = block(&prompt, "earlier_writes").unwrap();
     assert!(told.contains("add-items-to-playlist"), "{prompt}");
-    assert!(!told.contains(URI), "{prompt}");
-    assert_eq!(h.calls(), 2);
+    assert!(told.contains(URI), "{prompt}");
+    assert!(told.contains(OTHER), "{prompt}");
+    assert!(!told.contains(IN_QUERY), "{prompt}");
+    assert!(!told.contains("hush"), "{prompt}");
+    assert_eq!(h.calls(), 3);
+}
+
+/// Auth0's `roles` are declared by the request's schema, and told.
+#[tokio::test]
+async fn auth0s_roles_are_told_to_their_read() {
+    const ROUTE: &str = "/api/v2/users/auth0%7C1234/roles";
+    let h = harness_with(
+        &contract("auth0-management/auth0-management.openapi.yaml"),
+        vec![json!([])],
+        |_| {},
+    );
+    let posted = h
+        .call("POST", ROUTE, Some(json!({"roles": ["rol_4711"]})))
+        .await;
+    assert!(posted.0.is_success(), "{posted:?}");
+    h.call("GET", ROUTE, None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    let told = block(&prompt, "earlier_writes").unwrap();
+    assert!(told.contains("rol_4711"), "{prompt}");
+}
+
+/// What the request's schema declares goes through the same checks as what the items
+/// declare: a name, a mark or a shape still keeps it out.
+#[tokio::test]
+async fn a_member_the_request_declares_can_still_hide() {
+    let contract = WORLD.replace(
+        r#"      parameters: [{name: session_code, in: query, schema: {type: string, format: password}}]
+      requestBody:
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+"#,
+        r#"      parameters: [{name: session_code, in: query, schema: {type: string, format: password}}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                roles: {type: array, items: {type: string}}
+                password: {type: string}
+                pwd: {type: string}
+                pass: {type: string}
+                hidden: {type: string, writeOnly: true}
+                phrase: {type: string, format: password}
+                link: {type: string}
+                extra: {type: object, additionalProperties: true}
+"#,
+    );
+    assert!(contract.contains("roles: {type: array"));
+    let h = harness_with(contract.as_bytes(), vec![json!([])], |_| {});
+    h.call(
+        "POST",
+        "/users/u-1/roles",
+        Some(json!({
+            "roles": ["role-1"], "password": "hush-1", "pwd": "hush-2", "pass": "hush-3",
+            "hidden": "hush-4", "phrase": "hush-5", "link": "https://ann:hush-6@example.com/x",
+            "extra": {"anything": "hush-7"}, "code": "hush-8",
+        })),
+    )
+    .await;
+    h.call("GET", "/users/u-1/roles", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    let told = block(&prompt, "earlier_writes").unwrap();
+    assert!(told.contains("role-1"), "{prompt}");
+    assert!(!prompt.contains("hush"), "{prompt}");
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    let route: Vec<_> = kept.iter().filter(|d| d.id.starts_with("#route")).collect();
+    assert_eq!(route.len(), 1, "{kept:?}");
+    assert!(!route[0].data.to_string().contains("hush"), "{kept:?}");
 }
 
 /// A create that stored its record has told a list read all it needs: the record is
@@ -1537,21 +1616,20 @@ async fn an_answers_secrets_stay_out_of_prompts_and_memory() {
     }
 }
 
-/// A route is not told its own earlier answer, so a clock or a status stays free to move.
+/// A route is told its own earlier answer, as what it said and may have changed, so a
+/// `/me` keeps its identity after a write clears the cache.
 #[tokio::test]
-async fn a_route_is_not_shown_its_own_answer() {
-    let h = world(vec![
-        json!({"up": "first-answer"}),
-        note("note-4711"),
-        json!({"up": "second-answer"}),
-    ]);
-    h.call("GET", "/status", None).await;
+async fn a_route_is_shown_its_own_answer() {
+    let h = world(vec![me(), note("note-4711"), me()]);
+    h.call("GET", "/me", None).await;
     h.call("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
-    assert!(block(&h.prompt(1), "earlier_answers").is_some());
-    h.call("GET", "/status", None).await;
+    h.call("GET", "/me", None).await;
     let prompt = h.prompt(2);
-    assert!(block(&prompt, "earlier_answers").is_none(), "{prompt}");
+    let shown = block(&prompt, "earlier_answers").unwrap();
+    assert!(shown.contains("user-1"), "{prompt}");
+    assert!(prompt.contains("may have changed"), "{prompt}");
+    assert_eq!(h.calls(), 3);
 }
 
 /// The preface says what was said, and that it may have changed.
