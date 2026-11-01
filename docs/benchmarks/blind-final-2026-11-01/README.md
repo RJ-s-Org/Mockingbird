@@ -23,7 +23,7 @@ Measures `main` after write memory and the [blind baseline](../blind-baseline-20
 The first blind suite stands at 603/840 (71.8%), last measured before the final secret fixes and not re-run. The second suite is easier in ways that have nothing to do with the fixes:
 
 - Its author was told to avoid gates that skip a journey and to assert only what a contract promises, so fewer checks fail for the suite's own reasons.
-- Its contracts offer fewer writes. OpenWeatherMap has none, so 12 of its 14 checks need little memory.
+- Its contracts offer fewer writes. OpenWeatherMap has none, so none of its 14 checks test a write.
 - No baseline exists for it, so its gain was not measured.
 
 The fairest reading is that a new contract now scores somewhere around 70–85%, depending on how much of it is writes and state.
@@ -43,18 +43,18 @@ All 6 tuned failures are one travel repetition, in which an offer search timed o
 
 ## What still fails
 
-| Check | Passed | |
-| --- | ---: | --- |
-| `plaid.item keeps its webhook` | 0/12 | |
-| `plaid.accounts name their item` | 0/12 | |
-| `paypalpayments.a fully refunded capture refuses another` | 0/12 | A rule the contract implies rather than states |
-| `plaid.item reads back as exchanged` | 1/12 | |
-| `sendgrid.removed address has no bounce` | 3/12 | |
-| `sendgrid.bounce read keeps the listed bounce` | 4/12 | |
-| `openweathermap.unknown place matches nothing` | 4/12 | |
-| `paypalpayments.capture shows the full refund` | 5/12 | |
-| `paypalpayments.capture shows the partial refund` | 6/12 | |
-| `twilio.message is queued` | 6/12 | |
+| Check | Passed |
+| --- | ---: |
+| `plaid.item keeps its webhook` | 0/12 |
+| `plaid.accounts name their item` | 0/12 |
+| `paypalpayments.a fully refunded capture refuses another` | 0/12 |
+| `plaid.item reads back as exchanged` | 1/12 |
+| `sendgrid.removed address has no bounce` | 3/12 |
+| `sendgrid.bounce read keeps the listed bounce` | 4/12 |
+| `openweathermap.unknown place matches nothing` | 4/12 |
+| `paypalpayments.capture shows the full refund` | 5/12 |
+| `paypalpayments.capture shows the partial refund` | 6/12 |
+| `twilio.message is queued` | 6/12 |
 
 These have not been diagnosed, so that no fix tunes against this set by accident. Some checks may be stricter than a client needs.
 
