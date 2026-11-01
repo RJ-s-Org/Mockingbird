@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mb_state::{ChangeKind, SessionKey, StateChanged, StateStore, StoredResource};
+use mb_state::{ChangeKind, INTERNAL_TYPE, SessionKey, StateChanged, StateStore, StoredResource};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -33,6 +33,52 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     export_then_seed_round_trips(&store, ws).await;
     session_count_default_matches_sessions(&store, ws).await;
     insert_seeded_keeps_an_existing_resource(&store, ws).await;
+    the_internal_type_is_no_resource(&store, ws).await;
+}
+
+/// [`INTERNAL_TYPE`] answers reads and writes, and goes with the session, but it
+/// is not exported, counted, published or seeded.
+async fn the_internal_type_is_no_resource(st: &Arc<dyn StateStore>, ws: &str) {
+    let s = key(ws, "internal", "a");
+    let doc = |id: &str| StoredResource {
+        resource_type: INTERNAL_TYPE.into(),
+        id: id.into(),
+        data: json!({"requests": []}),
+    };
+    let real = StoredResource {
+        resource_type: "pet".into(),
+        id: "1".into(),
+        data: json!({"id": 1}),
+    };
+    st.upsert(&s, real.clone()).await.unwrap();
+
+    let mut changes = st.subscribe();
+    st.upsert(&s, doc("pet/1")).await.unwrap();
+    st.upsert(&s, doc("pet/2")).await.unwrap();
+    assert!(st.delete(&s, INTERNAL_TYPE, "pet/2").await.unwrap());
+    st.upsert(&s, doc("pet/2")).await.unwrap();
+    st.upsert(&s, real.clone()).await.unwrap();
+    let seen = recv_change(&mut changes).await;
+    assert_eq!(seen.resource_type, "pet", "only the resource is published");
+
+    assert_eq!(
+        st.get(&s, INTERNAL_TYPE, "pet/1").await.unwrap(),
+        Some(doc("pet/1"))
+    );
+    assert_eq!(st.list(&s, INTERNAL_TYPE, 10).await.unwrap().len(), 2);
+    assert_eq!(st.list(&s, "pet", 10).await.unwrap(), vec![real.clone()]);
+    assert_eq!(st.export(&s).await.unwrap(), vec![real.clone()]);
+    let sessions = st.sessions(ws, "internal").await.unwrap();
+    assert_eq!(sessions[0].resources, 1, "only the resource is counted");
+
+    // A fixture cannot plant it, and seeding replaces it with the rest.
+    st.seed(&s, vec![doc("pet/9"), real.clone()]).await.unwrap();
+    assert!(st.list(&s, INTERNAL_TYPE, 10).await.unwrap().is_empty());
+    assert_eq!(st.export(&s).await.unwrap(), vec![real]);
+
+    st.upsert(&s, doc("pet/1")).await.unwrap();
+    st.reset(&s).await.unwrap();
+    assert_eq!(st.get(&s, INTERNAL_TYPE, "pet/1").await.unwrap(), None);
 }
 
 /// Seeding stores a resource only when absent, quietly.

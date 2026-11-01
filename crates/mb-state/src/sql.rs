@@ -20,8 +20,8 @@ use sqlx::{ConnectOptions, PgPool, Row, SqlitePool};
 use tokio::sync::broadcast;
 
 use crate::{
-    CHANGE_CHANNEL_CAPACITY, ChangeKind, SWEEP_INTERVAL, SessionInfo, SessionKey, StateChanged,
-    StateError, StateStore, StoredResource,
+    CHANGE_CHANNEL_CAPACITY, ChangeKind, INTERNAL_TYPE, SWEEP_INTERVAL, SessionInfo, SessionKey,
+    StateChanged, StateError, StateStore, StoredResource,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -223,6 +223,9 @@ impl SqlStateStore {
     }
 
     fn publish(&self, s: &SessionKey, resource_type: &str, id: &str, kind: ChangeKind) {
+        if resource_type == INTERNAL_TYPE {
+            return;
+        }
         // No subscribers is fine.
         let _ = self.tx.send(StateChanged {
             session: s.clone(),
@@ -541,6 +544,7 @@ impl StateStore for SqlStateStore {
                    COUNT(r.id) AS resources \
                    FROM state_sessions s LEFT JOIN state_resources r \
                    ON r.workspace = s.workspace AND r.mock = s.mock AND r.session = s.session \
+                   AND r.resource_type <> $4 \
                    WHERE s.workspace = $1 AND s.mock = $2 AND s.last_touched > $3 \
                    GROUP BY s.session, s.last_touched \
                    ORDER BY s.last_touched DESC, s.session";
@@ -549,6 +553,7 @@ impl StateStore for SqlStateStore {
                 .bind(workspace)
                 .bind(mock)
                 .bind(cutoff)
+                .bind(INTERNAL_TYPE)
                 .fetch_all(p)
                 .await?;
             let mut out = Vec::with_capacity(rows.len());
@@ -579,7 +584,7 @@ impl StateStore for SqlStateStore {
     async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
         let sql = format!(
             "SELECT resource_type, id, data FROM state_resources \
-             WHERE {KEY_WHERE} AND {} ORDER BY seq ASC",
+             WHERE {KEY_WHERE} AND {} AND resource_type <> $5 ORDER BY seq ASC",
             live_session(4)
         );
         let cutoff = self.inner.cutoff(now_ms());
@@ -589,6 +594,7 @@ impl StateStore for SqlStateStore {
                 .bind(&s.mock)
                 .bind(&s.session)
                 .bind(cutoff)
+                .bind(INTERNAL_TYPE)
                 .fetch_all(p)
                 .await?;
             let mut out = Vec::with_capacity(rows.len());
@@ -600,6 +606,10 @@ impl StateStore for SqlStateStore {
     }
 
     async fn seed(&self, s: &SessionKey, resources: Vec<StoredResource>) -> Result<(), StateError> {
+        let resources: Vec<StoredResource> = resources
+            .into_iter()
+            .filter(|r| r.resource_type != INTERNAL_TYPE)
+            .collect();
         let now = now_ms();
         let clear = format!("DELETE FROM state_sessions WHERE {KEY_WHERE}");
         on_pool!(&self.inner.pool, |p| {

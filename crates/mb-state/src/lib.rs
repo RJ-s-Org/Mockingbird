@@ -74,6 +74,14 @@ pub enum StateError {
     Backend(String),
 }
 
+/// The resource type under which the runtime keeps what is not a resource of the
+/// session: the write memory of `mockingbird-protocols`. It lives and dies with
+/// the session (TTL, reset, seed) and answers `get`, `upsert` and `delete` like
+/// any type, but no backend exports it, counts it among
+/// [`SessionInfo::resources`], publishes a change for it or seeds it from a
+/// fixture. A contract cannot be expected to name it.
+pub const INTERNAL_TYPE: &str = "__mockingbird.earlier_requests";
+
 /// Identifies one session of one mock: the scope every stored resource
 /// belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

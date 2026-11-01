@@ -27,8 +27,8 @@ use redis::{Pipeline, RedisError, Script};
 use tokio::sync::broadcast;
 
 use crate::{
-    CHANGE_CHANNEL_CAPACITY, ChangeKind, SessionInfo, SessionKey, StateChanged, StateError,
-    StateStore, StoredResource,
+    CHANGE_CHANNEL_CAPACITY, ChangeKind, INTERNAL_TYPE, SessionInfo, SessionKey, StateChanged,
+    StateError, StateStore, StoredResource,
 };
 
 /// Prefix of every key this store writes.
@@ -239,6 +239,9 @@ impl RedisStateStore {
     }
 
     fn publish(&self, s: &SessionKey, resource_type: &str, id: &str, kind: ChangeKind) {
+        if resource_type == INTERNAL_TYPE {
+            return;
+        }
         // No subscribers is fine.
         let _ = self.tx.send(StateChanged {
             session: s.clone(),
@@ -250,6 +253,35 @@ impl RedisStateStore {
     }
 
     /// Reserves `n` consecutive recency sequence numbers; returns the last.
+    /// How many of the fields of hash `res` are [`INTERNAL_TYPE`]'s. `HSCAN`, not
+    /// a script: listing sessions is an Admin API call, and must not block Redis.
+    async fn internal_fields(&self, res: &str) -> Result<usize, StateError> {
+        let pattern = format!("{INTERNAL_TYPE}{FIELD_SEP}*");
+        let (mut cursor, mut found) = (0_u64, 0);
+        loop {
+            let (next, page): (u64, Vec<String>) = redis::cmd("HSCAN")
+                .arg(res)
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(1000)
+                .query_async(&mut self.con())
+                .await?;
+            // A page holds fields and values in turn; a value is JSON, never
+            // starting with this field's first character.
+            found += page
+                .iter()
+                .step_by(2)
+                .filter(|f| f.starts_with(INTERNAL_TYPE))
+                .count();
+            if next == 0 {
+                return Ok(found);
+            }
+            cursor = next;
+        }
+    }
+
     async fn next_seq(&self, n: usize) -> Result<i64, StateError> {
         let n = i64::try_from(n).unwrap_or(i64::MAX);
         Ok(redis::cmd("INCRBY")
@@ -499,7 +531,13 @@ impl StateStore for RedisStateStore {
             let touched: Option<String> = redis::from_redis_value_ref(touched)?;
             // No meta: the session expired after the index was read.
             let Some(touched) = touched else { continue };
-            let resources: usize = redis::from_redis_value_ref(count)?;
+            let total: usize = redis::from_redis_value_ref(count)?;
+            let resources = if total == 0 {
+                0
+            } else {
+                let [res, ..] = session_keys(workspace, mock, &session);
+                total.saturating_sub(self.internal_fields(&res).await?)
+            };
             let last_touched = DateTime::parse_from_rfc3339(&touched)
                 .map(|t| t.with_timezone(&Utc))
                 .ok()
@@ -529,8 +567,10 @@ impl StateStore for RedisStateStore {
         pipe.cmd("HGETALL").arg(&k.res);
         let (order, mut all): (Vec<String>, HashMap<String, String>) =
             pipe.query_async(&mut self.con()).await?;
+        let internal = field(INTERNAL_TYPE, "");
         order
             .iter()
+            .filter(|f| !f.starts_with(&internal))
             .filter_map(|f| all.remove(f))
             .map(|j| decode(&j))
             .collect()
@@ -539,7 +579,10 @@ impl StateStore for RedisStateStore {
     async fn seed(&self, s: &SessionKey, resources: Vec<StoredResource>) -> Result<(), StateError> {
         let k = Keys::of(s);
         let mut entries: Vec<(String, String)> = Vec::with_capacity(resources.len());
-        for r in &resources {
+        for r in resources
+            .iter()
+            .filter(|r| r.resource_type != INTERNAL_TYPE)
+        {
             entries.push((field(&r.resource_type, &r.id), encode(r)?));
         }
         let last = if entries.is_empty() {
