@@ -167,3 +167,152 @@ async fn persona_formats_are_kept() {
     );
     assert_eq!(body["amount"], 5999);
 }
+
+/// Spotify's search, as the blind benchmark sent it: `type=track,artist` names
+/// `tracks` and `artists`, and five of each fit once the rest has gone.
+#[tokio::test]
+async fn a_search_keeps_the_types_it_names_at_its_limit() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/apis/spotify/spotify.openapi.yaml"
+    );
+    let bundle = compile(&std::fs::read(path).unwrap()).unwrap();
+    let op = bundle.operation("search").unwrap();
+    let call = OperationCall {
+        query: serde_json::from_value(json!({"q": "love", "type": "track,artist", "limit": "5"}))
+            .unwrap(),
+        ..OperationCall::default()
+    };
+    let (provider, engine) = engine(vec![json!({})], EngineConfig::default());
+    engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    let written = format_schema(&provider);
+    let props = written["properties"].as_object().unwrap();
+    assert!(props.contains_key("tracks"), "{}", written["properties"]);
+    assert!(props.contains_key("artists"), "{}", written["properties"]);
+    assert!(!props.contains_key("albums"), "{}", written["properties"]);
+    for def in ["PagingTrackObject", "PagingArtistObject"] {
+        // A page is its `Paging` members and, in an `allOf`, its `items`.
+        let parts = written["$defs"][def]["allOf"].as_array().unwrap();
+        let items = parts
+            .iter()
+            .find_map(|part| part["properties"].get("items"))
+            .unwrap();
+        assert_eq!(items["type"], "array", "{def}: {items}");
+        assert_eq!(items["maxItems"], 5, "{def}: {items}");
+    }
+}
+
+/// A page of things heavy enough to shape, with `query` its parameters, and beside
+/// the page's items what no page size counts: a list of a lighter object, and words.
+fn paged_things(query: &str, items: &str) -> Bundle {
+    let detail: String = (0..30)
+        .map(|i| format!("f{i}: {{type: string}}, "))
+        .collect();
+    let contract = format!(
+        r##"
+openapi: 3.0.0
+info: {{title: Things, version: "1"}}
+paths:
+  /things:
+    get:
+      operationId: listThings
+      parameters: [{query}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [things, warnings, tags]
+                properties:
+                  things: {{type: array, {items} items: {{$ref: "#/components/schemas/Thing"}}}}
+                  warnings: {{type: array, maxItems: 500, items: {{type: object, required: [code], properties: {{code: {{type: string}}}}}}}}
+                  tags: {{type: array, items: {{type: string}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id]
+      properties:
+        id: {{type: string}}
+        detail: {{type: object, properties: {{ {detail} }}}}
+"##
+    );
+    compile(contract.as_bytes()).unwrap()
+}
+
+/// The schema a model is sent for `query` on [`paged_things`].
+async fn things_written(bundle: &Bundle, query: Value) -> Value {
+    let op = bundle.operation("listThings").unwrap();
+    let call = OperationCall {
+        query: serde_json::from_value(query).unwrap(),
+        ..OperationCall::default()
+    };
+    let (provider, engine) = engine(vec![json!({})], EngineConfig::default());
+    engine.generate(bundle, op, &call, ctx()).await.unwrap();
+    format_schema(&provider)
+}
+
+/// No API's own word for a page size is special: a name holding one of the words
+/// says so, in whatever case.
+#[tokio::test]
+async fn a_page_size_goes_by_any_name_for_it() {
+    for name in [
+        "limit",
+        "per_page",
+        "perPage",
+        "pageSize",
+        "page-size",
+        "first",
+        "$top",
+    ] {
+        let bundle = paged_things(
+            &format!("{{name: \"{name}\", in: query, schema: {{type: integer}}}}"),
+            "",
+        );
+        let written = things_written(&bundle, json!({name: "40"})).await;
+        assert_eq!(written["properties"]["things"]["maxItems"], 40, "{name}");
+    }
+}
+
+/// A word is no page size unless it can be: a parameter declared as text, or one
+/// whose name holds none of the words, says nothing of the page.
+#[tokio::test]
+async fn other_parameters_are_no_page_size() {
+    for (name, kind) in [
+        ("limit", "string"),
+        ("first_name", "string"),
+        ("offset", "integer"),
+    ] {
+        let bundle = paged_things(
+            &format!("{{name: {name}, in: query, schema: {{type: {kind}}}}}"),
+            "",
+        );
+        let written = things_written(&bundle, json!({name: "40"})).await;
+        assert_ne!(written["properties"]["things"]["maxItems"], 40, "{name}");
+    }
+}
+
+/// The size applies to the page's items, not to every array outside another.
+#[tokio::test]
+async fn a_page_size_holds_only_for_the_items_of_the_page() {
+    let bundle = paged_things("{name: limit, in: query, schema: {type: integer}}", "");
+    let written = things_written(&bundle, json!({"limit": "40"})).await;
+    let properties = &written["properties"];
+    assert_eq!(properties["things"]["maxItems"], 40, "{written}");
+    assert_ne!(properties["warnings"]["maxItems"], 40, "{written}");
+    assert_ne!(properties["tags"]["maxItems"], 40, "{written}");
+}
+
+/// The contract says better than a name can: a parameter whose `maximum` is an array's
+/// `maxItems` is that array's page size, whatever it is called.
+#[tokio::test]
+async fn a_maximum_matching_max_items_names_the_page() {
+    let bundle = paged_things(
+        "{name: amount, in: query, schema: {type: integer, maximum: 100}}",
+        "maxItems: 100,",
+    );
+    let written = things_written(&bundle, json!({"amount": "40"})).await;
+    assert_eq!(written["properties"]["things"]["maxItems"], 40, "{written}");
+}

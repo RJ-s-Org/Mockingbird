@@ -28,6 +28,7 @@ use crate::{
     MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
 };
 
+mod deleted;
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -664,6 +665,16 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
+    let guard = pending
+        .target
+        .as_ref()
+        .filter(|_| response_schema.is_none())
+        .map(|held| write_memory::SettleGuard {
+            rt,
+            plan,
+            call,
+            held,
+        });
     let ctx = GenerationContext {
         related: &pending.related,
         target: pending.target.as_ref(),
@@ -672,6 +683,7 @@ pub(crate) async fn generate_pending(
         response_schema,
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
+        update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     if generated.source == Source::Fallback {
@@ -742,6 +754,13 @@ pub(crate) async fn prepare<'a>(
     let op = plan.op;
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
+    state.tracks_deleted = deleted::applies(rt, plan);
+    if state.tracks_deleted {
+        state.call_params = Some(Box::new(OperationCall {
+            path_params: call.path_params.clone(),
+            ..OperationCall::default()
+        }));
+    }
     let resource_type = op.resource_type.as_deref();
     let mut target_id = target_id(op, call);
     // Before any state is read: an answer generated from older state must
@@ -790,6 +809,25 @@ pub(crate) async fn prepare<'a>(
             .await)
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
+    }
+    // Whatever `unknown_ids` says: this one is known to be gone.
+    if matches!(op.kind, OperationKind::Query)
+        && plan.forced_status.is_none()
+        && target.is_none()
+        && state.tracks_deleted
+        && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+        && deleted::is_deleted(
+            &mut state,
+            session,
+            t,
+            deleted::scope(op, call).as_deref(),
+            id,
+        )
+        .await
+    {
+        let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
     }
@@ -957,6 +995,18 @@ pub(crate) async fn complete(
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
+            if is_query && target_id.is_none() && state.tracks_deleted {
+                let scope = deleted::scope(op, call);
+                deleted::drop_from_list(
+                    &mut state,
+                    session,
+                    plan,
+                    t,
+                    scope.as_deref(),
+                    &mut generated,
+                )
+                .await;
+            }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
@@ -1002,9 +1052,17 @@ pub(crate) async fn complete(
                         request_body: call.body.as_ref(),
                         collection: collection.clone(),
                         origin,
+                        held: target.is_some() && !generated.new_record,
                     },
                 )
                 .await;
+                if op.kind == OperationKind::Command(Effect::Delete)
+                    && state.tracks_deleted
+                    && !foreign_key
+                    && let Some(id) = target_id.as_deref()
+                {
+                    deleted::mark(&mut state, session, op, call, t, id).await;
+                }
             }
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
@@ -1078,7 +1136,20 @@ pub(crate) async fn complete(
         }
         // Last: an effect on what this call just stored sees it.
         if rt.consistency && (200..300).contains(&generated.status) {
-            let outcomes = apply_effects(&mut state, session, rt, &generated.effects).await;
+            // An effect on an update's own target goes on what was just stored, under
+            // the protections the answer has.
+            let own = resource_type
+                .zip(acted_on.as_deref())
+                .filter(|_| op.kind == OperationKind::Command(Effect::Update) && !op.is_action());
+            let outcomes = apply_effects(
+                &mut state,
+                session,
+                rt,
+                &generated.effects,
+                own,
+                (plan, call),
+            )
+            .await;
             generated.effect_outcomes.extend(outcomes);
             if generated.dropped_effects > 0 {
                 metrics::counter!(
@@ -1189,16 +1260,20 @@ fn log_capped(text: &str) -> String {
 
 /// Applies what an answer says it changed in other resources, in this session
 /// only, and counts each effect. A rejected effect costs itself: the answer is
-/// served and the next effect still applies.
+/// served and the next effect still applies. One on `own`, the (type, id) an update
+/// just stored, keeps only what [`write_memory::own_effect_members`] allows.
 async fn apply_effects(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     effects: &[ResourceEffect],
+    own: Option<(&str, &str)>,
+    source: (&CallPlan<'_>, &OperationCall),
 ) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::with_capacity(effects.len());
     for effect in effects {
-        let result = apply_effect(state, session, rt, effect).await;
+        let on_own = own == Some((effect.resource_type.as_str(), effect.id.as_str()));
+        let result = apply_effect(state, session, rt, effect, on_own.then_some(source)).await;
         tracing::info!(
             mock = %rt.name,
             resource_type = %log_capped(&effect.resource_type),
@@ -1266,6 +1341,7 @@ async fn apply_effect(
     session: &SessionKey,
     rt: &MockRuntime,
     effect: &ResourceEffect,
+    own: Option<(&CallPlan<'_>, &OperationCall)>,
 ) -> Result<Value, &'static str> {
     let t = effect.resource_type.as_str();
     let index = rt.index();
@@ -1287,7 +1363,15 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
-    data.extend(effect.set.clone());
+    if let Some((plan, call)) = own {
+        let set = write_memory::own_effect_members(rt, plan, call, &held, &effect.set);
+        if set.is_empty() {
+            return Err("it sets no member an effect on this update's target may");
+        }
+        data.extend(set);
+    } else {
+        data.extend(effect.set.clone());
+    }
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
     }
@@ -2101,9 +2185,12 @@ async fn store_wrapped(
         };
         if own {
             let stored = resource.clone();
-            if state.upsert(session, resource).await
-                && let Some(collection) = collection
-            {
+            let took = state.upsert(session, resource).await;
+            if took && state.tracks_deleted {
+                let scope = collection.map(|c| c.path.as_str());
+                deleted::clear(state, session, &stored.resource_type, scope, &stored.id).await;
+            }
+            if took && let Some(collection) = collection {
                 rt.collections()
                     .remember(session, &stored, collection.clone());
             }
@@ -2112,7 +2199,17 @@ async fn store_wrapped(
             && entity_fits(rt, &resource.resource_type, &resource.data)
         {
             if unkeyed {
-                state.upsert(session, resource).await;
+                let gone = state.tracks_deleted
+                    && deleted::mention_is_deleted(
+                        state,
+                        session,
+                        &resource.resource_type,
+                        &resource.id,
+                    )
+                    .await;
+                if !gone {
+                    state.upsert(session, resource).await;
+                }
             } else {
                 state.insert_seeded(session, resource).await;
             }
@@ -3362,6 +3459,10 @@ pub(crate) struct StateAccess<'a> {
     read: bool,
     /// A write succeeded; writes refresh the session themselves.
     wrote: bool,
+    /// This call keeps and honours deleted markers (see [`deleted`]).
+    tracks_deleted: bool,
+    /// The path parameters of the call, for the parent of what it mentions.
+    call_params: Option<Box<OperationCall>>,
 }
 
 /// Whether this call may use the store.
@@ -3381,6 +3482,8 @@ impl<'a> StateAccess<'a> {
             gate: Gate::Unasked,
             read: false,
             wrote: false,
+            tracks_deleted: false,
+            call_params: None,
         }
     }
 
@@ -3478,10 +3581,15 @@ impl<'a> StateAccess<'a> {
         ok
     }
 
-    /// Stores a seeded resource unless one is stored under its id; `true`
-    /// when stored.
+    /// Stores a seeded resource unless one is stored under its id or it was
+    /// deleted; `true` when stored.
     pub(crate) async fn insert_seeded(&mut self, s: &SessionKey, r: StoredResource) -> bool {
         if !self.open() {
+            return false;
+        }
+        if self.tracks_deleted
+            && deleted::mention_is_deleted(self, s, &r.resource_type, &r.id).await
+        {
             return false;
         }
         let rt = self.rt;
@@ -3907,6 +4015,8 @@ struct WriteRequest<'a> {
     /// Where the path puts what this writes (see [`collection_of`]).
     collection: Option<Collection>,
     origin: WriteOrigin,
+    /// The session held what this writes to, so it cannot be marked deleted.
+    held: bool,
 }
 
 /// Writes a 2xx answer to state: a call's create, update or delete, or
@@ -3922,6 +4032,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         request_body,
         collection,
         origin,
+        held: was_held,
     } = w;
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
@@ -3937,6 +4048,17 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             let Some(id) = item.get(&field).and_then(id_string) else {
                 continue;
             };
+            // Marked under this list's parent; a mention is seen to on insert.
+            if state.tracks_deleted {
+                let parent = state
+                    .call_params
+                    .as_ref()
+                    .and_then(|call| deleted::scope(op, call));
+                if deleted::is_deleted(state, session, resource_type, parent.as_deref(), &id).await
+                {
+                    continue;
+                }
+            }
             let resource = StoredResource {
                 resource_type: resource_type.into(),
                 id: id.clone(),
@@ -3997,6 +4119,10 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 _ => None,
             };
             if state.upsert(session, resource).await {
+                if state.tracks_deleted && !was_held {
+                    let scope = collection.as_ref().map(|c| c.path.as_str());
+                    deleted::clear(state, session, resource_type, scope, &stored.id).await;
+                }
                 match (collection, held) {
                     (Some(collection), _) => {
                         rt.collections().remember(session, &stored, collection)
