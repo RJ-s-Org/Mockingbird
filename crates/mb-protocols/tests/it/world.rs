@@ -55,17 +55,17 @@ paths:
     get:
       operationId: getQuota
       responses:
-        "200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {a: {type: string}, username: {type: string}, discriminator: {type: string}, avatar: {type: string}, verified: {type: string}, bot: {type: string}}}}}}
   /team:
     get:
       operationId: getTeam
       responses:
-        "200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {b: {type: string}}}}}}
   /plan:
     get:
       operationId: getPlan
       responses:
-        "200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {c: {type: string}, id: {type: string}}}}}}
   /stats:
     get:
       operationId: getStats
@@ -117,6 +117,57 @@ paths:
         content: {application/json: {schema: {type: object, additionalProperties: true}}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+  /account:
+    get:
+      operationId: getAccount
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}
+    patch:
+      operationId: patchAccount
+      requestBody:
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}
+  /tokens:
+    get:
+      operationId: listTokens
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Token"}}}}}
+    post:
+      operationId: createToken
+      requestBody:
+        content: {application/json: {schema: {$ref: "#/components/schemas/Token"}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+  /tokens/{token}:
+    get:
+      operationId: getToken
+      parameters: [{name: token, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Token"}}}}
+  /api_keys:
+    get:
+      operationId: listApiKeys
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/ApiKey"}}}}}
+    post:
+      operationId: createApiKey
+      requestBody:
+        content: {application/json: {schema: {$ref: "#/components/schemas/ApiKey"}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+  /api_keys/{key}:
+    get:
+      operationId: getApiKey
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/ApiKey"}}}}
+  /orders/{order_id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
   /safes/{safe_id}:
     get:
       operationId: getSafe
@@ -165,7 +216,7 @@ paths:
     get:
       operationId: getStatus
       responses:
-        "200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {up: {type: string}}}}}}
   /users/{id}/roles:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     get:
@@ -194,6 +245,7 @@ components:
         api_key: {type: string}
         pass_phrase: {type: string, format: password}
         contact: {type: string}
+        pages: {type: array, items: {type: string}}
     Note:
       type: object
       required: [id, title]
@@ -214,6 +266,34 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
+    Account:
+      type: object
+      properties: {id: {type: string}, name: {type: string}, pass: {type: string}, pwd: {type: string}, passphrase: {type: string}, jwt: {type: string}, otp: {type: string}, key: {type: string}, dsn: {type: string}, connection_string: {type: string}, hmac: {type: string}, signature: {type: string}, license_key: {type: string}, card_number: {type: string}, credit_card: {type: string}, ssn: {type: string}, salt: {type: string}, mfa: {type: string}, sid: {type: string}, access_token: {type: string}, api_key: {type: string}, refresh_token: {type: string}, id_token: {type: string}, token: {type: string}, apiKey: {type: string}, clientSecret: {type: string}, password: {type: string}, avatar: {type: string}, hook: {type: string}, store: {type: string}, sign: {type: string}, note: {type: string}, kv: {$ref: "#/components/schemas/Pair"}, pair: {$ref: "#/components/schemas/Pair"}}
+    Pair:
+      type: object
+      properties:
+        key: {type: string}
+        name: {type: string}
+        value: {type: string}
+    Token:
+      type: object
+      required: [token, label]
+      properties:
+        token: {type: string}
+        label: {type: string}
+    ApiKey:
+      type: object
+      required: [key, label]
+      properties:
+        key: {type: string}
+        label: {type: string}
+    Order:
+      type: object
+      required: [id, title]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        safe_id: {type: string}
     Safe:
       type: object
       required: [id, name]
@@ -224,6 +304,12 @@ components:
         api_key: {type: string}
         key: {type: string}
         link: {type: string}
+        region: {type: string}
+        config:
+          type: object
+          properties:
+            api_key: {type: string}
+            region: {type: string}
     Ticket:
       type: object
       required: [key, title]
@@ -1280,15 +1366,13 @@ async fn slacks_auth_test_reaches_later_prompts() {
 /// Only so many answers are kept, the newest, and a large one is not kept at all.
 #[tokio::test]
 async fn earlier_answers_are_capped() {
-    let big: serde_json::Map<String, Value> = (0..40)
-        .map(|n| (format!("field{n}"), Value::from("y".repeat(100))))
-        .collect();
+    let big = json!({"pages": (0..40).map(|_| "y".repeat(100)).collect::<Vec<_>>()});
     let h = world(vec![
         me(),
         json!({"a": "quota-answer"}),
         json!({"b": "team-answer"}),
         json!({"c": "plan-answer"}),
-        Value::Object(big),
+        big,
         note("note-4711"),
     ]);
     for route in ["/me", "/quota", "/team", "/plan", "/settings"] {
@@ -1573,32 +1657,33 @@ async fn a_matched_record_is_scrubbed_and_its_effect_goes_on_the_stored_copy() {
     assert_eq!(h.held("safes", "safe01").await, moved);
 }
 
-/// Every row of the review's table of what reached a prompt and the kept copy: under a
-/// name, and by the shape of a value under any name.
+/// Every row of the reviews' tables, declared by the read: under a name, by the shape of
+/// a value under any name, and in a pair. What is hidden is omitted, so the model is never
+/// shown the marker to repeat.
 #[tokio::test]
 async fn an_answers_secrets_stay_out_of_prompts_and_memory() {
     let answer = json!({
         "id": "user-1", "name": "kept-name",
         "pass": "hush", "pwd": "hush", "passphrase": "hush", "jwt": "hush", "otp": "hush",
         "key": "hush", "dsn": "hush", "connection_string": "hush", "hmac": "hush",
-        "signature": "hush", "license_key": "hush", "card_number": "hush", "mfa": "hush",
-        "recovery_codes": ["hush"], "sid": "hush", "keys": [{"value": "hush"}],
+        "signature": "hush", "license_key": "hush", "card_number": "hush", "credit_card": "hush",
+        "ssn": "hush", "salt": "hush", "mfa": "hush", "sid": "hush",
         "access_token": "hush", "api_key": "hush", "refresh_token": "hush", "id_token": "hush",
         "token": "hush", "apiKey": "hush", "clientSecret": "hush", "password": "hush",
-        "nested": {"bearer": "hush", "credentials": "hush"},
-        "pair": {"name": "Authorization", "value": "hush"},
         "avatar": "https://x.example/a?token=hush",
         "hook": "https://hooks.example.com/in?api_key=hush&v=1",
         "store": "postgres://ann:hush@db.example.com/app",
         "sign": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJodXNoIn0.hush",
         "note": "Bearer hush",
+        "kv": {"key": "hush", "value": "v"},
+        "pair": {"name": "Authorization", "value": "hush"},
     });
-    for (method, route, request) in [
-        ("GET", "/me", None),
-        ("PUT", "/me", Some(json!({"pass": "hush", "key": "hush"}))),
+    for (method, request) in [
+        ("GET", None),
+        ("PATCH", Some(json!({"pass": "hush", "key": "hush"}))),
     ] {
         let h = world(vec![answer.clone(), note("note-4711")]);
-        h.call(method, route, request).await;
+        h.call(method, "/account", request).await;
         h.call("POST", "/notes", Some(json!({"title": "A note"})))
             .await;
         let prompt = h.prompt(1);
@@ -1607,13 +1692,182 @@ async fn an_answers_secrets_stay_out_of_prompts_and_memory() {
         assert!(shown.contains("user-1"), "{prompt}");
         assert!(!prompt.contains("hush"), "{prompt}");
         assert!(!prompt.contains("eyJ"), "{prompt}");
+        assert!(!prompt.contains("[redacted]"), "{prompt}");
         let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
         assert!(!kept.is_empty());
-        assert!(
-            !kept.iter().any(|d| d.data.to_string().contains("hush")),
-            "{kept:?}"
-        );
+        let kept = serde_json::to_string(&kept.iter().map(|d| &d.data).collect::<Vec<_>>());
+        assert!(!kept.unwrap().contains("hush"));
     }
+}
+
+/// An answer echoing what a request said keeps only what its read declares.
+#[tokio::test]
+async fn an_undeclared_echo_stays_out_of_earlier_answers() {
+    let h = world(vec![
+        json!({
+            "id": "user-1", "name": "kept-name",
+            "credit_card": "hush", "ssn": "hush", "code": "hush", "value": "hush", "note": "hush",
+        }),
+        note("note-4711"),
+    ]);
+    h.call(
+        "PUT",
+        "/me",
+        Some(json!({"credit_card": "hush", "ssn": "hush", "code": "hush"})),
+    )
+    .await;
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    let prompt = h.prompt(1);
+    let shown = block(&prompt, "earlier_answers").unwrap();
+    assert!(shown.contains("kept-name"), "{prompt}");
+    assert!(!shown.contains("hush"), "{prompt}");
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    let answers: Vec<_> = kept.iter().filter(|d| d.id == "#answers").collect();
+    assert_eq!(answers.len(), 1, "{kept:?}");
+    assert!(!answers[0].data.to_string().contains("hush"), "{kept:?}");
+}
+
+/// A resource that is itself a credential has no identity to keep: what it is named by
+/// is what must not be told.
+#[tokio::test]
+async fn a_credentials_own_identity_is_not_told() {
+    for (route, request) in [
+        ("/tokens", json!({"token": "hush-token", "label": "kept"})),
+        ("/api_keys", json!({"key": "hush-key", "label": "kept"})),
+    ] {
+        let h = world(vec![json!({"ok": true}), json!([])]);
+        h.call("POST", route, Some(request)).await;
+        h.call("GET", route, None).await;
+        let prompt = h.prompt(1);
+        let told = block(&prompt, "earlier_writes").unwrap();
+        assert!(told.contains("kept"), "{prompt}");
+        assert!(!prompt.contains("hush"), "{prompt}");
+        let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+        let route_docs: Vec<_> = kept.iter().filter(|d| d.id.starts_with("#route")).collect();
+        assert_eq!(route_docs.len(), 1, "{kept:?}");
+        assert!(!route_docs[0].data.to_string().contains("hush"), "{kept:?}");
+    }
+}
+
+/// A record matched by value follows none of its own references, so `ord-01` does not
+/// bring the safe its `safe_id` names, whose secrets only a named reference shows.
+#[tokio::test]
+async fn a_value_match_follows_no_references() {
+    let h = world(vec![json!({"effects": [], "response": {"ok": true}})]);
+    h.hold(
+        "orders",
+        "ord-01",
+        json!({"id": "ord-01", "title": "O", "safe_id": "safe01"}),
+    )
+    .await;
+    h.hold(
+        "safes",
+        "safe01",
+        json!({"id": "safe01", "name": "S", "password": "hush", "api_key": "hush"}),
+    )
+    .await;
+    h.call("POST", "/pins", Some(json!({"title": "ord-01"})))
+        .await;
+    let prompt = h.prompt(0);
+    assert!(
+        block(&prompt, "related_resources")
+            .unwrap()
+            .contains("ord-01"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("hush"), "{prompt}");
+    assert!(!prompt.contains("safes"), "{prompt}");
+}
+
+/// The marker a scrubbed prompt could show is no value: a member holding it stays as
+/// stored, at any depth, and the rest of the effect applies.
+#[tokio::test]
+async fn an_effect_cannot_write_the_redaction_marker() {
+    let h = world(vec![json!({
+        "effects": [{"type": "safes", "id": "safe01", "set": {
+            "api_key": "[redacted]",
+            "config": {"api_key": "[redacted]", "region": "eu"},
+        }}],
+        "response": {"ok": true},
+    })]);
+    h.hold(
+        "safes",
+        "safe01",
+        json!({
+            "id": "safe01", "name": "S", "api_key": "real-top",
+            "config": {"api_key": "real-nested", "region": "us"},
+        }),
+    )
+    .await;
+    h.call("POST", "/charges", Some(json!({"title": "safe01"})))
+        .await;
+    assert_eq!(
+        h.held("safes", "safe01").await,
+        json!({
+            "id": "safe01", "name": "S", "api_key": "real-top",
+            "config": {"api_key": "real-nested", "region": "eu"},
+        })
+    );
+}
+
+/// An effect that sets only the marker sets nothing, and is refused.
+#[tokio::test]
+async fn an_effect_of_only_the_marker_is_refused() {
+    let h = world(vec![json!({
+        "effects": [{"type": "safes", "id": "safe01", "set": {"api_key": "[redacted]"}}],
+        "response": {"ok": true},
+    })]);
+    let safe = json!({"id": "safe01", "name": "S", "api_key": "real"});
+    h.hold("safes", "safe01", safe.clone()).await;
+    h.call("POST", "/charges", Some(json!({"title": "safe01"})))
+        .await;
+    assert_eq!(h.held("safes", "safe01").await, safe);
+}
+
+// What the older paths do stays what it is on main.
+
+/// The older write memory tells an action's body to its target by the older names.
+#[tokio::test]
+async fn an_actions_body_tells_its_target_as_it_did() {
+    let h = world(vec![]);
+    h.hold("users", "u-1", me()).await;
+    h.call(
+        "POST",
+        "/users/u-1/roles",
+        Some(json!({"key": "told-key", "sid": "told-sid", "pass_count": 3})),
+    )
+    .await;
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    let target = kept.iter().find(|d| d.id == "users/u-1").unwrap();
+    let body = &target.data["requests"][0]["body"];
+    assert_eq!(body["key"], "told-key", "{kept:?}");
+    assert_eq!(body["sid"], "told-sid", "{kept:?}");
+    assert_eq!(body["pass_count"], 3, "{kept:?}");
+}
+
+/// A Jira create tells its read `project.key`, as it did.
+#[tokio::test]
+async fn jiras_project_key_is_told() {
+    let h = harness_with(
+        &contract("jira/jira.openapi.yaml"),
+        vec![json!({
+            "id": "10001", "key": "PLNT-1",
+            "self": "https://juniper.atlassian.net/rest/api/3/issue/10001",
+        })],
+        |_| {},
+    );
+    h.call(
+        "POST",
+        "/rest/api/3/issue",
+        Some(json!({"fields": {
+            "summary": "It stops", "project": {"key": "PLNT"}, "issuetype": {"name": "Bug"},
+        }})),
+    )
+    .await;
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    let told = serde_json::to_string(&kept[0].data).unwrap();
+    assert!(told.contains(r#""project":{"key":"PLNT"}"#), "{told}");
 }
 
 /// A route is told its own earlier answer, as what it said and may have changed, so a
