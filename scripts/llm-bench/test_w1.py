@@ -209,6 +209,16 @@ class HeldOutJourneyTest(unittest.TestCase):
             server_suites.run_one_journey("square", server_suites.square_steps, Srv, sink, Args, 0)
         return {r["case"]: r for r in sink.rows}
 
+    def test_journeys_blind_is_a_suite(self):
+        self.assertIn("journeys_blind", server_suites.SUITES)
+        self.assertNotIn("journeys_blind", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind"]
+        self.assertIs(runner, server_suites.run_journeys_blind)
+        self.assertEqual(sorted(mocks), ["auth0", "discord", "hubspot", "slack", "spotify"])
+        for contract, _, persona in mocks.values():
+            self.assertIsNone(persona)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
