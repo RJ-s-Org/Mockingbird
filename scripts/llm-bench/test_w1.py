@@ -219,6 +219,18 @@ class HeldOutJourneyTest(unittest.TestCase):
             self.assertIsNone(persona)
             self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
 
+    def test_journeys_blind2_is_a_suite(self):
+        self.assertIn("journeys_blind2", server_suites.SUITES)
+        self.assertNotIn("journeys_blind2", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind2"]
+        self.assertIs(runner, server_suites.run_journeys_blind2)
+        self.assertEqual(sorted(mocks), ["openweathermap", "paypalpayments", "plaid", "sendgrid", "twilio"])
+        for contract, _, persona in mocks.values():
+            self.assertIsNone(persona)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
