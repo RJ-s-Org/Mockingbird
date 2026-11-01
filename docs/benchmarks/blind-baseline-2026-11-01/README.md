@@ -22,16 +22,21 @@ Spotify's first check stops its journey, so its other 13 checks were skipped on 
 
 ## What fails
 
-Read from the answers of the default model, and a first reading rather than a root-cause analysis:
+Of 467 failed checks, a review of the code and recorded prompts puts 405 on the engine, 50 on the models (filters, ordering, invalid output) and 12 on one wrong check. These counts are one reviewer's sort, and no fix has confirmed them. The checks each cause covers:
 
-| Pattern | Examples | Likely cause |
-| --- | --- | --- |
-| A read does not find what was created | `auth0.read matches the created user` 0/12 | `/users/{id}` over a resource with `user_id` and no `id` gets no identity, so the read generates someone else |
-| A delete does not take | `auth0.deleted user is gone`, `discord.deleted message is gone`, `hubspot.archived contact is gone`, all 0/12 | Reads still answer 200 after a 204 |
-| Lists and searches do not see writes | `auth0.search finds the user as updated`, `discord.list drops the deleted message` 1/12, `hubspot.search by the old stage misses the contact` 3/12 | Generated from the query alone |
-| Filters are not applied | `slack.latest filter holds only the earlier message` 0/12, `discord.before filter holds only the earlier message` 4/12 | Same |
-| RPC-style routes hold no state | `slack.parent counts the reply`, `slack.reaction shows on the message`, `slack.a repeated reaction is refused`, all 0/12 | `/reactions.add` and `/chat.postMessage` name no resource in their path |
-| An optional page is left out | `spotify.search returned tracks` 0/12 | No answer included `tracks`, which the contract does not require |
+| Cause | Failed | What happens |
+| --- | ---: | --- |
+| The output budget drops `tracks` | 168, of which 156 skipped | `budget.rs` removes optional members the request does not name, heaviest first, and `type=track` does not match `tracks`. All 12 prompts offered `artists` alone, so the models never left it out |
+| An update discards the answer | 48 | The stored copy overrides the answer, then a nested request object fails validation and is dropped. The model answered `opportunity`; the client got `lead` |
+| Writes by reference reach nothing | 48 | `references_in` goes by field name, so `channel` and `thread_ts` link to nothing. Slack's messages are stored; what they refer to is not found |
+| Deletes do not stick | 47 | The record is removed, but with `unknown_ids: generate` the next read generates a replacement and stores it |
+| No record of the caller | 46 | Earlier answers such as `/users/@me` are not shown to later generations |
+| Identity is missing | 36 | `/users/{id}` over a resource with `user_id` and no `id` gets none, so nothing is stored. 12 routes across `examples/apis` have the same gap |
+| A lookup is its own type | 12 | `users-by-email` sees no stored users, though its items share their schema |
+| Model weakness | 50 | `related()` already shows stored records, and models do not always filter them. So lists do see writes |
+| Wrong check | 12 | `slack.reply names its thread and stays out of the channel`: the contract never says replies leave history |
+
+Three more checks look stricter than a client needs: `slack.parent counts the reply`, `auth0.user holds the assigned role` and the Spotify gate wanting at least 3 tracks. Spotify's other 13 checks have never run.
 
 Checks that passed every time are mostly first answers keeping what the request said: `auth0.user keeps the profile`, `discord.message keeps what was sent`, `slack.post returns a timestamp`.
 
