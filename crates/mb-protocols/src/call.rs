@@ -685,6 +685,7 @@ pub(crate) async fn generate_pending(
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
         earlier_answers: &pending.earlier_answers,
+        earlier_writes: &pending.earlier_writes,
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
@@ -745,6 +746,8 @@ pub(crate) struct Pending<'a> {
     earlier: write_memory::Earlier,
     /// What routes with no parameters answered earlier in the session.
     earlier_answers: Vec<Value>,
+    /// What was written to this list read's own path earlier in the session.
+    earlier_writes: Vec<Value>,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -914,7 +917,7 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(served);
     }
 
-    let mut earlier = match recalled {
+    let earlier = match recalled {
         Some(earlier) => earlier,
         None => {
             write_memory::recall(
@@ -930,7 +933,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    let earlier_answers = async {
+    let (earlier_answers, earlier_writes) = async {
         parents_by_name(
             &mut state,
             session,
@@ -961,10 +964,10 @@ pub(crate) async fn prepare<'a>(
                 }
             }
         }
-        earlier
-            .told
-            .extend(write_memory::recall_route(&mut state, plan, call).await);
-        world::recall_answers(&mut state, plan).await
+        (
+            world::recall_answers(&mut state, plan).await,
+            write_memory::recall_route(&mut state, plan, call).await,
+        )
     }
     .instrument(state_span())
     .await;
@@ -978,6 +981,7 @@ pub(crate) async fn prepare<'a>(
         cache: since.zip(key),
         earlier,
         earlier_answers,
+        earlier_writes,
     })
 }
 
@@ -1203,6 +1207,7 @@ pub(crate) async fn complete(
         )
         .await;
         world::after_answer(&mut state, plan, call, &generated).await;
+        world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -1606,8 +1611,16 @@ pub(crate) struct BundleIndex {
     /// Per path with no parameters whose `GET` answers a single object (see
     /// [`answers_a_list`]), that operation's position.
     single_reads: HashMap<String, usize>,
-    /// Per path a command and a list read by no path parameter share, the list's type.
-    written_lists: HashMap<String, String>,
+    /// Per path a command and a list read by no path parameter share, that list.
+    written_lists: HashMap<String, WrittenList>,
+}
+
+/// A list read whose path also takes writes.
+#[derive(Debug, Clone)]
+struct WrittenList {
+    resource_type: String,
+    /// The schema of its items: all of a write's body that it is told.
+    items: Value,
 }
 
 impl BundleIndex {
@@ -1753,9 +1766,9 @@ fn routes_of(
     bundle: &mb_mcm::Bundle,
     read_types: &HashSet<String>,
     members_of: &[Vec<String>],
-) -> (HashMap<String, usize>, HashMap<String, String>) {
+) -> (HashMap<String, usize>, HashMap<String, WrittenList>) {
     let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
-    let mut lists: HashMap<&str, &str> = HashMap::new();
+    let mut lists: HashMap<&str, WrittenList> = HashMap::new();
     for (i, op) in bundle.operations.iter().enumerate() {
         let Binding::Http { method, path } = &op.binding else {
             continue;
@@ -1764,44 +1777,54 @@ fn routes_of(
             continue;
         }
         let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
-        let list = answers_a_list(bundle, op, read_types, members);
-        if list && op.identity.as_ref().is_none_or(|i| i.path_param.is_none()) {
-            lists.extend(op.resource_type.as_deref().map(|t| (path.as_str(), t)));
+        let items = listed_items(bundle, op, read_types, members);
+        if let (Some(items), Some(t), true) = (
+            &items,
+            op.resource_type.as_deref(),
+            op.identity.as_ref().is_none_or(|i| i.path_param.is_none()),
+        ) {
+            let list = WrittenList {
+                resource_type: t.to_string(),
+                items: items.clone(),
+            };
+            lists.insert(path.as_str(), list);
         }
         let parameters = path.contains('{') || op.input.path.is_some() || op.input.query.is_some();
-        if !list && !parameters && op.success_output().is_some_and(|o| o.schema.is_some()) {
+        if items.is_none() && !parameters && op.success_output().is_some_and(|o| o.schema.is_some())
+        {
             single_reads.insert(path.clone(), i);
         }
     }
     for op in &bundle.operations {
         if let (OperationKind::Command(_), Binding::Http { path, .. }) = (&op.kind, &op.binding)
-            && let Some(t) = lists.get(path.as_str())
+            && let Some(list) = lists.get(path.as_str())
         {
-            written_lists.insert(path.clone(), (*t).to_string());
+            written_lists.insert(path.clone(), list.clone());
         }
     }
     (single_reads, written_lists)
 }
 
-/// Whether `op`'s success answer is a list: an array, or an object holding one in an
-/// envelope's member or under a member that is itself a type read. An object that only
-/// has a list among its members (a profile's `images`) stays a single object.
-fn answers_a_list(
+/// The item schema of `op`'s success answer when it is a list: an array, or an object
+/// holding one in an envelope's member or under a member that is itself a type read. An
+/// object that only has a list among its members (a profile's `images`) is a single object.
+fn listed_items(
     bundle: &mb_mcm::Bundle,
     op: &Operation,
     read_types: &HashSet<String>,
     members: &[String],
-) -> bool {
-    let root_array = list_item_schemas(bundle, op, members)
-        .iter()
-        .any(|(member, _)| member.is_none());
-    root_array
-        || members.iter().any(|m| {
-            ENVELOPE_KEYS.contains(&m.as_str())
-                || op.resource_type.as_deref() == Some(m.as_str())
-                || read_types.contains(m)
-                || read_types.contains(&format!("{m}s"))
+) -> Option<Value> {
+    list_item_schemas(bundle, op, members)
+        .into_iter()
+        .find(|(member, _)| {
+            member.as_deref().is_none_or(|m| {
+                ENVELOPE_KEYS.contains(&m)
+                    || op.resource_type.as_deref() == Some(m)
+                    || read_types.contains(m)
+                    || read_types.contains(&format!("{m}s"))
+            })
         })
+        .map(|(_, items)| items)
 }
 
 /// Records in `referrers` the types the fields of `op`'s answers (as type
@@ -4368,19 +4391,19 @@ mod tests {
         assert!(rt.credential_names().headers.is_empty());
         rt.set_data_plane_auth(DataPlaneAuth {
             mode: DataPlaneAuthMode::ApiKey,
-            header: "x-tenant-pass".into(),
+            header: "x-tenant-code".into(),
         });
         let mut headers = HeaderMap::new();
-        headers.insert("x-tenant-pass", "k".parse().unwrap());
+        headers.insert("x-tenant-code", "k".parse().unwrap());
         headers.insert("x-trace", "t".parse().unwrap());
         let forwarded = forwarded_headers(&rt, &headers);
-        assert!(!forwarded.contains_key("x-tenant-pass"), "{forwarded:?}");
+        assert!(!forwarded.contains_key("x-tenant-code"), "{forwarded:?}");
         assert!(forwarded.contains_key("x-trace"), "{forwarded:?}");
         assert!(public_query(&rt, &[("api_key".into(), "k".into())]).is_empty());
 
         rt.set_data_plane_auth(DataPlaneAuth::default());
         assert!(rt.credential_names().headers.is_empty());
-        assert!(forwarded_headers(&rt, &headers).contains_key("x-tenant-pass"));
+        assert!(forwarded_headers(&rt, &headers).contains_key("x-tenant-code"));
     }
 
     #[test]

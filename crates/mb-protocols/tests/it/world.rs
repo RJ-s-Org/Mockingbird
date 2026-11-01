@@ -560,7 +560,7 @@ async fn slack_reaction_and_reply_reach_their_message() {
             .contains(&format!(r#"{{"type": "messages", "id": "{TS}"}}"#)),
         "{prompt}"
     );
-    // Three values in Slack's six types, the message's references and the kept answers.
+    // Two values in Slack's six types (`thumbsup` is a word), the message's references and the kept answers.
     let reads = h.reads().0 - before.0;
     assert!(reads <= 32, "{reads}");
     assert_eq!(h.held("messages", TS).await["reactions"], reactions);
@@ -965,10 +965,15 @@ async fn a_writes_secrets_are_not_told_to_its_route() {
         "{prompt}"
     );
     assert!(!prompt.contains("hush"), "{prompt}");
+    // What the target's own read is told is the write memory's, as it was.
     let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
-    assert!(!kept.is_empty());
+    let route: Vec<_> = kept.iter().filter(|d| d.id.starts_with("#route")).collect();
+    assert_eq!(route.len(), 1, "{kept:?}");
+    assert!(!route[0].data.to_string().contains("hush"), "{kept:?}");
     assert!(
-        !kept.iter().any(|d| d.data.to_string().contains("hush")),
+        !kept
+            .iter()
+            .any(|d| d.data.to_string().contains("hush-query")),
         "{kept:?}"
     );
 }
@@ -1397,8 +1402,12 @@ async fn a_word_only_value_is_no_reference() {
     assert!(block(&prompt, "shown_resources").is_none(), "{prompt}");
 
     let h = world(vec![json!({"effects": [], "response": {"ok": true}})]);
-    h.hold("labels", "in-review", json!({"id": "in-review", "name": "x"}))
-        .await;
+    h.hold(
+        "labels",
+        "in-review",
+        json!({"id": "in-review", "name": "x"}),
+    )
+    .await;
     h.call("POST", "/pins", Some(json!({"title": "in-review"})))
         .await;
     assert!(block(&h.prompt(0), "shown_resources").is_some());
@@ -1408,7 +1417,8 @@ async fn a_word_only_value_is_no_reference() {
 /// identity, under any member naming it, and loses it where it is not.
 #[tokio::test]
 async fn an_identity_named_key_or_sid_stays_visible() {
-    let h = world(vec![json!({"effects": [], "response": {"ok": true}})]);
+    let acked = || json!({"effects": [], "response": {"ok": true}});
+    let h = world(vec![acked(), acked(), acked()]);
     h.hold("tickets", "PROJ-1", json!({"key": "PROJ-1", "title": "T"}))
         .await;
     h.hold("calls", "CA1234", json!({"sid": "CA1234", "title": "C"}))
@@ -1419,18 +1429,33 @@ async fn an_identity_named_key_or_sid_stays_visible() {
         json!({"id": "safe01", "name": "S", "key": "hush-key"}),
     )
     .await;
-    h.call(
-        "POST",
-        "/pins",
-        Some(json!({"key": "PROJ-1", "other_sid": "CA1234", "on": "safe01"})),
-    )
-    .await;
+    h.call("POST", "/pins", Some(json!({"key": "PROJ-1"})))
+        .await;
     let prompt = h.prompt(0);
-    let related = block(&prompt, "related_resources").unwrap();
-    assert!(related.contains(r#""key":"PROJ-1""#), "{prompt}");
-    assert!(related.contains(r#""sid":"CA1234""#), "{prompt}");
-    assert!(related.contains("safe01"), "{prompt}");
-    assert!(!related.contains("hush"), "{prompt}");
+    assert!(
+        block(&prompt, "related_resources")
+            .unwrap()
+            .contains(r#""key":"PROJ-1""#),
+        "{prompt}"
+    );
+    h.call("POST", "/pins", Some(json!({"other_sid": "CA1234"})))
+        .await;
+    let prompt = h.prompt(1);
+    assert!(
+        block(&prompt, "related_resources")
+            .unwrap()
+            .contains(r#""sid":"CA1234""#),
+        "{prompt}"
+    );
+    h.call("POST", "/pins", Some(json!({"on": "safe01"}))).await;
+    let prompt = h.prompt(2);
+    assert!(
+        block(&prompt, "related_resources")
+            .unwrap()
+            .contains("safe01"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("hush"), "{prompt}");
 }
 
 /// A record matched by value is scrubbed for the prompt, and only there: an effect on
@@ -1458,7 +1483,9 @@ async fn a_matched_record_is_scrubbed_and_its_effect_goes_on_the_stored_copy() {
         "{prompt}"
     );
     assert!(
-        block(&prompt, "related_resources").unwrap().contains("Vault"),
+        block(&prompt, "related_resources")
+            .unwrap()
+            .contains("Vault"),
         "{prompt}"
     );
     assert!(!prompt.contains("hush"), "{prompt}");

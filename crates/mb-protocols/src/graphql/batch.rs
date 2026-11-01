@@ -171,6 +171,7 @@ async fn generate(
                     earlier_requests: &[],
                     earlier_own_body: None,
                     earlier_answers: &[],
+                    earlier_writes: &[],
                     update_guard: None,
                 },
             }),

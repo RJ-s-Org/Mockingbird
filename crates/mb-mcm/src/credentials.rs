@@ -1,11 +1,12 @@
 //! Whether a name holds a credential: the last resort, when a contract marks
 //! nothing (`writeOnly`, `format: password`). No list of names can be complete.
-//! Shared by what keeps bodies and what records requests.
+//! Shared by what keeps bodies and what records requests. What a name misses, the
+//! shape of a value can still give away (see [`is_credential_value`]).
 
 /// Names holding a credential wherever they appear, once normalized (see
 /// [`normalize_into`]): `privatekey` is `privateKey`, `PRIVATE_KEY` and
 /// `private-key`.
-const ANYWHERE: [&str; 14] = [
+const ANYWHERE: [&str; 23] = [
     "password",
     "passwd",
     "secret",
@@ -20,11 +21,34 @@ const ANYWHERE: [&str; 14] = [
     "signingkey",
     "cvv",
     "bearer",
+    "pwd",
+    "passphrase",
+    "jwt",
+    "hmac",
+    "signature",
+    "licensekey",
+    "cardnumber",
+    "recoverycode",
+    "connectionstring",
 ];
 
-/// Names too short to count inside another word: `auth` is not `author`, and `pin`
-/// is not `shipping`.
-const WHOLE_WORD: [&str; 2] = ["auth", "pin"];
+/// Names too short to count inside another word: `auth` is not `author`, `pin` is not
+/// `shipping`, and `pass` is not `passenger`.
+const WHOLE_WORD: [&str; 6] = ["auth", "pin", "pass", "otp", "mfa", "dsn"];
+
+/// Those of [`ANYWHERE`] made of two words, which [`hides_a_returned_member`] goes by
+/// wherever they appear, as no word of them says it alone.
+const COMPOUND: [&str; 4] = [
+    "licensekey",
+    "cardnumber",
+    "recoverycode",
+    "connectionstring",
+];
+
+/// Names that count only as a name's last word, plural too, as they are as often an
+/// identity as a credential: `key` and `account_sid` hold one, `key_id` does not. Where
+/// a contract makes one a type's identity, it is that (see [`may_be_an_identity`]).
+const IDENTITY_WORDS: [&str; 2] = ["key", "sid"];
 
 /// Those of [`ANYWHERE`] that say little inside the name of a member an API returns:
 /// `session_title`.
@@ -66,15 +90,73 @@ fn has_word(name: &str, word: &str) -> bool {
 pub fn is_credential_name(name: &str) -> bool {
     let mut normalized = String::with_capacity(name.len());
     normalize_into(name, &mut normalized);
-    ANYWHERE.iter().any(|n| normalized.contains(n)) || WHOLE_WORD.iter().any(|w| has_word(name, w))
+    ANYWHERE.iter().any(|n| normalized.contains(n))
+        || WHOLE_WORD.iter().any(|w| has_word(name, w))
+        || may_be_an_identity(name)
+}
+
+/// Whether `name` is a credential's only by a word that is as often an identity
+/// ([`IDENTITY_WORDS`]): what it holds is worth looking up as an id, and it is visible
+/// where the contract makes it its type's identity.
+#[must_use]
+pub fn may_be_an_identity(name: &str) -> bool {
+    let mut normalized = String::with_capacity(name.len());
+    normalize_into(name, &mut normalized);
+    IDENTITY_WORDS.iter().any(|w| {
+        let plural = format!("{w}s");
+        (normalized.ends_with(w) && has_word(name, w))
+            || (normalized.ends_with(&plural) && has_word(name, &plural))
+    })
+}
+
+/// Whether a value holds a credential by its shape, whatever it is called: a URL with a
+/// password or a credential-named parameter in it, a JWT, or a `Bearer ` header's value.
+#[must_use]
+pub fn is_credential_value(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let bearer = trimmed
+        .get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case("bearer "));
+    bearer
+        || text
+            .split_whitespace()
+            .any(|w| is_jwt(w) || is_secret_url(w))
+}
+
+/// `eyJ…`, base64url JSON, then at least two more dot-separated parts.
+fn is_jwt(word: &str) -> bool {
+    let mut parts = word.split('.');
+    parts.next().is_some_and(|head| head.starts_with("eyJ"))
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_some()
+}
+
+/// A URL with a password in its userinfo, or a credential-named parameter in its query
+/// or fragment.
+fn is_secret_url(word: &str) -> bool {
+    let Some((_, rest)) = word.split_once("://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let password = authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'));
+    password
+        || tail
+            .split(['?', '#', '&', ';'])
+            .skip(1)
+            .filter_map(|param| param.split_once('='))
+            .any(|(param, _)| is_credential_name(param))
 }
 
 /// Whether `name` hides a member a contract says an API returns, where a word alone
 /// says less. Credential words hide it as whole words of the name, plural too
 /// (`secret_key`, `password_hash`, `tokens`, not `secretary` or `tokenizer`), and
-/// compound key names wherever they appear (`api_key_id`). The weak words `session`,
-/// `auth` and `pin` hide it only as the name's last word: `user_pin`, not
-/// `session_title` or `pin_id`.
+/// compound names wherever they appear (`api_key_id`, `card_number`). The weak words
+/// `session`, `auth`, `pin` and the like hide it only as the name's last word: `user_pin`,
+/// not `session_title` or `pin_id`. So do `key` and `sid`, where a caller has not found
+/// them to be the type's identity (see [`may_be_an_identity`]).
 #[must_use]
 pub fn hides_a_returned_member(name: &str) -> bool {
     let mut normalized = String::with_capacity(name.len());
@@ -83,8 +165,10 @@ pub fn hides_a_returned_member(name: &str) -> bool {
         has_word(name, n)
             || has_word(name, &format!("{n}s"))
             || (n.ends_with("key") && normalized.contains(n))
+            || COMPOUND.contains(n) && normalized.contains(n)
     });
     strong
+        || may_be_an_identity(name)
         || WEAK
             .iter()
             .chain(&WHOLE_WORD)
@@ -192,6 +276,135 @@ mod tests {
             "spin",
         ] {
             assert!(!hides_a_returned_member(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_wider_names_are_credentials() {
+        for name in [
+            "pass",
+            "user_pass",
+            "pwd",
+            "userPwd",
+            "passphrase",
+            "jwt",
+            "otp",
+            "otp_code",
+            "hmac",
+            "signature",
+            "license_key",
+            "licenseKey",
+            "card_number",
+            "cardNumber",
+            "mfa",
+            "mfa_code",
+            "recovery_code",
+            "recovery_codes",
+            "connection_string",
+            "connectionString",
+            "dsn",
+            "key",
+            "keys",
+            "KEY",
+            "encryption_key",
+            "sid",
+            "account_sid",
+            "accountSid",
+        ] {
+            assert!(is_credential_name(name), "{name}");
+        }
+        for name in [
+            "passenger",
+            "compass",
+            "passport",
+            "bypass",
+            "hotpot",
+            "monkey",
+            "keyboard",
+            "key_id",
+            "public_key_id",
+            "side",
+            "sidebar",
+            "residence",
+            "pins",
+        ] {
+            assert!(!is_credential_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_returned_member_hides_by_the_wider_names() {
+        for name in [
+            "pass",
+            "pwd",
+            "passphrase",
+            "jwt",
+            "otp",
+            "hmac",
+            "signature",
+            "license_key",
+            "card_number",
+            "mfa",
+            "recovery_codes",
+            "connection_string",
+            "dsn",
+            "key",
+            "keys",
+            "sid",
+            "account_sid",
+        ] {
+            assert!(hides_a_returned_member(name), "{name}");
+        }
+        for name in ["mfa_enabled", "key_id", "sidebar", "monkey", "passenger"] {
+            assert!(!hides_a_returned_member(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn key_and_sid_are_words_an_identity_can_be() {
+        for name in ["key", "sid", "issue_key", "accountSid"] {
+            assert!(may_be_an_identity(name), "{name}");
+        }
+        for name in ["password", "token", "key_id", "monkey"] {
+            assert!(!may_be_an_identity(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn values_shaped_like_credentials() {
+        for value in [
+            "https://ann:hunter2@example.com/path",
+            "postgres://u:p@db.internal:5432/app",
+            "redis://:hunter2@cache:6379",
+            "https://example.com/in?token=abc",
+            "https://example.com/in?v=1&api_key=abc",
+            "https://example.com/in?key=abc",
+            "https://example.com/in#access_token=abc",
+            "https://example.com/s3?X-Amz-Signature=abc",
+            "see https://ann:pw@example.com/x for it",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+            "the token is eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+            "Bearer abc",
+            "bearer abc",
+            "  Bearer abc",
+        ] {
+            assert!(is_credential_value(value), "{value}");
+        }
+        for value in [
+            "https://example.com/path",
+            "https://ann@example.com/path",
+            "https://example.com/in?page=2&q=token",
+            "mailto:ann@example.com",
+            "ann:not@a-url",
+            "a time 12:30@home",
+            "eyJust a word",
+            "eyJ.only",
+            "Bearer",
+            "the bearer of news",
+            "PROJ-1",
+            "1790000000.000100",
+        ] {
+            assert!(!is_credential_value(value), "{value}");
         }
     }
 

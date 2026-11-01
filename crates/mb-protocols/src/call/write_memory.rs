@@ -27,8 +27,10 @@
 //!
 //! A write that left no record a list read shows (`POST /users/{id}/roles` answering
 //! 204, Spotify's add answering a snapshot id) is also kept for the path it was made to,
-//! and told to the list read of that path. Only told: the read is not forced, nothing
-//! stands over its answer, and the memory stays until the session goes.
+//! and told to the list read of that path. Only told, as what may since have changed: the
+//! read is not forced and nothing stands over its answer. Its query is never kept, and of
+//! its body only what the list's items declare plainly, as the rest may be anything. The
+//! memory goes with the path's parent, and a write goes with the child it named.
 //!
 //! HTTP-bound operations only: GraphQL stores what its answers hold under their
 //! own types, and gRPC and SOAP are not remembered for, so their prompts and their
@@ -570,7 +572,7 @@ fn declared_part(
 
 /// What a merge or a body leaves to the resource's identity: the members the
 /// contract identifies it and reads it by.
-fn pinned_members<'a>(rt: &'a MockRuntime, t: &str) -> Vec<&'a str> {
+pub(super) fn pinned_members<'a>(rt: &'a MockRuntime, t: &str) -> Vec<&'a str> {
     let index = rt.index();
     ["id", "number"]
         .into_iter()
@@ -690,12 +692,26 @@ fn redact_credentials(
             }
             let (parts, _) = schema_parts(bundle, schema);
             let returned = Level::of(bundle, read);
+            let (_, read_defs) = schema_parts(bundle, read);
+            // The `key` of a `{"key": ..., "value": ...}` pair is its label, gone over above.
+            let pair = members.len() == 2 && members.contains_key("value");
+            // What the read's own type is identified by is that, whatever it is called.
+            let identifies = |key: &str| {
+                mb_mcm::credentials::may_be_an_identity(key)
+                    && read_defs
+                        .iter()
+                        .filter_map(|def| rt.index().types_by_def.get(*def))
+                        .any(|t| pinned_members(rt, t).contains(&key))
+            };
             for (key, member) in members.iter_mut() {
                 let inner = parts.iter().find_map(|p| p.get("properties")?.get(key));
                 let read_inner = returned.named(key);
                 let by_name = !is_count(key, member)
+                    && !(pair && key == "key")
                     && match read_inner {
-                        Some(_) => mb_mcm::credentials::hides_a_returned_member(key),
+                        Some(_) => {
+                            mb_mcm::credentials::hides_a_returned_member(key) && !identifies(key)
+                        }
                         None => is_credential_name(rt, key),
                     };
                 if schema_hides(bundle, inner)
@@ -740,8 +756,8 @@ fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value, own: bool) -> V
     scrubbed_by(rt, plan, body, plan.op.input.body.as_ref(), read)
 }
 
-/// `value` as it may be kept, by `schema`'s marks and every rule by name (see
-/// [`scrubbed`]). What an answer holds goes by its output's schema, a query by its own.
+/// `value` as it may be kept, by `schema`'s marks, every rule by name (see [`scrubbed`])
+/// and a value's own shape. What an answer holds goes by its output's schema.
 pub(super) fn scrubbed_by(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -751,11 +767,134 @@ pub(super) fn scrubbed_by(
 ) -> Value {
     let mut value = value.clone();
     redact_credentials(rt, &mut value, schema, read);
+    redact_shapes(&mut value);
     if let Some(recorder) = &rt.recorder {
         recorder.redact(&mut value);
     }
     plan.engine.scrub(&mut value);
     value
+}
+
+/// [`scrubbed_by`], for what a prompt shows of a record of type `t`: what identifies it
+/// stays as it is, however it reads, or a model could not name it.
+pub(super) fn scrubbed_record(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    t: &str,
+    data: &Value,
+    schema: Option<&Value>,
+    read: Option<&Value>,
+) -> Value {
+    let mut kept = scrubbed_by(rt, plan, data, schema, read);
+    if let (Value::Object(kept), Value::Object(given)) = (&mut kept, data) {
+        for field in pinned_members(rt, t) {
+            if let Some(value) = given.get(field) {
+                kept.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+    kept
+}
+
+/// [`scrubbed_record`] of a record matched for a prompt: by its type's read.
+pub(super) fn scrubbed_for_prompt(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    t: &str,
+    data: &Value,
+) -> Value {
+    scrubbed_record(rt, plan, t, data, None, read_schema(rt, t))
+}
+
+/// What `items` declare plainly of `value`: members they name, not marked as hidden and
+/// not named as a credential, unless it is the type's identity. A map's or a union's
+/// other members may hold anything, so they are not told.
+fn declared_plainly(
+    rt: &MockRuntime,
+    t: &str,
+    items: &Value,
+    value: &Value,
+    depth: usize,
+) -> Option<Value> {
+    let bundle = rt.bundle();
+    match value {
+        _ if depth > 8 => None,
+        Value::Object(members) => {
+            let (parts, _) = schema_parts(bundle, Some(items));
+            let identity = pinned_members(rt, t);
+            let kept: Map<String, Value> = members
+                .iter()
+                .filter_map(|(key, member)| {
+                    let inner = parts.iter().find_map(|p| p.get("properties")?.get(key))?;
+                    let own = depth == 0 && identity.contains(&key.as_str());
+                    let named = mb_mcm::credentials::hides_a_returned_member(key)
+                        || is_own_credential(rt, key);
+                    if schema_hides(bundle, Some(inner)) || (named && !own) {
+                        return None;
+                    }
+                    let member = declared_plainly(rt, t, inner, member, depth + 1)?;
+                    Some((key.clone(), member))
+                })
+                .collect();
+            (!kept.is_empty()).then_some(Value::Object(kept))
+        }
+        Value::Array(list) => {
+            let (parts, _) = schema_parts(bundle, Some(items));
+            let inner = parts.iter().find_map(|p| p.get("items"))?;
+            let kept: Vec<Value> = list
+                .iter()
+                .filter_map(|item| declared_plainly(rt, t, inner, item, depth + 1))
+                .collect();
+            (!kept.is_empty()).then_some(Value::Array(kept))
+        }
+        scalar => Some(scalar.clone()),
+    }
+}
+
+/// What a list read is told of a write's `body`: an object as one of its items, or a list
+/// of them, by [`declared_plainly`]. Nothing else, however it reads.
+fn told_to_list(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    list: &WrittenList,
+    body: &Value,
+) -> Option<Value> {
+    let t = list.resource_type.as_str();
+    let declared = match body {
+        Value::Array(items) => {
+            let kept: Vec<Value> = items
+                .iter()
+                .filter(|item| item.is_object())
+                .filter_map(|item| declared_plainly(rt, t, &list.items, item, 0))
+                .collect();
+            (!kept.is_empty()).then_some(Value::Array(kept))?
+        }
+        Value::Object(_) => declared_plainly(rt, t, &list.items, body, 0)?,
+        _ => return None,
+    };
+    let told = match &declared {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| scrubbed_record(rt, plan, t, item, None, Some(&list.items)))
+                .collect(),
+        ),
+        one => scrubbed_record(rt, plan, t, one, None, Some(&list.items)),
+    };
+    Some(told)
+}
+
+/// `value` with every string shaped like a credential replaced, at any depth, as no name
+/// has to give those away (see [`mb_mcm::credentials::is_credential_value`]).
+fn redact_shapes(value: &mut Value) {
+    match value {
+        Value::String(text) if mb_mcm::credentials::is_credential_value(text) => {
+            *value = Value::from(REDACTED);
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_shapes),
+        Value::Object(members) => members.values_mut().for_each(redact_shapes),
+        _ => {}
+    }
 }
 
 /// `body` within [`MAX_BODY_BYTES`]: as it is, or cut to a string that says so.
@@ -1139,7 +1278,7 @@ pub(super) async fn after_write(
     if target.is_none() && parent.is_none() {
         return;
     }
-    let entry = |body: Option<Value>| memory_entry(op, body, None);
+    let entry = |body: Option<Value>| memory_entry(op, body);
     if let Some(tell) = target {
         let key = memory_key(t, &tell.id, tell.stored);
         remember(state, session, &key, &entry(tell.body), tell.own).await;
@@ -1156,13 +1295,10 @@ pub(super) async fn after_write(
 }
 
 /// One remembered request, as a prompt is told it but for `at`.
-fn memory_entry(op: &Operation, body: Option<Value>, query: Option<Value>) -> Value {
+fn memory_entry(op: &Operation, body: Option<Value>) -> Value {
     let mut entry = Map::new();
     entry.insert("operation".to_string(), Value::from(op.id.as_str()));
     entry.insert("path".to_string(), Value::from(route(op)));
-    if let Some(query) = query {
-        entry.insert("query".to_string(), within_cap(query));
-    }
     if let Some(body) = body {
         entry.insert("body".to_string(), within_cap(body));
     }
@@ -1206,9 +1342,83 @@ pub(super) async fn recall_route(
     requests
 }
 
+/// Whether two path templates' segments are the same route: parameters may be named
+/// differently, as the same position is the same value.
+fn same_route(one: &[&str], other: &[&str]) -> bool {
+    one.len() == other.len()
+        && one
+            .iter()
+            .zip(other)
+            .all(|(a, b)| a == b || (segment_param(a).is_some() && segment_param(b).is_some()))
+}
+
+/// Whether a kept body says `value`, as a member or an item.
+fn mentions(body: &Value, value: &str) -> bool {
+    match body {
+        Value::Object(members) => members.values().any(|m| mentions(m, value)),
+        Value::Array(items) => items.iter().any(|m| mentions(m, value)),
+        other => id_string(other).as_deref() == Some(value),
+    }
+}
+
+/// After a 2xx delete: what is kept for a list under what it deleted goes, for routes
+/// whose path below it has no other parameter to know (the memory is keyed by a hash of
+/// the whole path). Of a list it was a child of, the writes naming that child go. What
+/// this misses is told as what may have changed.
+async fn forget_deleted_route(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+) {
+    let rt = state.rt;
+    let Binding::Http { path, .. } = &plan.op.binding else {
+        return;
+    };
+    let segments = path_segments(path);
+    let Some(filled) = fill_path(call, &segments).map(|f| f.path) else {
+        return;
+    };
+    for list in rt.index().written_lists.keys() {
+        let below = path_segments(list);
+        if below.len() > segments.len() && same_route(&segments, &below[..segments.len()]) {
+            let rest = &below[segments.len()..];
+            if rest.iter().all(|s| segment_param(s).is_none()) {
+                let key = memory_key("#route", &format!("{filled}/{}", rest.join("/")), false);
+                state.delete(&plan.session, INTERNAL_TYPE, &key).await;
+            }
+            continue;
+        }
+        let (Some((last, parent)), Some((parent_path, _))) =
+            (segments.split_last(), filled.rsplit_once('/'))
+        else {
+            continue;
+        };
+        let child = segment_param(last)
+            .and_then(|param| call.path_params.get(param))
+            .and_then(id_string);
+        let Some(child) = child.filter(|_| same_route(parent, &below)) else {
+            continue;
+        };
+        let key = memory_key("#route", parent_path, false);
+        let mut memory = read_memory(state, &plan.session, &key).await;
+        let before = memory.requests.len();
+        memory
+            .requests
+            .retain(|r| !r.get("body").is_some_and(|body| mentions(body, &child)));
+        if memory.requests.len() == before {
+            continue;
+        }
+        if memory.requests.is_empty() {
+            state.delete(&plan.session, INTERNAL_TYPE, &key).await;
+        } else {
+            write_memory(state, &plan.session, &key, &memory).await;
+        }
+    }
+}
+
 /// Keeps a 2xx write for the list read of its path, unless it stored a record of that
 /// list's type, which the read shows as a related resource. `refused`: it stored nothing
-/// for being another's or having nowhere to go.
+/// for being another's or having nowhere to go. A delete also forgets what it outdated.
 pub(super) async fn after_route_write(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -1225,24 +1435,25 @@ pub(super) async fn after_route_write(
     {
         return;
     }
-    let Some(key) = route_memory_key(rt, op, call) else {
+    if op.kind == OperationKind::Command(Effect::Delete) {
+        forget_deleted_route(state, plan, call).await;
+    }
+    let (Some(key), Some(list)) = (
+        route_memory_key(rt, op, call),
+        rt.index().written_lists.get(&route(op)),
+    ) else {
         return;
     };
     let stored = generated.body.as_ref().or(call.body.as_ref());
-    let of_the_list = op.resource_type.as_ref() == rt.index().written_lists.get(&route(op));
+    let of_the_list = op.resource_type.as_deref() == Some(list.resource_type.as_str());
     if of_the_list && stored.is_some_and(|stored| created_id(op, stored).is_some()) {
         return;
     }
     let body = call
         .body
         .as_ref()
-        .filter(|b| !b.is_null() && b.as_object().is_none_or(|o| !o.is_empty()))
-        .map(|b| scrubbed(rt, plan, b, false));
-    let query = (!call.query.is_empty()).then(|| {
-        let query = Value::Object(call.query.clone());
-        scrubbed_by(rt, plan, &query, op.input.query.as_ref(), None)
-    });
-    let entry = memory_entry(op, body, query);
+        .and_then(|body| told_to_list(rt, plan, list, body));
+    let entry = memory_entry(op, body);
     remember(state, &plan.session, &key, &entry, None).await;
 }
 

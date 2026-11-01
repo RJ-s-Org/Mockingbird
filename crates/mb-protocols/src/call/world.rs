@@ -6,12 +6,17 @@
 //! the related resources: the model sees it and may state a change, which goes through
 //! the effects path as any other. Only a record's stored id, or a path field
 //! [`PathAliases`] has seen it hold, counts as a match, so what a record merely says
-//! elsewhere names nothing. A call pays at most [`MAX_LOOKUPS`] reads, and none when no
-//! value could be an id or when its answer needs no generation.
+//! elsewhere names nothing. A value must hold a digit or a separator, so a common word
+//! (`closed`) is no reference, and a word-only id is not found this way; a date can match.
+//! A hit is scrubbed for the prompt, and an effect goes on the stored copy. A call pays at
+//! most [`MAX_LOOKUPS`] reads, and none when no value could be an id or when its answer
+//! needs no generation.
 //!
 //! An answer of a `GET` route with no parameters that returns a single object
 //! (`/users/@me`, Slack's `auth.test`) says who the caller is, and is shown to later
-//! generations, however they are reached. It is kept under the reserved type of the state
+//! generations of other routes, as what the API said and may since have changed: a route
+//! is not told its own, or `/time` would stand still. Deleting the record it is about ends
+//! it. Indirect changes are not tracked. It is kept under the reserved type of the state
 //! store ([`mb_state::INTERNAL_TYPE`]), like the write memory's documents: sessions, TTLs
 //! and resets clear it, and it is not exported, counted or on a change feed. A contract
 //! with no such route pays no read for it.
@@ -46,13 +51,15 @@ const MAX_ANSWERS: usize = 3;
 /// is no answer, and it is not likely to say who the caller is.
 const MAX_ANSWER_BYTES: usize = 2 * 1024;
 
-/// `value` as an id it could be: a string of an id's length with no space in it, or a
-/// whole number too large to be a count.
+/// `value` as an id it could be: a string of an id's length with no space in it and a
+/// digit or a separator (`thread_ts`'s value, `PROJ-1`, not `closed`), or a whole number
+/// too large to be a count.
 fn id_like_value(value: &Value) -> Option<String> {
     match value {
         Value::String(text)
             if (MIN_ID_LEN..=MAX_ID_LEN).contains(&text.len())
-                && !text.chars().any(char::is_whitespace) =>
+                && !text.chars().any(char::is_whitespace)
+                && text.chars().any(|c| !c.is_alphabetic()) =>
         {
             Some(text.clone())
         }
@@ -65,9 +72,12 @@ fn id_like_value(value: &Value) -> Option<String> {
 }
 
 /// Adds what could be an id in `value`, under member `name`, to `out`: an object's own
-/// scalars before what it nests. What a credential's member holds is not looked up.
+/// scalars before what it nests. What a credential's member holds is not looked up, but
+/// for a word as often an identity (`key`, `sid`), as a lookup shows nothing of the value.
 fn id_values(rt: &MockRuntime, name: &str, value: &Value, depth: usize, out: &mut Vec<String>) {
-    if depth > MAX_VALUE_DEPTH || write_memory::is_credential_name(rt, name) {
+    let credential = write_memory::is_credential_name(rt, name)
+        && !mb_mcm::credentials::may_be_an_identity(name);
+    if depth > MAX_VALUE_DEPTH || credential {
         return;
     }
     match value {
@@ -163,7 +173,8 @@ pub(super) async fn named_by_value(
                 && !holds(&out[..followed.named], &hit)
                 && !holds(&found, &hit)
             {
-                found.push(hit);
+                let data = write_memory::scrubbed_for_prompt(rt, plan, &t, &hit.data);
+                found.push(StoredResource { data, ..hit });
             }
         }
     }
@@ -174,13 +185,90 @@ pub(super) async fn named_by_value(
     out.splice(named..named, found);
 }
 
-/// What routes with no parameters answered earlier in this session, oldest first.
+/// What routes with no parameters other than this call's answered earlier in this
+/// session, oldest first.
 pub(super) async fn recall_answers(state: &mut StateAccess<'_>, plan: &CallPlan<'_>) -> Vec<Value> {
     let rt = state.rt;
     if !write_memory::applies(rt, plan) || rt.index().single_reads.is_empty() {
         return Vec::new();
     }
-    read_answers(state, &plan.session).await
+    let mut answers = read_answers(state, &plan.session).await;
+    if let Binding::Http { path, .. } = &plan.op.binding {
+        answers.retain(|entry| !of_path(entry, path));
+    }
+    answers
+}
+
+/// Whether a kept answer is that of `path`.
+fn of_path(entry: &Value, path: &str) -> bool {
+    entry.get("path").and_then(Value::as_str) == Some(path)
+}
+
+/// After a 2xx delete of a record: an answer it was the identity of goes, as what it said
+/// is known to be over. Any other change it says nothing of is left to its preface.
+pub(super) async fn after_delete(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    deleted: Option<&str>,
+    generated: &GeneratedResponse,
+) {
+    let rt = state.rt;
+    let (OperationKind::Command(Effect::Delete), Some(deleted), true, true, false) = (
+        plan.op.kind,
+        deleted,
+        (200..300).contains(&generated.status),
+        write_memory::applies(rt, plan),
+        rt.index().single_reads.is_empty(),
+    ) else {
+        return;
+    };
+    let session = &plan.session;
+    let held = read_answers(state, session).await;
+    let about_it = |entry: &Value| {
+        let read = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .and_then(|path| rt.index().single_reads.get(path))
+            .and_then(|i| rt.bundle().operations.get(*i));
+        let Some((read, answer)) = read.zip(entry.get("answer")) else {
+            return false;
+        };
+        let fields = read.resource_type.as_deref().map_or_else(
+            || vec!["id", "number"],
+            |t| write_memory::pinned_members(rt, t),
+        );
+        fields
+            .iter()
+            .any(|f| answer.get(*f).and_then(id_string).as_deref() == Some(deleted))
+    };
+    let answers: Vec<Value> = held.iter().filter(|e| !about_it(e)).cloned().collect();
+    write_answers(state, session, &held, answers).await;
+}
+
+/// Replaces what is kept, when it changed.
+async fn write_answers(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    held: &[Value],
+    answers: Vec<Value>,
+) {
+    if answers == held {
+        return;
+    }
+    if answers.is_empty() {
+        state.delete(session, INTERNAL_TYPE, ANSWERS_KEY).await;
+        return;
+    }
+    state
+        .upsert(
+            session,
+            StoredResource {
+                resource_type: INTERNAL_TYPE.to_string(),
+                id: ANSWERS_KEY.to_string(),
+                data: serde_json::json!({ "answers": answers }),
+            },
+        )
+        .await;
 }
 
 async fn read_answers(state: &mut StateAccess<'_>, session: &SessionKey) -> Vec<Value> {
@@ -216,11 +304,9 @@ pub(super) async fn after_answer(
     if !usable {
         return;
     }
-    let read_schema = rt
-        .bundle()
-        .operations
-        .get(*read)
-        .and_then(|read| read.success_output()?.schema.as_ref());
+    let read = rt.bundle().operations.get(*read);
+    let read_schema = read.and_then(|read| read.success_output()?.schema.as_ref());
+    let own_type = read.and_then(|read| read.resource_type.as_deref());
     let schema = op
         .output_for_status(generated.status)
         .and_then(|o| o.schema.as_ref());
@@ -233,7 +319,10 @@ pub(super) async fn after_answer(
                 && schema.is_some()
                 && schema == read_schema
         })
-        .map(|body| write_memory::scrubbed_by(rt, plan, body, schema, None))
+        .map(|body| match own_type {
+            Some(t) => write_memory::scrubbed_record(rt, plan, t, body, schema, None),
+            None => write_memory::scrubbed_by(rt, plan, body, schema, None),
+        })
         .filter(|body| body.to_string().len() <= MAX_ANSWER_BYTES);
     // A read that says nothing new leaves what is kept: a faker standing in for the LLM.
     // One too large to keep has outdated it.
@@ -244,28 +333,11 @@ pub(super) async fn after_answer(
     }
     let session = &plan.session;
     let held = read_answers(state, session).await;
-    let of_route = |entry: &Value| entry.get("path").and_then(Value::as_str) == Some(path.as_str());
-    let mut answers: Vec<Value> = held.iter().filter(|e| !of_route(e)).cloned().collect();
+    let mut answers: Vec<Value> = held.iter().filter(|e| !of_path(e, path)).cloned().collect();
     if let Some(answer) = kept {
         answers.push(serde_json::json!({"path": path, "answer": answer}));
     }
     let excess = answers.len().saturating_sub(MAX_ANSWERS);
     answers.drain(..excess);
-    if answers == held {
-        return;
-    }
-    if answers.is_empty() {
-        state.delete(session, INTERNAL_TYPE, ANSWERS_KEY).await;
-        return;
-    }
-    state
-        .upsert(
-            session,
-            StoredResource {
-                resource_type: INTERNAL_TYPE.to_string(),
-                id: ANSWERS_KEY.to_string(),
-                data: serde_json::json!({ "answers": answers }),
-            },
-        )
-        .await;
+    write_answers(state, session, &held, answers).await;
 }
