@@ -31,6 +31,11 @@ Suites (contracts are in-repo, so the bench is reproducible):
   fixed against: PayPal orders, Jira issues, Zendesk tickets, Notion pages and Square
   payments. Not in the default suites. Measures how `journeys` generalises, so its
   checks are written from each contract and are not edited to suit results.
+- journeys_blind: the same kind of journey over five more contracts: Spotify playlists,
+  Discord messages, Auth0 users, HubSpot CRM and Slack messages. Not in the default
+  suites. Its checks were written from the contracts and from what each real API
+  promises a client, without looking at the engine or at any past result, so it
+  measures behaviour on contracts nobody tuned against. Do not edit a check to suit results.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -64,7 +69,7 @@ import uuid
 from datetime import datetime
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout")
+SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -115,6 +120,14 @@ HELDOUT_MOCKS = {
     "zendesk": ("examples/apis/zendesk/zendesk.openapi.yaml", "/zendesk", None),
     "notion": ("examples/apis/notion/notion.openapi.yaml", "/notion", None),
     "square": ("examples/apis/square/square.openapi.yaml", "/square", None),
+}
+# The blind journeys, contracts alone as well: no persona.
+BLIND_MOCKS = {
+    "spotify": ("examples/apis/spotify/spotify.openapi.yaml", "/spotify", None),
+    "discord": ("examples/apis/discord/discord.openapi.yaml", "/discord", None),
+    "auth0": ("examples/apis/auth0-management/auth0-management.openapi.yaml", "/auth0", None),
+    "hubspot": ("examples/apis/hubspot/hubspot.openapi.yaml", "/hubspot", None),
+    "slack": ("examples/apis/slack/slack.openapi.yaml", "/slack", None),
 }
 SSE_MOCKS = {
     "events": ("fixtures/openapi/events-3.1.yaml", "/events",
@@ -1329,6 +1342,429 @@ def run_journeys_heldout(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- blind journeys
+
+# These journeys measure the engine on contracts nobody tuned against. They were
+# written from the contracts and from what each real API promises a client, with no
+# look at the engine or at past results. A check that is hard for a mock stays; a
+# check is left out only when its contract has no route for it or its schema rules the
+# answer out, and a comment says so. Do not edit a check to suit results.
+BLIND_CHECKS = {
+    "spotify": [
+        "search returned tracks", "search answers what was asked", "track detail keeps the listed track",
+        "artist detail keeps the track's artist", "top tracks credit the artist",
+        "playlist read names the playlist asked for", "add returns a new snapshot",
+        "item list shows the new tracks first", "items carry the full track", "items name who added them",
+        "insert lands at its position", "older path adds to the same playlist",
+        "read shows the latest snapshot and count", "read keeps the playlist's details",
+    ],
+    "discord": [
+        "guild read names the guild asked for", "channels name their guild", "guild has a text channel",
+        "message has an id", "message keeps what was sent", "author is the bot", "read matches the created message",
+        "reply names the message it answers", "read keeps the reference", "list holds both, newest first",
+        "after filter holds only the later message", "before filter holds only the earlier message",
+        "deleted message is gone", "list drops the deleted message",
+    ],
+    "auth0": [
+        "user has an id", "user keeps the profile", "user belongs to the connection", "read matches the created user",
+        "password never comes back", "update changes the fields", "update merges the metadata", "read shows the update",
+        "search finds the user as updated", "search misses another email", "lookup by email finds the user",
+        "tenant offers a role", "user holds the assigned role", "deleted user is gone",
+    ],
+    "hubspot": [
+        "company has an id", "company keeps its properties", "read matches the created company", "contact has an id",
+        "contact keeps its properties", "read returns the properties asked for", "deal has an id",
+        "read matches the created deal", "deal list holds the new deal", "update changes the contact",
+        "read shows the update and keeps the rest", "search finds the contact in its new stage",
+        "search by the old stage misses the contact", "archived contact is gone",
+    ],
+    "slack": [
+        "auth names the bot", "channel list offers a channel", "channel list answers the filter",
+        "user info keeps the listed bot", "post returns a timestamp", "message keeps text and author",
+        "history holds the new message", "history lists newest first", "oldest filter holds only the later message",
+        "latest filter holds only the earlier message", "reply names its thread and stays out of the channel",
+        "parent counts the reply", "reaction shows on the message", "a repeated reaction is refused",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND_CHECKS)
+
+
+def spotify_uris(page):
+    return [obj(item.get("track")).get("uri") for item in dicts(page.get("items"))]
+
+
+def spotify_steps(j):
+    # A playlist the client was given: the contract has no route to create one, and
+    # none to update its details, remove an item or delete anything. Item lists are read
+    # from their start and inserts go there too, because its Paging schema pins offset to 0.
+    j.headers.update(HELDOUT_AUTH)
+    term = "love"
+    found = obj(j.call("GET", "/v1/search", query={"q": term, "type": "track,artist", "market": "DE", "limit": 5}))
+    track_page, artist_page = obj(found.get("tracks")), obj(found.get("artists"))
+    tracks = dicts(track_page.get("items"))
+    need(j, "search returned tracks", len(tracks) >= 3 and all(t.get("id") and t.get("uri") for t in tracks))
+    listed_artists = artist_page.get("items")
+    j.check("search answers what was asked",
+            eq(track_page.get("limit"), 5) and eq(artist_page.get("limit"), 5) and isinstance(listed_artists, list)
+            and "albums" not in found and term in json.dumps([tracks, listed_artists]).lower())
+    first = tracks[0]
+    track = obj(j.call("GET", f"/v1/tracks/{first['id']}", query={"market": "DE"}))
+    j.check("track detail keeps the listed track",
+            same(track, first, "id", "name", "uri", "duration_ms") and same(obj(track.get("album")), obj(first.get("album")), "id", "name"))
+    credit = head(first.get("artists"))
+    artist = obj(j.call("GET", f"/v1/artists/{credit.get('id')}"))
+    j.check("artist detail keeps the track's artist", same(artist, credit, "id", "name", "uri"))
+    top = dicts(obj(j.call("GET", f"/v1/artists/{credit.get('id')}/top-tracks", query={"market": "DE"})).get("tracks"))
+    j.check("top tracks credit the artist",
+            bool(top) and credit.get("id") is not None
+            and all(by_id(t.get("artists"), credit.get("id")) for t in top), listed=len(top))
+    me = obj(j.call("GET", "/v1/me"))
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    pid = "".join(j.rng.choice(alphabet) for _ in range(22))
+    path = f"/v1/playlists/{pid}"
+    before = obj(j.call("GET", path))
+    need(j, "playlist read names the playlist asked for",
+         eq(before.get("id"), pid) and eq(before.get("uri"), f"spotify:playlist:{pid}") and before.get("snapshot_id"))
+    count = obj(before.get("tracks")).get("total")
+
+    def grown(page, by):
+        return isinstance(count, int) and eq(page.get("total"), count + by)
+
+    pair = [tracks[0]["uri"], tracks[1]["uri"]]
+    added = obj(j.call("POST", f"{path}/items", body={"uris": pair, "position": 0}))
+    j.check("add returns a new snapshot",
+            j.last["status"] == 201 and added.get("snapshot_id") and added["snapshot_id"] != before.get("snapshot_id"),
+            snapshot=added.get("snapshot_id"))
+    page = obj(j.call("GET", f"{path}/items", query={"limit": 5}))
+    j.check("item list shows the new tracks first", spotify_uris(page)[:2] == pair and grown(page, 2),
+            uris=spotify_uris(page), total=page.get("total"), before=count)
+    items = dicts(page.get("items"))
+    j.check("items carry the full track",
+            same(obj(head(items).get("track")), first, "id", "name", "uri", "duration_ms"))
+    j.check("items name who added them",
+            len(items) >= 2 and all(eq(obj(i.get("added_by")).get("id"), me.get("id")) and i.get("added_at") for i in items[:2]))
+    inserted = tracks[2]["uri"]
+    j.call("POST", f"{path}/items", body={"uris": [inserted], "position": 1})
+    page = obj(j.call("GET", f"{path}/items", query={"limit": 5}))
+    j.check("insert lands at its position", spotify_uris(page)[:3] == [pair[0], inserted, pair[1]], uris=spotify_uris(page))
+    older = head(top).get("uri") or pair[0]  # the same track twice is allowed in a playlist
+    last = obj(j.call("POST", f"{path}/tracks", body={"uris": [older], "position": 0}))
+    page = obj(j.call("GET", f"{path}/items", query={"limit": 5}))
+    j.check("older path adds to the same playlist",
+            spotify_uris(page)[:4] == [older, pair[0], inserted, pair[1]], uris=spotify_uris(page))
+    read = obj(j.call("GET", path))
+    j.check("read shows the latest snapshot and count",
+            eq(read.get("snapshot_id"), last.get("snapshot_id")) and grown(obj(read.get("tracks")), 4),
+            total=obj(read.get("tracks")).get("total"), before=count)
+    j.check("read keeps the playlist's details",
+            same(read, before, "id", "uri", "name", "owner", "public", "collaborative"))
+
+
+def discord_steps(j):
+    # A guild the client was given: the contract has no route to create one or to list the
+    # bot's guilds. It has no route to edit or pin a message either. Its interaction callback
+    # is left out: it needs an interaction from the gateway and answers 204, so nothing
+    # shows its effect. Usernames are not compared: UserResponse's pattern rules out the
+    # const username of UserPIIResponse.
+    j.headers["authorization"] = "Bot bench-placeholder"
+    me = obj(j.call("GET", "/users/@me"))
+    gid = str(1200000000000000000 + j.rng.randrange(10 ** 17))
+    guild = obj(j.call("GET", f"/guilds/{gid}", query={"with_counts": "true"}))
+    j.check("guild read names the guild asked for",
+            eq(guild.get("id"), gid) and isinstance(guild.get("approximate_member_count"), int))
+    channels = dicts(j.call("GET", f"/guilds/{gid}/channels"))
+    j.check("channels name their guild", bool(channels) and all(eq(c.get("guild_id"), gid) for c in channels))
+    channel = next((c for c in channels if c.get("type") == 0), {})
+    cid = channel.get("id")
+    need(j, "guild has a text channel", cid)
+    messages = f"/channels/{cid}/messages"
+    content, title = f"Doors open at {j.rng.randint(17, 20)}:30 tonight.", "Meetup reminder"
+    nonce = f"bench-{j.rng.randint(100000, 999999)}"
+    first = obj(j.call("POST", messages, body={
+        "content": content, "nonce": nonce, "embeds": [{"title": title, "description": "Bring a laptop."}],
+    }))
+    mid = first.get("id")
+    need(j, "message has an id", mid)
+    embed = head(first.get("embeds"))
+    j.check("message keeps what was sent",
+            eq(first.get("content"), content) and eq(first.get("channel_id"), cid) and eq(first.get("nonce"), nonce)
+            and eq(embed.get("title"), title) and eq(embed.get("description"), "Bring a laptop."))
+    j.check("author is the bot", eq(obj(first.get("author")).get("id"), me.get("id")))
+    read = obj(j.call("GET", f"{messages}/{mid}"))
+    j.check("read matches the created message",
+            same(read, first, "id", "content", "channel_id", "timestamp", "embeds")
+            and eq(obj(read.get("author")).get("id"), me.get("id")) and read.get("pinned") is False
+            and "edited_timestamp" in read and read["edited_timestamp"] is None)
+    answer = "Will the talks be recorded?"
+    reply = obj(j.call("POST", messages, body={"content": answer, "message_reference": {"message_id": mid}}))
+    rid = reply.get("id")
+    j.check("reply names the message it answers",
+            eq(reply.get("type"), 19) and eq(reply.get("content"), answer)
+            and eq(obj(reply.get("message_reference")).get("message_id"), mid))
+    read2 = obj(j.call("GET", f"{messages}/{rid}"))
+    j.check("read keeps the reference",
+            eq(read2.get("id"), rid) and eq(obj(read2.get("message_reference")).get("message_id"), mid))
+
+    def ids(**query):
+        return [m.get("id") for m in dicts(j.call("GET", messages, query=query))]
+
+    listed = ids(limit=50)
+    j.check("list holds both, newest first",
+            rid in listed and mid in listed and listed.index(rid) < listed.index(mid), listed=listed)
+    later = ids(after=mid)
+    j.check("after filter holds only the later message", rid in later and mid not in later, listed=later)
+    earlier = ids(before=rid)
+    j.check("before filter holds only the earlier message", mid in earlier and rid not in earlier, listed=earlier)
+    j.call("DELETE", f"{messages}/{mid}")
+    deleted = j.last["status"]
+    j.call("GET", f"{messages}/{mid}")
+    j.check("deleted message is gone", deleted == 204 and j.last["status"] == 404, delete_status=deleted)
+    left = ids(limit=50)
+    j.check("list drops the deleted message", rid in left and mid not in left, listed=left)
+
+
+def auth0_user(users, wanted):
+    return next((u for u in dicts(users) if eq(u.get("user_id"), wanted)), {})
+
+
+def auth0_steps(j):
+    # The contract has no route to create a role, so the role comes from the tenant's list.
+    j.headers.update(HELDOUT_AUTH)
+    connection = "Username-Password-Authentication"
+    tag = j.rng.randint(1000, 9999)
+    email, name = f"ana.silva{tag}@example.org", "Ana Silva"
+    user_meta = {"plan": "team"}
+    app_meta = {"region": "eu"}
+    created = obj(j.call("POST", "/api/v2/users", body={
+        "connection": connection, "email": email, "password": f"Bench-Placeholder-{tag}!", "name": name,
+        "given_name": "Ana", "family_name": "Silva", "user_metadata": user_meta, "app_metadata": app_meta,
+    }))
+    uid = created.get("user_id")
+    need(j, "user has an id", uid)
+    path = f"/api/v2/users/{urllib.parse.quote(str(uid), safe='')}"  # the id holds a `|`
+    j.check("user keeps the profile",
+            eq(created.get("email"), email) and eq(created.get("name"), name)
+            and eq(created.get("given_name"), "Ana") and eq(created.get("family_name"), "Silva"))
+    identity = head(created.get("identities"))
+    j.check("user belongs to the connection",
+            eq(identity.get("connection"), connection) and eq(identity.get("provider"), "auth0")
+            and eq(f"auth0|{identity.get('user_id')}", uid), identity=identity)
+    read = obj(j.call("GET", path))
+    j.check("read matches the created user",
+            same(read, created, "user_id", "email", "name", "given_name", "family_name", "created_at", "identities")
+            and eq(read.get("user_metadata"), user_meta) and eq(read.get("app_metadata"), app_meta))
+    j.check("password never comes back", bool(read) and "password" not in created and "password" not in read)
+    updated = obj(j.call("PATCH", path, body={"blocked": True, "given_name": "Anabela", "user_metadata": {"locale": "de"}}))
+    merged = dict(user_meta, locale="de")
+    j.check("update changes the fields",
+            eq(updated.get("user_id"), uid) and updated.get("blocked") is True and eq(updated.get("given_name"), "Anabela"))
+    j.check("update merges the metadata",
+            eq(updated.get("user_metadata"), merged) and eq(updated.get("app_metadata"), app_meta),
+            user_metadata=updated.get("user_metadata"))
+    read2 = obj(j.call("GET", path))
+    j.check("read shows the update",
+            read2.get("blocked") is True and eq(read2.get("given_name"), "Anabela") and eq(read2.get("family_name"), "Silva")
+            and eq(read2.get("user_metadata"), merged) and eq(read2.get("created_at"), created.get("created_at"))
+            and read2.get("updated_at") is not None and read2["updated_at"] != created.get("updated_at"),
+            updated_at=read2.get("updated_at"))
+    found = obj(j.call("GET", "/api/v2/users", query={"q": f'email:"{email}"', "search_engine": "v3", "include_totals": "true"}))
+    hit = auth0_user(found.get("users"), uid)
+    j.check("search finds the user as updated",
+            eq(hit.get("email"), email) and hit.get("blocked") is True and eq(hit.get("given_name"), "Anabela")
+            and eq(found.get("total"), 1), total=found.get("total"))
+    missed = obj(j.call("GET", "/api/v2/users",
+                        query={"q": f'email:"nobody{tag}@example.org"', "search_engine": "v3", "include_totals": "true"}))
+    j.check("search misses another email", missed.get("users") == [] and eq(missed.get("total"), 0), total=missed.get("total"))
+    by_email = j.call("GET", "/api/v2/users-by-email", query={"email": email})
+    j.check("lookup by email finds the user", eq(auth0_user(by_email, uid).get("email"), email))
+    role = head(obj(j.call("GET", "/api/v2/roles", query={"include_totals": "true"})).get("roles"))
+    need(j, "tenant offers a role", role.get("id"))
+    held = obj(j.call("GET", f"{path}/roles", query={"include_totals": "true"}))
+    j.call("POST", f"{path}/roles", body={"roles": [role["id"]]})
+    assigned = j.last["status"]
+    after = obj(j.call("GET", f"{path}/roles", query={"include_totals": "true"}))
+    j.check("user holds the assigned role",
+            eq(held.get("total"), 0) and assigned == 204 and eq(after.get("total"), 1)
+            and same(by_id(after.get("roles"), role["id"]), role, "id", "name"),
+            before=held.get("total"), after=after.get("total"), assign_status=assigned)
+    j.call("DELETE", path)
+    deleted = j.last["status"]
+    j.call("GET", path)
+    gone = j.last["status"]
+    left = j.call("GET", "/api/v2/users-by-email", query={"email": email})
+    j.check("deleted user is gone", deleted == 204 and gone == 404 and left == [],
+            delete_status=deleted, read_status=gone)
+
+
+def hubspot_props(thing):
+    return obj(thing.get("properties"))
+
+
+def hubspot_search(j, *filters):
+    query = {"filterGroups": [{"filters": [{"propertyName": p, "operator": "EQ", "value": v} for p, v in filters]}],
+             "properties": ["email", "firstname", "lastname", "lifecyclestage"], "limit": 10}
+    return obj(j.call("POST", "/crm/v3/objects/contacts/search", body=query))
+
+
+def hubspot_steps(j):
+    # The contract has no route or parameter to read associations back, so a deal's links
+    # are sent as a client would send them and the references checked are its properties.
+    # It has no route to update or delete a company or a deal. An archived contact is not
+    # read with archived=true: the Contact schema pins archived to false.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randint(1000, 9999)
+    made = {"name": f"Fjord Logistics {tag}", "domain": f"fjord{tag}.example.org",
+            "industry": "LOGISTICS_AND_SUPPLY_CHAIN", "city": "Oslo"}
+    company = obj(j.call("POST", "/crm/v3/objects/companies", body={"properties": made}))
+    company_id = company.get("id")
+    need(j, "company has an id", company_id)
+    j.check("company keeps its properties", all(eq(hubspot_props(company).get(k), v) for k, v in made.items()))
+    got = obj(j.call("GET", f"/crm/v3/objects/companies/{company_id}", query={"properties": ",".join(made)}))
+    j.check("read matches the created company",
+            eq(got.get("id"), company_id) and all(eq(hubspot_props(got).get(k), v) for k, v in made.items()))
+    owner = "52550153"
+    email = f"ana.silva{tag}@example.org"
+    person = {"email": email, "firstname": "Ana", "lastname": "Silva", "phone": f"+1 617 555 0{tag % 1000:03d}",
+              "company": made["name"], "jobtitle": "Buyer", "lifecyclestage": "lead", "hubspot_owner_id": owner}
+
+    def link(to, kind):
+        return {"to": {"id": to}, "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": kind}]}
+
+    contact = obj(j.call("POST", "/crm/v3/objects/contacts", body={"properties": person, "associations": [link(company_id, 1)]}))
+    contact_id = contact.get("id")
+    need(j, "contact has an id", contact_id)
+    path = f"/crm/v3/objects/contacts/{contact_id}"
+    j.check("contact keeps its properties", all(eq(hubspot_props(contact).get(k), v) for k, v in person.items()))
+    # HubSpot returns only a default set unless the client names the properties it wants.
+    asked = {"properties": ",".join(person)}
+    read = obj(j.call("GET", path, query=asked))
+    j.check("read returns the properties asked for",
+            eq(read.get("id"), contact_id) and all(eq(hubspot_props(read).get(k), v) for k, v in person.items()))
+    sale = {"dealname": f"Fjord renewal {tag}", "amount": f"{j.rng.randint(2, 90)}000", "dealstage": "qualifiedtobuy",
+            "pipeline": "default", "closedate": "2026-12-31T00:00:00.000Z", "hubspot_owner_id": owner}
+    deal = obj(j.call("POST", "/crm/v3/objects/deals",
+                      body={"properties": sale, "associations": [link(contact_id, 3), link(company_id, 5)]}))
+    deal_id = deal.get("id")
+    need(j, "deal has an id", deal_id)
+    got_deal = obj(j.call("GET", f"/crm/v3/objects/deals/{deal_id}", query={"properties": ",".join(sale)}))
+    j.check("read matches the created deal",
+            eq(got_deal.get("id"), deal_id) and all(eq(hubspot_props(got_deal).get(k), v) for k, v in sale.items()))
+    deals = obj(j.call("GET", "/crm/v3/objects/deals", query={"limit": 100, "properties": ",".join(sale)}))
+    j.check("deal list holds the new deal",
+            all(eq(hubspot_props(by_id(deals.get("results"), deal_id)).get(k), sale[k]) for k in ("dealname", "amount")))
+    updated = obj(j.call("PATCH", path, body={"properties": {"lifecyclestage": "opportunity", "jobtitle": "Head of buying"}}))
+    j.check("update changes the contact",
+            eq(updated.get("id"), contact_id) and eq(hubspot_props(updated).get("lifecyclestage"), "opportunity")
+            and eq(hubspot_props(updated).get("jobtitle"), "Head of buying"))
+    read2 = obj(j.call("GET", path, query=asked))
+    props2 = hubspot_props(read2)
+    j.check("read shows the update and keeps the rest",
+            eq(props2.get("lifecyclestage"), "opportunity") and eq(props2.get("jobtitle"), "Head of buying")
+            and all(eq(props2.get(k), person[k]) for k in ("email", "firstname", "lastname", "phone", "company"))
+            and same(read2, read, "id", "createdAt"), stage=props2.get("lifecyclestage"))
+    found = hubspot_search(j, ("email", email), ("lifecyclestage", "opportunity"))
+    j.check("search finds the contact in its new stage",
+            eq(hubspot_props(by_id(found.get("results"), contact_id)).get("lastname"), "Silva") and eq(found.get("total"), 1),
+            total=found.get("total"))
+    stale = hubspot_search(j, ("email", email), ("lifecyclestage", "lead"))
+    j.check("search by the old stage misses the contact",
+            stale.get("results") == [] and eq(stale.get("total"), 0), total=stale.get("total"))
+    j.call("DELETE", path)
+    archived = j.last["status"]
+    j.call("GET", path)
+    gone = j.last["status"]
+    after = hubspot_search(j, ("email", email))
+    j.check("archived contact is gone",
+            archived == 204 and gone == 404 and after.get("results") == [] and eq(after.get("total"), 0),
+            archive_status=archived, read_status=gone, total=after.get("total"))
+
+
+def slack_history(j, channel, **query):
+    return dicts(obj(j.call("GET", "/conversations.history", query=dict(query, channel=channel))).get("messages"))
+
+
+def slack_message(messages, ts):
+    return next((m for m in messages if eq(m.get("ts"), ts)), {})
+
+
+def slack_stamps(messages):
+    return [m.get("ts") for m in messages]
+
+
+def slack_steps(j):
+    # The contract has no route to edit or delete a message, to read a thread or to create
+    # a channel, so a reply's effect is read on its parent and the channel comes from the list.
+    j.headers["authorization"] = "Bearer xoxb-bench-placeholder"
+    who = obj(j.call("GET", "/auth.test"))
+    bot = who.get("user_id")
+    need(j, "auth names the bot", who.get("ok") is True and bot)
+    listed = obj(j.call("GET", "/conversations.list",
+                        query={"exclude_archived": "true", "types": "public_channel", "limit": 100}))
+    channels = dicts(listed.get("channels"))
+    channel = next((c for c in channels if c.get("is_member") is True), head(channels))
+    cid = channel.get("id")
+    need(j, "channel list offers a channel", cid)
+    j.check("channel list answers the filter",
+            all(c.get("is_private") is False and c.get("is_archived") is False for c in channels))
+    members = obj(j.call("GET", "/users.list", query={"limit": 100}))
+    member = by_id(members.get("members"), bot)
+    info = obj(obj(j.call("GET", "/users.info", query={"user": bot})).get("user"))
+    j.check("user info keeps the listed bot",
+            same(info, member, "id", "name", "real_name", "team_id") and info.get("is_bot") is True)
+
+    def post(**fields):
+        return obj(j.call("POST", "/chat.postMessage", body=dict(fields, channel=cid)))
+
+    text = f"Deploy {j.rng.randint(1000, 9999)} is rolling out."
+    made = post(text=text)
+    ts = made.get("ts")
+    need(j, "post returns a timestamp", made.get("ok") is True and ts)
+    message = obj(made.get("message"))
+    j.check("message keeps text and author",
+            eq(made.get("channel"), cid) and eq(message.get("text"), text) and eq(message.get("ts"), ts)
+            and eq(message.get("user"), bot))
+    j.check("history holds the new message", eq(slack_message(slack_history(j, cid), ts).get("text"), text))
+    later = post(text="Deploy finished.")
+    ts2 = later.get("ts")
+    stamps = slack_stamps(slack_history(j, cid))
+    j.check("history lists newest first",
+            ts2 is not None and ts2 in stamps and ts in stamps and stamps.index(ts2) < stamps.index(ts), stamps=stamps)
+    # Both bounds are exclusive unless inclusive is set.
+    newer = slack_stamps(slack_history(j, cid, oldest=ts))
+    j.check("oldest filter holds only the later message", ts2 in newer and ts not in newer, stamps=newer)
+    older = slack_stamps(slack_history(j, cid, latest=ts2))
+    j.check("latest filter holds only the earlier message", ts in older and ts2 not in older, stamps=older)
+    reply = post(text="Rollback plan is ready.", thread_ts=ts)
+    channel_view = slack_stamps(slack_history(j, cid))
+    j.check("reply names its thread and stays out of the channel",
+            eq(obj(reply.get("message")).get("thread_ts"), ts) and reply.get("ts") is not None
+            and reply["ts"] not in channel_view, stamps=channel_view)
+    # A client reads one message by bounding history to it.
+    parent = slack_message(slack_history(j, cid, latest=ts, inclusive="true", limit=1), ts)
+    j.check("parent counts the reply", eq(parent.get("reply_count"), 1) and eq(parent.get("thread_ts"), ts),
+            reply_count=parent.get("reply_count"))
+    react = {"channel": cid, "name": "eyes", "timestamp": ts}
+    reacted = obj(j.call("POST", "/reactions.add", body=react))
+    shown = slack_message(slack_history(j, cid, latest=ts, inclusive="true", limit=1), ts)
+    reaction = next((r for r in dicts(shown.get("reactions")) if r.get("name") == "eyes"), {})
+    j.check("reaction shows on the message",
+            reacted.get("ok") is True and eq(reaction.get("count"), 1) and bot in (reaction.get("users") or [])
+            and eq(shown.get("text"), text), reaction=reaction)
+    again = obj(j.call("POST", "/reactions.add", body=react))
+    j.check("a repeated reaction is refused", again.get("ok") is False and eq(again.get("error"), "already_reacted"),
+            slack_ok=again.get("ok"), slack_error=again.get("error"))
+
+
+BLIND_JOURNEYS = {"spotify": spotify_steps, "discord": discord_steps, "auth0": auth0_steps,
+                  "hubspot": hubspot_steps, "slack": slack_steps}
+
+
+def run_journeys_blind(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -1337,6 +1773,7 @@ RUNNERS = {
     "import": ({}, run_import),
     "journeys": (JOURNEY_MOCKS, run_journeys),
     "journeys_heldout": (HELDOUT_MOCKS, run_journeys_heldout),
+    "journeys_blind": (BLIND_MOCKS, run_journeys_blind),
 }
 
 
