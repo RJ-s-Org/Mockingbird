@@ -25,6 +25,11 @@
 //! writes to one resource at the same moment can lose one request, and a count can
 //! miss a failure. No lock: what is lost is a hint to a mock's LLM.
 //!
+//! A write that left no record a list read shows (`POST /users/{id}/roles` answering
+//! 204, Spotify's add answering a snapshot id) is also kept for the path it was made to,
+//! and told to the list read of that path. Only told: the read is not forced, nothing
+//! stands over its answer, and the memory stays until the session goes.
+//!
 //! HTTP-bound operations only: GraphQL stores what its answers hold under their
 //! own types, and gRPC and SOAP are not remembered for, so their prompts and their
 //! reads are as they were.
@@ -99,7 +104,7 @@ fn memory_key(resource_type: &str, id: &str, stored: bool) -> String {
 
 /// Whether this call may use the memory at all: with no LLM there is nothing to
 /// tell, and an offline read answers as it always did.
-fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
+pub(super) fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
     rt.consistency
         && plan.engine.has_provider()
         && matches!(plan.op.binding, Binding::Http { .. })
@@ -642,7 +647,7 @@ fn is_own_credential(rt: &MockRuntime, name: &str) -> bool {
 }
 
 /// Whether a member named `name` holds a credential, when a contract does not say.
-fn is_credential_name(rt: &MockRuntime, name: &str) -> bool {
+pub(super) fn is_credential_name(rt: &MockRuntime, name: &str) -> bool {
     is_sensitive(name) || is_own_credential(rt, name)
 }
 
@@ -726,19 +731,31 @@ fn redact_credentials(
 /// Only a record's `own` body has its read schema to go by. One that is only told, an
 /// action's or a child's to its parent, gets every rule by name.
 fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value, own: bool) -> Value {
-    let mut body = body.clone();
     let read = plan
         .op
         .resource_type
         .as_deref()
         .filter(|_| own)
         .and_then(|t| read_schema(rt, t));
-    redact_credentials(rt, &mut body, plan.op.input.body.as_ref(), read);
+    scrubbed_by(rt, plan, body, plan.op.input.body.as_ref(), read)
+}
+
+/// `value` as it may be kept, by `schema`'s marks and every rule by name (see
+/// [`scrubbed`]). What an answer holds goes by its output's schema, a query by its own.
+pub(super) fn scrubbed_by(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    value: &Value,
+    schema: Option<&Value>,
+    read: Option<&Value>,
+) -> Value {
+    let mut value = value.clone();
+    redact_credentials(rt, &mut value, schema, read);
     if let Some(recorder) = &rt.recorder {
-        recorder.redact(&mut body);
+        recorder.redact(&mut value);
     }
-    plan.engine.scrub(&mut body);
-    body
+    plan.engine.scrub(&mut value);
+    value
 }
 
 /// `body` within [`MAX_BODY_BYTES`]: as it is, or cut to a string that says so.
@@ -1122,19 +1139,7 @@ pub(super) async fn after_write(
     if target.is_none() && parent.is_none() {
         return;
     }
-    let entry = |body: Option<Value>| {
-        let mut entry = Map::new();
-        entry.insert("operation".to_string(), Value::from(op.id.as_str()));
-        entry.insert("path".to_string(), Value::from(route(op)));
-        if let Some(body) = body {
-            entry.insert("body".to_string(), within_cap(body));
-        }
-        entry.insert(
-            "at".to_string(),
-            Value::from(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-        );
-        Value::Object(entry)
-    };
+    let entry = |body: Option<Value>| memory_entry(op, body, None);
     if let Some(tell) = target {
         let key = memory_key(t, &tell.id, tell.stored);
         remember(state, session, &key, &entry(tell.body), tell.own).await;
@@ -1148,6 +1153,97 @@ pub(super) async fn after_write(
         let key = memory_key(&parent.resource_type, &parent.id, true);
         remember(state, session, &key, &entry(told), None).await;
     }
+}
+
+/// One remembered request, as a prompt is told it but for `at`.
+fn memory_entry(op: &Operation, body: Option<Value>, query: Option<Value>) -> Value {
+    let mut entry = Map::new();
+    entry.insert("operation".to_string(), Value::from(op.id.as_str()));
+    entry.insert("path".to_string(), Value::from(route(op)));
+    if let Some(query) = query {
+        entry.insert("query".to_string(), within_cap(query));
+    }
+    if let Some(body) = body {
+        entry.insert("body".to_string(), within_cap(body));
+    }
+    entry.insert(
+        "at".to_string(),
+        Value::from(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+    );
+    Value::Object(entry)
+}
+
+/// Where the writes to the path `call` was made to are kept, when its route has a list
+/// read they could reach: by a hash, as a path's values may be the secret.
+fn route_memory_key(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    rt.index().written_lists.get(path)?;
+    let filled = fill_path(call, &path_segments(path))?;
+    Some(memory_key("#route", &filled.path, false))
+}
+
+/// What a list read is told of the writes to its own path, oldest first.
+pub(super) async fn recall_route(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+) -> Vec<Value> {
+    let rt = state.rt;
+    if !applies(rt, plan) || !matches!(plan.op.kind, OperationKind::Query) {
+        return Vec::new();
+    }
+    let Some(key) = route_memory_key(rt, plan.op, call) else {
+        return Vec::new();
+    };
+    let mut requests = read_memory(state, &plan.session, &key).await.requests;
+    for request in &mut requests {
+        if let Value::Object(members) = request {
+            members.remove("at");
+        }
+    }
+    requests
+}
+
+/// Keeps a 2xx write for the list read of its path, unless it stored a record of that
+/// list's type, which the read shows as a related resource. `refused`: it stored nothing
+/// for being another's or having nowhere to go.
+pub(super) async fn after_route_write(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+    refused: bool,
+) {
+    let rt = state.rt;
+    let op = plan.op;
+    if refused
+        || !applies(rt, plan)
+        || !matches!(op.kind, OperationKind::Command(_))
+        || !(200..300).contains(&generated.status)
+    {
+        return;
+    }
+    let Some(key) = route_memory_key(rt, op, call) else {
+        return;
+    };
+    let stored = generated.body.as_ref().or(call.body.as_ref());
+    let of_the_list = op.resource_type.as_ref() == rt.index().written_lists.get(&route(op));
+    if of_the_list && stored.is_some_and(|stored| created_id(op, stored).is_some()) {
+        return;
+    }
+    let body = call
+        .body
+        .as_ref()
+        .filter(|b| !b.is_null() && b.as_object().is_none_or(|o| !o.is_empty()))
+        .map(|b| scrubbed(rt, plan, b, false));
+    let query = (!call.query.is_empty()).then(|| {
+        let query = Value::Object(call.query.clone());
+        scrubbed_by(rt, plan, &query, op.input.query.as_ref(), None)
+    });
+    let entry = memory_entry(op, body, query);
+    remember(state, &plan.session, &key, &entry, None).await;
 }
 
 /// What an update answering nothing leaves to tell its target, having merged what

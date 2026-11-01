@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod deleted;
+mod world;
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -683,6 +684,7 @@ pub(crate) async fn generate_pending(
         response_schema,
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
+        earlier_answers: &pending.earlier_answers,
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
@@ -741,6 +743,8 @@ pub(crate) struct Pending<'a> {
     cache: Option<(CacheEpoch, String)>,
     /// The writes the target does not show yet.
     earlier: write_memory::Earlier,
+    /// What routes with no parameters answered earlier in the session.
+    earlier_answers: Vec<Value>,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -910,7 +914,7 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(served);
     }
 
-    let earlier = match recalled {
+    let mut earlier = match recalled {
         Some(earlier) => earlier,
         None => {
             write_memory::recall(
@@ -926,11 +930,20 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    async {
+    let earlier_answers = async {
         parents_by_name(
             &mut state,
             session,
             op,
+            call,
+            target.as_ref(),
+            &mut followed,
+            &mut related,
+        )
+        .await;
+        world::named_by_value(
+            &mut state,
+            plan,
             call,
             target.as_ref(),
             &mut followed,
@@ -948,6 +961,10 @@ pub(crate) async fn prepare<'a>(
                 }
             }
         }
+        earlier
+            .told
+            .extend(write_memory::recall_route(&mut state, plan, call).await);
+        world::recall_answers(&mut state, plan).await
     }
     .instrument(state_span())
     .await;
@@ -960,6 +977,7 @@ pub(crate) async fn prepare<'a>(
         foreign_key,
         cache: since.zip(key),
         earlier,
+        earlier_answers,
     })
 }
 
@@ -1176,6 +1194,15 @@ pub(crate) async fn complete(
             },
         )
         .await;
+        write_memory::after_route_write(
+            &mut state,
+            plan,
+            call,
+            &generated,
+            foreign_key || unstored,
+        )
+        .await;
+        world::after_answer(&mut state, plan, call, &generated).await;
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -1574,6 +1601,13 @@ pub(crate) struct BundleIndex {
     /// Per resource type, the types whose answers have a reference field of
     /// it (see [`reference_targets`]), sorted and deduplicated.
     referrers: HashMap<String, Vec<String>>,
+    /// The types an effect can name, those with a read to check against, sorted.
+    effect_types: Vec<String>,
+    /// Per path with no parameters whose `GET` answers a single object (see
+    /// [`answers_a_list`]), that operation's position.
+    single_reads: HashMap<String, usize>,
+    /// Per path a command and a list read by no path parameter share, the list's type.
+    written_lists: HashMap<String, String>,
 }
 
 impl BundleIndex {
@@ -1640,6 +1674,11 @@ impl BundleIndex {
         // `offers` of a flight search are offers.
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
+        let (single_reads, written_lists) = routes_of(bundle, &read_types, &list_members_of);
+        let mut effect_types: Vec<String> =
+            detail_reads.keys().chain(shapes.keys()).cloned().collect();
+        effect_types.sort_unstable();
+        effect_types.dedup();
         #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
         #[cfg(any(test, feature = "events"))]
@@ -1670,6 +1709,9 @@ impl BundleIndex {
                 .map(|(t, (_, i, schema))| (t, (i, schema)))
                 .collect(),
             referrers,
+            effect_types,
+            single_reads,
+            written_lists,
         }
     }
 
@@ -1703,6 +1745,63 @@ impl BundleIndex {
     fn referrers(&self, resource_type: &str) -> &[String] {
         self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
     }
+}
+
+/// What routes the contract's operations share: see [`BundleIndex::single_reads`] and
+/// [`BundleIndex::written_lists`].
+fn routes_of(
+    bundle: &mb_mcm::Bundle,
+    read_types: &HashSet<String>,
+    members_of: &[Vec<String>],
+) -> (HashMap<String, usize>, HashMap<String, String>) {
+    let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
+    let mut lists: HashMap<&str, &str> = HashMap::new();
+    for (i, op) in bundle.operations.iter().enumerate() {
+        let Binding::Http { method, path } = &op.binding else {
+            continue;
+        };
+        if !matches!(op.kind, OperationKind::Query) || *method != mb_mcm::HttpMethod::Get {
+            continue;
+        }
+        let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
+        let list = answers_a_list(bundle, op, read_types, members);
+        if list && op.identity.as_ref().is_none_or(|i| i.path_param.is_none()) {
+            lists.extend(op.resource_type.as_deref().map(|t| (path.as_str(), t)));
+        }
+        let parameters = path.contains('{') || op.input.path.is_some() || op.input.query.is_some();
+        if !list && !parameters && op.success_output().is_some_and(|o| o.schema.is_some()) {
+            single_reads.insert(path.clone(), i);
+        }
+    }
+    for op in &bundle.operations {
+        if let (OperationKind::Command(_), Binding::Http { path, .. }) = (&op.kind, &op.binding)
+            && let Some(t) = lists.get(path.as_str())
+        {
+            written_lists.insert(path.clone(), (*t).to_string());
+        }
+    }
+    (single_reads, written_lists)
+}
+
+/// Whether `op`'s success answer is a list: an array, or an object holding one in an
+/// envelope's member or under a member that is itself a type read. An object that only
+/// has a list among its members (a profile's `images`) stays a single object.
+fn answers_a_list(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    read_types: &HashSet<String>,
+    members: &[String],
+) -> bool {
+    let root_array = list_item_schemas(bundle, op, members)
+        .iter()
+        .any(|(member, _)| member.is_none());
+    root_array
+        || members.iter().any(|m| {
+            ENVELOPE_KEYS.contains(&m.as_str())
+                || op.resource_type.as_deref() == Some(m.as_str())
+                || read_types.contains(m)
+                || read_types.contains(&format!("{m}s"))
+        })
 }
 
 /// Records in `referrers` the types the fields of `op`'s answers (as type
@@ -2138,6 +2237,44 @@ fn renumber_urls(value: &mut Value, old: &str, new: &str) {
         Value::Array(items) => items.iter_mut().for_each(|v| renumber_urls(v, old, new)),
         Value::Object(obj) => obj.values_mut().for_each(|v| renumber_urls(v, old, new)),
         _ => {}
+    }
+}
+
+/// Sessions [`WrittenTypes`] holds at most; it is emptied when full.
+const MAX_WRITTEN_SESSIONS: usize = 1024;
+/// Types [`WrittenTypes`] holds per session at most, the latest.
+const MAX_WRITTEN_TYPES: usize = 32;
+
+/// Which types each session last wrote through this runtime, latest first. Only an
+/// order of looking (see [`world::named_by_value`]): a contract can have more types than
+/// a call may read, and what the session wrote is what it refers to. A session written
+/// to elsewhere (the Admin API, another node) is looked up in the contract's order.
+#[derive(Debug, Default)]
+pub(crate) struct WrittenTypes(std::sync::Mutex<HashMap<SessionKey, Vec<String>>>);
+
+impl WrittenTypes {
+    fn remember(&self, session: &SessionKey, t: &str) {
+        let Ok(mut written) = self.0.lock() else {
+            return;
+        };
+        if written.len() >= MAX_WRITTEN_SESSIONS && !written.contains_key(session) {
+            written.clear();
+        }
+        let types = written.entry(session.clone()).or_default();
+        if types.first().is_some_and(|first| first == t) {
+            return;
+        }
+        types.retain(|held| held != t);
+        types.insert(0, t.to_string());
+        types.truncate(MAX_WRITTEN_TYPES);
+    }
+
+    fn of(&self, session: &SessionKey) -> Vec<String> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|written| written.get(session).cloned())
+            .unwrap_or_default()
     }
 }
 
@@ -3561,9 +3698,13 @@ impl<'a> StateAccess<'a> {
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let t = r.resource_type.clone();
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
+        if ok && t != mb_state::INTERNAL_TYPE {
+            rt.written_types().remember(s, &t);
+        }
         if ok && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }
@@ -3595,9 +3736,13 @@ impl<'a> StateAccess<'a> {
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let t = r.resource_type.clone();
         let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
         self.wrote |= stored;
+        if stored {
+            rt.written_types().remember(s, &t);
+        }
         if stored && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }

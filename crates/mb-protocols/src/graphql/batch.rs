@@ -170,6 +170,7 @@ async fn generate(
                     response_schema: part.schema.as_deref(),
                     earlier_requests: &[],
                     earlier_own_body: None,
+                    earlier_answers: &[],
                     update_guard: None,
                 },
             }),

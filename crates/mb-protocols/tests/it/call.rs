@@ -743,6 +743,7 @@ paths:
   /deep:
     get:
       operationId: deep
+      parameters: [{name: view, in: query, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {type: object}}}}
 components:

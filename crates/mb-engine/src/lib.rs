@@ -151,6 +151,9 @@ pub struct GenerationContext<'a> {
     /// stands over what the answer wrote. Last write wins, so with any later write
     /// there is none, and a child's or an action's body is never one.
     pub earlier_own_body: Option<&'a Value>,
+    /// What routes with no parameters answered earlier in the session, oldest first:
+    /// what later answers agree with. Scrubbed by whoever kept them. For the prompt only.
+    pub earlier_answers: &'a [Value],
     /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
     /// With none it does not.
     pub update_guard: Option<&'a dyn UpdateGuard>,
