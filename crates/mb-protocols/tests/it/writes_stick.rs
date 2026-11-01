@@ -618,8 +618,9 @@ async fn patched_values_fill_what_is_not_stored() {
     assert!(updated.get("phase").is_some(), "{updated}");
 }
 
-/// Effects on the own target are held to what the answer is: identity, `readOnly`, a
-/// path member and an owner's are left out, and what the request named stands.
+/// Effects on the own target are held to what the answer is: identity, a path member and
+/// an owner's are left out, and what the request named stands. A `readOnly` member is what
+/// a server sets, so an effect can state it.
 #[tokio::test]
 async fn an_effect_on_its_own_target_is_held_to_the_same_protections() {
     let mut answer = widget();
@@ -646,8 +647,8 @@ async fn an_effect_on_its_own_target_is_held_to_the_same_protections() {
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     let (_, _, read) = h.call("GET", WIDGET, None).await;
-    assert_eq!(read["revision"], 3, "{read}");
-    assert!(read.get("completed_at").is_none(), "{read}");
+    assert_eq!(read["revision"], 99, "{read}");
+    assert_eq!(read["completed_at"], "2026-01-01", "{read}");
     assert_eq!(read["name"], "asked", "{read}");
     // What none of those rules cover still applies.
     assert_eq!(read["created_at"], "2026-11-01", "{read}");

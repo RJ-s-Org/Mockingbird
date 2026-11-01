@@ -1332,9 +1332,10 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 
 /// What of an effect's `set` may go on the target its update just stored: what the read
 /// schema declares at the top level (all of it where the schema names no members or a
-/// union may hold others), and of that not a path or `readOnly` member, not what the
-/// request names at the top level, and not what would show another owner. The check on identity comes
-/// before this, as for any effect.
+/// union may hold others), and of that not a path member, not what the request names at
+/// the top level, and not what would show another owner. A `readOnly` member may go on:
+/// a client cannot set it, and an effect is the server saying what followed. The check on
+/// identity comes before this, as for any effect.
 pub(super) fn own_effect_members(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -1372,7 +1373,6 @@ pub(super) fn own_effect_members(
     set.iter()
         .filter(|(key, _)| !declaring || declared(key).is_some())
         .filter(|(key, _)| !paths.contains(*key) && !shows_path(key) && !named(key))
-        .filter(|(key, _)| !read_only(bundle, declared(key)))
         .filter(|(key, value)| {
             let mut alone = held.data.clone();
             if let Value::Object(members) = &mut alone {
