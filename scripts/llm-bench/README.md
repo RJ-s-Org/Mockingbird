@@ -91,6 +91,10 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 
 `server_suites.py --suite journeys_heldout` runs five more journeys in the same row format: PayPal order to capture, Jira issue to transition, Zendesk ticket to update, Notion page to query and Square payment to refund, each against a mock built from its contract alone. The `journeys` suite drove engine fixes, so it no longer shows how well they generalise. This suite exists to measure that. Its checks were written from the contracts, as a client of each API would expect it to behave, without reading the engine. Do not edit a check to suit results. The suite is not in the default set, so `run.py` does not run it; it costs real calls.
 
+## Blind journeys
+
+`server_suites.py --suite journeys_blind` runs five journeys over Spotify, Discord, Auth0, HubSpot and Slack, written by an author who read no engine code or past results. The [first run](../../docs/benchmarks/blind-baseline-2026-11-01/README.md) is the baseline. Once a fix looks at their failures they are tuned like the rest, so a final number needs a new set.
+
 ## Testing without spend
 
 Both scripts accept a hidden `--upstream URL` flag that points the proxy at a fake chat endpoint. With it, `run.py` skips the key calls. `fake_llm.py` can stand in for OpenRouter:
