@@ -653,7 +653,7 @@ pub(crate) async fn generate_narrowed(
     match prepare(rt, plan, call, response_schema).await {
         Prepared::Answered(answer) => Ok(answer),
         Prepared::Pending(pending) => {
-            generate_pending(rt, plan, call, pending, response_schema).await
+            generate_pending(rt, plan, call, *pending, response_schema).await
         }
     }
 }
@@ -728,7 +728,7 @@ pub(crate) async fn generate_pending(
 /// state a generation must take into account.
 pub(crate) enum Prepared<'a> {
     Answered(GeneratedResponse),
-    Pending(Pending<'a>),
+    Pending(Box<Pending<'a>>),
 }
 
 /// A call to generate, then hand to [`complete`].
@@ -972,7 +972,7 @@ pub(crate) async fn prepare<'a>(
     .instrument(state_span())
     .await;
 
-    Prepared::Pending(Pending {
+    Prepared::Pending(Box::new(Pending {
         state,
         target_id,
         target,
@@ -982,7 +982,7 @@ pub(crate) async fn prepare<'a>(
         earlier,
         earlier_answers,
         earlier_writes,
-    })
+    }))
 }
 
 /// Writes a generated answer's state (a 2xx command's resource, a list

@@ -96,7 +96,7 @@ pub fn is_credential_name(name: &str) -> bool {
 }
 
 /// Whether `name` is a credential's only by a word that is as often an identity
-/// ([`IDENTITY_WORDS`]): what it holds is worth looking up as an id, and it is visible
+/// (`key`, `sid`): what it holds is worth looking up as an id, and it is visible
 /// where the contract makes it its type's identity.
 #[must_use]
 pub fn may_be_an_identity(name: &str) -> bool {

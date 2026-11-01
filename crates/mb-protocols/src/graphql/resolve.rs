@@ -421,7 +421,7 @@ async fn generate_in(
                                 *batch = Some(b);
                                 Route::Answered(answer)
                             }
-                            call::Prepared::Pending(pending) => Route::Join(b, Box::new(pending)),
+                            call::Prepared::Pending(pending) => Route::Join(b, pending),
                         },
                         None => Route::Alone,
                     };
