@@ -29,8 +29,9 @@
 //! 204, Spotify's add answering a snapshot id) is also kept for the path it was made to,
 //! and told to the list read of that path. Only told, as what may since have changed: the
 //! read is not forced and nothing stands over its answer. Its query is never kept, and of
-//! its body only what the list's items declare plainly, as the rest may be anything. The
-//! memory goes with the path's parent, and a write goes with the child it named.
+//! its body only what the contract declares of the write's request or the list's items,
+//! as the rest may be anything. The memory goes with the path's parent, and a write goes
+//! with the child it named.
 //!
 //! HTTP-bound operations only: GraphQL stores what its answers hold under their
 //! own types, and gRPC and SOAP are not remembered for, so their prompts and their
@@ -806,32 +807,51 @@ pub(super) fn scrubbed_for_prompt(
     scrubbed_record(rt, plan, t, data, None, read_schema(rt, t))
 }
 
-/// What `items` declare plainly of `value`: members they name, not marked as hidden and
-/// not named as a credential, unless it is the type's identity. A map's or a union's
-/// other members may hold anything, so they are not told.
+/// What the contract declares of `value`, by the list's `items` or the write's `request`
+/// schema: members either names, not marked as hidden by either and not named as a
+/// credential, unless it is the type's identity. A map's other members may hold anything,
+/// so they are not told.
 fn declared_plainly(
     rt: &MockRuntime,
     t: &str,
-    items: &Value,
+    (items, request): (Option<&Value>, Option<&Value>),
     value: &Value,
     depth: usize,
 ) -> Option<Value> {
     let bundle = rt.bundle();
+    let (items_parts, _) = schema_parts(bundle, items);
+    let (request_parts, _) = schema_parts(bundle, request);
     match value {
         _ if depth > 8 => None,
         Value::Object(members) => {
-            let (parts, _) = schema_parts(bundle, Some(items));
             let identity = pinned_members(rt, t);
+            let member_of = |parts: &[&'_ Value], key: &str| {
+                parts
+                    .iter()
+                    .find_map(|p| p.get("properties")?.get(key).cloned())
+            };
             let kept: Map<String, Value> = members
                 .iter()
                 .filter_map(|(key, member)| {
-                    let inner = parts.iter().find_map(|p| p.get("properties")?.get(key))?;
-                    let own = depth == 0 && identity.contains(&key.as_str());
-                    let named = mb_mcm::credentials::hides_a_returned_member(key)
-                        || is_own_credential(rt, key);
-                    if schema_hides(bundle, Some(inner)) || (named && !own) {
+                    let in_items = member_of(&items_parts, key);
+                    let in_request = member_of(&request_parts, key);
+                    if in_items.is_none() && in_request.is_none() {
                         return None;
                     }
+                    let own = depth == 0 && identity.contains(&key.as_str());
+                    let named = is_own_credential(rt, key)
+                        || if in_items.is_some() {
+                            mb_mcm::credentials::hides_a_returned_member(key)
+                        } else {
+                            is_credential_name(rt, key)
+                        };
+                    if schema_hides(bundle, in_items.as_ref())
+                        || schema_hides(bundle, in_request.as_ref())
+                        || (named && !own)
+                    {
+                        return None;
+                    }
+                    let inner = (in_items.as_ref(), in_request.as_ref());
                     let member = declared_plainly(rt, t, inner, member, depth + 1)?;
                     Some((key.clone(), member))
                 })
@@ -839,8 +859,12 @@ fn declared_plainly(
             (!kept.is_empty()).then_some(Value::Object(kept))
         }
         Value::Array(list) => {
-            let (parts, _) = schema_parts(bundle, Some(items));
-            let inner = parts.iter().find_map(|p| p.get("items"))?;
+            let inner_of = |parts: &[&'_ Value]| parts.iter().find_map(|p| p.get("items").cloned());
+            let (in_items, in_request) = (inner_of(&items_parts), inner_of(&request_parts));
+            if in_items.is_none() && in_request.is_none() {
+                return None;
+            }
+            let inner = (in_items.as_ref(), in_request.as_ref());
             let kept: Vec<Value> = list
                 .iter()
                 .filter_map(|item| declared_plainly(rt, t, inner, item, depth + 1))
@@ -852,7 +876,8 @@ fn declared_plainly(
 }
 
 /// What a list read is told of a write's `body`: an object as one of its items, or a list
-/// of them, by [`declared_plainly`]. Nothing else, however it reads.
+/// of those or of what the request's schema declares, by [`declared_plainly`]. Nothing
+/// else, however it reads.
 fn told_to_list(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -860,28 +885,27 @@ fn told_to_list(
     body: &Value,
 ) -> Option<Value> {
     let t = list.resource_type.as_str();
-    let declared = match body {
-        Value::Array(items) => {
-            let kept: Vec<Value> = items
+    let items = Some(&list.items);
+    let request = plan.op.input.body.as_ref();
+    let told =
+        |one: &Value, schema: Option<&Value>| scrubbed_record(rt, plan, t, one, schema, items);
+    match body {
+        Value::Array(list) => {
+            let (parts, _) = schema_parts(rt.bundle(), request);
+            let each = parts.iter().find_map(|p| p.get("items"));
+            let kept: Vec<Value> = list
                 .iter()
-                .filter(|item| item.is_object())
-                .filter_map(|item| declared_plainly(rt, t, &list.items, item, 0))
+                .filter(|item| item.is_object() || each.is_some())
+                .filter_map(|item| declared_plainly(rt, t, (items, each), item, 0))
+                .map(|item| told(&item, each))
                 .collect();
-            (!kept.is_empty()).then_some(Value::Array(kept))?
+            (!kept.is_empty()).then_some(Value::Array(kept))
         }
-        Value::Object(_) => declared_plainly(rt, t, &list.items, body, 0)?,
-        _ => return None,
-    };
-    let told = match &declared {
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| scrubbed_record(rt, plan, t, item, None, Some(&list.items)))
-                .collect(),
-        ),
-        one => scrubbed_record(rt, plan, t, one, None, Some(&list.items)),
-    };
-    Some(told)
+        Value::Object(_) => {
+            declared_plainly(rt, t, (items, request), body, 0).map(|one| told(&one, request))
+        }
+        _ => None,
+    }
 }
 
 /// `value` with every string shaped like a credential replaced, at any depth, as no name

@@ -14,9 +14,9 @@
 //!
 //! An answer of a `GET` route with no parameters that returns a single object
 //! (`/users/@me`, Slack's `auth.test`) says who the caller is, and is shown to later
-//! generations of other routes, as what the API said and may since have changed: a route
-//! is not told its own, or `/time` would stand still. Deleting the record it is about ends
-//! it. Indirect changes are not tracked. It is kept under the reserved type of the state
+//! generations, its own route's too, as what the API said and may since have changed, so
+//! a `/me` keeps its identity when a write clears the cache. Deleting the record it is
+//! about ends it. Indirect changes are not tracked. It is kept under the reserved type of the state
 //! store ([`mb_state::INTERNAL_TYPE`]), like the write memory's documents: sessions, TTLs
 //! and resets clear it, and it is not exported, counted or on a change feed. A contract
 //! with no such route pays no read for it.
@@ -185,18 +185,13 @@ pub(super) async fn named_by_value(
     out.splice(named..named, found);
 }
 
-/// What routes with no parameters other than this call's answered earlier in this
-/// session, oldest first.
+/// What routes with no parameters answered earlier in this session, oldest first.
 pub(super) async fn recall_answers(state: &mut StateAccess<'_>, plan: &CallPlan<'_>) -> Vec<Value> {
     let rt = state.rt;
     if !write_memory::applies(rt, plan) || rt.index().single_reads.is_empty() {
         return Vec::new();
     }
-    let mut answers = read_answers(state, &plan.session).await;
-    if let Binding::Http { path, .. } = &plan.op.binding {
-        answers.retain(|entry| !of_path(entry, path));
-    }
-    answers
+    read_answers(state, &plan.session).await
 }
 
 /// Whether a kept answer is that of `path`.

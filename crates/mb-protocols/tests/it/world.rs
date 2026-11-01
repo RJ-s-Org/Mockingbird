@@ -1127,7 +1127,7 @@ async fn auth0s_roles_are_told_to_their_read() {
     const ROUTE: &str = "/api/v2/users/auth0%7C1234/roles";
     let h = harness_with(
         &contract("auth0-management/auth0-management.openapi.yaml"),
-        vec![json!([])],
+        vec![json!({"start": 0, "limit": 50, "length": 0, "total": 0, "roles": []})],
         |_| {},
     );
     let posted = h
