@@ -142,8 +142,13 @@ pub struct GenerationContext<'a> {
     /// GraphQL selection set asks for. Self-contained (no `$ref`).
     pub response_schema: Option<&'a Value>,
     /// Successful writes the target does not show yet, oldest first: what the
-    /// answer must reflect. Scrubbed by whoever kept them.
+    /// answer must reflect. Scrubbed by whoever kept them. For the prompt only.
     pub earlier_requests: &'a [Value],
+    /// Those of [`GenerationContext::earlier_requests`] written to the target
+    /// itself (an update's or a create's own body, and only what the contract
+    /// says it holds), oldest first: they stand over what the answer wrote. A
+    /// child's or an action's body says nothing of the target's members.
+    pub earlier_own_bodies: &'a [Value],
 }
 
 /// What a credential's value becomes in a body kept beyond its request (see
@@ -1876,7 +1881,7 @@ fn reflect(
     let ahead = from_llm && !ctx.earlier_requests.is_empty();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
-            Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_requests),
+            Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_bodies),
             Some(target) => overlay_target(validator, target, body),
             None => body,
         },
@@ -1891,7 +1896,7 @@ fn reflect(
             } else {
                 let body = match ctx.target {
                     Some(target) if ahead => {
-                        caught_up(validator, body, target, ctx.earlier_requests)
+                        caught_up(validator, body, target, ctx.earlier_own_bodies)
                     }
                     Some(target) if op.is_action() && from_llm => {
                         fill_omitted(validator, body, target)
@@ -2025,15 +2030,15 @@ fn fill_omitted(validator: &SchemaValidator, answer: Value, target: &StoredResou
     overlay(validator, answer, Some(&Value::Object(omitted)))
 }
 
-/// An answer told of `earlier` requests, over the stored copy it is ahead of: the
-/// copy fills what the answer left out, at any depth, and the requests' members
-/// that the schema declares stand over what the answer wrote, as a request's own
-/// do (see [`overlay_request`]). What was redacted is not a value to keep.
+/// An answer told of earlier requests, over the stored copy it is ahead of: the
+/// copy fills what the answer left out, at any depth, and what was written to the
+/// target itself (`own`) stands over what the answer wrote, as a request's own body
+/// does (see [`overlay_request`]). What was redacted is not a value to keep.
 fn caught_up(
     validator: &SchemaValidator,
     answer: Value,
     target: &StoredResource,
-    earlier: &[Value],
+    own: &[Value],
 ) -> Value {
     let filled = deep_fill(&answer, &target.data);
     let mut body = if validator.is_valid(&filled) {
@@ -2041,25 +2046,21 @@ fn caught_up(
     } else {
         fill_omitted(validator, answer, target)
     };
-    let Some(declared) = validator.declared_property_names() else {
-        return body;
-    };
-    for request in earlier {
-        let Some(Value::Object(fields)) = request.get("body") else {
+    for written in own {
+        let Some(Value::Object(fields)) = without_redacted(written) else {
             continue;
         };
         let Value::Object(current) = &body else {
             return body;
         };
         let over: Map<String, Value> = fields
-            .iter()
-            .filter(|(k, v)| declared.contains(k.as_str()) && v.as_str() != Some(REDACTED))
+            .into_iter()
             .map(|(k, v)| {
-                let merged = match current.get(k) {
-                    Some(held) => deep_over(held, v, declared),
-                    None => v.clone(),
+                let merged = match current.get(&k) {
+                    Some(held) => deep_over(held, &v),
+                    None => v,
                 };
-                (k.clone(), merged)
+                (k, merged)
             })
             .collect();
         body = overlay(validator, body, Some(&Value::Object(over)));
@@ -2084,23 +2085,50 @@ fn deep_fill(answer: &Value, stored: &Value) -> Value {
     Value::Object(out)
 }
 
-/// `over` on `base`, objects member by member and only the members in `declared`.
-fn deep_over(base: &Value, over: &Value, declared: &std::collections::HashSet<String>) -> Value {
+/// `over` on `base`, objects member by member.
+fn deep_over(base: &Value, over: &Value) -> Value {
     let (Value::Object(base_members), Value::Object(over_members)) = (base, over) else {
         return over.clone();
     };
     let mut out = base_members.clone();
     for (k, v) in over_members {
-        if !declared.contains(k.as_str()) || v.as_str() == Some(REDACTED) {
-            continue;
-        }
         let merged = match out.get(k) {
-            Some(held) => deep_over(held, v, declared),
+            Some(held) => deep_over(held, v),
             None => v.clone(),
         };
         out.insert(k.clone(), merged);
     }
     Value::Object(out)
+}
+
+/// `value` with what was redacted taken out at any depth: an object loses the
+/// member, and an array, which is replaced whole, goes altogether. `None` when
+/// nothing is left.
+fn without_redacted(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(text) if text == REDACTED => None,
+        Value::Object(members) => {
+            let kept: Map<String, Value> = members
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), without_redacted(v)?)))
+                .collect();
+            (kept.len() == members.len() || !kept.is_empty()).then_some(Value::Object(kept))
+        }
+        Value::Array(items) => {
+            let kept: Option<Vec<Value>> = items
+                .iter()
+                .map(|item| match item {
+                    Value::Object(members) => {
+                        let whole = without_redacted(item)?;
+                        (whole.as_object().map(Map::len) == Some(members.len())).then_some(whole)
+                    }
+                    other => without_redacted(other),
+                })
+                .collect();
+            kept.map(Value::Array)
+        }
+        other => Some(other.clone()),
+    }
 }
 
 /// Overlay `fields`' top-level members onto an object `base`: all at once if

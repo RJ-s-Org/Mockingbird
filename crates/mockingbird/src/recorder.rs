@@ -191,7 +191,7 @@ impl RequestRecorder for StoreRecorder {
     /// live settings.
     fn redact(&self, value: &mut Value) {
         let settings = self.settings.load();
-        redact_kept(value, &settings.redact_fields, &mut String::new());
+        redact_normalized(value, &settings.redact_fields, true, &mut String::new());
     }
 
     /// Queues the record for the writer. The only work done here is a
@@ -403,9 +403,9 @@ impl Writer {
     async fn write(&mut self, mut r: RequestRecord) {
         let settings = self.settings.load_full();
         let mut scratch = String::new();
-        redact_normalized(&mut r.request, &settings.redact_fields, &mut scratch);
+        redact_normalized(&mut r.request, &settings.redact_fields, false, &mut scratch);
         if let Some(response) = &mut r.response {
-            redact_normalized(response, &settings.redact_fields, &mut scratch);
+            redact_normalized(response, &settings.redact_fields, false, &mut scratch);
         }
         if let Some(body) = r.request.get_mut("body") {
             truncate_body(body);
@@ -534,7 +534,7 @@ impl std::io::Write for Preview {
 /// `api_key` and `x-api-key`; it also redacts `tokenizer_version`, erring
 /// on the side of hiding a value.
 pub fn redact(value: &mut Value, fields: &[String]) {
-    redact_normalized(value, &normalize_fields(fields), &mut String::new());
+    redact_normalized(value, &normalize_fields(fields), false, &mut String::new());
 }
 
 /// `fields` normalized (see [`normalize_key_into`]), empty ones dropped.
@@ -543,7 +543,7 @@ fn normalize_fields(fields: &[String]) -> Vec<String> {
         .iter()
         .map(|f| {
             let mut key = String::new();
-            normalize_key_into(f, &mut key);
+            mb_mcm::credentials::normalize_into(f, &mut key);
             key
         })
         .filter(|f| !f.is_empty())
@@ -551,68 +551,43 @@ fn normalize_fields(fields: &[String]) -> Vec<String> {
 }
 
 /// [`redact`] with `fields` already normalized; `scratch` holds each
-/// normalized key in turn, so no key allocates.
-fn redact_normalized(value: &mut Value, fields: &[String], scratch: &mut String) {
+/// normalized key in turn, so no key allocates. With `keep_counts`, for what is
+/// kept and shown again rather than logged, a number under a plural key that a
+/// field only partly matches stays (`max_tokens` for `token`): a field naming the
+/// key itself still wins.
+fn redact_normalized(
+    value: &mut Value,
+    fields: &[String],
+    keep_counts: bool,
+    scratch: &mut String,
+) {
     if fields.is_empty() {
         return;
     }
     match value {
         Value::Object(map) => {
             for (key, v) in map.iter_mut() {
-                normalize_key_into(key, scratch);
+                mb_mcm::credentials::normalize_into(key, scratch);
                 if fields.iter().any(|f| scratch.contains(f.as_str())) {
-                    *v = Value::String(REDACTED.to_string());
-                } else {
-                    redact_normalized(v, fields, scratch);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for v in items {
-                redact_normalized(v, fields, scratch);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// [`redact_normalized`] for what is kept and shown again rather than logged,
-/// where hiding a count costs an answer: a number under a plural `...tokens` key
-/// (`max_tokens`) stays.
-fn redact_kept(value: &mut Value, fields: &[String], scratch: &mut String) {
-    if fields.is_empty() {
-        return;
-    }
-    match value {
-        Value::Object(map) => {
-            for (key, v) in map.iter_mut() {
-                normalize_key_into(key, scratch);
-                if fields.iter().any(|f| scratch.contains(f.as_str())) {
-                    if !(v.is_number() && scratch.ends_with("tokens")) {
+                    let count = keep_counts
+                        && v.is_number()
+                        && mb_mcm::credentials::is_count_name(scratch)
+                        && !fields.iter().any(|f| f == scratch);
+                    if !count {
                         *v = Value::String(REDACTED.to_string());
                     }
                 } else {
-                    redact_kept(v, fields, scratch);
+                    redact_normalized(v, fields, keep_counts, scratch);
                 }
             }
         }
         Value::Array(items) => {
             for v in items {
-                redact_kept(v, fields, scratch);
+                redact_normalized(v, fields, keep_counts, scratch);
             }
         }
         _ => {}
     }
-}
-
-/// Replaces `out` with `key` ASCII-lowercased without `_`, `-` and `.`.
-fn normalize_key_into(key: &str, out: &mut String) {
-    out.clear();
-    out.extend(
-        key.chars()
-            .filter(|c| !matches!(c, '_' | '-' | '.'))
-            .map(|c| c.to_ascii_lowercase()),
-    );
 }
 
 #[cfg(test)]
@@ -642,6 +617,12 @@ mod tests {
         let mut count = json!({"max_tokens": 100, "tokens": "a"});
         recorder.redact(&mut count);
         assert_eq!(count, json!({"max_tokens": 100, "tokens": REDACTED}));
+
+        // An operator naming the member itself wins, for a number too.
+        recorder.set_settings(10, vec!["max_tokens".to_string()]);
+        let mut count = json!({"max_tokens": 100});
+        recorder.redact(&mut count);
+        assert_eq!(count, json!({"max_tokens": REDACTED}));
 
         recorder.set_settings(10, vec!["note".to_string()]);
         let mut body = json!({"access_token": "a", "nested": {"note": "b"}});

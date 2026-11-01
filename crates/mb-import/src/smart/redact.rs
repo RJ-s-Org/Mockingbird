@@ -5,25 +5,9 @@ use serde_json::Value;
 /// What a redacted value is replaced with.
 pub const REDACTED: &str = "<redacted>";
 
-const SENSITIVE: [&str; 11] = [
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "api-key",
-    "authorization",
-    "cookie",
-    "session",
-    "credential",
-];
-
-/// Whether a key, header or parameter name may hold a credential
-/// (case-insensitive substring match).
+/// Whether a key, header or parameter name may hold a credential.
 pub fn is_sensitive_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    SENSITIVE.iter().any(|s| lower.contains(s))
+    mb_mcm::credentials::is_credential_name(name)
 }
 
 /// Replaces, recursively, the value under every sensitive object key with

@@ -169,6 +169,7 @@ async fn generate(
                     scenario: part.scenario.as_ref(),
                     response_schema: part.schema.as_deref(),
                     earlier_requests: &[],
+                    earlier_own_bodies: &[],
                 },
             }),
             None => unknown.push(part.key.clone()),

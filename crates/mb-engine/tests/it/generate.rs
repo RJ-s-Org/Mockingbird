@@ -44,6 +44,7 @@ fn ctx() -> GenerationContext<'static> {
         scenario: None,
         response_schema: None,
         earlier_requests: &[],
+        earlier_own_bodies: &[],
     }
 }
 
@@ -268,6 +269,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     scenario: None,
                     response_schema: None,
                     earlier_requests: &[],
+                    earlier_own_bodies: &[],
                 },
             )
             .await

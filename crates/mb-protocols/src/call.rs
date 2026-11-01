@@ -48,17 +48,6 @@ const MAX_LIST_MEMBERS: usize = 3;
 /// forced or injected error the contract declares no response for).
 const NOT_GENERATED_SOURCE: &str = "not_generated";
 
-/// Headers never forwarded to the engine or recorded (they may carry
-/// credentials).
-const SENSITIVE_HEADERS: [&str; 6] = [
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "x-api-key",
-    "x-auth-token",
-];
-
 /// The `X-Mockingbird-*` override headers of one call.
 pub(crate) struct Overrides {
     pub session: String,
@@ -682,6 +671,7 @@ pub(crate) async fn generate_pending(
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
         earlier_requests: &pending.earlier.told,
+        earlier_own_bodies: &pending.earlier.own,
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     if generated.source == Source::Fallback {
@@ -1160,7 +1150,7 @@ pub(crate) async fn complete(
     // of a read still owing earlier requests, which is to try again.
     if let (Some(response_cache), Some((since, key))) = (rt.state.response_cache(), cache)
         && (200..300).contains(&generated.status)
-        && (earlier.shown.is_empty() || earlier.capped() || !transient_fallback(&generated))
+        && earlier.cacheable(&generated)
     {
         response_cache.put_if_current(
             session,
@@ -2752,24 +2742,12 @@ fn request_kind(protocol: Protocol) -> RequestKind {
     }
 }
 
-/// Substrings that mark a header name as carrying credentials, matched
-/// case-insensitively (header names from a GraphQL `connection_init`
-/// payload may use any spelling, e.g. `apiKey`).
-const SENSITIVE_PATTERNS: [&str; 8] = [
-    "token",
-    "secret",
-    "password",
-    "api-key",
-    "api_key",
-    "apikey",
-    "authorization",
-    "cookie",
-];
-
+/// Whether a header or member named `name` (any case) may carry credentials:
+/// never one of Mockingbird's own overrides, whatever its name says
+/// (`X-Mockingbird-Session`).
 pub(crate) fn is_sensitive(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    SENSITIVE_HEADERS.contains(&name.as_str())
-        || SENSITIVE_PATTERNS.iter().any(|s| name.contains(s))
+    !name.to_ascii_lowercase().starts_with("x-mockingbird-")
+        && mb_mcm::credentials::is_credential_name(name)
 }
 
 /// Non-sensitive, UTF-8 request headers, optionally keeping

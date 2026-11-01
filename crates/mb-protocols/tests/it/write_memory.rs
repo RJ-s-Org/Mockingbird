@@ -79,6 +79,47 @@ paths:
       parameters: [{name: note_id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+  /posts:
+    get:
+      operationId: listPosts
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Post"}}}}}
+  /posts/{post_id}:
+    get:
+      operationId: getPost
+      parameters: [{name: post_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Post"}}}}
+  /posts/{post_id}/comments:
+    post:
+      operationId: createComment
+      parameters: [{name: post_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+  /comments/{comment_id}:
+    get:
+      operationId: getComment
+      parameters: [{name: comment_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+  /invoices/{invoice_id}:
+    get:
+      operationId: getInvoice
+      parameters: [{name: invoice_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
+  /invoices/{invoice_id}/pay:
+    post:
+      operationId: payInvoice
+      parameters: [{name: invoice_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: false
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "204": {description: paid}
   /pets:
     post:
       operationId: createPet
@@ -289,12 +330,51 @@ components:
         id: {type: string}
         text: {type: string}
         pinned: {type: boolean}
+    Post:
+      type: object
+      required: [id, body, status]
+      properties:
+        id: {type: string}
+        body: {type: string}
+        status: {type: string}
+    Comment:
+      type: object
+      required: [id, body]
+      properties:
+        id: {type: string}
+        body: {type: string}
+    Invoice:
+      type: object
+      required: [id, amount, status]
+      properties:
+        id: {type: string}
+        amount: {type: integer}
+        status: {type: string}
     Pet:
       type: object
       required: [id, name]
       properties:
         id: {type: string}
         name: {type: string}
+        version: {type: integer, readOnly: true}
+        headers:
+          type: array
+          items:
+            type: object
+            properties: {name: {type: string}, value: {type: string}}
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+        form:
+          type: object
+          properties: {kind: {type: string}}
+          oneOf:
+            - {required: [kind], properties: {kind: {enum: [dog]}, bark: {type: boolean}}}
+            - {required: [kind], properties: {kind: {enum: [cat]}, meow: {type: boolean}}}
+        shape:
+          oneOf:
+            - {type: object, required: [kind], properties: {kind: {type: string, enum: [dog]}, bark: {type: boolean}}}
+            - {type: object, required: [kind], properties: {kind: {type: string, enum: [cat]}, meow: {type: boolean}}}
         meta:
           type: object
           properties:
@@ -1337,7 +1417,7 @@ async fn a_204_update_that_breaks_the_schema_is_remembered_not_merged() {
 async fn a_204_update_the_copy_already_holds_remembers_nothing() {
     let h = things(vec![pet("same")]);
     h.call("POST", "/pets", Some(json!({"name": "same"}))).await;
-    h.call("PUT", "/pets/p1", Some(json!({"nickname": "same"})))
+    h.call("PUT", "/pets/p1", Some(json!({"name": "same"})))
         .await;
     assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
 }
@@ -1453,30 +1533,359 @@ async fn a_capped_short_copy_stops_calling_too() {
     assert_eq!(h.calls(), tried, "no call per read for ever");
 }
 
-/// A catch-up keeps what its answer left out at any depth, the client's values
-/// over the model's, and what identifies the resource.
+/// A catch-up keeps what its answer left out at any depth, and what identifies
+/// the resource.
 #[tokio::test]
-async fn a_catch_up_keeps_nested_members_and_what_the_client_sent() {
+async fn a_catch_up_keeps_nested_members() {
     let h = things(vec![
         pet("Rex"),
-        json!({"id": "other", "name": "Rewritten", "meta": {"age": 3}}),
+        json!({"id": "other", "name": "Rex", "meta": {"age": 3}}),
     ]);
     h.call("POST", "/pets", Some(json!({"name": "Rex"}))).await;
-    h.call(
-        "POST",
-        "/pets/p1/birthday",
-        Some(json!({"name": "Rex the Great"})),
-    )
-    .await;
+    h.call("POST", "/pets/p1/birthday", None).await;
     let (_, source, read) = h.call("GET", "/pets/p1", None).await;
     assert_eq!(source, "llm");
     assert_eq!(read["id"], "p1", "identity pinned");
     assert_eq!(read["meta"]["age"], 3, "the answer stands");
     assert_eq!(read["meta"]["tag"], "calm", "nested member kept");
-    assert_eq!(read["name"], "Rex the Great", "the client's value stands");
     let (_, source, again) = h.call("GET", "/pets/p1", None).await;
     assert_eq!(source, "state");
     assert_eq!(again, read);
+}
+
+async fn hold(h: &Harness, resource_type: &str, id: &str, data: Value) {
+    h.store
+        .upsert(
+            &session(),
+            StoredResource {
+                resource_type: resource_type.into(),
+                id: id.into(),
+                data,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A child's body is about the child. Its members may share names with its
+/// parent's, and the parent's stored values stand.
+#[tokio::test]
+async fn a_childs_body_is_never_overlaid_on_its_parent() {
+    let post = json!({"id": "po1", "body": "post text", "status": "open"});
+    let h = things(vec![
+        json!({"id": "c1", "body": "child text"}),
+        post.clone(),
+    ]);
+    hold(&h, "posts", "po1", post.clone()).await;
+    h.call(
+        "POST",
+        "/posts/po1/comments",
+        Some(json!({"body": "child text", "status": "pending"})),
+    )
+    .await;
+    let (_, source, read) = h.call("GET", "/posts/po1", None).await;
+    assert_eq!(source, "llm");
+    assert!(
+        block(&h.prompt(1)).unwrap().contains("child text"),
+        "still told"
+    );
+    assert_eq!(read["body"], "post text");
+    assert_eq!(read["status"], "open");
+}
+
+/// An action's body is what it was asked, not what its target became.
+#[tokio::test]
+async fn an_actions_body_is_never_overlaid_on_its_target() {
+    let h = things(vec![json!({"id": "in1", "amount": 100, "status": "paid"})]);
+    hold(
+        &h,
+        "invoices",
+        "in1",
+        json!({"id": "in1", "amount": 100, "status": "open"}),
+    )
+    .await;
+    h.call("POST", "/invoices/in1/pay", Some(json!({"amount": 5})))
+        .await;
+    let (_, source, read) = h.call("GET", "/invoices/in1", None).await;
+    assert_eq!(source, "llm");
+    assert!(block(&h.prompt(0)).unwrap().contains("\"amount\":5"));
+    assert_eq!(read["amount"], 100);
+    assert_eq!(read["status"], "paid");
+}
+
+/// A null the schema does not allow is not applied, so it is told.
+#[tokio::test]
+async fn a_null_on_a_non_nullable_member_is_remembered() {
+    let h = things(vec![pet("old")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    for body in [
+        json!({"name": null}),
+        json!({"meta": null}),
+        json!({"nickname": null}),
+    ] {
+        h.call("PUT", "/pets/p1", Some(body.clone())).await;
+        let memory = h.memory().await;
+        let requests = memory[0].data["requests"].as_array().unwrap();
+        assert_eq!(requests.last().unwrap()["body"], body, "{memory:?}");
+    }
+    let stored = h
+        .store
+        .get(&session(), "pets", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["name"], "old");
+}
+
+/// A member counts as shown only at its own path: `"x"` elsewhere is not it.
+#[tokio::test]
+async fn a_value_elsewhere_in_the_copy_is_not_the_member() {
+    let h = things(vec![json!({"id": "p1", "name": "x"})]);
+    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.call("PUT", "/pets/p1", Some(json!({"alias": "x"}))).await;
+    let memory = h.memory().await;
+    assert_eq!(memory[0].data["requests"][0]["body"], json!({"alias": "x"}));
+}
+
+/// A redacted member was never compared, so it is not taken as shown.
+#[tokio::test]
+async fn a_redacted_member_is_not_taken_as_shown() {
+    let h = things(vec![pet("old")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call("PUT", "/pets/p1", Some(json!({"token_count": 5})))
+        .await;
+    assert_eq!(h.memory().await.len(), 1);
+}
+
+/// What was redacted is not a value: not overlaid, stored or served, however deep.
+#[tokio::test]
+async fn a_redacted_value_is_never_overlaid() {
+    let headers = json!([{"name": "Authorization", "value": "abc"}]);
+    let answer = json!({"id": "p1", "name": "x", "headers": headers});
+    let h = things(vec![pet("old"), answer]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"headers": headers, "client_ref": "abc"})),
+    )
+    .await;
+    let (_, source, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "llm");
+    assert!(!read.to_string().contains("[redacted]"), "{read}");
+    let stored = h
+        .store
+        .get(&session(), "pets", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !stored.data.to_string().contains("[redacted]"),
+        "{stored:?}"
+    );
+}
+
+/// What an update applied stands in the catch-up its remainder causes, even from
+/// an answer that went by an older copy.
+#[tokio::test]
+async fn a_catch_up_cannot_revert_what_the_update_applied() {
+    let h = things(vec![pet("old"), pet("old")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"name": "new", "client_ref": "abc"})),
+    )
+    .await;
+    let (_, source, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "llm");
+    assert_eq!(read["name"], "new");
+    let (_, source, again) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(again["name"], "new");
+}
+
+/// A newer update, fully applied, is not reverted by an older one's memory.
+#[tokio::test]
+async fn an_older_body_cannot_revert_a_newer_update() {
+    let h = things(vec![pet("old"), pet("old")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"name": "first", "client_ref": "abc"})),
+    )
+    .await;
+    h.call("PUT", "/pets/p1", Some(json!({"name": "second"})))
+        .await;
+    let (_, _, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(read["name"], "second");
+}
+
+/// An update's own body counts on a copy it could not be merged into.
+#[tokio::test]
+async fn an_updates_own_body_stands_on_a_short_copy() {
+    let h = jira(vec![
+        created_issue(),
+        issue_bean("what the model wrote", "To Do", &[]),
+    ]);
+    h.call("POST", "/rest/api/3/issue", Some(create_issue_request()))
+        .await;
+    h.call(
+        "PUT",
+        "/rest/api/3/issue/PLNT-1",
+        Some(json!({"fields": {"summary": "what the client sent"}})),
+    )
+    .await;
+    let (_, _, read) = h.call("GET", "/rest/api/3/issue/PLNT-1", None).await;
+    assert_eq!(read["fields"]["summary"], "what the client sent");
+}
+
+/// Nothing merges across `oneOf`: a branch's members could mix with another's.
+#[tokio::test]
+async fn a_union_member_is_remembered_not_merged() {
+    let h = things(vec![
+        json!({"id": "p1", "name": "x", "shape": {"kind": "dog", "bark": true}}),
+    ]);
+    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.call("PUT", "/pets/p1", Some(json!({"shape": {"meow": true}})))
+        .await;
+    let stored = h
+        .store
+        .get(&session(), "pets", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["shape"], json!({"kind": "dog", "bark": true}));
+    let memory = h.memory().await;
+    assert_eq!(
+        memory[0].data["requests"][0]["body"],
+        json!({"shape": {"meow": true}})
+    );
+}
+
+/// So too where the union sits beside `properties`: its stale members would mix.
+#[tokio::test]
+async fn a_member_beside_a_union_is_remembered_not_merged() {
+    let h = things(vec![
+        json!({"id": "p1", "name": "x", "form": {"kind": "dog", "bark": true}}),
+    ]);
+    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.call("PUT", "/pets/p1", Some(json!({"form": {"kind": "cat"}})))
+        .await;
+    let stored = h
+        .store
+        .get(&session(), "pets", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["form"], json!({"kind": "dog", "bark": true}));
+    assert_eq!(h.memory().await.len(), 1);
+}
+
+/// A map's members are declared by its `additionalProperties`.
+#[tokio::test]
+async fn a_map_member_merges_at_write_time() {
+    let h = things(vec![
+        json!({"id": "p1", "name": "x", "metadata": {"a": "1"}}),
+    ]);
+    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.call("PUT", "/pets/p1", Some(json!({"metadata": {"b": "2"}})))
+        .await;
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+    let (_, source, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read["metadata"], json!({"a": "1", "b": "2"}));
+    assert_eq!(h.calls(), 1);
+}
+
+/// A merge leaves identity and `readOnly` members as they are.
+#[tokio::test]
+async fn a_merge_leaves_identity_and_read_only_members() {
+    let h = things(vec![json!({"id": "p1", "name": "x", "version": 1})]);
+    h.call("POST", "/pets", Some(json!({"name": "x"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"id": "p2", "version": 99, "name": "y"})),
+    )
+    .await;
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+    let (_, source, read) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read, json!({"id": "p1", "name": "y", "version": 1}));
+}
+
+/// Telling a parent changes nothing it holds, so it publishes nothing and keeps
+/// its place in a list.
+#[tokio::test]
+async fn a_childs_create_does_not_republish_its_parent() {
+    let post = |id: &str| json!({"id": id, "body": "text", "status": "open"});
+    let h = things(vec![json!({"id": "c1", "body": "hi"}), post("po1")]);
+    hold(&h, "posts", "po1", post("po1")).await;
+    hold(&h, "posts", "po2", post("po2")).await;
+    let order =
+        |listed: Vec<StoredResource>| -> Vec<String> { listed.into_iter().map(|r| r.id).collect() };
+    let mut changes = h.store.subscribe();
+    h.call("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
+        .await;
+    while let Ok(change) = changes.try_recv() {
+        assert_ne!(change.resource_type, "posts", "{change:?}");
+    }
+    let listed = h.store.list(&session(), "posts", 10).await.unwrap();
+    assert_eq!(order(listed), ["po2", "po1"]);
+
+    // A catch-up that changes nothing publishes nothing either.
+    let (_, source, _) = h.call("GET", "/posts/po1", None).await;
+    assert_eq!(source, "llm");
+    while let Ok(change) = changes.try_recv() {
+        assert_ne!(change.resource_type, "posts", "{change:?}");
+    }
+    let listed = h.store.list(&session(), "posts", 10).await.unwrap();
+    assert_eq!(order(listed), ["po2", "po1"]);
+    assert!(h.memory().await.is_empty());
+}
+
+/// Another node reading a parent gets the catch-up with no publish to hear: the
+/// read looks in the shared store before it serves.
+#[tokio::test]
+async fn a_replica_catches_up_on_a_parent_with_no_publish() {
+    let post = json!({"id": "po1", "body": "text", "status": "open"});
+    let shared = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let node = |script: Vec<Value>| {
+        let provider = Arc::new(ScriptedProvider::new(
+            script.into_iter().map(|v| Ok(v.to_string())).collect(),
+        ));
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(compile(THINGS.as_bytes()).unwrap()),
+            Arc::new(Engine::new(
+                Some(Arc::clone(&provider) as Arc<dyn Provider>),
+                EngineConfig::default(),
+            )),
+            CachingStateStore::wrap(
+                Arc::clone(&shared) as Arc<dyn StateStore>,
+                Duration::from_secs(3600),
+                mb_state::DEFAULT_CACHE_ENTRIES,
+            ),
+        );
+        Harness {
+            router: http_rest::router(Arc::new(rt)),
+            provider,
+            store: Arc::clone(&shared),
+        }
+    };
+    let writer = node(vec![json!({"id": "c1", "body": "hi"})]);
+    let reader = node(vec![post.clone()]);
+    hold(&writer, "posts", "po1", post.clone()).await;
+    let (_, source, _) = reader.call("GET", "/posts/po1", None).await;
+    assert_eq!(source, "state");
+    writer
+        .call("POST", "/posts/po1/comments", Some(json!({"body": "hi"})))
+        .await;
+    let (_, source, _) = reader.call("GET", "/posts/po1", None).await;
+    assert_eq!(source, "llm", "told, on the other node");
+    assert!(block(&reader.prompt(0)).unwrap().contains("createComment"));
 }
 
 /// The key a path reads by is pinned, whatever the regeneration wrote.
@@ -1504,28 +1913,35 @@ async fn a_catch_up_pins_the_key_its_path_reads_by() {
     assert_eq!(source, "state", "still found by its key");
 }
 
-/// An answer that would make the resource another owner's keeps what it changed
-/// as the stored copy had it.
+/// An answer that would make the resource another owner's is a failed attempt:
+/// the stored copy answers, the memory stays, and the cap applies.
 #[tokio::test]
 async fn a_catch_up_cannot_move_a_resource_to_another_owner() {
-    let h = things(vec![team("octo", "Core"), team("acme", "Stolen")]);
+    let h = things(vec![
+        team("octo", "Core"),
+        team("acme", "Stolen"),
+        team("acme", "Stolen"),
+    ]);
     octos_team(&h).await;
-    h.call("GET", "/orgs/octo/teams/core", None).await;
     h.call(
         "POST",
         "/orgs/octo/teams/core/archive",
         Some(json!({"reason": "old"})),
     )
     .await;
-    let (_, _, read) = h.call("GET", "/orgs/octo/teams/core", None).await;
-    assert!(
-        read["url"].as_str().unwrap().contains("/orgs/octo/"),
-        "{read}"
-    );
-    let (status, source, again) = h.call("GET", "/orgs/octo/teams/core", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(source, "state", "still octo's to answer with");
-    assert_eq!(again, read);
+    for _ in 0..2 {
+        let (status, source, read) = h.call("GET", "/orgs/octo/teams/core", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source, "state", "{read}");
+        assert_eq!(read, team("octo", "Core"));
+        assert_eq!(h.memory().await.len(), 1, "kept");
+    }
+    assert_eq!(h.calls(), 3, "two attempts");
+    let (_, source, read) = h.call("GET", "/orgs/octo/teams/core", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read, team("octo", "Core"));
+    assert_eq!(h.calls(), 3, "none after the cap");
+    assert_eq!(h.memory().await.len(), 1, "kept");
 }
 
 async fn a_capture_and_its_refund(h: &Harness) {
@@ -1688,7 +2104,16 @@ async fn credentials_go_however_they_are_named() {
             "headers": [{"name": "Authorization", "value": "Bearer kept-out-3"}],
             "passphrase": "kept-out-4",
             "recovery": "kept-out-5",
+            "PRIVATEKEY": "kept-out-6",
+            "clientCredentials": "kept-out-7",
+            "sessionId": "kept-out-8",
+            "ssh_key": "kept-out-9",
+            "signingKey": "kept-out-10",
+            "cvv": "kept-out-11",
+            "bearer": "kept-out-12",
+            "user_pin": "kept-out-13",
             "max_tokens": 100,
+            "pinned": "kept-in-3",
             "author": "kept-in-1",
             "note": "kept-in-2",
         })),
@@ -1698,6 +2123,7 @@ async fn credentials_go_however_they_are_named() {
     assert!(!stored.contains("kept-out"), "{stored}");
     assert!(stored.contains("kept-in-1"), "{stored}");
     assert!(stored.contains("kept-in-2"), "{stored}");
+    assert!(stored.contains("kept-in-3"), "{stored}");
     assert!(stored.contains("\"max_tokens\":100"), "{stored}");
     assert!(stored.contains("Authorization"), "{stored}");
 }
