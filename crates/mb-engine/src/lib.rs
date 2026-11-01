@@ -141,7 +141,19 @@ pub struct GenerationContext<'a> {
     /// (in the prompt, for validation and by the faker): the fields a
     /// GraphQL selection set asks for. Self-contained (no `$ref`).
     pub response_schema: Option<&'a Value>,
+    /// Successful writes the target does not show yet, oldest first: what the
+    /// answer must reflect. Scrubbed by whoever kept them. For the prompt only.
+    pub earlier_requests: &'a [Value],
+    /// What the latest write said of the target itself, when that was an update's
+    /// or a create's own body (only what the contract says the target holds): it
+    /// stands over what the answer wrote. Last write wins, so with any later write
+    /// there is none, and a child's or an action's body is never one.
+    pub earlier_own_body: Option<&'a Value>,
 }
+
+/// What a credential's value becomes in a body kept beyond its request (see
+/// [`GenerationContext::earlier_requests`]): the request log's text.
+pub const REDACTED: &str = "[redacted]";
 
 /// Where a response or item came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1867,8 +1879,13 @@ fn reflect(
     let Some(body) = response.body.take() else {
         return response;
     };
+    // An answer told of later writes is ahead of the stored copy, so that copy
+    // only fills what it left out. A faker's knows of none, and takes the copy.
+    let from_llm = !matches!(response.source, Source::Fallback);
+    let ahead = from_llm && !ctx.earlier_requests.is_empty();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
+            Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
             Some(target) => overlay_target(validator, target, body),
             None => body,
         },
@@ -1881,8 +1898,10 @@ fn reflect(
                 response.new_record = true;
                 overlaid
             } else {
-                let from_llm = !matches!(response.source, Source::Fallback);
                 let body = match ctx.target {
+                    Some(target) if ahead => {
+                        caught_up(validator, body, target, ctx.earlier_own_body)
+                    }
                     Some(target) if op.is_action() && from_llm => {
                         fill_omitted(validator, body, target)
                     }
@@ -2013,6 +2032,144 @@ fn fill_omitted(validator: &SchemaValidator, answer: Value, target: &StoredResou
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     overlay(validator, answer, Some(&Value::Object(omitted)))
+}
+
+/// An answer told of earlier requests, over the stored copy it is ahead of: the
+/// copy fills what the answer left out, at any depth, and what the latest write said
+/// of the target itself (`own`) stands over what the answer wrote, as a request's own
+/// body does (see [`overlay_request`]). What was redacted is not a value to keep.
+fn caught_up(
+    validator: &SchemaValidator,
+    answer: Value,
+    target: &StoredResource,
+    own: Option<&Value>,
+) -> Value {
+    let root = validator.schema();
+    let filled = deep_fill(root, Some(root), &answer, &target.data);
+    let body = if validator.is_valid(&filled) {
+        filled
+    } else {
+        fill_omitted(validator, answer, target)
+    };
+    let Some(Value::Object(fields)) = own.and_then(without_redacted) else {
+        return body;
+    };
+    let Value::Object(current) = &body else {
+        return body;
+    };
+    let over: Map<String, Value> = fields
+        .into_iter()
+        .map(|(k, v)| {
+            let merged = match current.get(&k) {
+                Some(held) => deep_over(held, &v),
+                None => v,
+            };
+            (k, merged)
+        })
+        .collect();
+    overlay(validator, body, Some(&Value::Object(over)))
+}
+
+/// What one level of a schema in `root` says, by its `$ref`s and `allOf`s: whether it
+/// has a `oneOf` or `anyOf`, and member `key`'s schema if asked for.
+fn schema_level<'a>(
+    root: &'a Value,
+    node: &'a Value,
+    key: Option<&str>,
+    depth: usize,
+) -> (bool, Option<&'a Value>) {
+    if depth > 8 {
+        return (false, None);
+    }
+    if let Some(target) = node
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix('#'))
+        .and_then(|pointer| root.pointer(pointer))
+    {
+        return schema_level(root, target, key, depth + 1);
+    }
+    let mut union = node.get("oneOf").is_some() || node.get("anyOf").is_some();
+    let mut member = key.and_then(|k| node.get("properties")?.get(k));
+    for branch in node
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (below, found) = schema_level(root, branch, key, depth + 1);
+        union |= below;
+        member = member.or(found);
+    }
+    (union, member)
+}
+
+/// `answer` with every member of `stored` it omits, at any depth, but not within a
+/// `oneOf` or `anyOf`: the branch the answer took stands, with no member of another.
+fn deep_fill(root: &Value, schema: Option<&Value>, answer: &Value, stored: &Value) -> Value {
+    let (Value::Object(answer_members), Value::Object(stored_members)) = (answer, stored) else {
+        return answer.clone();
+    };
+    if schema.is_some_and(|node| schema_level(root, node, None, 0).0) {
+        return answer.clone();
+    }
+    let mut out = answer_members.clone();
+    for (k, v) in stored_members {
+        let inner = schema.and_then(|node| schema_level(root, node, Some(k), 0).1);
+        match out.get_mut(k) {
+            Some(held) => *held = deep_fill(root, inner, held, v),
+            None => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// `over` on `base`, objects member by member.
+fn deep_over(base: &Value, over: &Value) -> Value {
+    let (Value::Object(base_members), Value::Object(over_members)) = (base, over) else {
+        return over.clone();
+    };
+    let mut out = base_members.clone();
+    for (k, v) in over_members {
+        let merged = match out.get(k) {
+            Some(held) => deep_over(held, v),
+            None => v.clone(),
+        };
+        out.insert(k.clone(), merged);
+    }
+    Value::Object(out)
+}
+
+/// `value` with what was redacted taken out at any depth: an object loses the
+/// member, and an array, which is replaced whole, goes altogether. `None` when
+/// nothing is left.
+fn without_redacted(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(text) if text == REDACTED => None,
+        Value::Object(members) => {
+            let kept: Map<String, Value> = members
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), without_redacted(v)?)))
+                .collect();
+            (kept.len() == members.len() || !kept.is_empty()).then_some(Value::Object(kept))
+        }
+        Value::Array(items) => {
+            let kept: Option<Vec<Value>> = items
+                .iter()
+                .map(|item| match item {
+                    Value::Object(members) => {
+                        let whole = without_redacted(item)?;
+                        (whole.as_object().map(Map::len) == Some(members.len())).then_some(whole)
+                    }
+                    other => without_redacted(other),
+                })
+                .collect();
+            kept.map(Value::Array)
+        }
+        other => Some(other.clone()),
+    }
 }
 
 /// Overlay `fields`' top-level members onto an object `base`: all at once if

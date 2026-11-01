@@ -40,4 +40,5 @@ mod runtime;
 mod soap;
 mod sse;
 mod webhooks;
+mod write_memory;
 mod ws;

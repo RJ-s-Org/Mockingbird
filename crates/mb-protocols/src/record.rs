@@ -88,4 +88,10 @@ pub struct RequestRecord {
 /// record to a background task.
 pub trait RequestRecorder: Send + Sync {
     fn record(&self, r: RequestRecord);
+
+    /// Applies to `value`, a request body kept beyond the log (a write's request
+    /// remembered for its resource), the redaction this recorder applies to what
+    /// it stores. Unlike [`RequestRecorder::record`], it runs on the request path,
+    /// for each write with a body on an LLM mock.
+    fn redact(&self, _value: &mut Value) {}
 }

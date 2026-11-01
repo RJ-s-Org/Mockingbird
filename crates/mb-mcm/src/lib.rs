@@ -18,6 +18,8 @@
 //! ```
 #![warn(missing_debug_implementations, missing_docs)]
 
+pub mod credentials;
+
 use std::fmt;
 use std::time::Duration;
 
