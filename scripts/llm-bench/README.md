@@ -85,7 +85,7 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 
 ## Journeys
 
-`server_suites.py --suite journeys` runs three multi-step journeys (Stripe payment to refund, travel search to cancellation, GitHub search to issue) against mocks built from the contracts alone, one fresh session per rep. They measure whether the engine remembers entities across calls and applies the effects of writes. Each check is a `server.jsonl` row with `case` = `<journey>.<check>` and the `x-mockingbird-source` of the call it judged; a journey that breaks fails its remaining checks. The steps and check names match `pilot_world.py`, so results compare with `docs/benchmarks/pilot-2026-10-30/`. The suite is not in the default set, so `run.py` does not run it; it costs real calls.
+`server_suites.py --suite journeys` runs three multi-step journeys (Stripe payment to refund, travel search to cancellation, GitHub search to issue) against mocks built from the contracts alone, one fresh session per rep. They measure whether the engine remembers entities across calls and applies the effects of writes. Each check is a `server.jsonl` row with `case` = `<journey>.<check>` and the `x-mockingbird-source` of the call it judged; a journey that breaks fails its remaining checks. The steps and check names match `pilot_world.py`, so results compare with `docs/benchmarks/pilot-2026-10-30/`. The suite is not in the default set, so `run.py` does not run it; it costs real calls. `--journey <name>` (repeatable) limits a run, and also reaches `invoices`, which the default leaves out so results stay comparable: actions that move a status, actions that leave it, and a resource with none.
 
 ## Held-out journeys
 

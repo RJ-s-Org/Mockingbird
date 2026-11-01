@@ -1,0 +1,147 @@
+openapi: 3.1.0
+info:
+  title: Invoicing API
+  version: 1.0.0
+  description: Action routes that move a status on, action routes that leave it, and a resource with no status.
+paths:
+  /invoices:
+    post:
+      operationId: createInvoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer, amount, currency]
+              properties:
+                customer: { type: string }
+                amount: { type: integer }
+                currency: { type: string, minLength: 3, maxLength: 3 }
+      responses:
+        "201":
+          description: The new invoice, not yet paid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getInvoice
+      responses:
+        "200":
+          description: The invoice.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}/pay:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: payInvoice
+      summary: Pay the invoice.
+      responses:
+        "200":
+          description: The paid invoice.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}/remind:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: remindInvoice
+      summary: Send the customer a reminder. The invoice stays as it is, apart from counting the reminder.
+      responses:
+        "200":
+          description: The invoice, with the reminder counted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}/preview:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: previewInvoice
+      responses:
+        "200":
+          description: The invoice as the customer would see it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/invoice" }
+  /invoices/{invoiceId}/validate:
+    parameters:
+      - { name: invoiceId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: validateInvoice
+      responses:
+        "200":
+          description: What is wrong with the invoice, if anything.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, problems]
+                properties:
+                  valid: { type: boolean }
+                  problems: { type: array, items: { type: string } }
+  /notes:
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string }
+      responses:
+        "201":
+          description: The new note.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/note" }
+  /notes/{noteId}:
+    parameters:
+      - { name: noteId, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getNote
+      responses:
+        "200":
+          description: The note.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/note" }
+  /notes/{noteId}/pin:
+    parameters:
+      - { name: noteId, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: pinNote
+      responses:
+        "200":
+          description: The pinned note.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/note" }
+components:
+  schemas:
+    note:
+      type: object
+      required: [id, text, pinned]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        pinned: { type: boolean }
+    invoice:
+      type: object
+      required: [id, customer, amount, currency, status, reminders_sent]
+      properties:
+        id: { type: string }
+        customer: { type: string }
+        amount: { type: integer }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        status: { type: string, enum: [draft, awaiting_payment, overdue, paid, void] }
+        reminders_sent: { type: integer, minimum: 0 }

@@ -728,6 +728,10 @@ impl Engine {
                         user.content.push_str("\n\n");
                         user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
                     }
+                    if let Some(note) = prompt::action_note(op, status, &ctx) {
+                        user.content.push('\n');
+                        user.content.push_str(&note);
+                    }
                 }
                 let prompt_schema = compact::response_prompt_schema(bundle, written);
                 let format = ResponseFormat::JsonSchema {

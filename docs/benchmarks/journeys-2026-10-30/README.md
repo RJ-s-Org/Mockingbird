@@ -79,7 +79,7 @@ Blind judging: two judges, 14 targets, 42 paired answers against round 2. Realis
 
 - **Fallback templates:** journeys had no fallback in the last run, and single answers few. There is no case yet for building them, so step 4 of the spec waits.
 - **Learned invariants:** judges still name durations that contradict timestamps, as in the pilot (`LIS-FNC 11:30Z to 14:20Z is 170 min but duration 110`). The case for step 5 stands, and it needs its own test.
-- **State moves on weaker models:** Luna and Lightning can still keep a status on a confirm. Moving the note to the system prompt or naming a target state from the contract's enum could help. Neither was tried.
+- **State moves on weaker models:** Luna and Lightning could still keep a status on a confirm. [The action note](../action-note-2026-10-31/README.md) has since met this bar.
 
 ## Limits
 

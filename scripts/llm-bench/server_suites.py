@@ -112,6 +112,7 @@ JOURNEY_MOCKS = {
     "stripe": ("examples/apis/stripe/stripe.openapi.yaml", "/stripe", None),
     "travel": ("docs/benchmarks/contracts/travel.openapi.yaml", "/travel", None),
     "github": ("examples/apis/github-rest/github-rest.openapi.yaml", "/github", None),
+    "invoices": ("docs/benchmarks/contracts/invoicing.openapi.yaml", "/invoices", None),
 }
 # The held-out journeys, contracts alone as well: no persona.
 HELDOUT_MOCKS = {
@@ -776,6 +777,11 @@ JOURNEY_CHECKS = {
         "repo detail keeps the listed repo", "issue keeps its title", "issue reads back as created",
         "issue list holds the new issue", "repo keeps its identity",
     ],
+    "invoices": [
+        "remind keeps the status", "preview keeps the status", "validate answers a report",
+        "validate keeps the status", "pay moves the status on", "read shows the paid status",
+        "pin sets the flag", "pin keeps the text", "read shows the pinned note",
+    ],
 }
 # The check recorded when a journey cannot go on past its first call.
 JOURNEY_GATE = {"travel": "search returned offers", "github": "search returned repositories"}
@@ -954,6 +960,37 @@ def github_steps(j):
                 before=before, after=after["open_issues_count"])
 
 
+def invoices_steps(j):
+    inv = j.call("POST", "/invoices", body={"customer": "Ana Silva", "amount": 4180, "currency": "eur"})
+    iid = inv.get("id")
+    # An action that moves nothing on is the check against a prompt that pushes every status.
+    rem = j.call("POST", f"/invoices/{iid}/remind")
+    j.check("remind keeps the status", eq(rem.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=rem.get("status"))
+    seen = j.call("POST", f"/invoices/{iid}/preview")
+    j.check("preview keeps the status", eq(seen.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=seen.get("status"))
+    report = j.call("POST", f"/invoices/{iid}/validate")
+    j.check("validate answers a report", isinstance(report.get("valid"), bool), report=report)
+    read = j.call("GET", f"/invoices/{iid}")
+    j.check("validate keeps the status", eq(read.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=read.get("status"))
+    paid = j.call("POST", f"/invoices/{iid}/pay")
+    j.check("pay moves the status on", paid.get("status") == "paid",
+            before=rem.get("status"), status_value=paid.get("status"))
+    read = j.call("GET", f"/invoices/{iid}")
+    j.check("read shows the paid status", eq(read.get("status"), paid.get("status")),
+            paid=paid.get("status"), read=read.get("status"))
+    # No enum, so nothing in the prompt may talk about a status.
+    note = j.call("POST", "/notes", body={"text": "Call the bank"})
+    nid = note.get("id")
+    pinned = j.call("POST", f"/notes/{nid}/pin")
+    j.check("pin sets the flag", pinned.get("pinned") is True, pinned=pinned.get("pinned"))
+    j.check("pin keeps the text", eq(pinned.get("text"), "Call the bank"))
+    read = j.call("GET", f"/notes/{nid}")
+    j.check("read shows the pinned note", read.get("pinned") is True, pinned=read.get("pinned"))
+
+
 def journey_stripe(srv, sink, args, rep):
     run_one_journey("stripe", stripe_steps, srv, sink, args, rep)
 
@@ -966,13 +1003,18 @@ def journey_github(srv, sink, args, rep):
     run_one_journey("github", github_steps, srv, sink, args, rep)
 
 
-JOURNEYS = {"stripe": journey_stripe, "travel": journey_travel, "github": journey_github}
+JOURNEYS = {
+    "stripe": journey_stripe, "travel": journey_travel, "github": journey_github,
+    "invoices": lambda srv, sink, args, rep: run_one_journey("invoices", invoices_steps, srv, sink, args, rep),
+}
+# What a journeys run without --journey does: the set the published results compare.
+DEFAULT_JOURNEYS = ("stripe", "travel", "github")
 
 
 def run_journeys(srv, sink, args):
     for rep in range(args.repeat):
-        for fn in JOURNEYS.values():
-            fn(srv, sink, args, rep)
+        for name in args.journey or DEFAULT_JOURNEYS:
+            JOURNEYS[name](srv, sink, args, rep)
 
 
 # ---------------------------------------------------------------- held-out journeys
@@ -1784,6 +1826,8 @@ def main():
     p.add_argument("--out", required=True, help="results directory (server.jsonl is appended)")
     p.add_argument("--repeat", type=int, default=3, help="reps (fresh session each) per suite")
     p.add_argument("--suite", action="append", choices=SUITES, help="default: consistency, sse, import")
+    p.add_argument("--journey", action="append", choices=tuple(JOURNEYS),
+                   help="journeys to run; default: stripe, travel, github")
     p.add_argument("--binary", default="target/release/mockingbird")
     p.add_argument("--timeout", type=float, default=180, help="client timeout per call, seconds")
     p.add_argument("--stream-items", type=int, default=5, help="SSE events to read per rep")
