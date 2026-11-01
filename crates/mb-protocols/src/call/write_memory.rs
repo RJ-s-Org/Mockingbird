@@ -684,6 +684,18 @@ fn redact_credentials(
     redact_by_names(rt, value, schema, read, false);
 }
 
+/// Whether `members` are a pair whose label says its `value` is a credential, by any of
+/// the members a label goes under: `{"key": "X-Api-Key", "value": ...}`.
+fn labels_a_credential(rt: &MockRuntime, members: &Map<String, Value>) -> bool {
+    members.contains_key("value")
+        && ["name", "key", "header"]
+            .iter()
+            .filter_map(|n| members.get(*n)?.as_str())
+            .any(|label| {
+                is_own_credential(rt, label) || mb_mcm::credentials::hides_in_context(label)
+            })
+}
+
 /// [`redact_credentials`], with `context` by the wider names of what a model is shown
 /// beyond its own request (see [`for_context`]), where `key` and `sid` stay on what the
 /// contract says they identify.
@@ -704,10 +716,14 @@ fn redact_by_names(
     };
     match value {
         Value::Object(members) => {
-            let named_pair = ["name", "key", "header"]
-                .iter()
-                .find_map(|n| members.get(*n)?.as_str())
-                .is_some_and(any_name);
+            let named_pair = if context {
+                labels_a_credential(rt, members)
+            } else {
+                ["name", "key", "header"]
+                    .iter()
+                    .find_map(|n| members.get(*n)?.as_str())
+                    .is_some_and(any_name)
+            };
             if named_pair && let Some(paired) = members.get_mut("value") {
                 *paired = Value::from(REDACTED);
             }
@@ -851,6 +867,8 @@ pub(super) fn declared_plainly(
     let (request_parts, _) = schema_parts(bundle, request);
     match value {
         _ if depth > 8 => None,
+        // Before a member goes: losing only its label would leave the secret.
+        Value::Object(members) if labels_a_credential(rt, members) => None,
         Value::Object(members) => {
             let identity = pinned_members(rt, t);
             let member_of = |parts: &[&'_ Value], key: &str| {
