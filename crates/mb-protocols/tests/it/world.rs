@@ -268,7 +268,7 @@ components:
         name: {type: string}
     Account:
       type: object
-      properties: {id: {type: string}, name: {type: string}, pass: {type: string}, pwd: {type: string}, passphrase: {type: string}, jwt: {type: string}, otp: {type: string}, key: {type: string}, dsn: {type: string}, connection_string: {type: string}, hmac: {type: string}, signature: {type: string}, license_key: {type: string}, card_number: {type: string}, credit_card: {type: string}, ssn: {type: string}, salt: {type: string}, mfa: {type: string}, sid: {type: string}, access_token: {type: string}, api_key: {type: string}, refresh_token: {type: string}, id_token: {type: string}, token: {type: string}, apiKey: {type: string}, clientSecret: {type: string}, password: {type: string}, avatar: {type: string}, hook: {type: string}, store: {type: string}, sign: {type: string}, note: {type: string}, kv: {$ref: "#/components/schemas/Pair"}, pair: {$ref: "#/components/schemas/Pair"}}
+      properties: {id: {type: string}, name: {type: string}, pass: {type: string}, pwd: {type: string}, passphrase: {type: string}, jwt: {type: string}, otp: {type: string}, key: {type: string}, dsn: {type: string}, connection_string: {type: string}, hmac: {type: string}, signature: {type: string}, license_key: {type: string}, card_number: {type: string}, credit_card: {type: string}, ssn: {type: string}, salt: {type: string}, mfa: {type: string}, sid: {type: string}, access_token: {type: string}, api_key: {type: string}, refresh_token: {type: string}, id_token: {type: string}, token: {type: string}, apiKey: {type: string}, clientSecret: {type: string}, password: {type: string}, avatar: {type: string}, hook: {type: string}, store: {type: string}, sign: {type: string}, note: {type: string}, kv: {$ref: "#/components/schemas/Pair"}, pair: {$ref: "#/components/schemas/Pair"}, attributes: {type: array, items: {$ref: "#/components/schemas/Pair"}}}
     Pair:
       type: object
       properties:
@@ -1038,7 +1038,7 @@ async fn a_writes_secrets_are_not_told_to_its_route() {
         "/users/u-1/roles?key=hush-query&sig=hush-query&session_code=hush-query&role=hush-query",
         Some(json!({
             "name": "admin",
-            "pass": "hush-pass", "otp": "hush-otp", "key": "hush-key",
+            "pass": "hush-pass", "otp": "hush-otp", "key": "hush-k",
             "code": "hush-code", "value": "hush-value",
             "password": "hush-password", "client_secret": "hush-secret", "auth": "hush-auth",
         })),
@@ -1698,6 +1698,90 @@ async fn an_answers_secrets_stay_out_of_prompts_and_memory() {
         let kept = serde_json::to_string(&kept.iter().map(|d| &d.data).collect::<Vec<_>>());
         assert!(!kept.unwrap().contains("hush"));
     }
+}
+
+/// A pair labelled as a credential goes whole, under any label member, in a list too:
+/// losing only its label would leave the secret.
+#[tokio::test]
+async fn a_credentials_pair_stays_out_of_earlier_answers() {
+    let h = world(vec![
+        json!({
+            "name": "kept-name",
+            "kv": {"key": "X-Api-Key", "value": "hush-1"},
+            "pair": {"key": "password", "value": "hush-2"},
+            "attributes": [
+                {"key": "X-Api-Key", "value": "hush-3"},
+                {"name": "Authorization", "value": "hush-4"},
+                {"name": "colour", "key": "password", "value": "hush-5"},
+                {"name": "colour", "value": "kept-value"},
+            ],
+        }),
+        note("note-4711"),
+    ]);
+    h.call("GET", "/account", None).await;
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    let prompt = h.prompt(1);
+    let shown = block(&prompt, "earlier_answers").unwrap();
+    assert!(shown.contains("kept-name"), "{prompt}");
+    assert!(shown.contains("kept-value"), "{prompt}");
+    assert!(!prompt.contains("hush"), "{prompt}");
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    assert!(
+        !kept.iter().any(|d| d.data.to_string().contains("hush")),
+        "{kept:?}"
+    );
+}
+
+/// The same pairs in a write's body, at its top and nested in a list.
+#[tokio::test]
+async fn a_credentials_pair_stays_out_of_earlier_writes() {
+    let contract = WORLD.replace(
+        r##"      parameters: [{name: session_code, in: query, schema: {type: string, format: password}}]
+      requestBody:
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+"##,
+        r##"      parameters: [{name: session_code, in: query, schema: {type: string, format: password}}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: {type: string}
+                one: {$ref: "#/components/schemas/Pair"}
+                attributes: {type: array, items: {$ref: "#/components/schemas/Pair"}}
+"##,
+    );
+    assert!(
+        contract
+            .contains("attributes: {type: array, items: {$ref: \"#/components/schemas/Pair\"}}\n")
+    );
+    let h = harness_with(contract.as_bytes(), vec![json!([])], |_| {});
+    h.call(
+        "POST",
+        "/users/u-1/roles",
+        Some(json!({
+            "role": "kept-role",
+            "one": {"key": "X-Api-Key", "value": "hush-1"},
+            "attributes": [
+                {"key": "password", "value": "hush-2"},
+                {"name": "Authorization", "value": "hush-3"},
+                {"name": "colour", "value": "kept-value"},
+            ],
+        })),
+    )
+    .await;
+    h.call("GET", "/users/u-1/roles", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    let told = block(&prompt, "earlier_writes").unwrap();
+    assert!(told.contains("kept-role"), "{prompt}");
+    assert!(told.contains("kept-value"), "{prompt}");
+    assert!(!told.contains("hush"), "{prompt}");
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    let route: Vec<_> = kept.iter().filter(|d| d.id.starts_with("#route")).collect();
+    assert_eq!(route.len(), 1, "{kept:?}");
+    assert!(!route[0].data.to_string().contains("hush"), "{kept:?}");
 }
 
 /// An answer echoing what a request said keeps only what its read declares.
