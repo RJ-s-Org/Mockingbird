@@ -30,6 +30,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub use mb_mcm::stem;
 use serde_json::{Map, Value};
 
 /// Completion tokens an answer is shaped to by default.
@@ -838,36 +839,6 @@ fn page_arrays(doc: &Value, maximum: Option<u64>) -> Option<HashSet<String>> {
         }
     }
     Some(heaviest.into_values().map(|(_, at)| at.clone()).collect())
-}
-
-/// What a word and a member name share when one names the other: lower case, with
-/// no plural ending or final `e` or `y`, so `track` and `tracks`, `category` and
-/// `categories`, `release` and `releases` meet. Cheap and approximate: a false match
-/// only keeps a member that could have gone.
-#[must_use]
-pub fn stem(word: &str) -> String {
-    let word = word.to_lowercase();
-    let base = word.as_str();
-    let singular = if let Some(root) = base.strip_suffix("ies").filter(|r| r.len() >= 2) {
-        return format!("{root}i");
-    } else if let Some(root) = base.strip_suffix("es").filter(|r| r.len() >= 2) {
-        root
-    } else if base.len() >= 3
-        && base.ends_with('s')
-        && !["ss", "us", "is"].iter().any(|e| base.ends_with(e))
-    {
-        &base[..base.len() - 1]
-    } else {
-        base
-    };
-    let trimmed = singular
-        .strip_suffix('e')
-        .filter(|r| r.len() >= 2)
-        .unwrap_or(singular);
-    match trimmed.strip_suffix('y').filter(|r| r.len() >= 2) {
-        Some(root) => format!("{root}i"),
-        None => trimmed.to_string(),
-    }
 }
 
 fn escape(key: &str) -> String {

@@ -87,6 +87,23 @@ No migration or configuration. With an LLM and `consistency: on`, except on Grap
 
 The oldest markers go past 1024 per session, and then what they marked can come back. Offline mocks and `consistency: off` are as they were.
 
+### A member named for its type is its identity
+
+No migration or configuration. A contract whose routes already have an identity is as it was, with the same LLM calls and store calls.
+
+- **What changes:** with no other identity, a member named for the type becomes one: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one: `{id}`, `{userId}`, `{user_id}`. So `/users/{handle}` gets none, and `GET /users/alice` keeps the `user_id` it is answered. A compiled bundle can change, also for offline mocks.
+- **What follows:** the Auth0 example's user is now stored by `POST`, served by `GET`, updated by `PATCH` and marked by `DELETE`.
+- **`unknown_ids: 404` can answer 404 where it generated before**: `GET /accounts/7` over `account_id`, and Auth0's users, as a read now knows it is by id and that the session does not hold it.
+- **Not covered**: a route answering an envelope (`{"user": {...}}`) or an array has no such member, and any other name is not guessed. [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) sets the identity where the contract's names do not give it. Square's, Zendesk's and SendGrid's reads by path and Twilio's lookup are as they were.
+
+### A lookup reads as the type of its items
+
+No migration or configuration. A read whose path has no parameter, whose type has no other route, and every listed array of which holds what one type's `GET` by path answers, now has that type: Auth0's `/users-by-email` is `users`, Zendesk's `/search` is `tickets` and Notion's `/search` is `pages`.
+
+- **It is shown that type's stored records, and stores what it lists under them**, instead of nothing. A prompt can be longer, and a recorded prompt may not replay.
+- **Another shape beside them keeps the route's own type**: `{users: [Hit], tickets: [Ticket]}` would store a hit as a ticket. An array of strings does not count. Items with no declared members do, as they could be anything.
+- **A list under a path parameter (`/teams/{team}/members`) and a read of one record (`/me`) keep their types**, as does a read whose items two types' `GET`s answer. So does a type with another route, or one set by `x-mockingbird-resource`.
+
 ### Action routes act on their parent resource
 
 A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how that is read](import.md#how-a-post-under-a-resource-is-read)), such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:

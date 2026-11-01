@@ -1,6 +1,7 @@
 //! Inference of operation kind, resource type, and identity from HTTP shape.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use crate::Ctx;
 use crate::schema::defs_name;
@@ -239,6 +240,145 @@ fn identity_for(
         input_field: None,
         path_field: named.filter(|n| *n != field).map(str::to_owned),
     })
+}
+
+/// The one scalar member of `props` named for its own type, as `user_id` is for
+/// `users` and `category_id` for `categories`. The mock already reads `<x>_id` as a
+/// reference to `<x>s`, and a list's items as keyed by it, so on a record of that type
+/// it can only be the record's own key. An object or a list holds no key.
+fn own_type_member<'a>(
+    resource_type: &str,
+    props: &'a Map<String, Value>,
+    defs: &Map<String, Value>,
+) -> Option<&'a str> {
+    let own = mb_mcm::stem(resource_type);
+    let named = |member: &&String| {
+        let lower = member.to_ascii_lowercase();
+        let name = lower
+            .strip_suffix("_id")
+            .or_else(|| lower.strip_suffix("id"));
+        name.is_some_and(|name| !name.is_empty() && mb_mcm::stem(name) == own)
+    };
+    let mut members = props.keys().filter(named);
+    let (Some(field), None) = (members.next(), members.next()) else {
+        return None;
+    };
+    let schema = resolve(props.get(field)?, defs)?;
+    let is_scalar = !matches!(
+        schema.get("type").and_then(Value::as_str),
+        Some("object" | "array")
+    ) && schema.get("properties").is_none();
+    is_scalar.then_some(field.as_str())
+}
+
+/// Whether a path parameter's name says it holds an id: `id`, `orderId`, `movie_id`.
+fn id_like(param: &str) -> bool {
+    param.eq_ignore_ascii_case("id") || param.ends_with("Id") || param.ends_with("_id")
+}
+
+/// Gives what has no identity the member named for its own type, on a type routes
+/// reach by a last path parameter, each of which says it holds an id. Another
+/// parameter (`/users/{handle}`) names something else, and the answer's member would be
+/// rewritten to its value. With no such route (`POST /tokens`) nothing could find the
+/// record again.
+fn apply_own_type_members(operations: &mut [Operation], defs: &Map<String, Value>) {
+    let mut by_id = HashSet::new();
+    let mut by_other = HashSet::new();
+    for op in operations.iter().filter(|op| !is_stream(op)) {
+        let (Some(t), Some(param)) = (
+            op.resource_type.clone(),
+            http_path(op).and_then(|(_, path)| trailing_param(path)),
+        ) else {
+            continue;
+        };
+        if id_like(param) {
+            by_id.insert(t);
+        } else {
+            by_other.insert(t);
+        }
+    }
+    for op in operations.iter_mut().filter(|op| op.identity.is_none()) {
+        let Some(t) = op
+            .resource_type
+            .as_deref()
+            .filter(|t| by_id.contains(*t) && !by_other.contains(*t))
+        else {
+            continue;
+        };
+        let Some((_, path)) = http_path(op) else {
+            continue;
+        };
+        let Some(props) = schema_properties(answer(op), defs) else {
+            continue;
+        };
+        let Some(field) = own_type_member(t, &props, defs) else {
+            continue;
+        };
+        let identity = Identity {
+            path_param: trailing_param(path).map(str::to_owned),
+            field: field.to_owned(),
+            input_field: None,
+            path_field: None,
+        };
+        op.identity = Some(identity);
+    }
+}
+
+/// Whether a schema is of a value with no members to compare: a string, a number.
+fn is_scalar_schema(schema: &Value) -> bool {
+    matches!(
+        schema.get("type").and_then(Value::as_str),
+        Some("string" | "number" | "integer" | "boolean")
+    )
+}
+
+/// Makes a lookup read as the type its items are: a read whose path has no
+/// parameter, of a type no other route has, every listed array of which holds what
+/// one type's `GET` by path serves (`/users-by-email` beside `/users/{id}`). So it sees
+/// that type's records and what it lists goes under them. Another shape beside them
+/// would be stored as that type, so it leaves the route as it was. So do a parameter,
+/// under which the path decides who is listed, and two types serving the items.
+fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Map<String, Value>) {
+    for index in 0..hints.len() {
+        let op = &operations[index];
+        let is_lookup = hints[index].resource_type.is_none()
+            && op.kind == OperationKind::Query
+            && !is_stream(op)
+            && http_path(op).is_some_and(|(_, path)| !path.contains('{'));
+        let alone = !operations
+            .iter()
+            .enumerate()
+            .any(|(other, o)| other != index && o.resource_type == op.resource_type);
+        if !is_lookup || !alone {
+            continue;
+        }
+        let Some(schema) = answer(op) else {
+            continue;
+        };
+        let items: Vec<Value> = listed_things(schema, defs)
+            .into_iter()
+            .filter(|item| !is_scalar_schema(item))
+            .collect();
+        if items.is_empty() || items.iter().any(|item| is_opaque(Some(item), defs)) {
+            continue;
+        }
+        let mut types = gets(operations, |route| {
+            route.last().is_some_and(|last| is_param(last))
+        })
+        .filter(|read| {
+            self::answer(read)
+                .is_some_and(|served| items.iter().all(|item| same_record(item, served, defs)))
+        })
+        .map(|read| read.resource_type.clone());
+        let Some(found) = types.next() else {
+            continue;
+        };
+        let one_type = types.all(|other| other == found);
+        drop(types);
+        if one_type {
+            operations[index].resource_type = found;
+        }
+    }
 }
 
 /// The resource a route acts on, named by its path:
@@ -743,6 +883,7 @@ pub(crate) fn apply_action_routes(
     defs: &Map<String, Value>,
     ctx: &mut Ctx,
 ) {
+    apply_own_type_members(operations, defs);
     let is_read = |op: &Operation| http_path(op).is_some_and(|(m, _)| m == HttpMethod::Get);
     let mut order: Vec<usize> = (0..hints.len()).collect();
     order.sort_by_key(|&i| !is_read(&operations[i]));
@@ -805,6 +946,7 @@ pub(crate) fn apply_action_routes(
             set_identity(index, field, operations, defs, ctx);
         }
     }
+    apply_lookups(operations, hints, defs);
 }
 
 /// Makes `field` the identity of the operation at `index`, unless it does
