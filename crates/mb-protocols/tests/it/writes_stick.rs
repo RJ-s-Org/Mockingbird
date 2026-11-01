@@ -1202,3 +1202,649 @@ async fn an_updates_effect_on_its_own_target_adds_no_member() {
         .unwrap();
     assert!(held.data.get("lifecyclestage").is_none(), "{}", held.data);
 }
+
+/// Items with a declared 404 and a counted envelope, things with neither, a read
+/// mentioning an item, a list that must hold one, and teams named under an org.
+const DELETES: &str = r##"
+openapi: 3.0.0
+info: {title: Deletes, version: "1"}
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/ItemPage"}}}}
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+  /items/{item_id}:
+    parameters: [{name: item_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getItem
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "404": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    put:
+      operationId: putItem
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+    delete:
+      operationId: deleteItem
+      responses:
+        "204": {description: gone}
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Thing"}}}}}
+  /things/{thing_id}:
+    parameters: [{name: thing_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+    delete:
+      operationId: deleteThing
+      responses:
+        "204": {description: gone}
+  /boxes/{box_id}:
+    get:
+      operationId: getBox
+      parameters: [{name: box_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Box"}}}}
+  /gadgets:
+    get:
+      operationId: listGadgets
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, minItems: 1, items: {$ref: "#/components/schemas/Thing"}}}}}
+  /gadgets/{gadget_id}:
+    parameters: [{name: gadget_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getGadget
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+    delete:
+      operationId: deleteGadget
+      responses:
+        "204": {description: gone}
+  /orgs/{org}/teams/{slug}:
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}}
+      - {name: slug, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getTeam
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+    delete:
+      operationId: deleteTeam
+      responses:
+        "204": {description: gone}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+    ItemPage:
+      type: object
+      required: [items, total, page_size]
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/Item"}}
+        total: {type: integer}
+        page_size: {type: integer}
+    Thing:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+    Box:
+      type: object
+      required: [id, item]
+      properties: {id: {type: string}, item: {$ref: "#/components/schemas/Item"}}
+    Team:
+      type: object
+      required: [slug, org]
+      properties: {slug: {type: string}, org: {type: string}}
+    Error:
+      type: object
+      required: [code, message]
+      properties: {code: {type: integer}, message: {type: string}}
+"##;
+
+fn deletes(script: Vec<Value>) -> Harness {
+    harness_with(DELETES.as_bytes(), script, |_| {})
+}
+
+fn item(id: &str) -> Value {
+    json!({"id": id, "title": "A title"})
+}
+
+/// A harness holding `i1`, created by its first answer, now deleted.
+async fn deleted_item(mut script: Vec<Value>) -> Harness {
+    script.insert(0, item("i1"));
+    let h = deletes(script);
+    let (status, _, _) = h
+        .call("POST", "/items", Some(json!({"title": "A title"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, source, read) = h.call("GET", "/items/i1", None).await;
+    assert_eq!(
+        (status, source.as_str()),
+        (StatusCode::OK, "state"),
+        "{read}"
+    );
+    let (status, _, _) = h.call("DELETE", "/items/i1", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    h
+}
+
+/// `unknown_ids: generate` is the default, and a delete still sticks: no LLM call,
+/// and the contract's own 404.
+#[tokio::test]
+async fn a_deleted_record_is_not_found_with_no_llm_call() {
+    let h = deleted_item(vec![]).await;
+    assert_eq!(h.calls(), 1);
+    for _ in 0..2 {
+        let (status, source, body) = h.call("GET", "/items/i1", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(source, "state");
+        assert!(
+            body["code"].is_i64() && body["message"].is_string(),
+            "{body}"
+        );
+    }
+    assert_eq!(h.calls(), 1);
+    assert!(
+        h.store
+            .get(&session(), "items", "i1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A contract declaring no 404 gets what `unknown_ids: not_found` answers there.
+#[tokio::test]
+async fn a_deleted_record_with_no_declared_404_is_a_problem() {
+    let h = deletes(vec![json!({"id": "t1"})]);
+    let (status, source, _) = h.call("GET", "/things/t1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
+    h.call("DELETE", "/things/t1", None).await;
+    let (status, source, body) = h.call("GET", "/things/t1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(source, "state");
+    assert_eq!(body["title"], "Not Found", "{body}");
+    assert_eq!(body["status"], 404, "{body}");
+    assert_eq!(h.calls(), 1);
+}
+
+/// Deleting what was never held still means it is gone.
+#[tokio::test]
+async fn deleting_an_unheld_id_sticks() {
+    let h = deletes(vec![]);
+    h.call("DELETE", "/items/never", None).await;
+    let (status, _, _) = h.call("GET", "/items/never", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(h.calls(), 0);
+}
+
+/// A generated list holding the id loses that item, and the count that is clearly
+/// its own follows; another number beside it stays.
+#[tokio::test]
+async fn a_list_answer_drops_a_deleted_id() {
+    let answer = json!({"items": [item("i1"), item("i2")], "total": 12, "page_size": 2});
+    let h = deleted_item(vec![answer]).await;
+    let (status, _, list) = h.call("GET", "/items", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["items"], json!([item("i2")]), "{list}");
+    assert_eq!(list["total"], 11, "{list}");
+    assert_eq!(list["page_size"], 2, "{list}");
+    // The list seeded the other, not this one.
+    let (status, _, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, source, _) = h.call("GET", "/items/i2", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "state"));
+}
+
+/// The following list is not told of the record, and repeats from the cache.
+#[tokio::test]
+async fn a_following_list_omits_it() {
+    let answer = json!({"items": [], "total": 0, "page_size": 20});
+    let h = deleted_item(vec![answer]).await;
+    let (_, _, list) = h.call("GET", "/items", None).await;
+    assert_eq!(list["items"], json!([]), "{list}");
+    let requests = h.provider.requests();
+    let prompt = &requests.last().unwrap().messages.last().unwrap().content;
+    assert!(!prompt.contains("\"i1\""), "{prompt}");
+}
+
+/// A bare array has no count to correct, and works the same.
+#[tokio::test]
+async fn a_bare_list_answer_drops_a_deleted_id() {
+    let h = deletes(vec![
+        json!({"id": "t1"}),
+        json!([{"id": "t1"}, {"id": "t2"}]),
+    ]);
+    h.call("GET", "/things/t1", None).await;
+    h.call("DELETE", "/things/t1", None).await;
+    let (_, _, list) = h.call("GET", "/things", None).await;
+    assert_eq!(list, json!([{"id": "t2"}]));
+}
+
+/// Taking the only item out would break the contract, so it stays in the answer,
+/// though it is not stored again.
+#[tokio::test]
+async fn a_list_that_would_break_its_schema_keeps_the_item() {
+    let h = deletes(vec![json!({"id": "g1"}), json!([{"id": "g1"}])]);
+    h.call("GET", "/gadgets/g1", None).await;
+    h.call("DELETE", "/gadgets/g1", None).await;
+    let (status, _, list) = h.call("GET", "/gadgets", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list, json!([{"id": "g1"}]));
+    let (status, _, _) = h.call("GET", "/gadgets/g1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A nested answer mentioning the id serves as it is, and restores nothing.
+#[tokio::test]
+async fn a_nested_answer_does_not_restore_it() {
+    let h = deleted_item(vec![json!({"id": "b1", "item": item("i1")})]).await;
+    let (status, _, boxed) = h.call("GET", "/boxes/b1", None).await;
+    assert_eq!(status, StatusCode::OK, "{boxed}");
+    assert_eq!(boxed["item"]["id"], "i1");
+    assert!(
+        h.store
+            .get(&session(), "items", "i1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (status, _, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// An effect never creates, so it has nothing to bring back.
+#[tokio::test]
+async fn an_effect_does_not_restore_it() {
+    let h = deleted_item(vec![
+        item("i2"),
+        json!({
+            "effects": [{"type": "items", "id": "i1", "set": {"title": "Back"}}],
+            "response": item("i2"),
+        }),
+    ])
+    .await;
+    h.call("POST", "/items", Some(json!({"title": "A title"})))
+        .await;
+    h.call("PUT", "/items/i2", Some(json!({"title": "A title"})))
+        .await;
+    assert!(
+        h.store
+            .get(&session(), "items", "i1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (status, _, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A create with that id brings it back, as does a `PUT`, and a later delete sticks.
+#[tokio::test]
+async fn a_recreate_clears_the_marker() {
+    let h = deleted_item(vec![item("i1"), item("i1")]).await;
+    let (status, _, _) = h
+        .call(
+            "POST",
+            "/items",
+            Some(json!({"id": "i1", "title": "A title"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, source, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "state"));
+    let markers = h.store.list(&session(), MARKERS, 10).await.unwrap();
+    assert!(markers.iter().all(|m| m.id == INDEX), "{markers:?}");
+
+    h.call("DELETE", "/items/i1", None).await;
+    assert_eq!(
+        h.call("GET", "/items/i1", None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, _, _) = h
+        .call("PUT", "/items/i1", Some(json!({"title": "A title"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, source, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "state"));
+}
+
+/// A session reset forgets what was deleted.
+#[tokio::test]
+async fn a_session_reset_clears_the_marker() {
+    let h = deleted_item(vec![item("i1")]).await;
+    h.store.reset(&session()).await.unwrap();
+    let (status, source, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
+}
+
+/// Where the markers are: not in what a session shows, on no change feed.
+const MARKERS: &str = mb_state::INTERNAL_TYPE;
+const INDEX: &str = "#deleted";
+
+#[tokio::test]
+async fn markers_stay_out_of_what_a_session_shows() {
+    let h = deleted_item(vec![]).await;
+    let mut changes = h.store.subscribe();
+    h.call("DELETE", "/items/other", None).await;
+    assert!(
+        !h.store
+            .list(&session(), MARKERS, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(h.store.export(&session()).await.unwrap().is_empty());
+    let sessions = h.store.sessions("default", "m").await.unwrap();
+    assert_eq!(sessions[0].resources, 0);
+    while let Ok(change) = changes.try_recv() {
+        assert_eq!(change.resource_type, "items", "{change:?}");
+    }
+}
+
+/// One owner's deleted name is not another's: the same slug under another org is
+/// another team.
+#[tokio::test]
+async fn a_deleted_name_is_its_owners() {
+    let team = json!({"slug": "core", "org": "acme"});
+    let h = deletes(vec![json!({"slug": "core", "org": "octo"}), team.clone()]);
+    let (status, _, _) = h.call("GET", "/orgs/octo/teams/core", None).await;
+    assert_eq!(status, StatusCode::OK);
+    h.call("DELETE", "/orgs/octo/teams/core", None).await;
+    let (status, _, _) = h.call("GET", "/orgs/octo/teams/core", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = h.call("GET", "/orgs/acme/teams/core", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, team);
+}
+
+/// With consistency off a delete leaves no mark: as before, the read generates.
+#[tokio::test]
+async fn consistency_off_keeps_generating() {
+    let h = harness_with(DELETES.as_bytes(), vec![item("i1"), item("i1")], |rt| {
+        rt.consistency = false;
+    });
+    h.call("GET", "/items/i1", None).await;
+    h.call("DELETE", "/items/i1", None).await;
+    let (status, source, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
+    assert!(
+        h.store
+            .list(&session(), MARKERS, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// An offline mock answers as it always did.
+#[tokio::test]
+async fn offline_keeps_generating() {
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(DELETES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(None, EngineConfig::default())),
+        CachingStateStore::wrap(
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            Duration::from_secs(3600),
+            mb_state::DEFAULT_CACHE_ENTRIES,
+        ),
+    );
+    let h = Harness {
+        router: http_rest::router(Arc::new(rt)),
+        provider: Arc::new(ScriptedProvider::new(vec![])),
+        store,
+    };
+    h.call("DELETE", "/items/i1", None).await;
+    let (status, source, _) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "fallback"));
+    assert!(
+        h.store
+            .list(&session(), MARKERS, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// How many are kept is bounded: the oldest is forgotten, the newest still holds.
+#[tokio::test]
+async fn markers_are_bounded() {
+    let h = deletes(vec![item("old")]);
+    for n in 0..1030 {
+        h.call("DELETE", &format!("/items/i{n}"), None).await;
+    }
+    let held = h.store.list(&session(), MARKERS, 5000).await.unwrap();
+    assert!(held.len() <= 1025, "{}", held.len());
+    assert_eq!(
+        h.call("GET", "/items/i1029", None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    h.provider.requests();
+    assert_eq!(h.calls(), 0);
+    let (status, source, _) = h.call("GET", "/items/i0", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
+}
+
+/// Records under a parent, reached also by a flat route, a mention and a membership.
+const PARENTS: &str = r##"
+openapi: 3.0.0
+info: {title: Parents, version: "1"}
+paths:
+  /projects/{project_id}:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getProject
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+  /projects/{project_id}/tasks:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listTasks
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskPage"}}}}
+  /projects/{project_id}/tasks/{id}:
+    parameters:
+      - {name: project_id, in: path, required: true, schema: {type: string}}
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getTask
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+        "404": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteTask
+      responses:
+        "204": {description: gone}
+  /tasks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getFlatTask
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+  /x/{id}/docs/{doc_id}.json:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: doc_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getDoc
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+        "404": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteDoc
+      responses:
+        "204": {description: gone}
+  /x/{id}/members:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listMembers
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Member"}}}}}
+  /x/{id}/members/{user_id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: user_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getMember
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+        "404": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: removeMember
+      responses:
+        "204": {description: gone}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+    TaskPage:
+      type: object
+      required: [tasks, total]
+      properties:
+        tasks: {type: array, items: {$ref: "#/components/schemas/Task"}}
+        total: {type: integer}
+    Project:
+      type: object
+      required: [id, current]
+      properties: {id: {type: string}, current: {$ref: "#/components/schemas/Task"}}
+    Member:
+      type: object
+      required: [id, role]
+      properties: {id: {type: string}, role: {type: string}}
+    Error:
+      type: object
+      required: [message]
+      properties: {message: {type: string}}
+"##;
+
+fn task(id: &str) -> Value {
+    json!({"id": id, "title": "A task"})
+}
+
+/// A delete under one parent says nothing of another: an id-like parameter is only an
+/// id within the path that holds it.
+#[tokio::test]
+async fn a_delete_stays_under_its_parent() {
+    let page = json!({"tasks": [task("5"), task("6")], "total": 2});
+    let h = harness_with(
+        PARENTS.as_bytes(),
+        vec![task("5"), task("5"), page.clone(), page],
+        |_| {},
+    );
+    h.call("GET", "/projects/1/tasks/5", None).await;
+    let (status, _, _) = h.call("DELETE", "/projects/1/tasks/5", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, gone) = h.call("GET", "/projects/1/tasks/5", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+
+    let (status, source, other) = h.call("GET", "/projects/2/tasks/5", None).await;
+    assert_eq!(
+        (status, source.as_str()),
+        (StatusCode::OK, "llm"),
+        "{other}"
+    );
+
+    // Held again by the read above, so nothing here is marked for the second project.
+    let (status, _, list) = h.call("GET", "/projects/2/tasks", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["total"], 2, "{list}");
+    assert_eq!(list["tasks"].as_array().unwrap().len(), 2, "{list}");
+}
+
+/// Under its own parent a list loses the item and its count, as it does on a flat route.
+#[tokio::test]
+async fn a_list_under_the_same_parent_drops_it() {
+    let page = json!({"tasks": [task("5"), task("6")], "total": 2});
+    let h = harness_with(PARENTS.as_bytes(), vec![task("5"), page], |_| {});
+    h.call("GET", "/projects/1/tasks/5", None).await;
+    h.call("DELETE", "/projects/1/tasks/5", None).await;
+    let (status, _, list) = h.call("GET", "/projects/1/tasks", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["total"], 1, "{list}");
+    assert_eq!(list["tasks"], json!([task("6")]), "{list}");
+}
+
+/// A membership is the plainest such route: removing a user from one parent leaves
+/// their membership of another.
+#[tokio::test]
+async fn a_removed_member_stays_in_other_parents() {
+    let member = json!({"id": "u1", "role": "admin"});
+    let h = harness_with(
+        PARENTS.as_bytes(),
+        vec![member.clone(), member.clone(), json!([member.clone()])],
+        |_| {},
+    );
+    h.call("GET", "/x/1/members/u1", None).await;
+    let (status, _, _) = h.call("DELETE", "/x/1/members/u1", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, gone) = h.call("GET", "/x/1/members/u1", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+    let (status, _, other) = h.call("GET", "/x/2/members/u1", None).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let (status, _, list) = h.call("GET", "/x/3/members", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+}
+
+/// A read through another route to the same record is another path: the marker does
+/// not reach it, which `docs/upgrading.md` says.
+#[tokio::test]
+async fn a_flat_route_to_the_record_is_not_marked() {
+    let h = harness_with(PARENTS.as_bytes(), vec![task("5"), task("5")], |_| {});
+    h.call("GET", "/projects/1/tasks/5", None).await;
+    h.call("DELETE", "/projects/1/tasks/5", None).await;
+    let (status, source, flat) = h.call("GET", "/tasks/5", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"), "{flat}");
+}
+
+/// An answer on the parent's own route mentioning what it held does not bring it back
+/// under that parent.
+#[tokio::test]
+async fn a_mention_under_the_same_parent_does_not_restore_it() {
+    let h = harness_with(
+        PARENTS.as_bytes(),
+        vec![task("5"), json!({"id": "1", "current": task("5")})],
+        |_| {},
+    );
+    h.call("GET", "/projects/1/tasks/5", None).await;
+    h.call("DELETE", "/projects/1/tasks/5", None).await;
+    let (status, _, project) = h.call("GET", "/projects/1", None).await;
+    assert_eq!(status, StatusCode::OK, "{project}");
+    let (status, _, gone) = h.call("GET", "/projects/1/tasks/5", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+}
+
+/// A target in no segment of its own (`{doc_id}.json`) has a parent like any other.
+#[tokio::test]
+async fn a_delete_with_an_extension_stays_under_its_parent() {
+    let h = harness_with(PARENTS.as_bytes(), vec![task("5"), task("5")], |_| {});
+    h.call("GET", "/x/1/docs/5.json", None).await;
+    let (status, _, _) = h.call("DELETE", "/x/1/docs/5.json", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, gone) = h.call("GET", "/x/1/docs/5.json", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+    let (status, _, other) = h.call("GET", "/x/2/docs/5.json", None).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+}

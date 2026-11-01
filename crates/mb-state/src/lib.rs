@@ -75,7 +75,7 @@ pub enum StateError {
 }
 
 /// The resource type under which the runtime keeps what is not a resource of the
-/// session: the write memory of `mockingbird-protocols`. It lives and dies with
+/// session: the write memory and deleted markers of `mockingbird-protocols`. It lives and dies with
 /// the session (TTL, reset, seed) and answers `get`, `upsert` and `delete` like
 /// any type, but no backend exports it, counts it among
 /// [`SessionInfo::resources`], publishes a change for it or seeds it from a

@@ -658,8 +658,11 @@ impl Harness {
         requests[n].messages.last().unwrap().content.clone()
     }
 
+    /// The memory's documents: not the deleted markers kept under the same type.
     async fn memory(&self) -> Vec<StoredResource> {
-        self.store.list(&session(), MEMORY, 100).await.unwrap()
+        let mut held = self.store.list(&session(), MEMORY, 100).await.unwrap();
+        held.retain(|doc| !doc.id.starts_with("#deleted"));
+        held
     }
 }
 

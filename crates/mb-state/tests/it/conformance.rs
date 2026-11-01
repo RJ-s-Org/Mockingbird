@@ -66,6 +66,24 @@ async fn the_internal_type_is_no_resource(st: &Arc<dyn StateStore>, ws: &str) {
         Some(doc("pet/1"))
     );
     assert_eq!(st.list(&s, INTERNAL_TYPE, 10).await.unwrap().len(), 2);
+    // A deleted marker's id, and its index holding no object.
+    let marker = doc("#deleted/0123456789abcdef0123456789abcdef");
+    st.upsert(&s, marker.clone()).await.unwrap();
+    let index = StoredResource {
+        data: json!([marker.id]),
+        ..doc("#deleted")
+    };
+    st.upsert(&s, index.clone()).await.unwrap();
+    assert_eq!(
+        st.get(&s, INTERNAL_TYPE, &marker.id).await.unwrap(),
+        Some(marker.clone())
+    );
+    assert_eq!(
+        st.get(&s, INTERNAL_TYPE, "#deleted").await.unwrap(),
+        Some(index)
+    );
+    assert!(st.delete(&s, INTERNAL_TYPE, &marker.id).await.unwrap());
+    assert!(st.delete(&s, INTERNAL_TYPE, "#deleted").await.unwrap());
     assert_eq!(st.list(&s, "pet", 10).await.unwrap(), vec![real.clone()]);
     assert_eq!(st.export(&s).await.unwrap(), vec![real.clone()]);
     let sessions = st.sessions(ws, "internal").await.unwrap();
