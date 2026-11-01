@@ -301,8 +301,8 @@ impl Engine {
         (checked, effects)
     }
 
-    /// Replaces the PII in `value`, counting it.
-    fn scrub(&self, value: &mut Value) {
+    /// Replaces the PII in `value`, counting it. Nothing without a scrubber.
+    pub fn scrub(&self, value: &mut Value) {
         if let Some(scrubber) = &self.guards.scrubber {
             for (pattern, n) in scrubber.scrub_value(value) {
                 metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)

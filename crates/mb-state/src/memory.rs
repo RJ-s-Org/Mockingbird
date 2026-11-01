@@ -12,8 +12,8 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 use crate::{
-    CHANGE_CHANNEL_CAPACITY, ChangeKind, SWEEP_INTERVAL, SessionInfo, SessionKey, StateChanged,
-    StateError, StateStore, StoredResource,
+    CHANGE_CHANNEL_CAPACITY, ChangeKind, INTERNAL_TYPE, SWEEP_INTERVAL, SessionInfo, SessionKey,
+    StateChanged, StateError, StateStore, StoredResource,
 };
 
 /// One resource type of a session.
@@ -87,8 +87,13 @@ impl SessionData {
         true
     }
 
+    /// How many resources the session holds, [`INTERNAL_TYPE`] aside.
     fn len(&self) -> usize {
-        self.resources.values().map(|d| d.by_id.len()).sum()
+        self.resources
+            .iter()
+            .filter(|(t, _)| t.as_str() != INTERNAL_TYPE)
+            .map(|(_, d)| d.by_id.len())
+            .sum()
     }
 
     /// Up to `limit` resources of `resource_type`, most recent first.
@@ -105,12 +110,13 @@ impl SessionData {
             .collect()
     }
 
-    /// Every resource, oldest first.
+    /// Every resource, oldest first, [`INTERNAL_TYPE`] aside.
     fn export(&self) -> Vec<StoredResource> {
         let mut all: Vec<&(u64, StoredResource)> = self
             .resources
-            .values()
-            .flat_map(|d| d.by_id.values())
+            .iter()
+            .filter(|(t, _)| t.as_str() != INTERNAL_TYPE)
+            .flat_map(|(_, d)| d.by_id.values())
             .collect();
         all.sort_unstable_by_key(|(seq, _)| *seq);
         all.into_iter().map(|(_, r)| r.clone()).collect()
@@ -185,6 +191,9 @@ impl Inner {
     }
 
     fn publish(&self, s: &SessionKey, resource_type: &str, id: &str, kind: ChangeKind) {
+        if resource_type == INTERNAL_TYPE {
+            return;
+        }
         // No subscribers is fine.
         let _ = self.tx.send(StateChanged {
             session: s.clone(),
@@ -368,7 +377,9 @@ impl StateStore for MemoryStore {
     async fn seed(&self, s: &SessionKey, resources: Vec<StoredResource>) -> Result<(), StateError> {
         let mut data = SessionData::new();
         for r in resources {
-            data.insert(r);
+            if r.resource_type != INTERNAL_TYPE {
+                data.insert(r);
+            }
         }
         self.inner.sessions.insert(s.clone(), data);
         Ok(())

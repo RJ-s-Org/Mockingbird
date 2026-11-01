@@ -60,6 +60,11 @@ const ACTS: &str = "This call acts on the API: the response shows the state afte
 call does not change stays as it is in the related resources (same ids, same values), and the \
 response stays consistent with the request body.";
 
+/// What <earlier_requests> owes: without "even where", a model told to keep the
+/// same values answers with the old ones.
+const EARLIER_REQUESTS: &str = "These requests succeeded after the resources above were stored, \
+oldest first: the response must reflect them, even where those resources say otherwise.";
+
 /// The system and user messages of one generation of `status` for `call`,
 /// with `schema` the body schema the answer must match.
 #[must_use]
@@ -174,6 +179,8 @@ fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) 
         forced_status: None,
         scenario: ctx.scenario.as_ref(),
         response_schema: None,
+        earlier_requests: &[],
+        earlier_own_body: None,
     };
     let mut s = user_message(call, &unary, false, None, false);
     if !ctx.request_stream.is_empty() {
@@ -374,7 +381,22 @@ must follow them.\n{}\n</scenario>",
         }
         s.push_str("</related_resources>\n");
     }
+    earlier_requests_block(&mut s, ctx.earlier_requests);
     s
+}
+
+/// The writes that the resources shown do not hold yet, oldest first. Last, so
+/// the prompt before it is what it would be without them.
+fn earlier_requests_block(s: &mut String, requests: &[Value]) {
+    if requests.is_empty() {
+        return;
+    }
+    s.push_str(EARLIER_REQUESTS);
+    s.push_str("\n<earlier_requests>\n");
+    for request in requests {
+        let _ = writeln!(s, "{}", data(request));
+    }
+    s.push_str("</earlier_requests>\n");
 }
 
 /// [`crate::guards::EFFECTS_ENVELOPE_NOTE`] and the resources shown in the

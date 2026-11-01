@@ -38,7 +38,7 @@ grpc = [
     "dep:tokio-stream",
 ]
 soap = ["dep:quick-xml"]
-events = ["websocket", "dep:cron", "dep:chrono", "dep:uuid"]
+events = ["websocket", "dep:cron", "dep:uuid"]
 mqtt = ["events", "dep:rumqttc"]
 amqp = ["events", "dep:lapin"]
 kafka = ["events", "dep:rdkafka"]
@@ -48,7 +48,7 @@ async-graphql = { workspace = true, optional = true }
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
-chrono = { workspace = true, optional = true }
+chrono.workspace = true
 cron = { workspace = true, optional = true }
 futures.workspace = true
 hmac.workspace = true
