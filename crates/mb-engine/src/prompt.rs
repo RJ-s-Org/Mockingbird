@@ -65,6 +65,15 @@ response stays consistent with the request body.";
 const EARLIER_REQUESTS: &str = "These requests succeeded after the resources above were stored, \
 oldest first: the response must reflect them, even where those resources say otherwise.";
 
+/// What <earlier_answers> is: what the API said then, not what must stand now.
+const EARLIER_ANSWERS: &str = "What this API said earlier in the session, on routes with no \
+parameters. It may have changed since: where nothing says otherwise, use the same ids, names and \
+values.";
+
+/// What <earlier_writes> is: told, not owed, as nothing else says they still hold.
+const EARLIER_WRITES: &str = "Requests that succeeded earlier on this route, oldest first. They may \
+have changed what it answers, and that may have changed since.";
+
 /// The system and user messages of one generation of `status` for `call`,
 /// with `schema` the body schema the answer must match.
 #[must_use]
@@ -181,6 +190,8 @@ fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) 
         response_schema: None,
         earlier_requests: &[],
         earlier_own_body: None,
+        earlier_answers: &[],
+        earlier_writes: &[],
         update_guard: None,
     };
     let mut s = user_message(call, &unary, false, None, false);
@@ -382,8 +393,28 @@ must follow them.\n{}\n</scenario>",
         }
         s.push_str("</related_resources>\n");
     }
+    data_block(
+        &mut s,
+        EARLIER_ANSWERS,
+        "earlier_answers",
+        ctx.earlier_answers,
+    );
+    data_block(&mut s, EARLIER_WRITES, "earlier_writes", ctx.earlier_writes);
     earlier_requests_block(&mut s, ctx.earlier_requests);
     s
+}
+
+/// `items` under a preface in their own block, nothing with none. After the rest, so the
+/// prompt before it is what it would be without them.
+fn data_block(s: &mut String, preface: &str, tag: &str, items: &[Value]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = writeln!(s, "{preface}\n<{tag}>");
+    for item in items {
+        let _ = writeln!(s, "{}", data(item));
+    }
+    let _ = writeln!(s, "</{tag}>");
 }
 
 /// The writes that the resources shown do not hold yet, oldest first. Last, so

@@ -464,3 +464,48 @@ fn slugs_before_literals_still_template() {
         vec!["/pets/{petId}/toys"; 3]
     );
 }
+
+/// An import redacts by the names it always did: an ordinary member keeps its value, and
+/// so the type inferred from it.
+#[test]
+fn ordinary_members_keep_their_types() {
+    let answer = json!({
+        "pass_count": 3,
+        "sort_key": 7,
+        "keys": ["a", "b"],
+        "signature": {"alg": "none"},
+        "mfa_enabled": true,
+        "otp_required": false,
+    });
+    let har = json!({"log": {"version": "1.2", "creator": {"name": "t", "version": "1"}, "entries": [{
+        "startedDateTime": "2026-10-01T10:00:00.000Z",
+        "time": 1,
+        "request": {
+            "method": "GET", "url": "https://x.example.com/stats", "httpVersion": "HTTP/1.1",
+            "headers": [], "cookies": [], "queryString": [], "headersSize": -1, "bodySize": 0,
+        },
+        "response": {
+            "status": 200, "statusText": "OK", "httpVersion": "HTTP/1.1",
+            "headers": [{"name": "Content-Type", "value": "application/json"}], "cookies": [],
+            "content": {"size": 1, "mimeType": "application/json", "text": answer.to_string()},
+            "redirectURL": "", "headersSize": -1, "bodySize": 1,
+        },
+        "cache": {}, "timings": {"send": 0, "wait": 0, "receive": 0},
+    }]}});
+    let import = import_har(har.to_string().as_bytes()).unwrap();
+    let response = &op(&import, "GET", "/stats").responses[0];
+    let schema = response.schema.as_ref().unwrap();
+    let properties = &schema["properties"];
+    for (member, kind) in [
+        ("pass_count", "integer"),
+        ("sort_key", "integer"),
+        ("keys", "array"),
+        ("signature", "object"),
+        ("mfa_enabled", "boolean"),
+        ("otp_required", "boolean"),
+    ] {
+        assert_eq!(properties[member]["type"], kind, "{member}: {schema}");
+    }
+    let draft = serde_json::to_string(&import.operations).unwrap();
+    assert!(!draft.contains(REDACTED), "{draft}");
+}

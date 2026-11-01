@@ -151,6 +151,13 @@ pub struct GenerationContext<'a> {
     /// stands over what the answer wrote. Last write wins, so with any later write
     /// there is none, and a child's or an action's body is never one.
     pub earlier_own_body: Option<&'a Value>,
+    /// What routes with no parameters answered earlier in the session, oldest first,
+    /// which may have changed since. Scrubbed by whoever kept them. For the prompt only.
+    pub earlier_answers: &'a [Value],
+    /// Successful writes to this list read's own path that stored no record of its type,
+    /// oldest first, which may have changed since. Scrubbed by whoever kept them. For the
+    /// prompt only: unlike [`Self::earlier_requests`], no answer has to reflect them.
+    pub earlier_writes: &'a [Value],
     /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
     /// With none it does not.
     pub update_guard: Option<&'a dyn UpdateGuard>,
@@ -2407,10 +2414,28 @@ fn deep_over(base: &Value, over: &Value) -> Value {
     Value::Object(out)
 }
 
+/// What an effect's `set` may put on `stored`: a member holding what was redacted, which a
+/// prompt may have shown it, stays as stored there, and the rest of it applies. A member
+/// without any is as it came, replacing what is stored.
+#[must_use]
+pub fn effect_without_redacted(stored: &Value, set: &Map<String, Value>) -> Map<String, Value> {
+    set.iter()
+        .filter_map(|(key, value)| {
+            let kept = without_redacted(value)?;
+            let merged = match stored.get(key) {
+                Some(held) if kept != *value => deep_over(held, &kept),
+                _ => kept,
+            };
+            Some((key.clone(), merged))
+        })
+        .collect()
+}
+
 /// `value` with what was redacted taken out at any depth: an object loses the
 /// member, and an array, which is replaced whole, goes altogether. `None` when
 /// nothing is left.
-fn without_redacted(value: &Value) -> Option<Value> {
+#[must_use]
+pub fn without_redacted(value: &Value) -> Option<Value> {
     match value {
         Value::String(text) if text == REDACTED => None,
         Value::Object(members) => {

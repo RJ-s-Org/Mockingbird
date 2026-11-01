@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod deleted;
+mod world;
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -652,7 +653,7 @@ pub(crate) async fn generate_narrowed(
     match prepare(rt, plan, call, response_schema).await {
         Prepared::Answered(answer) => Ok(answer),
         Prepared::Pending(pending) => {
-            generate_pending(rt, plan, call, pending, response_schema).await
+            generate_pending(rt, plan, call, *pending, response_schema).await
         }
     }
 }
@@ -683,6 +684,8 @@ pub(crate) async fn generate_pending(
         response_schema,
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
+        earlier_answers: &pending.earlier_answers,
+        earlier_writes: &pending.earlier_writes,
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
@@ -725,7 +728,7 @@ pub(crate) async fn generate_pending(
 /// state a generation must take into account.
 pub(crate) enum Prepared<'a> {
     Answered(GeneratedResponse),
-    Pending(Pending<'a>),
+    Pending(Box<Pending<'a>>),
 }
 
 /// A call to generate, then hand to [`complete`].
@@ -741,6 +744,10 @@ pub(crate) struct Pending<'a> {
     cache: Option<(CacheEpoch, String)>,
     /// The writes the target does not show yet.
     earlier: write_memory::Earlier,
+    /// What routes with no parameters answered earlier in the session.
+    earlier_answers: Vec<Value>,
+    /// What was written to this list read's own path earlier in the session.
+    earlier_writes: Vec<Value>,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -926,7 +933,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    async {
+    let (earlier_answers, earlier_writes) = async {
         parents_by_name(
             &mut state,
             session,
@@ -934,6 +941,15 @@ pub(crate) async fn prepare<'a>(
             call,
             target.as_ref(),
             &mut followed,
+            &mut related,
+        )
+        .await;
+        world::named_by_value(
+            &mut state,
+            plan,
+            call,
+            target.as_ref(),
+            &followed,
             &mut related,
         )
         .await;
@@ -948,11 +964,15 @@ pub(crate) async fn prepare<'a>(
                 }
             }
         }
+        (
+            world::recall_answers(&mut state, plan).await,
+            write_memory::recall_route(&mut state, plan, call).await,
+        )
     }
     .instrument(state_span())
     .await;
 
-    Prepared::Pending(Pending {
+    Prepared::Pending(Box::new(Pending {
         state,
         target_id,
         target,
@@ -960,7 +980,9 @@ pub(crate) async fn prepare<'a>(
         foreign_key,
         cache: since.zip(key),
         earlier,
-    })
+        earlier_answers,
+        earlier_writes,
+    }))
 }
 
 /// Writes a generated answer's state (a 2xx command's resource, a list
@@ -1176,6 +1198,16 @@ pub(crate) async fn complete(
             },
         )
         .await;
+        write_memory::after_route_write(
+            &mut state,
+            plan,
+            call,
+            &generated,
+            foreign_key || unstored,
+        )
+        .await;
+        world::after_answer(&mut state, plan, call, &generated).await;
+        world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -1363,14 +1395,18 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
+    let requested = mb_engine::effect_without_redacted(&held.data, &effect.set);
+    if requested.is_empty() && !effect.set.is_empty() {
+        return Err("it sets only what was redacted");
+    }
     if let Some((plan, call)) = own {
-        let set = write_memory::own_effect_members(rt, plan, call, &held, &effect.set);
+        let set = write_memory::own_effect_members(rt, plan, call, &held, &requested);
         if set.is_empty() {
             return Err("it sets no member an effect on this update's target may");
         }
         data.extend(set);
     } else {
-        data.extend(effect.set.clone());
+        data.extend(requested);
     }
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
@@ -1574,6 +1610,21 @@ pub(crate) struct BundleIndex {
     /// Per resource type, the types whose answers have a reference field of
     /// it (see [`reference_targets`]), sorted and deduplicated.
     referrers: HashMap<String, Vec<String>>,
+    /// The types an effect can name, those with a read to check against, sorted.
+    effect_types: Vec<String>,
+    /// Per path with no parameters whose `GET` answers a single object (see
+    /// [`answers_a_list`]), that operation's position.
+    single_reads: HashMap<String, usize>,
+    /// Per path a command and a list read by no path parameter share, that list.
+    written_lists: HashMap<String, WrittenList>,
+}
+
+/// A list read whose path also takes writes.
+#[derive(Debug, Clone)]
+struct WrittenList {
+    resource_type: String,
+    /// The schema of its items: all of a write's body that it is told.
+    items: Value,
 }
 
 impl BundleIndex {
@@ -1640,6 +1691,11 @@ impl BundleIndex {
         // `offers` of a flight search are offers.
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
+        let (single_reads, written_lists) = routes_of(bundle, &read_types, &list_members_of);
+        let mut effect_types: Vec<String> =
+            detail_reads.keys().chain(shapes.keys()).cloned().collect();
+        effect_types.sort_unstable();
+        effect_types.dedup();
         #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
         #[cfg(any(test, feature = "events"))]
@@ -1670,6 +1726,9 @@ impl BundleIndex {
                 .map(|(t, (_, i, schema))| (t, (i, schema)))
                 .collect(),
             referrers,
+            effect_types,
+            single_reads,
+            written_lists,
         }
     }
 
@@ -1703,6 +1762,73 @@ impl BundleIndex {
     fn referrers(&self, resource_type: &str) -> &[String] {
         self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
     }
+}
+
+/// What routes the contract's operations share: see [`BundleIndex::single_reads`] and
+/// [`BundleIndex::written_lists`].
+fn routes_of(
+    bundle: &mb_mcm::Bundle,
+    read_types: &HashSet<String>,
+    members_of: &[Vec<String>],
+) -> (HashMap<String, usize>, HashMap<String, WrittenList>) {
+    let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
+    let mut lists: HashMap<&str, WrittenList> = HashMap::new();
+    for (i, op) in bundle.operations.iter().enumerate() {
+        let Binding::Http { method, path } = &op.binding else {
+            continue;
+        };
+        if !matches!(op.kind, OperationKind::Query) || *method != mb_mcm::HttpMethod::Get {
+            continue;
+        }
+        let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
+        let items = listed_items(bundle, op, read_types, members);
+        if let (Some(items), Some(t), true) = (
+            &items,
+            op.resource_type.as_deref(),
+            op.identity.as_ref().is_none_or(|i| i.path_param.is_none()),
+        ) {
+            let list = WrittenList {
+                resource_type: t.to_string(),
+                items: items.clone(),
+            };
+            lists.insert(path.as_str(), list);
+        }
+        let parameters = path.contains('{') || op.input.path.is_some() || op.input.query.is_some();
+        if items.is_none() && !parameters && op.success_output().is_some_and(|o| o.schema.is_some())
+        {
+            single_reads.insert(path.clone(), i);
+        }
+    }
+    for op in &bundle.operations {
+        if let (OperationKind::Command(_), Binding::Http { path, .. }) = (&op.kind, &op.binding)
+            && let Some(list) = lists.get(path.as_str())
+        {
+            written_lists.insert(path.clone(), list.clone());
+        }
+    }
+    (single_reads, written_lists)
+}
+
+/// The item schema of `op`'s success answer when it is a list: an array, or an object
+/// holding one in an envelope's member or under a member that is itself a type read. An
+/// object that only has a list among its members (a profile's `images`) is a single object.
+fn listed_items(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    read_types: &HashSet<String>,
+    members: &[String],
+) -> Option<Value> {
+    list_item_schemas(bundle, op, members)
+        .into_iter()
+        .find(|(member, _)| {
+            member.as_deref().is_none_or(|m| {
+                ENVELOPE_KEYS.contains(&m)
+                    || op.resource_type.as_deref() == Some(m)
+                    || read_types.contains(m)
+                    || read_types.contains(&format!("{m}s"))
+            })
+        })
+        .map(|(_, items)| items)
 }
 
 /// Records in `referrers` the types the fields of `op`'s answers (as type
@@ -2138,6 +2264,44 @@ fn renumber_urls(value: &mut Value, old: &str, new: &str) {
         Value::Array(items) => items.iter_mut().for_each(|v| renumber_urls(v, old, new)),
         Value::Object(obj) => obj.values_mut().for_each(|v| renumber_urls(v, old, new)),
         _ => {}
+    }
+}
+
+/// Sessions [`WrittenTypes`] holds at most; it is emptied when full.
+const MAX_WRITTEN_SESSIONS: usize = 1024;
+/// Types [`WrittenTypes`] holds per session at most, the latest.
+const MAX_WRITTEN_TYPES: usize = 32;
+
+/// Which types each session last wrote through this runtime, latest first. Only an
+/// order of looking (see [`world::named_by_value`]): a contract can have more types than
+/// a call may read, and what the session wrote is what it refers to. A session written
+/// to elsewhere (the Admin API, another node) is looked up in the contract's order.
+#[derive(Debug, Default)]
+pub(crate) struct WrittenTypes(std::sync::Mutex<HashMap<SessionKey, Vec<String>>>);
+
+impl WrittenTypes {
+    fn remember(&self, session: &SessionKey, t: &str) {
+        let Ok(mut written) = self.0.lock() else {
+            return;
+        };
+        if written.len() >= MAX_WRITTEN_SESSIONS && !written.contains_key(session) {
+            written.clear();
+        }
+        let types = written.entry(session.clone()).or_default();
+        if types.first().is_some_and(|first| first == t) {
+            return;
+        }
+        types.retain(|held| held != t);
+        types.insert(0, t.to_string());
+        types.truncate(MAX_WRITTEN_TYPES);
+    }
+
+    fn of(&self, session: &SessionKey) -> Vec<String> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|written| written.get(session).cloned())
+            .unwrap_or_default()
     }
 }
 
@@ -3561,9 +3725,13 @@ impl<'a> StateAccess<'a> {
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let t = r.resource_type.clone();
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
+        if ok && t != mb_state::INTERNAL_TYPE {
+            rt.written_types().remember(s, &t);
+        }
         if ok && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }
@@ -3595,9 +3763,13 @@ impl<'a> StateAccess<'a> {
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let t = r.resource_type.clone();
         let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
         self.wrote |= stored;
+        if stored {
+            rt.written_types().remember(s, &t);
+        }
         if stored && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }

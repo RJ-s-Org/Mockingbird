@@ -400,6 +400,8 @@ pub struct MockRuntime {
     /// Which stored resource a path field value names, from this
     /// runtime's writes (see [`call::PathAliases`]).
     path_aliases: call::PathAliases,
+    /// Which types each session was last seen writing (see [`call::WrittenTypes`]).
+    written_types: call::WrittenTypes,
     /// Which stored resources are a plain read's own answer (see
     /// [`call::OwnReads`]).
     own_reads: call::OwnReads,
@@ -522,6 +524,7 @@ impl MockRuntime {
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),
+            written_types: call::WrittenTypes::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
             #[cfg(feature = "graphql")]
@@ -570,6 +573,11 @@ impl MockRuntime {
     /// [`call::PathAliases`]).
     pub(crate) fn path_aliases(&self) -> &call::PathAliases {
         &self.path_aliases
+    }
+
+    /// Which types each session was last seen writing.
+    pub(crate) fn written_types(&self) -> &call::WrittenTypes {
+        &self.written_types
     }
 
     /// Which stored resources are a plain read's own answer.
