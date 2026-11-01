@@ -45,6 +45,17 @@ No migration or configuration. With an LLM and `consistency: on`, on HTTP routes
 - **A 204 update with a valid body plus an undeclared member costs one extra LLM call** on the next read, as intended: the member cannot go in the stored copy, so the read is told of it. A remainder holding only redacted values, such as `password`, is not remembered and costs no call. A body that is only told, an action's or a child's to its parent, is redacted by every name rule, so `session_title` in an action's body shows as `[redacted]`.
 - **The path says whose a resource is**: a 204 update's member contradicting the owner in its path (`PUT /orgs/octo/teams/core {"organization":"acme"}`) is neither applied nor remembered.
 
+### Prompts show what a request refers to and who the caller is
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes ([what it does](concepts.md#sessions-and-state)):
+
+- **A write can be offered effects where it was not**: a body or query value equal to a held record's id puts that record among the related resources, so the call is asked for `{"effects": [...], "response": ...}`. Effects are checked as before, and nothing else changes a record. A value that matches by chance shows an unrelated record, and the model could then state a change to it, if the change validates. It takes a string of at least 6 bytes or a number of at least 100000, equal to an identity.
+- **More store reads per generated call**: at most 32 by value, 18 on Slack's `reactions.add`; one more for `<earlier_answers>` on a contract with a `GET` route with no parameters answering a single object, and one more on a list read whose route also takes a write. A served or cached answer pays none. On a contract with more types than that reaches, the types the session wrote through this node are looked up first, so a reference to a type written on another node can be missed.
+- **More prompt tokens when one applies**: about 100 for a typical remembered answer, up to 1,500 for three at the size cap. Slack's `reactions.add` with its message shown goes from 574 to 1,443 bytes, and the effects schema joins the response format. With nothing to show, a prompt is the same to the byte.
+- **Recorded prompts**: a snapshot or recording taken before this release may not replay where one of these applies.
+- **Not covered**: a list read is told only of writes to its own path, so `DELETE /users/{id}/roles/{role}` does not reach `GET /users/{id}/roles`. A caller's answer is kept per session, not per token. An answer of a `POST`-only route is not kept.
+- **Rust API**: `GenerationContext` gains a public field, `earlier_answers`, which breaks code constructing it in full; add `..Default::default()`.
+
 ### The output budget keeps what a request asked for
 
 No migration or configuration. With `limits.output_budget_tokens` on, for a response whose estimated answer is over budget:
