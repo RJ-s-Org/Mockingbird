@@ -1,6 +1,6 @@
 # Action note, 2026-10-31
 
-Follow-up to the one bar [simulated-world journeys](../journeys-2026-10-30/README.md) missed: a confirm moved its status on only 3 of 6 times. No context beyond each contract. Spend was $1.51 through `proxy.py`, most of it comparing wordings.
+Follow-up to the one bar [simulated-world journeys](../journeys-2026-10-30/README.md) missed: a confirm moved its status on only 3 of 6 times. No context beyond each contract. Spend was $1.76 through `proxy.py`, most of it comparing wordings.
 
 **Result:** the bar is met, but less of that is this change than it first looked. By the time this was ready, [the contract-driven action routes](https://github.com/RJ-s-Org/Mockingbird/pull/170) had taken confirm to 16/18. This change takes it to 17/18 in the journeys and from 64/71 to 71/71 in replays. Its larger effect is that prompts stop assuming a status: actions that should change nothing rose from 42/54 to 47/54.
 
@@ -20,7 +20,7 @@ Nothing in these prompts names a status, so a `preview`, a `validate` or a resou
 
 ## Results
 
-Compared with main at `ce95046`, 3 models. Published journeys and invoicing had 6 repetitions each, held-out journeys 4. Files ending `-before` are main.
+Compared with main at `ce95046`, before write memory merged, 3 models. Published journeys and invoicing had 6 repetitions each, held-out journeys 4. Files ending `-before` are main.
 
 | Suite | Main | This change |
 | --- | ---: | ---: |
@@ -65,6 +65,21 @@ Replays before #170, at 20 calls per model on Lightning:
 - **A note about status** moved `preview` off its status 17 times in 20, against 3 with no mention of status.
 - **Listing the status enum's values** cost confirm (15/20 against 19/20) and gained little on `remind`, so no code reads the schema for them.
 - **The system message**, with an earlier wording, did worst on confirm (0/9 on Luna, 3/10 on Lightning).
+
+## Does the note still earn its place?
+
+Checked after [write memory](../write-memory-2026-10-31/README.md) merged, with replays and no new journey run. Prompts recorded from this branch before that merge were sent with and without the note, 40 calls per model and answers lost upstream left out. Write memory can add requests to these prompts, and these recordings do not hold any, so this was not measured on its exact prompts.
+
+| Route | Without the note | With it |
+| --- | ---: | ---: |
+| Stripe confirm | 104/117 | **119/119** |
+| Invoice preview keeps the status | 94/120 | 104/119 |
+| PayPal capture | 114/114 | 118/118 |
+| Invoice pay | 120/120 | 120/120 |
+| Invoice remind keeps the status | 117/120 | 117/120 |
+| PayPal confirm | 91/120 | 83/119 |
+
+It stays, on a narrower case than it first looked. The gain is on the weaker models: Luna's Stripe confirm goes from 30/39 to 40/40, and Lightning's `preview` from 14/40 to 25/40. **The default model does not gain overall:** Stripe confirm goes from 37/40 to 40/40, and PayPal confirm falls from 26/40 to 19/40, more often keeping `CREATED`. With the earlier replay (14/30 against 12/30) that fall is 40/70 against 31/70, which could still be chance, but its direction has held twice. If the default model matters most, this is the case for dropping the note and keeping only the wording removals.
 
 ## Limits
 
