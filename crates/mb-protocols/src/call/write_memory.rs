@@ -82,8 +82,6 @@ pub(super) struct Written<'a> {
     pub(super) foreign_key: bool,
     /// A new record that could not be stored.
     pub(super) unstored: bool,
-    /// The key of a create held until its type's identity is learned.
-    pub(super) held_as: Option<&'a str>,
     pub(super) earlier: &'a Earlier,
 }
 
@@ -204,7 +202,7 @@ async fn write_memory(
 
 /// The schema of what `t`'s read by path answers, else its list items or
 /// singleton read (see [`entity_fits`]).
-pub(super) fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
+fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
     let index = rt.index();
     match index.detail_reads.get(t) {
         Some(i) => rt
@@ -233,18 +231,10 @@ fn is_read_schema(
     let Some(t) = op.resource_type.as_deref() else {
         return false;
     };
-    // Of a type with no identity from the contract, only what acts on a known record
-    // or adds one can be its read's answer: anything else is as it was.
-    let knows = op.identity.is_some() || op.kind == OperationKind::Command(Effect::Create);
-    let read = match rt.index().detail_reads.get(t) {
-        Some(i) => Some(*i),
-        None if knows => rt.index().by_id_read(t),
-        None => None,
-    };
-    let detail = read.and_then(|i| {
+    let detail = rt.index().detail_reads.get(t).and_then(|i| {
         rt.bundle()
             .operations
-            .get(i)?
+            .get(*i)?
             .success_output()?
             .schema
             .as_ref()
@@ -575,11 +565,10 @@ fn declared_part(
 
 /// What a merge or a body leaves to the resource's identity: the members the
 /// contract identifies it and reads it by.
-fn pinned_members<'a>(rt: &'a MockRuntime, op: &'a Operation, t: &str) -> Vec<&'a str> {
+fn pinned_members<'a>(rt: &'a MockRuntime, t: &str) -> Vec<&'a str> {
     let index = rt.index();
     ["id", "number"]
         .into_iter()
-        .chain(op.identity.iter().map(|i| i.field.as_str()))
         .chain(index.identity_fields(t).iter().map(String::as_str))
         .chain(index.path_fields(t).iter().map(String::as_str))
         .collect()
@@ -587,8 +576,8 @@ fn pinned_members<'a>(rt: &'a MockRuntime, op: &'a Operation, t: &str) -> Vec<&'
 
 /// What `t`'s `request` says of the resource itself, if that fits the caps. One that
 /// does not is no own body at all: a part of it, or a mark of it, is not the resource.
-fn own_part(rt: &MockRuntime, op: &Operation, t: &str, request: &Value) -> Option<Value> {
-    let pinned = pinned_members(rt, op, t);
+fn own_part(rt: &MockRuntime, t: &str, request: &Value) -> Option<Value> {
+    let pinned = pinned_members(rt, t);
     declared_part(rt.bundle(), read_schema(rt, t), request, &pinned)
         .filter(|own| own.to_string().len() <= MAX_BODY_BYTES)
 }
@@ -598,13 +587,12 @@ fn own_part(rt: &MockRuntime, op: &Operation, t: &str, request: &Value) -> Optio
 /// all together); the merged copy, and what could not be applied.
 fn apply_update(
     rt: &MockRuntime,
-    op: &Operation,
     held: &StoredResource,
     request: &Value,
 ) -> (Value, Option<Value>) {
     let t = held.resource_type.as_str();
     let schema = read_schema(rt, t);
-    let pinned = pinned_members(rt, op, t);
+    let pinned = pinned_members(rt, t);
     let (merged, rest) = merge_declared(rt.bundle(), schema, &held.data, request, &pinned);
     if entity_fits(rt, t, &merged) {
         return (merged, rest);
@@ -938,41 +926,6 @@ async fn forget_shown(
     }
 }
 
-/// Moves to stored id `new` the memory of what it was before: `old`, and the value as
-/// a path named it with nothing stored under it (see [`memory_key`]). Together they
-/// keep their order and the caps, and the count of failed catch-ups starts over.
-pub(super) async fn rekey(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    t: &str,
-    old: &str,
-    new: &str,
-) {
-    let target = memory_key(t, new, true);
-    let mut merged = read_memory(state, session, &target).await;
-    let mut moved = false;
-    for key in [memory_key(t, old, true), memory_key(t, new, false)] {
-        let memory = read_memory(state, session, &key).await;
-        if memory.requests.is_empty() && memory.own.is_none() {
-            continue;
-        }
-        moved = true;
-        merged.requests.extend(memory.requests);
-        merged.own = memory.own.or(merged.own);
-        state.delete(session, INTERNAL_TYPE, &key).await;
-    }
-    if !moved {
-        return;
-    }
-    merged
-        .requests
-        .sort_by_key(|request| request.get("at").and_then(Value::as_str).map(str::to_owned));
-    let excess = merged.requests.len().saturating_sub(MAX_REMEMBERED);
-    merged.requests.drain(..excess);
-    merged.attempts = 0;
-    write_memory(state, session, &target, &merged).await;
-}
-
 /// Whether an answer's effect changed that resource.
 fn effect_applied(generated: &GeneratedResponse, resource_type: &str, id: &str) -> bool {
     generated.effect_outcomes.iter().any(|o| {
@@ -1062,7 +1015,7 @@ pub(super) async fn after_write(
         }
         _ => false,
     };
-    let own_body = || request.as_ref().and_then(|r| own_part(rt, op, t, r));
+    let own_body = || request.as_ref().and_then(|r| own_part(rt, t, r));
     let mut target: Option<Tell> = None;
     match effect {
         Effect::Create => {
@@ -1071,7 +1024,6 @@ pub(super) async fn after_write(
             if telling && !whole && !carried(stored) {
                 target = stored
                     .and_then(|stored| created_id(op, stored))
-                    .or_else(|| w.held_as.map(str::to_owned))
                     .map(|id| Tell {
                         id,
                         body: request.clone(),
@@ -1228,7 +1180,7 @@ async fn update_without_answer(
     // The path says whose it is: a member saying otherwise is not applied or told.
     let raw = &without_contradictions(rt, plan, w.call, held, raw);
     let request = request.map(|r| without_contradictions(rt, plan, w.call, held, r));
-    let (merged, rest) = apply_update(rt, plan.op, held, raw);
+    let (merged, rest) = apply_update(rt, held, raw);
     let changed = merged != held.data;
     if changed {
         let resource = StoredResource {
@@ -1239,7 +1191,7 @@ async fn update_without_answer(
             rt.collections().carry(session, held, &resource);
         }
     }
-    let own = request.as_ref().and_then(|r| own_part(rt, plan.op, t, r));
+    let own = request.as_ref().and_then(|r| own_part(rt, t, r));
     // What is left, as it may be kept: every credential has gone by now, since a
     // scrubbed request has the same shape. What the copy holds has nothing to tell,
     // and what was redacted nothing a catch-up could show.
@@ -1325,18 +1277,12 @@ fn route(op: &Operation) -> String {
 
 /// What the identity of `held` says, over `answer`: a regeneration is of the same
 /// resource, however the LLM wrote its id or the key its path reads by.
-fn keeping_identity(
-    rt: &MockRuntime,
-    op: &Operation,
-    held: &StoredResource,
-    answer: &Value,
-) -> Value {
+fn keeping_identity(rt: &MockRuntime, held: &StoredResource, answer: &Value) -> Value {
     let mut answer = answer.clone();
     let index = rt.index();
     let t = &held.resource_type;
     let fields = ["id", "number"]
         .into_iter()
-        .chain(op.identity.iter().map(|i| i.field.as_str()))
         .chain(index.identity_fields(t).iter().map(String::as_str))
         .chain(index.path_fields(t).iter().map(String::as_str));
     if let Value::Object(members) = &mut answer {
@@ -1376,7 +1322,7 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
     }
 
     fn keep_identity(&self, candidate: Value) -> Value {
-        keeping_identity(self.rt, self.plan.op, self.held, &candidate)
+        keeping_identity(self.rt, self.held, &candidate)
     }
 
     fn keeps_owner(&self, candidate: &Value) -> bool {
@@ -1502,7 +1448,7 @@ pub(super) async fn settle_read(
     let Some(answer) = generated.body.as_ref() else {
         return;
     };
-    let answer = keeping_identity(rt, op, held, answer);
+    let answer = keeping_identity(rt, held, answer);
     if !entity_fits(rt, t, &answer) || !keeps_owner(rt, plan, call, held, &answer) {
         failed_attempt(state, plan, earlier).await;
         if let Some(stored) = earlier.stored_answer.take() {

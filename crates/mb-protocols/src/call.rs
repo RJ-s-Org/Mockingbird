@@ -29,7 +29,6 @@ use crate::{
 };
 
 mod deleted;
-mod learned;
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -178,22 +177,6 @@ pub(crate) struct CallPlan<'a> {
 }
 
 impl CallPlan<'_> {
-    /// This plan for `op`, the same operation with an identity learned (see [`learned`]).
-    fn with_op<'b>(&'b self, op: &'b Operation) -> CallPlan<'b> {
-        CallPlan {
-            op,
-            session: self.session.clone(),
-            scenario: self.scenario,
-            forced_status: self.forced_status,
-            delay: self.delay,
-            #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
-            stream_items: self.stream_items,
-            tenancy: self.tenancy.clone(),
-            engine: self.engine.clone(),
-            chaos: self.chaos,
-        }
-    }
-
     /// Whether the call answers an injected error that the operation
     /// declares no status for (the protocol-native answer applies).
     #[cfg(any(feature = "http-rest", feature = "soap"))]
@@ -666,19 +649,7 @@ pub(crate) async fn generate_narrowed(
     call: &OperationCall,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
-    let mut state = StateAccess::for_call(rt, plan, call);
-    let learned = learned::resolve(&mut state, plan, call)
-        .instrument(state_span())
-        .await;
-    let learned_plan;
-    let plan = match &learned {
-        Some(op) => {
-            learned_plan = plan.with_op(op);
-            &learned_plan
-        }
-        None => plan,
-    };
-    match prepare_in(state, rt, plan, call, response_schema).await {
+    match prepare(rt, plan, call, response_schema).await {
         Prepared::Answered(answer) => Ok(answer),
         Prepared::Pending(pending) => {
             generate_pending(rt, plan, call, pending, response_schema).await
@@ -774,20 +745,7 @@ pub(crate) struct Pending<'a> {
 
 /// Reads the call's state and answers what needs no generation: an unknown
 /// id (404), a stored resource, a cached answer.
-#[cfg(feature = "graphql")]
 pub(crate) async fn prepare<'a>(
-    rt: &'a MockRuntime,
-    plan: &CallPlan<'_>,
-    call: &OperationCall,
-    response_schema: Option<&Value>,
-) -> Prepared<'a> {
-    let state = StateAccess::for_call(rt, plan, call);
-    prepare_in(state, rt, plan, call, response_schema).await
-}
-
-/// [`prepare`], with the state access this call has already used.
-async fn prepare_in<'a>(
-    mut state: StateAccess<'a>,
     rt: &'a MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
@@ -795,6 +753,14 @@ async fn prepare_in<'a>(
 ) -> Prepared<'a> {
     let op = plan.op;
     let session = &plan.session;
+    let mut state = StateAccess::new(rt);
+    state.tracks_deleted = deleted::applies(rt, plan);
+    if state.tracks_deleted {
+        state.call_params = Some(Box::new(OperationCall {
+            path_params: call.path_params.clone(),
+            ..OperationCall::default()
+        }));
+    }
     let resource_type = op.resource_type.as_deref();
     let mut target_id = target_id(op, call);
     // Before any state is read: an answer generated from older state must
@@ -1025,8 +991,6 @@ pub(crate) async fn complete(
     // A new record whose id no draw could free: the answer is served, and
     // nothing else comes of it.
     let mut unstored = false;
-    // A create held until its type's identity is learned, by its key.
-    let mut held_as = None;
     async {
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
@@ -1101,7 +1065,6 @@ pub(crate) async fn complete(
                 }
             }
         }
-        held_as = learned::hold(&mut state, plan, call, &generated, collection.as_ref()).await;
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
         {
@@ -1209,7 +1172,6 @@ pub(crate) async fn complete(
                 held: target.as_ref(),
                 foreign_key,
                 unstored,
-                held_as: held_as.as_deref(),
                 earlier: &earlier,
             },
         )
@@ -1384,10 +1346,11 @@ async fn apply_effect(
     let t = effect.resource_type.as_str();
     let index = rt.index();
     let identity = index.identity_fields(t);
-    let learned = state.learned_field(t).map(str::to_owned);
-    if effect.set.keys().any(|k| {
-        matches!(k.as_str(), "id" | "number") || identity.contains(k) || learned.as_ref() == Some(k)
-    }) {
+    if effect
+        .set
+        .keys()
+        .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
+    {
         return Err("it sets an identity field");
     }
     if !index.detail_reads.contains_key(t) && !index.other_shapes.contains_key(t) {
@@ -1611,11 +1574,6 @@ pub(crate) struct BundleIndex {
     /// Per resource type, the types whose answers have a reference field of
     /// it (see [`reference_targets`]), sorted and deduplicated.
     referrers: HashMap<String, Vec<String>>,
-    /// The types whose identity can only be learned (see [`learned`]), with the
-    /// position of their read by path if they have one: a route ends in a parameter,
-    /// none of their routes but actions has an identity, and every such route answers
-    /// a record with a scalar member at its top level, or nothing.
-    open_types: HashMap<String, Option<usize>>,
 }
 
 impl BundleIndex {
@@ -1630,25 +1588,8 @@ impl BundleIndex {
         let mut ranked_defs = RankedDefs::new();
         let mut shapes = TypeShapes::new();
         let mut referrers: HashMap<String, Vec<String>> = HashMap::new();
-        let mut open_types: HashMap<String, Option<usize>> = HashMap::new();
-        let mut closed_types = HashSet::new();
         for (i, op) in bundle.operations.iter().enumerate() {
             by_id.entry(op.id.clone()).or_insert(i);
-            if let Some(t) = op.resource_type.as_deref() {
-                if op.identity.is_some() && !op.is_action() {
-                    closed_types.insert(t.to_string());
-                }
-                if ends_in_a_param(op) {
-                    if answers_a_flat_record(bundle, op) {
-                        let read = matches!(op.kind, OperationKind::Query)
-                            && op.success_output().is_some_and(|o| o.schema.is_some());
-                        let held = open_types.entry(t.to_string()).or_default();
-                        *held = held.or(read.then_some(i));
-                    } else {
-                        closed_types.insert(t.to_string());
-                    }
-                }
-            }
             if let (Some(t), Some(field)) = (
                 op.resource_type.as_deref(),
                 op.identity.as_ref().and_then(|i| i.path_field.as_deref()),
@@ -1729,19 +1670,7 @@ impl BundleIndex {
                 .map(|(t, (_, i, schema))| (t, (i, schema)))
                 .collect(),
             referrers,
-            open_types: open_types
-                .into_iter()
-                .filter(|(t, _)| !closed_types.contains(t))
-                .collect(),
         }
-    }
-
-    /// The position of `resource_type`'s read by path.
-    fn by_id_read(&self, resource_type: &str) -> Option<usize> {
-        self.detail_reads
-            .get(resource_type)
-            .copied()
-            .or_else(|| self.open_types.get(resource_type).copied().flatten())
     }
 
     /// The position of operation `id`.
@@ -1774,36 +1703,6 @@ impl BundleIndex {
     fn referrers(&self, resource_type: &str) -> &[String] {
         self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
     }
-}
-
-/// Whether `op` is an HTTP call or read on a route ending in a parameter.
-fn ends_in_a_param(op: &Operation) -> bool {
-    matches!(op.kind, OperationKind::Query | OperationKind::Command(_))
-        && matches!(&op.binding, Binding::Http { path, .. } if path
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .is_some_and(|last| last.contains('{')))
-}
-
-/// Whether `op`'s success answers nothing, or an object with a scalar member at its
-/// top level: not an array, and not an envelope (`{"user": {...}}`).
-fn answers_a_flat_record(bundle: &mb_mcm::Bundle, op: &Operation) -> bool {
-    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
-        return true;
-    };
-    let is_scalar = |member: &Value| {
-        schema_parts(bundle, Some(member)).0.iter().any(|part| {
-            matches!(
-                part.get("type").and_then(Value::as_str),
-                Some("string" | "integer" | "number")
-            )
-        })
-    };
-    schema_parts(bundle, Some(schema))
-        .0
-        .iter()
-        .filter_map(|part| part.get("properties")?.as_object())
-        .any(|members| members.values().any(is_scalar))
 }
 
 /// Records in `referrers` the types the fields of `op`'s answers (as type
@@ -2350,10 +2249,10 @@ async fn seed_own_read(
         return;
     };
     let index = rt.index();
-    let detail_schema = index.by_id_read(t).and_then(|i| {
+    let detail_schema = index.detail_reads.get(t).and_then(|i| {
         rt.bundle()
             .operations
-            .get(i)?
+            .get(*i)?
             .success_output()?
             .schema
             .as_ref()
@@ -3564,8 +3463,6 @@ pub(crate) struct StateAccess<'a> {
     tracks_deleted: bool,
     /// The path parameters of the call, for the parent of what it mentions.
     call_params: Option<Box<OperationCall>>,
-    /// The type of this call's operation and the member learned of it (see [`learned`]).
-    learned: Option<Box<(String, String)>>,
 }
 
 /// Whether this call may use the store.
@@ -3587,29 +3484,7 @@ impl<'a> StateAccess<'a> {
             wrote: false,
             tracks_deleted: false,
             call_params: None,
-            learned: None,
         }
-    }
-
-    /// The access of one generated call.
-    fn for_call(rt: &'a MockRuntime, plan: &CallPlan<'_>, call: &OperationCall) -> Self {
-        let mut state = Self::new(rt);
-        state.tracks_deleted = deleted::applies(rt, plan);
-        if state.tracks_deleted {
-            state.call_params = Some(Box::new(OperationCall {
-                path_params: call.path_params.clone(),
-                ..OperationCall::default()
-            }));
-        }
-        state
-    }
-
-    /// The member learned of `t` for this call.
-    fn learned_field(&self, t: &str) -> Option<&str> {
-        self.learned
-            .as_ref()
-            .filter(|learned| learned.0 == t)
-            .map(|learned| learned.1.as_str())
     }
 
     /// Keeps the session alive once per call: reads do not refresh it, so a
@@ -3838,9 +3713,6 @@ async fn related(
             }
             let room = LIST_CONTEXT_LIMIT - listed.len();
             listed.extend(state.list(session, member, room).await);
-        }
-        if rt.index().open_types.contains_key(t) {
-            listed.extend(learned::held_context(state, session, t).await);
         }
         for item in listed {
             if !holds(&out, &item) {
@@ -4167,14 +4039,11 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         let Some(items) = generated.body.as_ref().and_then(list_items) else {
             return;
         };
-        let field = match state.learned_field(resource_type) {
-            Some(learned) => learned.to_string(),
-            None => item_identity(
-                state.rt.bundle(),
-                op,
-                generated.body.as_ref().unwrap_or(&Value::Null),
-            ),
-        };
+        let field = item_identity(
+            state.rt.bundle(),
+            op,
+            generated.body.as_ref().unwrap_or(&Value::Null),
+        );
         for item in items {
             let Some(id) = item.get(&field).and_then(id_string) else {
                 continue;
