@@ -56,6 +56,21 @@ No migration or configuration. With `limits.output_budget_tokens` on, for a resp
 - **Recorded prompts**: a snapshot taken before this release may not replay for such a call, as the schema sent differs.
 - **Rust API**: `budget::shape` takes the request's page size as a `budget::PageLimit`, as `budget::requested_limit` reads it from the query schema, the answer's schema and the call.
 
+### An update's answer settles on the stored copy by what the request named
+
+No migration or configuration. For an update (`PUT` or `PATCH`, not an action route) answered by an LLM with the schema of the resource's read, on a stored resource:
+
+- **The stored copy stands, except at a path the request names.** A member of the model's answer wins only if the request body names the same path: `{"properties": {"lifecyclestage": "opportunity"}}` names `properties.lifecyclestage`, and `{"name": "x"}` names `name` but not `owner.name`. The stored copy used to go over the whole answer, which discarded the new values of a nested request. A value the model changes unasked is still dropped.
+- **A wrapper is looked through, when the contract settles it.** A request's only top-level key, if the response does not declare it and it holds an object, is stripped first, so `{"ticket": {"status": "solved"}}` names `status`. A request naming no member of the response names those of the one member holding them all, so `{"status": "solved"}` names `ticket.status`; with two such members it names nothing.
+- **What the stored copy lacks comes from the answer at the top level**, as before. Below it a member goes in only at a path the request names, so a model's invention, a new map key or a faker's value does not stick.
+- **Identity, path, `readOnly` and owner members never take the answer's value.** An answer showing another owner leaves the stored copy as it was and loses what it added, unless the schema requires that member: then the answer's value stays, as an answer must be valid.
+- **An array goes whole, only at a path the request names, and with the request's value**, as an output budget's cap or an empty answer can cut the answer's. An object or branch under a `oneOf` or `anyOf` goes whole at a path the request names, or not at all.
+- **A null in the answer is ignored unless the request names that path as null**: `{"properties": {"Due": null}}` clears it. A request's null on a member that cannot be null keeps the stored value.
+- **`PATCH` merges the request at any depth**, so `{"a": {"b": 1}}` keeps `a`'s other members. It used to replace `a` when that validated. When the merged object is invalid the request's member goes whole, as a switch of a union's branch needs. `PUT` still replaces `a`, and never removed members it does not name.
+- **An effect on the update's own target** applies when the merged resource validates, as before, and now without what the resource does not declare, a path or `readOnly` member, a member the request names at the top level, or what would show another owner. It is how a model states what follows from an update, so a `closed_at` the contract marks `readOnly` is not one it can state. Other members it can still set, such as a `created_at` or an array.
+
+An update whose answer has another schema, as an `Ack {status, count}` or Zendesk's `{ticket, audit}` has, behaves as before, and so do faker answers, offline mocks, GraphQL, action routes and a catch-up of an update told of earlier requests: the stored copy, then each member of the request whole.
+
 ### Action routes act on their parent resource
 
 A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how that is read](import.md#how-a-post-under-a-resource-is-read)), such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:

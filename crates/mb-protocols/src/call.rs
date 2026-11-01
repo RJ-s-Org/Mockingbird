@@ -664,6 +664,16 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
+    let guard = pending
+        .target
+        .as_ref()
+        .filter(|_| response_schema.is_none())
+        .map(|held| write_memory::SettleGuard {
+            rt,
+            plan,
+            call,
+            held,
+        });
     let ctx = GenerationContext {
         related: &pending.related,
         target: pending.target.as_ref(),
@@ -672,6 +682,7 @@ pub(crate) async fn generate_pending(
         response_schema,
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
+        update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     if generated.source == Source::Fallback {
@@ -1078,7 +1089,20 @@ pub(crate) async fn complete(
         }
         // Last: an effect on what this call just stored sees it.
         if rt.consistency && (200..300).contains(&generated.status) {
-            let outcomes = apply_effects(&mut state, session, rt, &generated.effects).await;
+            // An effect on an update's own target goes on what was just stored, under
+            // the protections the answer has.
+            let own = resource_type
+                .zip(acted_on.as_deref())
+                .filter(|_| op.kind == OperationKind::Command(Effect::Update) && !op.is_action());
+            let outcomes = apply_effects(
+                &mut state,
+                session,
+                rt,
+                &generated.effects,
+                own,
+                (plan, call),
+            )
+            .await;
             generated.effect_outcomes.extend(outcomes);
             if generated.dropped_effects > 0 {
                 metrics::counter!(
@@ -1189,16 +1213,20 @@ fn log_capped(text: &str) -> String {
 
 /// Applies what an answer says it changed in other resources, in this session
 /// only, and counts each effect. A rejected effect costs itself: the answer is
-/// served and the next effect still applies.
+/// served and the next effect still applies. One on `own`, the (type, id) an update
+/// just stored, keeps only what [`write_memory::own_effect_members`] allows.
 async fn apply_effects(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     effects: &[ResourceEffect],
+    own: Option<(&str, &str)>,
+    source: (&CallPlan<'_>, &OperationCall),
 ) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::with_capacity(effects.len());
     for effect in effects {
-        let result = apply_effect(state, session, rt, effect).await;
+        let on_own = own == Some((effect.resource_type.as_str(), effect.id.as_str()));
+        let result = apply_effect(state, session, rt, effect, on_own.then_some(source)).await;
         tracing::info!(
             mock = %rt.name,
             resource_type = %log_capped(&effect.resource_type),
@@ -1266,6 +1294,7 @@ async fn apply_effect(
     session: &SessionKey,
     rt: &MockRuntime,
     effect: &ResourceEffect,
+    own: Option<(&CallPlan<'_>, &OperationCall)>,
 ) -> Result<Value, &'static str> {
     let t = effect.resource_type.as_str();
     let index = rt.index();
@@ -1287,7 +1316,15 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
-    data.extend(effect.set.clone());
+    if let Some((plan, call)) = own {
+        let set = write_memory::own_effect_members(rt, plan, call, &held, &effect.set);
+        if set.is_empty() {
+            return Err("it sets no member an effect on this update's target may");
+        }
+        data.extend(set);
+    } else {
+        data.extend(effect.set.clone());
+    }
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
     }

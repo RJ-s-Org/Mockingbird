@@ -41,4 +41,5 @@ mod soap;
 mod sse;
 mod webhooks;
 mod write_memory;
+mod writes_stick;
 mod ws;

@@ -45,6 +45,7 @@ fn ctx() -> GenerationContext<'static> {
         response_schema: None,
         earlier_requests: &[],
         earlier_own_body: None,
+        update_guard: None,
     }
 }
 
@@ -270,6 +271,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     response_schema: None,
                     earlier_requests: &[],
                     earlier_own_body: None,
+                    update_guard: None,
                 },
             )
             .await
@@ -421,6 +423,549 @@ async fn update_keeps_identity_and_applies_body() {
     let body = out.body.unwrap();
     assert_eq!(body["id"], "o1", "{body}");
     assert_eq!(body["customerId"], "c2", "{body}");
+}
+
+/// A contract whose update answers its resource under a member (`ticket`) and
+/// names a nested member (`properties`) by a part of it: the request cannot be
+/// merged into the answer, which alone holds the new values.
+const NESTED_UPDATE: &str = r##"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /tickets/{ticketId}:
+    put:
+      operationId: updateTicket
+      parameters: [{name: ticketId, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ticket:
+                  type: object
+                  properties: {status: {type: string}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket]
+                properties:
+                  ticket:
+                    type: object
+                    required: [id, subject, status]
+                    properties:
+                      id: {type: string}
+                      subject: {type: string}
+                      status: {type: string}
+  /pages/{pageId}:
+    patch:
+      operationId: updatePage
+      parameters: [{name: pageId, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                properties:
+                  type: object
+                  additionalProperties:
+                    type: object
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, properties]
+                properties:
+                  id: {type: string}
+                  properties:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      required: [type]
+                      properties:
+                        type: {type: string}
+                        name: {type: string}
+"##;
+
+/// A wrapped update's answer keeps its new values: neither the stored wrapper
+/// nor the request's partial one can stand in for them.
+#[tokio::test]
+async fn update_answer_under_a_member_keeps_its_new_values() {
+    let bundle = inline(NESTED_UPDATE);
+    let op = bundle.operation("updateTicket").unwrap();
+    let target = StoredResource {
+        resource_type: "tickets".into(),
+        id: "t1".into(),
+        data: json!({
+            "ticket": {"id": "t1", "subject": "Broken", "status": "open"},
+        }),
+    };
+    let mut c = call("updateTicket");
+    c.path_params.clear();
+    c.path_params.insert("ticketId".into(), json!("t1"));
+    c.body = Some(json!({"ticket": {"status": "pending"}}));
+    let (_p, engine) = scripted(vec![Ok(json!({
+        "ticket": {"id": "t1", "subject": "Broken", "status": "pending"},
+    })
+    .to_string())]);
+    let guard = Settling(&target);
+    let context = GenerationContext {
+        target: Some(&target),
+        update_guard: Some(&guard),
+        ..ctx()
+    };
+    let out = engine.generate(&bundle, op, &c, context).await.unwrap();
+    assert_eq!(out.source, Source::Llm);
+    let body = out.body.unwrap();
+    assert_eq!(body["ticket"]["status"], "pending", "{body}");
+    assert_eq!(body["ticket"]["subject"], "Broken", "{body}");
+}
+
+/// A request without the response's wrapper names what it holds, if only one member
+/// can, whether the target is stored wrapped or as what it wraps.
+#[tokio::test]
+async fn update_request_matches_through_the_responses_wrapper() {
+    let bundle = inline(NESTED_UPDATE);
+    let op = bundle.operation("updateTicket").unwrap();
+    let held = json!({"id": "t1", "subject": "Broken", "status": "open"});
+    for data in [json!({"ticket": held}), held.clone()] {
+        let target = StoredResource {
+            resource_type: "tickets".into(),
+            id: "t1".into(),
+            data,
+        };
+        let mut c = call("updateTicket");
+        c.path_params.clear();
+        c.path_params.insert("ticketId".into(), json!("t1"));
+        c.body = Some(json!({"status": "pending"}));
+        let (_p, engine) = scripted(vec![Ok(json!({
+            "ticket": {"id": "t1", "subject": "Drifted", "status": "pending"},
+        })
+        .to_string())]);
+        let guard = Settling(&target);
+        let context = GenerationContext {
+            target: Some(&target),
+            update_guard: Some(&guard),
+            ..ctx()
+        };
+        let out = engine.generate(&bundle, op, &c, context).await.unwrap();
+        let body = out.body.unwrap();
+        assert_eq!(body["ticket"]["status"], "pending", "{body}");
+        assert_eq!(body["ticket"]["subject"], "Broken", "{body}");
+    }
+}
+
+/// Two members could hold what the request names, so nothing says which: nothing of
+/// the answer wins.
+#[tokio::test]
+async fn update_request_names_nothing_through_an_ambiguous_wrapper() {
+    let bundle = inline(
+        r##"
+openapi: 3.0.0
+info: {title: Wrapped, version: "1"}
+paths:
+  /tickets/{ticketId}:
+    patch:
+      operationId: patchTicket
+      parameters: [{name: ticketId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket: {type: object, properties: {id: {type: string}, status: {type: string}}}
+                  audit: {type: object, properties: {id: {type: string}, actor: {type: string}}}
+"##,
+    );
+    let op = bundle.operation("patchTicket").unwrap();
+    let target = StoredResource {
+        resource_type: "tickets".into(),
+        id: "t1".into(),
+        data: json!({"ticket": {"id": "t1", "status": "open"}, "audit": {"id": "a1"}}),
+    };
+    let mut c = call("patchTicket");
+    c.path_params.clear();
+    c.path_params.insert("ticketId".into(), json!("t1"));
+    c.body = Some(json!({"id": "t2"}));
+    let (_p, engine) = scripted(vec![Ok(json!({
+        "ticket": {"id": "t2", "status": "solved"},
+        "audit": {"id": "a2"},
+    })
+    .to_string())]);
+    let guard = Settling(&target);
+    let context = GenerationContext {
+        target: Some(&target),
+        update_guard: Some(&guard),
+        ..ctx()
+    };
+    let body = engine
+        .generate(&bundle, op, &c, context)
+        .await
+        .unwrap()
+        .body
+        .unwrap();
+    assert_eq!(body["ticket"]["id"], "t1", "{body}");
+    assert_eq!(body["ticket"]["status"], "open", "{body}");
+    assert_eq!(body["audit"]["id"], "a1", "{body}");
+}
+
+/// An update naming part of a nested member keeps the answer's whole new
+/// value, not the stored one, and what the answer omits comes from the store.
+#[tokio::test]
+async fn update_answer_keeps_a_nested_member_the_request_names_in_part() {
+    let bundle = inline(NESTED_UPDATE);
+    let op = bundle.operation("updatePage").unwrap();
+    let target = StoredResource {
+        resource_type: "pages".into(),
+        id: "p1".into(),
+        data: json!({
+            "id": "p1",
+            "url": "https://example.org/p1",
+            "properties": {
+                "Status": {"type": "status", "name": "Not started"},
+                "Due": {"type": "date", "name": "2026-12-14"},
+            },
+        }),
+    };
+    let mut c = call("updatePage");
+    c.path_params.clear();
+    c.path_params.insert("pageId".into(), json!("p1"));
+    c.body = Some(json!({"properties": {"Status": {"name": "In progress"}}}));
+    let (_p, engine) = scripted(vec![Ok(json!({
+        "id": "p1",
+        "properties": {
+            "Status": {"type": "status", "name": "In progress"},
+            "Due": {"type": "date", "name": "2026-12-14"},
+        },
+    })
+    .to_string())]);
+    let guard = Settling(&target);
+    let context = GenerationContext {
+        target: Some(&target),
+        update_guard: Some(&guard),
+        ..ctx()
+    };
+    let out = engine.generate(&bundle, op, &c, context).await.unwrap();
+    assert_eq!(out.source, Source::Llm);
+    let body = out.body.unwrap();
+    assert_eq!(
+        body["properties"]["Status"]["name"], "In progress",
+        "{body}"
+    );
+    assert_eq!(body["properties"]["Due"]["name"], "2026-12-14", "{body}");
+    assert_eq!(body["url"], "https://example.org/p1", "{body}");
+}
+
+/// The faker invents every value, so its answer to an update still gives way
+/// to the stored resource.
+#[tokio::test]
+async fn update_fallback_keeps_the_stored_nested_member() {
+    let bundle = inline(NESTED_UPDATE);
+    let op = bundle.operation("updateTicket").unwrap();
+    let target = StoredResource {
+        resource_type: "tickets".into(),
+        id: "t1".into(),
+        data: json!({
+            "ticket": {"id": "t1", "subject": "Broken", "status": "open"},
+        }),
+    };
+    let mut c = call("updateTicket");
+    c.path_params.clear();
+    c.path_params.insert("ticketId".into(), json!("t1"));
+    c.body = Some(json!({"ticket": {"status": "pending"}}));
+    let context = GenerationContext {
+        target: Some(&target),
+        ..ctx()
+    };
+    let out = offline().generate(&bundle, op, &c, context).await.unwrap();
+    assert_eq!(out.source, Source::Fallback);
+    assert_eq!(out.body.unwrap()["ticket"]["subject"], "Broken");
+}
+
+/// A contract with a nullable member at each depth, a nested object with no
+/// required members, and the same route under `PUT`.
+const NULLABLE_UPDATE: &str = r##"
+openapi: 3.1.0
+info: {title: T, version: "1"}
+paths:
+  /tasks/{taskId}:
+    parameters: [{name: taskId, in: path, required: true, schema: {type: string}}]
+    patch:
+      operationId: patchTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+    put:
+      operationId: putTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+  /tasks/{taskId}/unassign:
+    parameters: [{name: taskId, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: unassignTask
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        title: {type: [string, "null"]}
+        owner: {type: [string, "null"]}
+        properties:
+          type: object
+          properties:
+            Status: {type: [string, "null"]}
+            Due:
+              type: [object, "null"]
+              properties:
+                date: {type: [string, "null"]}
+                note: {type: [string, "null"]}
+        choice:
+          oneOf:
+            - {type: object, required: [kind], properties: {kind: {const: a}, a: {type: [string, "null"]}}}
+            - {type: object, required: [kind], properties: {kind: {const: b}, b: {type: [string, "null"]}}}
+"##;
+
+/// An update's answer has the read's schema, and the target keeps its `id`.
+#[derive(Debug)]
+struct Settling<'a>(&'a StoredResource);
+
+impl mb_engine::UpdateGuard for Settling<'_> {
+    fn settles(&self, _status: u16) -> bool {
+        true
+    }
+
+    fn keep_identity(&self, mut candidate: Value) -> Value {
+        if let Some(id) = self.0.data.get("id") {
+            candidate["id"] = id.clone();
+        }
+        candidate
+    }
+
+    fn keeps_owner(&self, _candidate: &Value) -> bool {
+        true
+    }
+}
+
+fn stored_task() -> StoredResource {
+    StoredResource {
+        resource_type: "tasks".into(),
+        id: "t1".into(),
+        data: json!({
+            "id": "t1",
+            "title": "Write",
+            "owner": "ana",
+            "properties": {
+                "Status": "Not started",
+                "Due": {"date": "2026-12-14", "note": "soon"},
+            },
+        }),
+    }
+}
+
+/// What an update on [`stored_task`] with `request` serves when the LLM answers
+/// `answer`.
+async fn updated_task(op: &str, request: Value, answer: Value) -> Value {
+    let bundle = inline(NULLABLE_UPDATE);
+    let operation = bundle.operation(op).unwrap();
+    let target = stored_task();
+    let mut c = call(op);
+    c.path_params.clear();
+    c.path_params.insert("taskId".into(), json!("t1"));
+    c.body = Some(request);
+    let (_p, engine) = scripted(vec![Ok(answer.to_string())]);
+    let guard = Settling(&target);
+    let context = GenerationContext {
+        target: Some(&target),
+        update_guard: Some(&guard),
+        ..ctx()
+    };
+    let out = engine
+        .generate(&bundle, operation, &c, context)
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm, "{:?}", out.fallback_reason);
+    out.body.unwrap()
+}
+
+/// Models null what they were not asked about: no name or API says it is meant,
+/// so a null the request does not name goes as an omitted member does.
+#[tokio::test]
+async fn update_answer_null_does_not_erase_what_the_request_left_alone() {
+    let body = updated_task(
+        "patchTask",
+        json!({"properties": {"Status": "Done"}}),
+        json!({
+            "id": "t1",
+            "title": null,
+            "properties": {"Status": "Done", "Due": null},
+        }),
+    )
+    .await;
+    assert_eq!(body["title"], "Write", "{body}");
+    assert_eq!(body["properties"]["Due"]["date"], "2026-12-14", "{body}");
+    assert_eq!(body["properties"]["Status"], "Done", "{body}");
+    // Deeper: the object stands, with its null member.
+    let body = updated_task(
+        "patchTask",
+        json!({"properties": {"Status": "Done"}}),
+        json!({
+            "id": "t1",
+            "properties": {"Status": "Done", "Due": {"date": null, "note": "soon"}},
+        }),
+    )
+    .await;
+    assert_eq!(body["properties"]["Due"]["date"], "2026-12-14", "{body}");
+}
+
+/// A request naming a member as null clears it, at any depth, whichever way the
+/// answer put it: null, omitted or still holding the value.
+#[tokio::test]
+async fn update_naming_a_member_null_clears_it() {
+    let request = json!({"owner": null, "properties": {"Due": null}});
+    for answer in [
+        json!({"id": "t1", "owner": null, "properties": {"Due": null}}),
+        json!({"id": "t1", "properties": {}}),
+        json!({"id": "t1", "owner": "ana", "properties": {"Due": {"date": "2026-12-14"}}}),
+    ] {
+        let body = updated_task("patchTask", request.clone(), answer).await;
+        assert!(body["owner"].is_null(), "{body}");
+        assert!(body["properties"]["Due"].is_null(), "{body}");
+        assert_eq!(body["properties"]["Status"], "Not started", "{body}");
+        assert_eq!(body["title"], "Write", "{body}");
+    }
+    // One level down, its sibling stays.
+    let body = updated_task(
+        "patchTask",
+        json!({"properties": {"Due": {"date": null}}}),
+        json!({"id": "t1", "properties": {"Due": {"date": null}}}),
+    )
+    .await;
+    assert!(body["properties"]["Due"]["date"].is_null(), "{body}");
+    assert_eq!(body["properties"]["Due"]["note"], "soon", "{body}");
+}
+
+/// A value the model changes unasked is drift: what the request did not name stays
+/// as stored, and what the stored copy lacks comes from the answer.
+#[tokio::test]
+async fn update_answer_changing_an_untouched_member_does_not_stand() {
+    let body = updated_task(
+        "patchTask",
+        json!({"properties": {"Status": "Done"}}),
+        json!({"id": "t1", "title": "Written", "properties": {"Status": "Done"}}),
+    )
+    .await;
+    assert_eq!(body["title"], "Write", "{body}");
+    assert_eq!(body["properties"]["Status"], "Done", "{body}");
+}
+
+/// A `PATCH` naming part of a nested object keeps the rest, of the answer and
+/// of what it omitted.
+#[tokio::test]
+async fn partial_nested_patch_keeps_siblings() {
+    let body = updated_task(
+        "patchTask",
+        json!({"properties": {"Status": "Done"}}),
+        json!({"id": "t1", "properties": {"Status": "Blocked"}}),
+    )
+    .await;
+    assert_eq!(body["properties"]["Status"], "Done", "{body}");
+    assert_eq!(body["properties"]["Due"]["note"], "soon", "{body}");
+    assert_eq!(body["owner"], "ana", "{body}");
+}
+
+/// The identity is the path's, whatever the answer or the request says.
+#[tokio::test]
+async fn update_identity_stays_pinned_to_the_path() {
+    let body = updated_task(
+        "patchTask",
+        json!({"id": "other", "title": "New"}),
+        json!({"id": "invented", "title": "New"}),
+    )
+    .await;
+    assert_eq!(body["id"], "t1", "{body}");
+    assert_eq!(body["title"], "New", "{body}");
+}
+
+/// `PUT` replaces a member it names, as it did, and does not merge into it. The
+/// rest it never removed, and that stays.
+#[tokio::test]
+async fn put_replaces_a_named_member_whole() {
+    let body = updated_task(
+        "putTask",
+        json!({"properties": {"Status": "Done"}}),
+        json!({
+            "id": "t1",
+            "properties": {"Status": "Done", "Due": {"date": "2026-12-14"}},
+        }),
+    )
+    .await;
+    assert_eq!(body["properties"], json!({"Status": "Done"}), "{body}");
+    assert_eq!(body["title"], "Write", "{body}");
+}
+
+/// An action's answer may null what its verb clears, and the request says nothing
+/// of what that is.
+#[tokio::test]
+async fn an_action_answer_may_clear_a_member() {
+    let body = updated_task(
+        "unassignTask",
+        json!({}),
+        json!({"id": "t1", "owner": null}),
+    )
+    .await;
+    assert!(body["owner"].is_null(), "{body}");
+}
+
+/// Under a `oneOf`, a branch the request named goes whole, from the answer and then
+/// the request: nothing of the stored branch comes into it.
+#[tokio::test]
+async fn update_answer_keeps_the_branch_it_took() {
+    let bundle = inline(NULLABLE_UPDATE);
+    let op = bundle.operation("patchTask").unwrap();
+    let target = StoredResource {
+        resource_type: "tasks".into(),
+        id: "t1".into(),
+        data: json!({"id": "t1", "choice": {"kind": "a", "a": "x"}}),
+    };
+    let mut c = call("patchTask");
+    c.path_params.clear();
+    c.path_params.insert("taskId".into(), json!("t1"));
+    c.body = Some(json!({"choice": {"kind": "b"}}));
+    let (_p, engine) = scripted(vec![Ok(
+        json!({"id": "t1", "choice": {"kind": "b", "b": null}}).to_string(),
+    )]);
+    let guard = Settling(&target);
+    let context = GenerationContext {
+        target: Some(&target),
+        update_guard: Some(&guard),
+        ..ctx()
+    };
+    let out = engine.generate(&bundle, op, &c, context).await.unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(body["choice"]["kind"], "b", "{body}");
+    assert!(body["choice"].get("a").is_none(), "{body}");
 }
 
 #[tokio::test]

@@ -40,7 +40,9 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use mb_llm::{ChatMessage, ChatRequest, LlmError, Provider, ResponseFormat, Role, Usage};
-use mb_mcm::{Bundle, Effect, Operation, OperationKind, OutputVariant, StatusSelector};
+use mb_mcm::{
+    Binding, Bundle, Effect, HttpMethod, Operation, OperationKind, OutputVariant, StatusSelector,
+};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
@@ -149,6 +151,20 @@ pub struct GenerationContext<'a> {
     /// stands over what the answer wrote. Last write wins, so with any later write
     /// there is none, and a child's or an action's body is never one.
     pub earlier_own_body: Option<&'a Value>,
+    /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
+    /// With none it does not.
+    pub update_guard: Option<&'a dyn UpdateGuard>,
+}
+
+/// What only the runtime knows of an update's stored target, for the answer to settle
+/// on it.
+pub trait UpdateGuard: std::fmt::Debug + Sync {
+    /// Whether an answer of this status has the schema of the resource's read.
+    fn settles(&self, status: u16) -> bool;
+    /// `candidate` with the identity the target holds, and the keys its path reads by.
+    fn keep_identity(&self, candidate: Value) -> Value;
+    /// Whether `candidate` is still the target's owner's.
+    fn keeps_owner(&self, candidate: &Value) -> bool;
 }
 
 /// What a credential's value becomes in a body kept beyond its request (see
@@ -1818,7 +1834,7 @@ fn apply_scenario(
         ..response.clone()
     };
     let patched = if success {
-        reassert_request(validator, op, call, patched)
+        reassert_request(validator, op, call, ctx, patched)
     } else {
         patched
     };
@@ -1872,8 +1888,10 @@ fn encode_base64(
 /// Make a 2xx body consistent with the request and state (spec §1.2,
 /// criterion 4): queries reflect the stored target, creates reflect the
 /// request body, updates reflect the target then the request body, and the
-/// identity field always equals the path id. An action's LLM answer is the
-/// state after it, so it wins over the target instead (see
+/// identity field always equals the path id. An LLM's answer to an update that has
+/// the resource's read schema wins where the request named a member
+/// ([`settled_update`]), and the request merges into that ([`apply_request`]). An
+/// action's LLM answer is the state after it, so it wins over the target instead (see
 /// [`Operation::is_action`]), unless it is a new record ([`is_new_record`]),
 /// which takes nothing from the target and keeps its own identity. Every merge
 /// is validated; an invalid one keeps the best valid value.
@@ -1909,16 +1927,25 @@ fn reflect(
                 response.new_record = true;
                 overlaid
             } else {
-                let body = match ctx.target {
-                    Some(target) if ahead => {
-                        caught_up(validator, body, target, ctx.earlier_own_body)
+                match (ctx.target, settling_guard(op, ctx, &response)) {
+                    (Some(target), Some(guard)) => {
+                        let body =
+                            settled_update(validator, guard, body, target, call.body.as_ref());
+                        apply_request(validator, op, body, call.body.as_ref())
                     }
-                    Some(target) if op.is_action() && from_llm => {
-                        fill_omitted(validator, body, target)
+                    (target, _) => {
+                        let body = match target {
+                            Some(target) if ahead => {
+                                caught_up(validator, body, target, ctx.earlier_own_body)
+                            }
+                            Some(target) if op.is_action() && from_llm => {
+                                fill_omitted(validator, body, target)
+                            }
+                            target => overlay(validator, body, target.map(|t| &t.data)),
+                        };
+                        overlay_request(validator, body, call.body.as_ref())
                     }
-                    target => overlay(validator, body, target.map(|t| &t.data)),
-                };
-                overlay_request(validator, body, call.body.as_ref())
+                }
             }
         }
         OperationKind::Command(_) => body,
@@ -1933,6 +1960,23 @@ fn reflect(
         force_identity(validator, op, call, body)
     });
     response
+}
+
+/// What lets this update's answer settle on its target ([`settled_update`]): an LLM's
+/// to a plain update, not told of earlier requests, with the read's schema. Anything
+/// else takes the stored copy, then the request's members whole.
+fn settling_guard<'a>(
+    op: &Operation,
+    ctx: &GenerationContext<'a>,
+    response: &GeneratedResponse,
+) -> Option<&'a dyn UpdateGuard> {
+    let plain = op.kind == OperationKind::Command(Effect::Update)
+        && !op.is_action()
+        && ctx.target.is_some()
+        && ctx.earlier_requests.is_empty()
+        && !matches!(response.source, Source::Fallback);
+    ctx.update_guard
+        .filter(|guard| plain && guard.settles(response.status))
 }
 
 /// Whether an action's LLM answer `body` is a new record: of its stored
@@ -1995,12 +2039,17 @@ fn reassert_request(
     validator: &SchemaValidator,
     op: &Operation,
     call: &OperationCall,
+    ctx: &GenerationContext<'_>,
     mut response: GeneratedResponse,
 ) -> GeneratedResponse {
+    let settling = settling_guard(op, ctx, &response).is_some();
     let Some(body) = response.body.take() else {
         return response;
     };
     let body = match op.kind {
+        OperationKind::Command(Effect::Update) if settling => {
+            apply_request(validator, op, body, call.body.as_ref())
+        }
         OperationKind::Command(Effect::Create | Effect::Update) => {
             overlay_request(validator, body, call.body.as_ref())
         }
@@ -2028,6 +2077,291 @@ fn overlay_request(validator: &SchemaValidator, base: Value, body: Option<&Value
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     overlay(validator, base, Some(&Value::Object(kept)))
+}
+
+/// A request body on an answer settled on its target ([`settled_update`]). A `PATCH`'s
+/// goes member by member at any depth ([`merge_request`]), so naming part of an object
+/// keeps the rest. A `PUT` replaces each member it names.
+fn apply_request(
+    validator: &SchemaValidator,
+    op: &Operation,
+    base: Value,
+    body: Option<&Value>,
+) -> Value {
+    let replaces = matches!(
+        op.binding,
+        Binding::Http {
+            method: HttpMethod::Put,
+            ..
+        }
+    );
+    if replaces {
+        overlay_request(validator, base, body)
+    } else {
+        merge_request(validator, base, body)
+    }
+}
+
+/// [`overlay_request`], with each named member merged into the one `base` holds. One
+/// that does not fit merged goes whole, as it may start another branch of a union; one
+/// that fits neither way leaves `base` as it is.
+fn merge_request(validator: &SchemaValidator, base: Value, body: Option<&Value>) -> Value {
+    let (Some(Value::Object(fields)), Value::Object(current)) = (body, &base) else {
+        return overlay_request(validator, base, body);
+    };
+    let declared = validator.declared_property_names();
+    let root = validator.schema();
+    let named = fields
+        .iter()
+        .filter(|(k, _)| declared.is_none_or(|names| names.contains(k.as_str())));
+    let merged: Map<String, Value> = named
+        .clone()
+        .map(|(k, v)| {
+            let inner = schema_level(root, root, Some(k), 0).1;
+            let value = match current.get(k) {
+                Some(held) => merged_member(root, inner, held, v),
+                None => v.clone(),
+            };
+            (k.clone(), value)
+        })
+        .collect();
+    let applied = overlay(validator, base, Some(&Value::Object(merged.clone())));
+    let whole: Map<String, Value> = named
+        .filter(|(k, _)| applied.get(k.as_str()) != merged.get(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    overlay(validator, applied, Some(&Value::Object(whole)))
+}
+
+/// `over` on `held`, objects member by member. An object under a `oneOf` or `anyOf` is
+/// replaced, as its members could mix with another branch's.
+fn merged_member(root: &Value, schema: Option<&Value>, held: &Value, over: &Value) -> Value {
+    let (Value::Object(held_members), Value::Object(over_members)) = (held, over) else {
+        return over.clone();
+    };
+    if schema.is_some_and(|node| schema_level(root, node, None, 0).0) {
+        return over.clone();
+    }
+    let mut out = held_members.clone();
+    for (k, v) in over_members {
+        let inner = schema.and_then(|node| schema_level(root, node, Some(k), 0).1);
+        let merged = match out.get(k) {
+            Some(below) => merged_member(root, inner, below, v),
+            None => v.clone(),
+        };
+        out.insert(k.clone(), merged);
+    }
+    Value::Object(out)
+}
+
+/// An LLM's answer to an update, over the stored copy it replaces: the copy stands. A
+/// member of the answer wins only where the request body names the same path, so a
+/// value the model drifted on, a faker filled or a budget capped goes, with no list of
+/// names or per-API rule. What the copy lacks comes from the answer at the top level.
+///
+/// A request and its answer may wrap differently. A request's only key, if the response
+/// does not declare it, is a wrapper: `{ticket: {status}}` names `status`. And a request
+/// naming no member of the response names those of the one member that holds them all,
+/// when only one does: `{status}` names `ticket.status`.
+///
+/// Identity, what the path reads by and `readOnly` members never take the answer's
+/// value, nor does an owner: an answer that moves the resource leaves the copy as it
+/// was, and what it adds goes, unless the schema needs it. Each top-level member that fits
+/// (see [`overlay`]), and one that does not keeps what a faker's answer would.
+fn settled_update(
+    validator: &SchemaValidator,
+    guard: &dyn UpdateGuard,
+    answer: Value,
+    target: &StoredResource,
+    request: Option<&Value>,
+) -> Value {
+    let root = validator.schema();
+    let request = unwrapped_request(validator, request);
+    let settled = match response_wrapper(validator, request) {
+        Some(wrapper) => {
+            let inner = schema_level(root, root, Some(wrapper), 0).1;
+            let Some(below) = answer.get(wrapper) else {
+                return overlay(validator, answer, Some(&target.data));
+            };
+            // A wrapped answer is stored as what it wraps.
+            let Some(held) = target.data.get(wrapper) else {
+                let member = settled_members(root, inner, below, &target.data, request, false);
+                let member = guard.keep_identity(member);
+                let member = if guard.keeps_owner(&member) {
+                    member
+                } else {
+                    target.data.clone()
+                };
+                let settled = Value::Object(Map::from_iter([(wrapper.to_string(), member)]));
+                return overlay(validator, answer, Some(&settled));
+            };
+            let member = settled_members(root, inner, below, held, request, false);
+            let mut settled = target.data.clone();
+            if let Value::Object(members) = &mut settled {
+                members.insert(wrapper.to_string(), member);
+            }
+            settled
+        }
+        None => settled_members(root, Some(root), &answer, &target.data, request, true),
+    };
+    let settled = guard.keep_identity(settled);
+    if !guard.keeps_owner(&settled) {
+        return overlay(
+            validator,
+            without_other_owners(validator, answer, target),
+            Some(&target.data),
+        );
+    }
+    let stored_first = overlay(validator, answer, Some(&target.data));
+    overlay(validator, stored_first, Some(&settled))
+}
+
+/// `answer` without the members the stored copy lacks, as an answer moving the resource
+/// says nothing to go by, unless the schema needs them.
+fn without_other_owners(
+    validator: &SchemaValidator,
+    answer: Value,
+    target: &StoredResource,
+) -> Value {
+    let (Value::Object(members), Value::Object(stored)) = (&answer, &target.data) else {
+        return answer;
+    };
+    let kept: Map<String, Value> = members
+        .iter()
+        .filter(|(k, _)| stored.contains_key(*k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let kept = Value::Object(kept);
+    if validator.is_valid(&kept) {
+        kept
+    } else {
+        answer
+    }
+}
+
+/// What a request's only key holds, if that is an object and the response does not
+/// declare the key.
+fn unwrapped_request<'a>(
+    validator: &SchemaValidator,
+    request: Option<&'a Value>,
+) -> Option<&'a Value> {
+    let (Some(Value::Object(members)), Some(declared)) =
+        (request, validator.declared_property_names())
+    else {
+        return request;
+    };
+    match members.iter().next() {
+        Some((key, inner))
+            if members.len() == 1 && inner.is_object() && !declared.contains(key.as_str()) =>
+        {
+            Some(inner)
+        }
+        _ => request,
+    }
+}
+
+/// The one member of the response holding all a request names, when the request names
+/// none of the response's own.
+fn response_wrapper<'a>(
+    validator: &'a SchemaValidator,
+    request: Option<&Value>,
+) -> Option<&'a str> {
+    let Value::Object(members) = request? else {
+        return None;
+    };
+    let declared = validator.declared_property_names()?;
+    if members.is_empty() || members.keys().any(|k| declared.contains(k.as_str())) {
+        return None;
+    }
+    let root = validator.schema();
+    let mut holding = declared.iter().filter(|name| {
+        schema_level(root, root, Some(name.as_str()), 0)
+            .1
+            .is_some_and(|member| {
+                members
+                    .keys()
+                    .all(|k| schema_level(root, member, Some(k), 0).1.is_some())
+            })
+    });
+    let wrapper = holding.next()?;
+    holding.next().is_none().then_some(wrapper.as_str())
+}
+
+/// [`settled_update`] at one level, `request` being what the request says at this path.
+/// Objects go member by member, unless a `oneOf` or `anyOf` says either is a branch,
+/// which is taken whole or not at all. A named array takes the request's value, as a cap
+/// or an empty answer could have cut the answer's. A null is only the request's to write.
+fn settled_members(
+    root: &Value,
+    schema: Option<&Value>,
+    answer: &Value,
+    stored: &Value,
+    request: Option<&Value>,
+    top: bool,
+) -> Value {
+    let (Value::Object(answer_members), Value::Object(stored_members)) = (answer, stored) else {
+        return stored.clone();
+    };
+    let union = schema.is_some_and(|node| schema_level(root, node, None, 0).0);
+    let mut out = stored_members.clone();
+    for (k, v) in answer_members {
+        let named = request.and_then(|r| r.get(k));
+        let answered = match named {
+            Some(array @ Value::Array(_)) if v.is_array() => array,
+            _ => v,
+        };
+        let Some(held) = stored_members.get(k) else {
+            if top || named.is_some() {
+                out.insert(k.clone(), answered.clone());
+            }
+            continue;
+        };
+        let inner = schema.and_then(|node| schema_level(root, node, Some(k), 0).1);
+        if inner.is_some_and(|member| is_read_only(root, member, 0)) {
+            continue;
+        }
+        let Some(named) = named else {
+            continue;
+        };
+        if named.is_null() {
+            out.insert(k.clone(), Value::Null);
+        } else if v.is_null() || (held.is_array() && !named.is_array()) {
+            continue;
+        } else if held.is_object() && v.is_object() && !union && !is_union(root, inner) {
+            let member = settled_members(root, inner, v, held, Some(named), false);
+            out.insert(k.clone(), member);
+        } else {
+            out.insert(k.clone(), answered.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+/// Whether a member's schema has a `oneOf` or `anyOf`.
+fn is_union(root: &Value, schema: Option<&Value>) -> bool {
+    schema.is_some_and(|member| schema_level(root, member, None, 0).0)
+}
+
+/// Whether the contract says a client does not set this member, by its `$ref`s and
+/// `allOf`s.
+fn is_read_only(root: &Value, node: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if node.get("readOnly").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    if let Some(target) = node
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix('#'))
+        .and_then(|pointer| root.pointer(pointer))
+    {
+        return is_read_only(root, target, depth + 1);
+    }
+    node.get("allOf")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| parts.iter().any(|p| is_read_only(root, p, depth + 1)))
 }
 
 /// Add to an answer the stored members it omits, each only if the answer stays

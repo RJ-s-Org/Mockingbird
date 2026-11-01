@@ -1295,6 +1295,95 @@ fn keeping_identity(rt: &MockRuntime, held: &StoredResource, answer: &Value) -> 
     answer
 }
 
+/// What the engine asks of an update's stored target, for its answer to settle on it.
+pub(super) struct SettleGuard<'a> {
+    pub(super) rt: &'a MockRuntime,
+    pub(super) plan: &'a CallPlan<'a>,
+    pub(super) call: &'a OperationCall,
+    pub(super) held: &'a StoredResource,
+}
+
+impl std::fmt::Debug for SettleGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettleGuard")
+            .field("operation", &self.plan.op.id)
+            .field("id", &self.held.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl mb_engine::UpdateGuard for SettleGuard<'_> {
+    fn settles(&self, status: u16) -> bool {
+        is_read_schema(
+            self.rt,
+            self.plan.op,
+            self.plan.op.output_for_status(status),
+        )
+    }
+
+    fn keep_identity(&self, candidate: Value) -> Value {
+        keeping_identity(self.rt, self.held, &candidate)
+    }
+
+    fn keeps_owner(&self, candidate: &Value) -> bool {
+        keeps_owner(self.rt, self.plan, self.call, self.held, candidate)
+    }
+}
+
+/// What of an effect's `set` may go on the target its update just stored: what the read
+/// schema declares at the top level (all of it where the schema names no members or a
+/// union may hold others), and of that not a path or `readOnly` member, not what the
+/// request names at the top level, and not what would show another owner. The check on identity comes
+/// before this, as for any effect.
+pub(super) fn own_effect_members(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &StoredResource,
+    set: &Map<String, Value>,
+) -> Map<String, Value> {
+    let t = held.resource_type.as_str();
+    let bundle = rt.bundle();
+    let level = Level::of(bundle, read_schema(rt, t));
+    let declaring = !level.union && !level.properties.is_empty();
+    let declared = |key: &str| level.properties.iter().find_map(|p| p.get(key));
+    let index = rt.index();
+    let paths = index.path_fields(t);
+    let body = call.body.as_ref().and_then(Value::as_object);
+    let wrapped = body
+        .filter(|members| members.len() == 1)
+        .and_then(|members| {
+            let (key, inner) = members.iter().next()?;
+            (declaring && declared(key).is_none()).then_some(inner.as_object()?)
+        });
+    let named = |key: &str| {
+        wrapped
+            .or(body)
+            .is_some_and(|members| members.contains_key(key))
+    };
+    // What holds a value of this call's path, whatever the parameter is called.
+    let shows_path = |key: &str| {
+        held.data.get(key).and_then(id_string).is_some_and(|value| {
+            call.path_params
+                .values()
+                .any(|param| id_string(param).as_ref() == Some(&value))
+        })
+    };
+    set.iter()
+        .filter(|(key, _)| !declaring || declared(key).is_some())
+        .filter(|(key, _)| !paths.contains(*key) && !shows_path(key) && !named(key))
+        .filter(|(key, _)| !read_only(bundle, declared(key)))
+        .filter(|(key, value)| {
+            let mut alone = held.data.clone();
+            if let Value::Object(members) = &mut alone {
+                members.insert((*key).clone(), (*value).clone());
+            }
+            keeps_owner(rt, plan, call, held, &alone)
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 /// Whether `answer` is still `held`'s owner's: by the check a later read makes (see
 /// [`key_fits`]), and not linking elsewhere (see [`known_foreign`]).
 fn keeps_owner(
