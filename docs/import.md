@@ -21,16 +21,15 @@ Many documentation pages carry their own OpenAPI definition: a fenced ```` ```ya
 
 ## How a resource's identity is read
 
-The member a route's record goes by comes from the contract, in this order. `x-mockingbird-resource` can set it.
+The member a route's record goes by comes from the contract, in this order.
 
 1. **The answer has an `id`**, or a member named by the path's last parameter (`/orders/{number}` → `number`, `{MessageSid}` → `sid`).
 2. **A create's answer has a `sid` or a `uuid`.**
-3. **A member named for the type**: `user_id` or `userId` for `users`, where a route of that type ends in a parameter. An object or a list is no key. With no such route (`POST /tokens`) nothing could find the record again.
-4. **Otherwise the mock learns it, per session.** With `consistency: on`, on a type where a route ends in a parameter and answers a record with a string or number at its top level, a create is held. A later path value that exactly one record holds in exactly one member makes that member the identity. A value the create's request said, a member with an `enum` or `const`, and a member two records hold alike do not count. See [upgrading](upgrading.md#identity-from-the-types-name-and-from-what-a-mock-has-seen).
+3. **A member named for the type**: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one (`{id}`, `{userId}`, `{user_id}`): `{handle}` names something else. With no such route (`POST /tokens`) nothing could find the record again.
 
-An answer in an envelope (`{"user": {...}}`) or an array has no member to go by, so its route has no identity. A create's envelope is still stored as what it holds where a list names it.
+With none of these a route has no identity, so a create stores nothing and a read is generated each time. That includes an answer in an envelope (`{"user": {...}}`) or an array. Where the contract's names do not give the identity, [`x-mockingbird-resource`](#correcting-it-x-mockingbird-resource) sets it.
 
-A read with no path parameter, of a type no other route has, whose list items are what one type's `GET` by path answers, reads as that type: `/users-by-email` beside `/users/{id}`.
+A read with no path parameter, of a type no other route has, reads as a type when every array it lists holds what that type's `GET` by path answers: `/users-by-email` beside `/users/{id}`. Another shape beside them leaves it as it was, as does a second type serving the same items.
 
 ## How a `POST` under a resource is read
 
@@ -40,7 +39,7 @@ The compiler decides from the contract, not the words of the path, whether `POST
 2. **A route below it** (`<path>/{...}`), or **a `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not.
 3. **The parent's `GET` answers the same record**: it acts on the parent. With the very schema of that `GET` it is an update, [decided at runtime](#an-update-that-answers-another-record).
 4. **Another resource's `GET` by path serves the same record**: a record of that route's type, with its identity (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it). If `GET`s of several types serve it, the contract does not say which, and this rule does not apply.
-5. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no [identity](#how-a-resources-identity-is-read) it stores nothing, or is held until one is learned.
+5. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no [identity](#how-a-resources-identity-is-read) it stores nothing.
 6. **Anything else**: it acts on the parent and stores nothing.
 
 The same record means the same schema, through a one-member envelope that holds an object (on either side), or a shorter form the other composes with `allOf`. Members in common are not enough: `{id, status}` beside a `Refund` that does not compose it does not match. An envelope with other members beside its record (`{data: User, links: ...}`) is not unwrapped, because nothing but the member's name says which one is the record.

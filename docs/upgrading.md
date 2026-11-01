@@ -87,24 +87,21 @@ No migration or configuration. With an LLM and `consistency: on`, except on Grap
 
 The oldest markers go past 1024 per session, and then what they marked can come back. Offline mocks and `consistency: off` are as they were.
 
-### Identity from the type's name and from what a mock has seen
+### A member named for its type is its identity
 
 No migration or configuration. A contract whose routes already have an identity is as it was, with the same LLM calls and store calls.
 
-- **A member named for the type is its identity**, when a route of the type ends in a parameter, nothing else gives one, and the member is not an object or a list: `user_id` for `users`, `thingId` for `things`. So a compiled bundle can change, and the Auth0 example's user is now stored by `POST`, served by `GET`, updated by `PATCH` and marked by `DELETE`. Offline mocks get this too.
-- **Otherwise a create with no identity is held**, with `consistency: on`, where a route of its type ends in a parameter and no route but an action has an identity. It is a document of the reserved type `__mockingbird.earlier_requests`, with an id starting `#pending/`, so it is in no export, count or change feed, and its key is in no answer. Lists and lookups of the type are shown its data. A reset, a TTL or a fixture clears it, as with the write memory.
-- **A path value teaches the member.** If exactly one record, in exactly one top-level string or number, holds a path value on that route, the member becomes the type's identity for the session (`#identity/<type>`), on any node. Each record moves under it, so it then appears in exports, on change feeds and in `sessions` counts. Its write memory moves too, and a delete marker on the new id ends, as when a create stores that id. A record whose new id is taken, or that lacks the member, stays where it is.
-- **What does not teach:** a value the create's own request said, a member with an `enum` or `const`, a member two records hold alike, and a value under another parent. Such a read generates as before. A member taken by mistake gives way when a path names another member, and is not taken again in that session.
-- **After it is learned, a miss follows `unknown_ids`**: `unknown_ids: 404` can then answer 404 on a route that always generated before.
-- **Store calls**: for a type that can learn, a read that misses makes one reserved read and up to two listings, each of at most 500. A list makes one reserved read and one listing more. The newest 500 reserved documents of a session are what is scanned, so an older held record can go unseen.
-- **Not covered**: a route whose answer is an envelope (`{"user": {...}}`) or an array has nothing to learn from at its top level, and is as it was: Square's and Zendesk's reads by path, and SendGrid's. A read with no create (Twilio's lookup) has nothing to find.
-- **Rolling upgrades**: a node of an older release exports and counts these documents as resources, as it does the write memory's, and does not honour them.
+- **What changes:** with no other identity, a member named for the type becomes one: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one: `{id}`, `{userId}`, `{user_id}`. So `/users/{handle}` gets none, and `GET /users/alice` keeps the `user_id` it is answered. A compiled bundle can change, also for offline mocks.
+- **What follows:** the Auth0 example's user is now stored by `POST`, served by `GET`, updated by `PATCH` and marked by `DELETE`.
+- **`unknown_ids: 404` can answer 404 where it generated before**: `GET /accounts/7` over `account_id`, and Auth0's users, as a read now knows it is by id and that the session does not hold it.
+- **Not covered**: a route answering an envelope (`{"user": {...}}`) or an array has no such member, and any other name is not guessed. [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) sets the identity where the contract's names do not give it. Square's, Zendesk's and SendGrid's reads by path and Twilio's lookup are as they were.
 
 ### A lookup reads as the type of its items
 
-No migration or configuration. A read whose path has no parameter, whose type has no other route, and whose list items (of a bare array or an array member) are what one type's `GET` by path answers, now has that type: Auth0's `/users-by-email` is `users`, Zendesk's `/search` is `tickets` and Notion's `/search` is `pages`.
+No migration or configuration. A read whose path has no parameter, whose type has no other route, and every listed array of which holds what one type's `GET` by path answers, now has that type: Auth0's `/users-by-email` is `users`, Zendesk's `/search` is `tickets` and Notion's `/search` is `pages`.
 
 - **It is shown that type's stored records, and stores what it lists under them**, instead of nothing. A prompt can be longer, and a recorded prompt may not replay.
+- **Another shape beside them keeps the route's own type**: `{users: [Hit], tickets: [Ticket]}` would store a hit as a ticket. An array of strings does not count. Items with no declared members do, as they could be anything.
 - **A list under a path parameter (`/teams/{team}/members`) and a read of one record (`/me`) keep their types**, as does a read whose items two types' `GET`s answer. So does a type with another route, or one set by `x-mockingbird-resource`.
 
 ### Action routes act on their parent resource
