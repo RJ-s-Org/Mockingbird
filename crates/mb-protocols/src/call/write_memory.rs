@@ -30,7 +30,7 @@
 //! and told to the list read of that path. Only told, as what may since have changed: the
 //! read is not forced and nothing stands over its answer. Its query is never kept, and of
 //! its body only what the contract declares of the write's request or the list's items,
-//! as the rest may be anything. The memory goes with the path's parent, and a write goes
+//! past the wider checks of [`for_context`], as the rest may be anything. The memory goes with the path's parent, and a write goes
 //! with the child it named.
 //!
 //! HTTP-bound operations only: GraphQL stores what its answers hold under their
@@ -681,39 +681,56 @@ fn redact_credentials(
     schema: Option<&Value>,
     read: Option<&Value>,
 ) {
+    redact_by_names(rt, value, schema, read, false);
+}
+
+/// [`redact_credentials`], with `context` by the wider names of what a model is shown
+/// beyond its own request (see [`for_context`]), where `key` and `sid` stay on what the
+/// contract says they identify.
+fn redact_by_names(
+    rt: &MockRuntime,
+    value: &mut Value,
+    schema: Option<&Value>,
+    read: Option<&Value>,
+    context: bool,
+) {
     let bundle = rt.bundle();
+    let any_name = |name: &str| {
+        if context {
+            is_own_credential(rt, name) || mb_mcm::credentials::hides_in_context(name)
+        } else {
+            is_credential_name(rt, name)
+        }
+    };
     match value {
         Value::Object(members) => {
             let named_pair = ["name", "key", "header"]
                 .iter()
                 .find_map(|n| members.get(*n)?.as_str())
-                .is_some_and(|name| is_credential_name(rt, name));
+                .is_some_and(any_name);
             if named_pair && let Some(paired) = members.get_mut("value") {
                 *paired = Value::from(REDACTED);
             }
             let (parts, _) = schema_parts(bundle, schema);
             let returned = Level::of(bundle, read);
             let (_, read_defs) = schema_parts(bundle, read);
-            // The `key` of a `{"key": ..., "value": ...}` pair is its label, gone over above.
-            let pair = members.len() == 2 && members.contains_key("value");
             // What the read's own type is identified by is that, whatever it is called.
             let identifies = |key: &str| {
-                mb_mcm::credentials::may_be_an_identity(key)
-                    && read_defs
-                        .iter()
-                        .filter_map(|def| rt.index().types_by_def.get(*def))
-                        .any(|t| pinned_members(rt, t).contains(&key))
+                read_defs
+                    .iter()
+                    .filter_map(|def| rt.index().types_by_def.get(*def))
+                    .any(|t| pinned_members(rt, t).contains(&key) && identity_stays(t, key))
             };
             for (key, member) in members.iter_mut() {
                 let inner = parts.iter().find_map(|p| p.get("properties")?.get(key));
                 let read_inner = returned.named(key);
                 let by_name = !is_count(key, member)
-                    && !(pair && key == "key")
                     && match read_inner {
-                        Some(_) => {
-                            mb_mcm::credentials::hides_a_returned_member(key) && !identifies(key)
+                        Some(_) if context => {
+                            mb_mcm::credentials::hides_returned_in_context(key) && !identifies(key)
                         }
-                        None => is_credential_name(rt, key),
+                        Some(_) => mb_mcm::credentials::hides_a_returned_member(key),
+                        None => any_name(key),
                     };
                 if schema_hides(bundle, inner)
                     || schema_hides(bundle, read_inner)
@@ -722,7 +739,7 @@ fn redact_credentials(
                 {
                     *member = Value::from(REDACTED);
                 } else {
-                    redact_credentials(rt, member, inner, read_inner);
+                    redact_by_names(rt, member, inner, read_inner, context);
                 }
             }
         }
@@ -736,7 +753,7 @@ fn redact_credentials(
                 .iter()
                 .find_map(|p| p.get("items"));
             for item in items {
-                redact_credentials(rt, item, inner, read_inner);
+                redact_by_names(rt, item, inner, read_inner, context);
             }
         }
         _ => {}
@@ -754,64 +771,75 @@ fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value, own: bool) -> V
         .as_deref()
         .filter(|_| own)
         .and_then(|t| read_schema(rt, t));
-    scrubbed_by(rt, plan, body, plan.op.input.body.as_ref(), read)
+    let mut body = body.clone();
+    redact_credentials(rt, &mut body, plan.op.input.body.as_ref(), read);
+    if let Some(recorder) = &rt.recorder {
+        recorder.redact(&mut body);
+    }
+    plan.engine.scrub(&mut body);
+    body
 }
 
-/// `value` as it may be kept, by `schema`'s marks, every rule by name (see [`scrubbed`])
-/// and a value's own shape. What an answer holds goes by its output's schema.
-pub(super) fn scrubbed_by(
+/// Whether identity member `field` of type `t` is shown though its name could hold a
+/// credential: `key` and `sid`, and not on a type that is itself one, as what names an
+/// `api_keys` record is the secret. Any other name holding a credential is not.
+fn identity_stays(t: &str, field: &str) -> bool {
+    let hidden = mb_mcm::credentials::hides_in_context;
+    !hidden(field) || (mb_mcm::credentials::may_be_an_identity(field) && !hidden(t))
+}
+
+/// `value` as a model may be shown it beyond its own request, in `<earlier_answers>`,
+/// `<earlier_writes>` and a record matched by value, of type `t`: by `schema`'s and
+/// `read`'s marks, the wider names and a value's own shape. What is hidden is left out,
+/// as a marker would only be repeated. What identifies the record stays as it is (see
+/// [`identity_stays`]), or a model could not name it. `None` when nothing is left.
+pub(super) fn for_context(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
+    t: &str,
     value: &Value,
     schema: Option<&Value>,
     read: Option<&Value>,
-) -> Value {
-    let mut value = value.clone();
-    redact_credentials(rt, &mut value, schema, read);
-    redact_shapes(&mut value);
+) -> Option<Value> {
+    let mut kept = value.clone();
+    redact_by_names(rt, &mut kept, schema, read, true);
+    redact_shapes(&mut kept);
     if let Some(recorder) = &rt.recorder {
-        recorder.redact(&mut value);
+        recorder.redact(&mut kept);
     }
-    plan.engine.scrub(&mut value);
-    value
-}
-
-/// [`scrubbed_by`], for what a prompt shows of a record of type `t`: what identifies it
-/// stays as it is, however it reads, or a model could not name it.
-pub(super) fn scrubbed_record(
-    rt: &MockRuntime,
-    plan: &CallPlan<'_>,
-    t: &str,
-    data: &Value,
-    schema: Option<&Value>,
-    read: Option<&Value>,
-) -> Value {
-    let mut kept = scrubbed_by(rt, plan, data, schema, read);
-    if let (Value::Object(kept), Value::Object(given)) = (&mut kept, data) {
+    plan.engine.scrub(&mut kept);
+    if let (Value::Object(kept), Value::Object(given)) = (&mut kept, value) {
         for field in pinned_members(rt, t) {
-            if let Some(value) = given.get(field) {
-                kept.insert(field.to_string(), value.clone());
+            let shaped = |v: &Value| {
+                v.as_str()
+                    .is_some_and(mb_mcm::credentials::is_credential_value)
+            };
+            if let Some(identity) = given
+                .get(field)
+                .filter(|v| identity_stays(t, field) && !shaped(v))
+            {
+                kept.insert(field.to_string(), identity.clone());
             }
         }
     }
-    kept
+    mb_engine::without_redacted(&kept)
 }
 
-/// [`scrubbed_record`] of a record matched for a prompt: by its type's read.
-pub(super) fn scrubbed_for_prompt(
+/// [`for_context`] of a record matched by value: by its type's read.
+pub(super) fn matched_for_context(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     t: &str,
     data: &Value,
-) -> Value {
-    scrubbed_record(rt, plan, t, data, None, read_schema(rt, t))
+) -> Option<Value> {
+    for_context(rt, plan, t, data, None, read_schema(rt, t))
 }
 
 /// What the contract declares of `value`, by the list's `items` or the write's `request`
 /// schema: members either names, not marked as hidden by either and not named as a
-/// credential, unless it is the type's identity. A map's other members may hold anything,
-/// so they are not told.
-fn declared_plainly(
+/// credential, unless it is the type's identity (see [`identity_stays`]). A map's other
+/// members may hold anything, so they are not told.
+pub(super) fn declared_plainly(
     rt: &MockRuntime,
     t: &str,
     (items, request): (Option<&Value>, Option<&Value>),
@@ -838,12 +866,13 @@ fn declared_plainly(
                     if in_items.is_none() && in_request.is_none() {
                         return None;
                     }
-                    let own = depth == 0 && identity.contains(&key.as_str());
+                    let own =
+                        depth == 0 && identity.contains(&key.as_str()) && identity_stays(t, key);
                     let named = is_own_credential(rt, key)
                         || if in_items.is_some() {
-                            mb_mcm::credentials::hides_a_returned_member(key)
+                            mb_mcm::credentials::hides_returned_in_context(key)
                         } else {
-                            is_credential_name(rt, key)
+                            mb_mcm::credentials::hides_in_context(key)
                         };
                     if schema_hides(bundle, in_items.as_ref())
                         || schema_hides(bundle, in_request.as_ref())
@@ -887,8 +916,7 @@ fn told_to_list(
     let t = list.resource_type.as_str();
     let items = Some(&list.items);
     let request = plan.op.input.body.as_ref();
-    let told =
-        |one: &Value, schema: Option<&Value>| scrubbed_record(rt, plan, t, one, schema, items);
+    let told = |one: &Value, schema: Option<&Value>| for_context(rt, plan, t, one, schema, items);
     match body {
         Value::Array(list) => {
             let (parts, _) = schema_parts(rt.bundle(), request);
@@ -897,19 +925,20 @@ fn told_to_list(
                 .iter()
                 .filter(|item| item.is_object() || each.is_some())
                 .filter_map(|item| declared_plainly(rt, t, (items, each), item, 0))
-                .map(|item| told(&item, each))
+                .filter_map(|item| told(&item, each))
                 .collect();
             (!kept.is_empty()).then_some(Value::Array(kept))
         }
         Value::Object(_) => {
-            declared_plainly(rt, t, (items, request), body, 0).map(|one| told(&one, request))
+            declared_plainly(rt, t, (items, request), body, 0).and_then(|one| told(&one, request))
         }
         _ => None,
     }
 }
 
 /// `value` with every string shaped like a credential replaced, at any depth, as no name
-/// has to give those away (see [`mb_mcm::credentials::is_credential_value`]).
+/// has to give those away (see [`mb_mcm::credentials::is_credential_value`]). For
+/// [`for_context`].
 fn redact_shapes(value: &mut Value) {
     match value {
         Value::String(text) if mb_mcm::credentials::is_credential_value(text) => {

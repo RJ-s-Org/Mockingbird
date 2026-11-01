@@ -8,15 +8,17 @@
 //! [`PathAliases`] has seen it hold, counts as a match, so what a record merely says
 //! elsewhere names nothing. A value must hold a digit or a separator, so a common word
 //! (`closed`) is no reference, and a word-only id is not found this way; a date can match.
-//! A hit is scrubbed for the prompt, and an effect goes on the stored copy. A call pays at
+//! A hit is scrubbed for the prompt, an effect goes on the stored copy, and it follows
+//! none of its own references, which could name what no scrub went over. A call pays at
 //! most [`MAX_LOOKUPS`] reads, and none when no value could be an id or when its answer
 //! needs no generation.
 //!
 //! An answer of a `GET` route with no parameters that returns a single object
 //! (`/users/@me`, Slack's `auth.test`) says who the caller is, and is shown to later
 //! generations, its own route's too, as what the API said and may since have changed, so
-//! a `/me` keeps its identity when a write clears the cache. Deleting the record it is
-//! about ends it. Indirect changes are not tracked. It is kept under the reserved type of the state
+//! a `/me` keeps its identity when a write clears the cache. Only what its read declares
+//! is kept (see [`write_memory::declared_plainly`]). Deleting the record it is about ends
+//! it. Indirect changes are not tracked. It is kept under the reserved type of the state
 //! store ([`mb_state::INTERNAL_TYPE`]), like the write memory's documents: sessions, TTLs
 //! and resets clear it, and it is not exported, counted or on a change feed. A contract
 //! with no such route pays no read for it.
@@ -72,12 +74,9 @@ fn id_like_value(value: &Value) -> Option<String> {
 }
 
 /// Adds what could be an id in `value`, under member `name`, to `out`: an object's own
-/// scalars before what it nests. What a credential's member holds is not looked up, but
-/// for a word as often an identity (`key`, `sid`), as a lookup shows nothing of the value.
+/// scalars before what it nests. What a credential's member holds is not looked up.
 fn id_values(rt: &MockRuntime, name: &str, value: &Value, depth: usize, out: &mut Vec<String>) {
-    let credential = write_memory::is_credential_name(rt, name)
-        && !mb_mcm::credentials::may_be_an_identity(name);
-    if depth > MAX_VALUE_DEPTH || credential {
+    if depth > MAX_VALUE_DEPTH || write_memory::is_credential_name(rt, name) {
         return;
     }
     match value {
@@ -116,13 +115,14 @@ fn types_to_search(rt: &MockRuntime, session: &SessionKey) -> Vec<String> {
 }
 
 /// Adds to `out`, after what the request names by member, the records a body or query
-/// value is the identity of (see the module's doc), each type a value is found in.
+/// value is the identity of (see the module's doc), each type a value is found in. They
+/// are not counted among what [`follow_hops`] goes on from.
 pub(super) async fn named_by_value(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     target: Option<&StoredResource>,
-    followed: &mut Followed,
+    followed: &Followed,
     out: &mut Vec<StoredResource>,
 ) {
     let rt = state.rt;
@@ -173,16 +173,14 @@ pub(super) async fn named_by_value(
                 && !holds(&out[..followed.named], &hit)
                 && !holds(&found, &hit)
             {
-                let data = write_memory::scrubbed_for_prompt(rt, plan, &t, &hit.data);
-                found.push(StoredResource { data, ..hit });
+                let shown = write_memory::matched_for_context(rt, plan, &t, &hit.data);
+                found.extend(shown.map(|data| StoredResource { data, ..hit }));
             }
         }
     }
     // Listed already, they move up among what the request names.
     out.retain(|r| !holds(&found, r));
-    let named = followed.named;
-    followed.named += found.len();
-    out.splice(named..named, found);
+    out.splice(followed.named..followed.named, found);
 }
 
 /// What routes with no parameters answered earlier in this session, oldest first.
@@ -314,9 +312,10 @@ pub(super) async fn after_answer(
                 && schema.is_some()
                 && schema == read_schema
         })
-        .map(|body| match own_type {
-            Some(t) => write_memory::scrubbed_record(rt, plan, t, body, schema, None),
-            None => write_memory::scrubbed_by(rt, plan, body, schema, None),
+        .and_then(|body| {
+            let t = own_type.unwrap_or_default();
+            let declared = write_memory::declared_plainly(rt, t, (schema, None), body, 0)?;
+            write_memory::for_context(rt, plan, t, &declared, schema, schema)
         })
         .filter(|body| body.to_string().len() <= MAX_ANSWER_BYTES);
     // A read that says nothing new leaves what is kept: a faker standing in for the LLM.

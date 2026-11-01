@@ -1531,7 +1531,7 @@ field values) and, for create or update operations, with the request body.\n\n{n
 async fn a_typical_answer_costs_few_tokens() {
     let discord_me = json!({
         "id": "80351110224678912", "username": "nelly", "discriminator": "1337",
-        "avatar": "8342729096ea3675442027381ff50dfe", "bot": true, "verified": true,
+        "avatar": "8342729096ea3675442027381ff50dfe", "bot": "true", "verified": "true",
     });
     let plain = world(vec![note("note-4711")]);
     plain

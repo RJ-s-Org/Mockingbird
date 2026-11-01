@@ -2414,10 +2414,28 @@ fn deep_over(base: &Value, over: &Value) -> Value {
     Value::Object(out)
 }
 
+/// What an effect's `set` may put on `stored`: a member holding what was redacted, which a
+/// prompt may have shown it, stays as stored there, and the rest of it applies. A member
+/// without any is as it came, replacing what is stored.
+#[must_use]
+pub fn effect_without_redacted(stored: &Value, set: &Map<String, Value>) -> Map<String, Value> {
+    set.iter()
+        .filter_map(|(key, value)| {
+            let kept = without_redacted(value)?;
+            let merged = match stored.get(key) {
+                Some(held) if kept != *value => deep_over(held, &kept),
+                _ => kept,
+            };
+            Some((key.clone(), merged))
+        })
+        .collect()
+}
+
 /// `value` with what was redacted taken out at any depth: an object loses the
 /// member, and an array, which is replaced whole, goes altogether. `None` when
 /// nothing is left.
-fn without_redacted(value: &Value) -> Option<Value> {
+#[must_use]
+pub fn without_redacted(value: &Value) -> Option<Value> {
     match value {
         Value::String(text) if text == REDACTED => None,
         Value::Object(members) => {

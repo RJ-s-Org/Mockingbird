@@ -949,7 +949,7 @@ pub(crate) async fn prepare<'a>(
             plan,
             call,
             target.as_ref(),
-            &mut followed,
+            &followed,
             &mut related,
         )
         .await;
@@ -1395,14 +1395,18 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
+    let requested = mb_engine::effect_without_redacted(&held.data, &effect.set);
+    if requested.is_empty() && !effect.set.is_empty() {
+        return Err("it sets only what was redacted");
+    }
     if let Some((plan, call)) = own {
-        let set = write_memory::own_effect_members(rt, plan, call, &held, &effect.set);
+        let set = write_memory::own_effect_members(rt, plan, call, &held, &requested);
         if set.is_empty() {
             return Err("it sets no member an effect on this update's target may");
         }
         data.extend(set);
     } else {
-        data.extend(effect.set.clone());
+        data.extend(requested);
     }
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
@@ -4391,19 +4395,19 @@ mod tests {
         assert!(rt.credential_names().headers.is_empty());
         rt.set_data_plane_auth(DataPlaneAuth {
             mode: DataPlaneAuthMode::ApiKey,
-            header: "x-tenant-code".into(),
+            header: "x-tenant-pass".into(),
         });
         let mut headers = HeaderMap::new();
-        headers.insert("x-tenant-code", "k".parse().unwrap());
+        headers.insert("x-tenant-pass", "k".parse().unwrap());
         headers.insert("x-trace", "t".parse().unwrap());
         let forwarded = forwarded_headers(&rt, &headers);
-        assert!(!forwarded.contains_key("x-tenant-code"), "{forwarded:?}");
+        assert!(!forwarded.contains_key("x-tenant-pass"), "{forwarded:?}");
         assert!(forwarded.contains_key("x-trace"), "{forwarded:?}");
         assert!(public_query(&rt, &[("api_key".into(), "k".into())]).is_empty());
 
         rt.set_data_plane_auth(DataPlaneAuth::default());
         assert!(rt.credential_names().headers.is_empty());
-        assert!(forwarded_headers(&rt, &headers).contains_key("x-tenant-code"));
+        assert!(forwarded_headers(&rt, &headers).contains_key("x-tenant-pass"));
     }
 
     #[test]
