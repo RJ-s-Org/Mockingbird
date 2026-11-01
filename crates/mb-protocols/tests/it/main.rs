@@ -35,6 +35,7 @@ mod graphql_ws;
 mod grpc;
 mod http_media;
 mod http_rest;
+mod learned_identity;
 mod provider_policy;
 mod runtime;
 mod soap;

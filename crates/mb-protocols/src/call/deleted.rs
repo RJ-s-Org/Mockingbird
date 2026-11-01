@@ -98,7 +98,7 @@ pub(super) fn scope(op: &Operation, call: &OperationCall) -> Option<String> {
 /// The parent a resource of type `t` has from where `call` stands, by its read's
 /// route: the outer `None` when `call` does not say, as a mention from elsewhere.
 fn scope_of_type(rt: &MockRuntime, t: &str, call: &OperationCall) -> Option<Option<String>> {
-    let read = *rt.index().detail_reads.get(t)?;
+    let read = rt.index().by_id_read(t)?;
     let op = rt.bundle().operations.get(read)?;
     let Binding::Http { path, .. } = &op.binding else {
         return Some(None);
@@ -237,7 +237,10 @@ pub(super) async fn drop_from_list(
     let Some(items) = list_items(body) else {
         return;
     };
-    let field = item_identity(rt.bundle(), op, body);
+    let field = match state.learned_field(t) {
+        Some(learned) => learned.to_string(),
+        None => item_identity(rt.bundle(), op, body),
+    };
     let mut gone = Vec::new();
     for (at, item) in items.iter().enumerate() {
         if let Some(id) = item.get(&field).and_then(id_string)
