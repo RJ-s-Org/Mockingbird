@@ -117,6 +117,55 @@ paths:
         content: {application/json: {schema: {type: object, additionalProperties: true}}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+  /safes/{safe_id}:
+    get:
+      operationId: getSafe
+      parameters: [{name: safe_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Safe"}}}}
+  /charges:
+    post:
+      operationId: createCharge
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+  /tickets/{key}:
+    get:
+      operationId: getTicket
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+  /calls/{sid}:
+    get:
+      operationId: getCall
+      parameters: [{name: sid, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/CallRecord"}}}}
+  /users/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Me"}}}}
+    delete:
+      operationId: deleteUser
+      responses:
+        "204": {description: gone}
+  /users/{id}/roles/{role_id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: role_id, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: deleteUserRole
+      responses:
+        "204": {description: gone}
+  /status:
+    get:
+      operationId: getStatus
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
   /users/{id}/roles:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     get:
@@ -165,6 +214,28 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
+    Safe:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        password: {type: string}
+        api_key: {type: string}
+        key: {type: string}
+        link: {type: string}
+    Ticket:
+      type: object
+      required: [key, title]
+      properties:
+        key: {type: string}
+        title: {type: string}
+    CallRecord:
+      type: object
+      required: [sid, title]
+      properties:
+        sid: {type: string}
+        title: {type: string}
     Ack:
       type: object
       required: [ok]
@@ -815,34 +886,31 @@ async fn offline_looks_nothing_up() {
 
 // Writes on a list read's route.
 
-/// A write answering nothing reaches the list read of its own route, scrubbed, and
-/// the same route of another owner hears nothing. It is prompt context: the read is
-/// not forced, stored nothing changed, and a later read is told again.
+/// A write answering nothing reaches the list read of its own route, as what it asked
+/// of what the list's items declare, and the same route of another owner hears nothing.
+/// It is advisory: the read is not forced, and is told again later.
 #[tokio::test]
 async fn a_bodyless_write_is_told_to_reads_of_its_route() {
-    let h = world(vec![json!([]), json!([]), json!([]), json!([])]);
+    let h = world(vec![json!([]), json!([]), json!([])]);
     let (status, _) = h
         .call(
             "POST",
-            "/users/u-1/roles?session_code=hush-query&role=admin",
-            Some(json!({"roles": ["role-1"], "client_secret": "hush-body"})),
+            "/users/u-1/roles",
+            Some(json!({"id": "role-1", "name": "admin"})),
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = h.call("GET", "/users/u-1/roles", None).await;
     assert_eq!(status, StatusCode::OK);
     let prompt = h.prompt(h.calls() - 1);
-    let told = block(&prompt, "earlier_requests").unwrap();
+    let told = block(&prompt, "earlier_writes").unwrap();
     assert!(told.contains("postUserRoles"), "{prompt}");
     assert!(told.contains("role-1"), "{prompt}");
-    assert!(told.contains(r#""role":"admin""#), "{prompt}");
     assert!(told.contains("/users/{id}/roles"), "the template: {prompt}");
-    assert!(!prompt.contains("hush"), "{prompt}");
+    assert!(prompt.contains("may have changed"), "{prompt}");
+    assert!(!prompt.contains("must reflect"), "{prompt}");
+    assert!(block(&prompt, "earlier_requests").is_none(), "{prompt}");
     let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
-    assert!(
-        !kept.iter().any(|d| d.data.to_string().contains("hush")),
-        "{kept:?}"
-    );
     assert!(
         !kept.iter().any(|d| d.id.contains("u-1")),
         "a path's values are not a key: {kept:?}"
@@ -850,23 +918,18 @@ async fn a_bodyless_write_is_told_to_reads_of_its_route() {
 
     h.call("GET", "/users/u-2/roles", None).await;
     let other = h.prompt(h.calls() - 1);
-    assert!(block(&other, "earlier_requests").is_none(), "{other}");
+    assert!(block(&other, "earlier_writes").is_none(), "{other}");
 
     // A later write clears the cache, and the read is told of both.
-    h.call(
-        "POST",
-        "/users/u-1/roles",
-        Some(json!({"roles": ["role-2"]})),
-    )
-    .await;
+    h.call("POST", "/users/u-1/roles", Some(json!({"id": "role-2"})))
+        .await;
     h.call("GET", "/users/u-1/roles", None).await;
     let again = h.prompt(h.calls() - 1);
-    let told = block(&again, "earlier_requests").unwrap();
+    let told = block(&again, "earlier_writes").unwrap();
     assert!(
         told.contains("role-1") && told.contains("role-2"),
         "{again}"
     );
-
     assert_eq!(h.calls(), 3, "one for each read, as before");
 
     h.store.reset(&session()).await.unwrap();
@@ -879,6 +942,116 @@ async fn a_bodyless_write_is_told_to_reads_of_its_route() {
     );
 }
 
+/// A write's query is never kept, and of its body only what the list's items declare
+/// plainly: what the review found told, and each of a contract's own marks.
+#[tokio::test]
+async fn a_writes_secrets_are_not_told_to_its_route() {
+    let h = world(vec![json!([])]);
+    h.call(
+        "POST",
+        "/users/u-1/roles?key=hush-query&sig=hush-query&session_code=hush-query&role=hush-query",
+        Some(json!({
+            "name": "admin",
+            "pass": "hush-pass", "otp": "hush-otp", "key": "hush-key",
+            "code": "hush-code", "value": "hush-value",
+            "password": "hush-password", "client_secret": "hush-secret", "auth": "hush-auth",
+        })),
+    )
+    .await;
+    h.call("GET", "/users/u-1/roles", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    assert!(
+        block(&prompt, "earlier_writes").unwrap().contains("admin"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("hush"), "{prompt}");
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    assert!(!kept.is_empty());
+    assert!(
+        !kept.iter().any(|d| d.data.to_string().contains("hush")),
+        "{kept:?}"
+    );
+}
+
+/// A member the list's items declare, but as hidden or under a credential's name, or
+/// holding a credential by its shape, is not told.
+#[tokio::test]
+async fn a_declared_member_can_still_hide() {
+    let contract = WORLD.replace(
+        r#"    Role:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+"#,
+        r#"    Role:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        hidden: {type: string, writeOnly: true}
+        phrase: {type: string, format: password}
+        license_key: {type: string}
+        link: {type: string}
+"#,
+    );
+    assert!(contract.contains("phrase"));
+    let h = harness_with(contract.as_bytes(), vec![json!([])], |_| {});
+    h.call(
+        "POST",
+        "/users/u-1/roles",
+        Some(json!({
+            "name": "admin", "hidden": "hush-1", "phrase": "hush-2", "license_key": "hush-3",
+            "link": "https://ann:hush-4@example.com/x",
+        })),
+    )
+    .await;
+    h.call("GET", "/users/u-1/roles", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    assert!(
+        block(&prompt, "earlier_writes").unwrap().contains("admin"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("hush"), "{prompt}");
+}
+
+/// A deleted parent takes its routes' memory with it.
+#[tokio::test]
+async fn deleting_a_routes_parent_forgets_its_writes() {
+    let h = world(vec![json!([])]);
+    h.call("POST", "/users/u-1/roles", Some(json!({"id": "role-1"})))
+        .await;
+    h.call("POST", "/users/u-2/roles", Some(json!({"id": "role-2"})))
+        .await;
+    h.call("DELETE", "/users/u-1", None).await;
+    h.call("GET", "/users/u-1/roles", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    assert!(block(&prompt, "earlier_writes").is_none(), "{prompt}");
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    assert!(
+        kept.iter().any(|d| d.data.to_string().contains("role-2")),
+        "the other parent's stay: {kept:?}"
+    );
+}
+
+/// Deleting a child of the list forgets the writes that named it, and no others.
+#[tokio::test]
+async fn deleting_a_child_forgets_the_write_that_named_it() {
+    let h = world(vec![json!([])]);
+    h.call("POST", "/users/u-1/roles", Some(json!({"id": "role-1"})))
+        .await;
+    h.call("POST", "/users/u-1/roles", Some(json!({"id": "role-2"})))
+        .await;
+    h.call("DELETE", "/users/u-1/roles/role-1", None).await;
+    h.call("GET", "/users/u-1/roles", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    let told = block(&prompt, "earlier_writes").unwrap();
+    assert!(!told.contains("role-1"), "{prompt}");
+    assert!(told.contains("role-2"), "{prompt}");
+}
+
 /// A route's memory keeps the newest requests only.
 #[tokio::test]
 async fn a_routes_memory_is_capped() {
@@ -887,13 +1060,13 @@ async fn a_routes_memory_is_capped() {
         h.call(
             "POST",
             "/users/u-1/roles",
-            Some(json!({"roles": [format!("role-{n}")]})),
+            Some(json!({"id": format!("role-{n}")})),
         )
         .await;
     }
     h.call("GET", "/users/u-1/roles", None).await;
     let prompt = h.prompt(h.calls() - 1);
-    let told = block(&prompt, "earlier_requests").unwrap();
+    let told = block(&prompt, "earlier_writes").unwrap();
     assert_eq!(told.trim().lines().count(), 5, "{prompt}");
     assert!(
         !told.contains("role-2") && told.contains("role-7"),
@@ -901,51 +1074,35 @@ async fn a_routes_memory_is_capped() {
     );
 }
 
-/// Spotify's add answers only a snapshot id, its body or its query naming the tracks.
+/// Spotify's add answers only a snapshot id. The read is told a write happened: its
+/// `uris` are no member of a playlist item, so they stay out, as does its query.
 #[tokio::test]
-async fn spotifys_playlist_items_are_told_to_their_read() {
+async fn spotifys_add_is_told_to_its_read_without_its_uris() {
     const URI: &str = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
+    const ROUTE: &str = "/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items";
     let empty_page = json!({
-        "href": "https://api.spotify.com/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items",
+        "href": "https://api.spotify.com/v1/playlists/p1/items",
         "items": [], "limit": 20, "next": null, "offset": 0, "previous": null, "total": 0,
     });
     let h = harness_with(
         &contract("spotify/spotify.openapi.yaml"),
-        vec![
-            json!({"snapshot_id": "snap-1"}),
-            empty_page.clone(),
-            json!({"snapshot_id": "snap-2"}),
-            empty_page,
-        ],
+        vec![json!({"snapshot_id": "snap-1"}), empty_page],
         |_| {},
     );
     let posted = h
         .call(
             "POST",
-            "/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items",
+            &format!("{ROUTE}?uris={URI}"),
             Some(json!({"uris": [URI]})),
         )
         .await;
     assert_eq!(posted.0, StatusCode::CREATED, "{posted:?}");
-    h.call("GET", "/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items", None)
-        .await;
+    h.call("GET", ROUTE, None).await;
     let prompt = h.prompt(1);
-    assert!(
-        block(&prompt, "earlier_requests").unwrap().contains(URI),
-        "{prompt}"
-    );
-    h.call(
-        "POST",
-        &format!("/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items?uris={URI}"),
-        None,
-    )
-    .await;
-    h.call("GET", "/v1/playlists/3cEYpjA9oz9GiPac4AsH4n/items", None)
-        .await;
-    let prompt = h.prompt(3);
-    let told = block(&prompt, "earlier_requests").unwrap();
-    assert_eq!(told.matches(URI).count(), 2, "{prompt}");
-    assert_eq!(h.calls(), 4);
+    let told = block(&prompt, "earlier_writes").unwrap();
+    assert!(told.contains("add-items-to-playlist"), "{prompt}");
+    assert!(!told.contains(URI), "{prompt}");
+    assert_eq!(h.calls(), 2);
 }
 
 /// A create that stored its record has told a list read all it needs: the record is
@@ -957,7 +1114,7 @@ async fn a_write_that_stored_its_record_tells_no_route() {
         .await;
     h.call("GET", "/notes", None).await;
     let prompt = h.prompt(1);
-    assert!(block(&prompt, "earlier_requests").is_none(), "{prompt}");
+    assert!(block(&prompt, "earlier_writes").is_none(), "{prompt}");
     assert!(
         block(&prompt, "related_resources")
             .unwrap()
@@ -1222,4 +1379,177 @@ async fn a_typical_answer_costs_few_tokens() {
         added.div_ceil(4)
     );
     assert!(added.div_ceil(4) < 120, "{added}: {}", h.prompt(1));
+}
+
+// What the review of these found.
+
+/// A value that reads as a word names nothing, whatever a record is called; one with a
+/// digit or a separator can.
+#[tokio::test]
+async fn a_word_only_value_is_no_reference() {
+    let h = world(vec![json!({"ok": true})]);
+    h.hold("labels", "closed", json!({"id": "closed", "name": "x"}))
+        .await;
+    h.call("POST", "/pins", Some(json!({"title": "closed"})))
+        .await;
+    let prompt = h.prompt(0);
+    assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
+    assert!(block(&prompt, "shown_resources").is_none(), "{prompt}");
+
+    let h = world(vec![json!({"effects": [], "response": {"ok": true}})]);
+    h.hold("labels", "in-review", json!({"id": "in-review", "name": "x"}))
+        .await;
+    h.call("POST", "/pins", Some(json!({"title": "in-review"})))
+        .await;
+    assert!(block(&h.prompt(0), "shown_resources").is_some());
+}
+
+/// A record keyed by what would be a credential's name keeps it where it is the type's
+/// identity, under any member naming it, and loses it where it is not.
+#[tokio::test]
+async fn an_identity_named_key_or_sid_stays_visible() {
+    let h = world(vec![json!({"effects": [], "response": {"ok": true}})]);
+    h.hold("tickets", "PROJ-1", json!({"key": "PROJ-1", "title": "T"}))
+        .await;
+    h.hold("calls", "CA1234", json!({"sid": "CA1234", "title": "C"}))
+        .await;
+    h.hold(
+        "safes",
+        "safe01",
+        json!({"id": "safe01", "name": "S", "key": "hush-key"}),
+    )
+    .await;
+    h.call(
+        "POST",
+        "/pins",
+        Some(json!({"key": "PROJ-1", "other_sid": "CA1234", "on": "safe01"})),
+    )
+    .await;
+    let prompt = h.prompt(0);
+    let related = block(&prompt, "related_resources").unwrap();
+    assert!(related.contains(r#""key":"PROJ-1""#), "{prompt}");
+    assert!(related.contains(r#""sid":"CA1234""#), "{prompt}");
+    assert!(related.contains("safe01"), "{prompt}");
+    assert!(!related.contains("hush"), "{prompt}");
+}
+
+/// A record matched by value is scrubbed for the prompt, and only there: an effect on
+/// it goes on the stored copy, which keeps what the prompt did not show.
+#[tokio::test]
+async fn a_matched_record_is_scrubbed_and_its_effect_goes_on_the_stored_copy() {
+    let safe = json!({
+        "id": "safe01", "name": "Vault", "password": "hush-password", "api_key": "hush-key",
+        "link": "https://ann:hush-link@example.com/x",
+    });
+    let h = world(vec![json!({
+        "effects": [{"type": "safes", "id": "safe01", "set": {"name": "Moved"}}],
+        "response": {"ok": true},
+    })]);
+    h.hold("safes", "safe01", safe.clone()).await;
+    let (status, _) = h
+        .call("POST", "/charges", Some(json!({"title": "safe01"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let prompt = h.prompt(0);
+    assert!(
+        block(&prompt, "shown_resources")
+            .unwrap()
+            .contains(r#"{"type": "safes", "id": "safe01"}"#),
+        "{prompt}"
+    );
+    assert!(
+        block(&prompt, "related_resources").unwrap().contains("Vault"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("hush"), "{prompt}");
+    let mut moved = safe;
+    moved["name"] = json!("Moved");
+    assert_eq!(h.held("safes", "safe01").await, moved);
+}
+
+/// Every row of the review's table of what reached a prompt and the kept copy: under a
+/// name, and by the shape of a value under any name.
+#[tokio::test]
+async fn an_answers_secrets_stay_out_of_prompts_and_memory() {
+    let answer = json!({
+        "id": "user-1", "name": "kept-name",
+        "pass": "hush", "pwd": "hush", "passphrase": "hush", "jwt": "hush", "otp": "hush",
+        "key": "hush", "dsn": "hush", "connection_string": "hush", "hmac": "hush",
+        "signature": "hush", "license_key": "hush", "card_number": "hush", "mfa": "hush",
+        "recovery_codes": ["hush"], "sid": "hush", "keys": [{"value": "hush"}],
+        "access_token": "hush", "api_key": "hush", "refresh_token": "hush", "id_token": "hush",
+        "token": "hush", "apiKey": "hush", "clientSecret": "hush", "password": "hush",
+        "nested": {"bearer": "hush", "credentials": "hush"},
+        "pair": {"name": "Authorization", "value": "hush"},
+        "avatar": "https://x.example/a?token=hush",
+        "hook": "https://hooks.example.com/in?api_key=hush&v=1",
+        "store": "postgres://ann:hush@db.example.com/app",
+        "sign": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJodXNoIn0.hush",
+        "note": "Bearer hush",
+    });
+    for (method, route, request) in [
+        ("GET", "/me", None),
+        ("PUT", "/me", Some(json!({"pass": "hush", "key": "hush"}))),
+    ] {
+        let h = world(vec![answer.clone(), note("note-4711")]);
+        h.call(method, route, request).await;
+        h.call("POST", "/notes", Some(json!({"title": "A note"})))
+            .await;
+        let prompt = h.prompt(1);
+        let shown = block(&prompt, "earlier_answers").unwrap();
+        assert!(shown.contains("kept-name"), "{prompt}");
+        assert!(shown.contains("user-1"), "{prompt}");
+        assert!(!prompt.contains("hush"), "{prompt}");
+        assert!(!prompt.contains("eyJ"), "{prompt}");
+        let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+        assert!(!kept.is_empty());
+        assert!(
+            !kept.iter().any(|d| d.data.to_string().contains("hush")),
+            "{kept:?}"
+        );
+    }
+}
+
+/// A route is not told its own earlier answer, so a clock or a status stays free to move.
+#[tokio::test]
+async fn a_route_is_not_shown_its_own_answer() {
+    let h = world(vec![
+        json!({"up": "first-answer"}),
+        note("note-4711"),
+        json!({"up": "second-answer"}),
+    ]);
+    h.call("GET", "/status", None).await;
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    assert!(block(&h.prompt(1), "earlier_answers").is_some());
+    h.call("GET", "/status", None).await;
+    let prompt = h.prompt(2);
+    assert!(block(&prompt, "earlier_answers").is_none(), "{prompt}");
+}
+
+/// The preface says what was said, and that it may have changed.
+#[tokio::test]
+async fn earlier_answers_are_advisory() {
+    let h = world(vec![me(), note("note-4711")]);
+    h.call("GET", "/me", None).await;
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    let prompt = h.prompt(1);
+    assert!(prompt.contains("may have changed"), "{prompt}");
+    assert!(!prompt.contains("agrees with"), "{prompt}");
+}
+
+/// Deleting the record an answer is about forgets that answer, and no other.
+#[tokio::test]
+async fn deleting_a_record_forgets_the_answer_about_it() {
+    let h = world(vec![me(), json!({"id": "plan-1"}), note("note-4711")]);
+    h.call("GET", "/me", None).await;
+    h.call("GET", "/plan", None).await;
+    h.call("DELETE", "/users/user-1", None).await;
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    let prompt = h.prompt(h.calls() - 1);
+    let shown = block(&prompt, "earlier_answers").unwrap();
+    assert!(!shown.contains("user-1"), "{prompt}");
+    assert!(shown.contains("plan-1"), "{prompt}");
 }
