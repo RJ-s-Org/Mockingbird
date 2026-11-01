@@ -266,6 +266,36 @@ paths:
         content: {application/json: {schema: {type: object, additionalProperties: true}}}
       responses:
         "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Created"}}}}
+  /tickets/{ticket_id}:
+    parameters: [{name: ticket_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTicket
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+    patch:
+      operationId: patchTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "204": {description: patched}
+  /tickets/{ticket_id}/stamp:
+    parameters: [{name: ticket_id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: stampTicket
+      requestBody:
+        required: false
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "204": {description: stamped}
   /orgs/{org}/groups:
     post:
       operationId: createGroup
@@ -389,6 +419,7 @@ components:
       properties:
         id: {type: string}
         body: {type: string}
+        session_title: {type: string}
     Invoice:
       type: object
       required: [id, amount, status]
@@ -469,6 +500,13 @@ components:
       properties:
         id: {type: string}
         login: {type: string}
+    Ticket:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        status: {type: string}
+        colour: {type: string}
     Group:
       type: object
       required: [id, slug, organization]
@@ -493,6 +531,14 @@ components:
         client_secret: {type: string}
         api_key: {type: string}
         password: {type: string}
+        secret_key: {type: string}
+        password_hash: {type: string}
+        token_value: {type: string}
+        tokens: {type: string}
+        api_key_id: {type: string}
+        credentials:
+          type: object
+          properties: {user: {type: string}, pass: {type: string}}
         hidden: {type: string, writeOnly: true}
         pay:
           oneOf:
@@ -1945,39 +1991,154 @@ async fn a_member_naming_another_owner_is_not_told() {
     assert!(memory[0].data["own"].is_null(), "{memory:?}");
 }
 
-/// A member the read schema declares plainly is one the API returns: redacted only
-/// when its name ends in a credential. Undeclared, the name alone decides.
+const NAMED_SECRETS: [(&str, &str); 6] = [
+    ("secret_key", "gone-1"),
+    ("password_hash", "gone-2"),
+    ("token_value", "gone-3"),
+    ("tokens", "gone-4"),
+    ("api_key_id", "gone-5"),
+    ("access_token", "gone-6"),
+];
+
+/// In a record's own body, a member the read schema declares plainly is one the API
+/// returns: `session`, `auth` and `pin` inside a name say little, and a number under
+/// a token count says nothing. Any other credential word in the name still hides it.
 #[tokio::test]
-async fn a_declared_member_is_redacted_only_by_its_last_word() {
+async fn a_declared_member_of_an_own_body_is_hidden_by_a_credential_word() {
     let h = things(vec![]);
     hold(&h, "accounts", "a1", json!({"id": "a1"})).await;
-    h.call(
-        "POST",
-        "/accounts/a1/refresh",
-        Some(json!({
-            "session_title": "kept-1",
-            "auth_method": "kept-2",
-            "pin_id": "kept-3",
-            "tokenizer": "kept-4",
-            "secretary": "kept-5",
-            "sessions_count": 41,
-            "token_count": 42,
-            "password": "gone-1",
-            "client_secret": "gone-2",
-            "api_key": "gone-3",
-            "access_token": "gone-4",
-            "hidden": "gone-5",
-            "session_note": "gone-6",
-        })),
-    )
-    .await;
-    let kept = h.memory().await[0].data.to_string();
+    let mut body = json!({
+        "session_title": "kept-1",
+        "auth_method": "kept-2",
+        "pin_id": "kept-3",
+        "tokenizer": "kept-4",
+        "secretary": "kept-5",
+        "sessions_count": 41,
+        "token_count": 42,
+        "password": "gone-7",
+        "client_secret": "gone-8",
+        "api_key": "gone-9",
+        "hidden": "gone-10",
+        "session_note": "gone-11",
+        "extra": "kept-6",
+    });
+    for (name, value) in NAMED_SECRETS {
+        body[name] = json!(value);
+    }
+    h.call("PUT", "/accounts/a1", Some(body)).await;
+    let memory = h.memory().await;
+    let kept = memory[0].data.to_string();
     assert!(!kept.contains("gone-"), "{kept}");
     for value in [
-        "kept-1", "kept-2", "kept-3", "kept-4", "kept-5", ":41", ":42",
+        "kept-1", "kept-2", "kept-3", "kept-4", "kept-5", "kept-6", ":41", ":42",
     ] {
         assert!(kept.contains(value), "{value} in {kept}");
     }
+}
+
+/// An action's body is only told, so nothing the read schema declares relaxes it.
+#[tokio::test]
+async fn an_actions_body_gets_the_whole_predicate() {
+    let h = things(vec![json!({"id": "a1"})]);
+    hold(&h, "accounts", "a1", json!({"id": "a1"})).await;
+    let mut body = json!({
+        "credentials": {"user": "gone-7", "pass": "gone-8"},
+        "note": "kept",
+    });
+    for (name, value) in NAMED_SECRETS {
+        body[name] = json!(value);
+    }
+    h.call("POST", "/accounts/a1/refresh", Some(body)).await;
+    h.call("GET", "/accounts/a1", None).await;
+    let prompt = h.prompt(0);
+    let earlier = block(&prompt).unwrap();
+    assert!(!earlier.contains("gone-"), "{earlier}");
+    assert!(earlier.contains("kept"), "{earlier}");
+}
+
+/// A child's create tells its parent the same way, while keeping its own body as its
+/// own record's.
+#[tokio::test]
+async fn a_body_told_to_a_parent_gets_the_whole_predicate() {
+    let post = json!({"id": "po1", "body": "text", "status": "open"});
+    let h = things(vec![json!({"id": "c1", "body": "hi"}), post.clone()]);
+    hold(&h, "posts", "po1", post).await;
+    h.call(
+        "POST",
+        "/posts/po1/comments",
+        Some(json!({"body": "hi", "session_title": "gone-1"})),
+    )
+    .await;
+    h.call("GET", "/posts/po1", None).await;
+    let earlier = h.prompt(1);
+    assert!(!block(&earlier).unwrap().contains("gone-1"), "{earlier}");
+}
+
+/// With memory left, a fully applied update is the last write: what the block says
+/// of an older one cannot stand over it, even from a model obeying the block.
+#[tokio::test]
+async fn a_fully_applied_update_stands_over_an_older_create() {
+    let h = things(vec![
+        json!({"id": "t1"}),
+        json!({"id": "t1", "status": "draft"}),
+    ]);
+    h.call("POST", "/tickets", Some(json!({"status": "draft"})))
+        .await;
+    h.call("PATCH", "/tickets/t1", Some(json!({"status": "shipped"})))
+        .await;
+    let (_, source, read) = h.call("GET", "/tickets/t1", None).await;
+    assert_eq!(source, "llm", "the create is still to tell");
+    assert_eq!(read["status"], "shipped");
+    let stored = h
+        .store
+        .get(&session(), "tickets", "t1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["status"], "shipped");
+}
+
+/// As it does over an action told before it.
+#[tokio::test]
+async fn a_fully_applied_update_stands_over_an_older_action() {
+    let h = things(vec![json!({"id": "t1", "colour": "blue"})]);
+    hold(&h, "tickets", "t1", json!({"id": "t1", "colour": "red"})).await;
+    h.call("POST", "/tickets/t1/stamp", Some(json!({"colour": "blue"})))
+        .await;
+    h.call("PATCH", "/tickets/t1", Some(json!({"colour": "green"})))
+        .await;
+    let (_, _, read) = h.call("GET", "/tickets/t1", None).await;
+    assert_eq!(read["colour"], "green");
+    let stored = h
+        .store
+        .get(&session(), "tickets", "t1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data["colour"], "green");
+}
+
+/// A later action still ends it: the model has the last word on what that did.
+#[tokio::test]
+async fn an_action_after_a_fully_applied_update_ends_its_body() {
+    let h = things(vec![json!({"id": "t1", "colour": "stamped"})]);
+    hold(&h, "tickets", "t1", json!({"id": "t1", "colour": "red"})).await;
+    h.call("POST", "/tickets/t1/stamp", None).await;
+    h.call("PATCH", "/tickets/t1", Some(json!({"colour": "green"})))
+        .await;
+    h.call("POST", "/tickets/t1/stamp", None).await;
+    let (_, _, read) = h.call("GET", "/tickets/t1", None).await;
+    assert_eq!(read["colour"], "stamped");
+}
+
+/// With no memory left there is nothing to keep it for.
+#[tokio::test]
+async fn a_fully_applied_update_with_no_memory_keeps_none() {
+    let h = things(vec![]);
+    hold(&h, "tickets", "t1", json!({"id": "t1", "colour": "red"})).await;
+    h.call("PATCH", "/tickets/t1", Some(json!({"colour": "green"})))
+        .await;
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
 }
 
 /// The answer's branch of a union stands: no member of another is filled in.

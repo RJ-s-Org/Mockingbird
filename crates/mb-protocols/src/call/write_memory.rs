@@ -663,10 +663,10 @@ fn schema_hides(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
 
 /// `value` with every credential replaced, at any depth. The contract speaks first:
 /// what either schema marks `writeOnly` or `format: password`, and the mock's own
-/// credential names. A member the read schema (`read`) declares otherwise is one the
-/// API returns, so only a name ending in a credential word hides it. Otherwise, as the
-/// last resort, a name holding one does, or a `{"name": "Authorization", "value": ...}`
-/// pair.
+/// credential names. With `read`, for a record's own body, a member that schema declares
+/// otherwise is one the API returns, so only a credential word in its name hides it
+/// (see [`mb_mcm::credentials::hides_a_returned_member`]). Otherwise, as the last
+/// resort, a name holding one does, or a `{"name": "Authorization", "value": ...}` pair.
 fn redact_credentials(
     rt: &MockRuntime,
     value: &mut Value,
@@ -688,10 +688,11 @@ fn redact_credentials(
             for (key, member) in members.iter_mut() {
                 let inner = parts.iter().find_map(|p| p.get("properties")?.get(key));
                 let read_inner = returned.named(key);
-                let by_name = match read_inner {
-                    Some(_) => mb_mcm::credentials::ends_in_credential(key),
-                    None => is_credential_name(rt, key) && !is_count(key, member),
-                };
+                let by_name = !is_count(key, member)
+                    && match read_inner {
+                        Some(_) => mb_mcm::credentials::hides_a_returned_member(key),
+                        None => is_credential_name(rt, key),
+                    };
                 if schema_hides(bundle, inner)
                     || schema_hides(bundle, read_inner)
                     || is_own_credential(rt, key)
@@ -722,12 +723,15 @@ fn redact_credentials(
 
 /// A request body as it may be kept: credentials redacted, then the request
 /// log's own redaction, then the PII the engine scrubs from answers and effects.
-fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value) -> Value {
+/// Only a record's `own` body has its read schema to go by. One that is only told, an
+/// action's or a child's to its parent, gets every rule by name.
+fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value, own: bool) -> Value {
     let mut body = body.clone();
     let read = plan
         .op
         .resource_type
         .as_deref()
+        .filter(|_| own)
         .and_then(|t| read_schema(rt, t));
     redact_credentials(rt, &mut body, plan.op.input.body.as_ref(), read);
     if let Some(recorder) = &rt.recorder {
@@ -895,6 +899,15 @@ async fn clear_own(state: &mut StateAccess<'_>, session: &SessionKey, key: &str)
     }
 }
 
+/// Makes `own` what a memory's catch-up keeps, when there is still one to come.
+async fn set_own(state: &mut StateAccess<'_>, session: &SessionKey, key: &str, own: Option<Value>) {
+    let mut memory = read_memory(state, session, key).await;
+    if !memory.requests.is_empty() && memory.own != own {
+        memory.own = own;
+        write_memory(state, session, key, &memory).await;
+    }
+}
+
 /// Takes from a memory the requests `shown`, and nothing a write added since: this
 /// answer was not told of those, whose own body, if any, stands.
 async fn forget_shown(
@@ -959,8 +972,9 @@ struct Tell {
 ///
 /// Only an update's or a create's body is the resource's own, for a catch-up to
 /// keep, and only the latest write's: last write wins. A child's or an action's is
-/// told, and is about something else, and like an applied effect or a fully applied
-/// update it ends what an older body may overlay.
+/// told, and is about something else, and like an applied effect it ends what an
+/// older body may overlay. A fully applied update, with memory left, puts its own body
+/// in that place, or a model obeying what is told could go back on it.
 pub(super) async fn after_write(
     state: &mut StateAccess<'_>,
     rt: &MockRuntime,
@@ -985,7 +999,8 @@ pub(super) async fn after_write(
         .body
         .as_ref()
         .filter(|b| !b.is_null() && b.as_object().is_none_or(|o| !o.is_empty()));
-    let request = raw.map(|b| scrubbed(rt, plan, b));
+    let request = raw.map(|b| scrubbed(rt, plan, b, true));
+    let told = raw.map(|b| scrubbed(rt, plan, b, false));
     let answered = generated.body.is_some() && !transient_fallback(generated);
     let telling = request.is_some() || generated.body.is_none();
     // A name that may be another's, with nothing held, is nobody's to remember.
@@ -1061,7 +1076,7 @@ pub(super) async fn after_write(
             {
                 target = Some(Tell {
                     id: id.to_string(),
-                    body: request.clone(),
+                    body: told.clone(),
                     own: None,
                     stored: w.held.is_some(),
                     publish: true,
@@ -1079,9 +1094,17 @@ pub(super) async fn after_write(
         clear_own(state, session, &key).await;
     }
     if target.is_none()
-        && let Some(key) = w.earlier.key.as_deref().filter(|_| w.earlier.own.is_some())
+        && let Some(key) = w.earlier.key.as_deref()
     {
-        clear_own(state, session, key).await;
+        match effect {
+            // Handled with its merge.
+            Effect::Update if generated.body.is_none() => {}
+            // A short answer holding what it was asked is applied in full.
+            Effect::Update if !generated.new_record && !whole && generated.body.is_some() => {
+                set_own(state, session, key, own_body()).await;
+            }
+            _ => clear_own(state, session, key).await,
+        }
     }
     let tells_parent =
         effect == Effect::Create || (effect == Effect::Other && generated.body.is_none());
@@ -1123,7 +1146,7 @@ pub(super) async fn after_write(
     }
     if let Some(parent) = parent {
         let key = memory_key(&parent.resource_type, &parent.id, true);
-        remember(state, session, &key, &entry(request), None).await;
+        remember(state, session, &key, &entry(told), None).await;
     }
 }
 
@@ -1176,7 +1199,11 @@ async fn update_without_answer(
         (Some(request), Some(rest)) => Some(kept_part(request, rest)),
         _ => None,
     };
-    let kept = kept.filter(|kept| !carries(kept, &merged) && !only_redacted(kept))?;
+    let Some(kept) = kept.filter(|kept| !carries(kept, &merged) && !only_redacted(kept)) else {
+        // Applied in full, but what is still told is older: this has the last word.
+        set_own(state, session, &memory_key(t, &held.id, true), own).await;
+        return None;
+    };
     Some(Tell {
         id: acted_on?.to_string(),
         body: Some(kept),

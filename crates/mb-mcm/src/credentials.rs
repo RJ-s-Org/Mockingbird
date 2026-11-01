@@ -26,6 +26,10 @@ const ANYWHERE: [&str; 14] = [
 /// is not `shipping`.
 const WHOLE_WORD: [&str; 2] = ["auth", "pin"];
 
+/// Those of [`ANYWHERE`] that say little inside the name of a member an API returns:
+/// `session_title`.
+const WEAK: [&str; 1] = ["session"];
+
 /// Replaces `out` with `name` ASCII-lowercased without `_`, `-` and `.`.
 pub fn normalize_into(name: &str, out: &mut String) {
     out.clear();
@@ -65,25 +69,33 @@ pub fn is_credential_name(name: &str) -> bool {
     ANYWHERE.iter().any(|n| normalized.contains(n)) || WHOLE_WORD.iter().any(|w| has_word(name, w))
 }
 
-/// Whether `name` ends in a credential word: `client_secret`, `api_key` and
-/// `user_pin`, not `session_title`, `token_count`, `tokenizer` or `secretary`. For a
-/// member a contract says an API returns, where a credential word inside its name
-/// says little.
+/// Whether `name` hides a member a contract says an API returns, where a word alone
+/// says less. Credential words hide it as whole words of the name, plural too
+/// (`secret_key`, `password_hash`, `tokens`, not `secretary` or `tokenizer`), and
+/// compound key names wherever they appear (`api_key_id`). The weak words `session`,
+/// `auth` and `pin` hide it only as the name's last word: `user_pin`, not
+/// `session_title` or `pin_id`.
 #[must_use]
-pub fn ends_in_credential(name: &str) -> bool {
+pub fn hides_a_returned_member(name: &str) -> bool {
     let mut normalized = String::with_capacity(name.len());
     normalize_into(name, &mut normalized);
-    ANYWHERE.iter().any(|n| normalized.ends_with(n))
-        || WHOLE_WORD
+    let strong = ANYWHERE.iter().filter(|n| !WEAK.contains(n)).any(|n| {
+        has_word(name, n)
+            || has_word(name, &format!("{n}s"))
+            || (n.ends_with("key") && normalized.contains(n))
+    });
+    strong
+        || WEAK
             .iter()
+            .chain(&WHOLE_WORD)
             .any(|w| normalized.ends_with(w) && has_word(name, w))
 }
 
 /// Whether a number under `name`, once normalized, is a count and no credential:
-/// `max_tokens: 100`. A plural is not what a credential goes by.
+/// `max_tokens: 100`, `token_count: 5`.
 #[must_use]
 pub fn is_count_name(normalized: &str) -> bool {
-    normalized.ends_with("tokens")
+    normalized.ends_with("tokens") || normalized.ends_with("tokencount")
 }
 
 #[cfg(test)]
@@ -150,15 +162,25 @@ mod tests {
     }
 
     #[test]
-    fn what_a_name_ends_in() {
+    fn what_a_returned_member_is_hidden_by() {
         for name in [
             "password",
+            "passwordHash",
+            "password_hash",
             "client_secret",
+            "secret_key",
             "api_key",
+            "apiKey",
+            "api_key_id",
             "access_token",
+            "token_value",
+            "tokens",
+            "credentials",
             "user_pin",
+            "session",
+            "auth",
         ] {
-            assert!(ends_in_credential(name), "{name}");
+            assert!(hides_a_returned_member(name), "{name}");
         }
         for name in [
             "session_title",
@@ -167,17 +189,18 @@ mod tests {
             "pin_id",
             "tokenizer",
             "secretary",
-            "token_count",
             "spin",
         ] {
-            assert!(!ends_in_credential(name), "{name}");
+            assert!(!hides_a_returned_member(name), "{name}");
         }
     }
 
     #[test]
-    fn a_plural_tokens_name_is_a_count() {
+    fn a_token_count_is_a_count() {
         assert!(is_count_name("maxtokens"));
-        assert!(!is_count_name("tokencount"));
+        assert!(is_count_name("tokencount"));
+        assert!(is_count_name("prompttokencount"));
         assert!(!is_count_name("token"));
+        assert!(!is_count_name("accesstoken"));
     }
 }
