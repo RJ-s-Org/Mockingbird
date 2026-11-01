@@ -33,7 +33,7 @@
 //! ```
 #![warn(missing_debug_implementations, missing_docs)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -415,7 +415,7 @@ pub struct Engine {
     shapes: DashMap<ShapeKey, Option<Arc<budget::Shaped>>>,
     /// The member names of each (`<source digest>/<operation id>`, status)
     /// schema, which decide which requested words matter for its shape.
-    member_names: DashMap<(String, u16), Arc<HashSet<String>>>,
+    member_names: DashMap<(String, u16), Arc<MemberNames>>,
     /// Validators of schemas that are not an operation's own (a narrowed
     /// GraphQL selection, a joint answer, an event key, header or address
     /// parameter schema), keyed by (`<source digest>`, schema text); at most
@@ -444,7 +444,16 @@ struct Target<'a> {
 
 /// (`<source digest>/<operation id>`, status, narrowed schema digest,
 /// requested member names).
-type ShapeKey = (String, u16, Option<u64>, Vec<String>);
+type ShapeKey = (
+    String,
+    u16,
+    Option<u64>,
+    Vec<String>,
+    Option<budget::PageLimit>,
+);
+
+/// A schema's member names, by their stem (see [`budget::stem`]).
+type MemberNames = HashMap<String, Vec<String>>;
 
 /// Most validators [`Engine::schema_validator`] keeps.
 const SCHEMA_VALIDATORS_MAX: usize = 512;
@@ -1395,8 +1404,12 @@ impl Engine {
         let names = match (selection, self.member_names.get(&names_key)) {
             (None, Some(names)) => Arc::clone(&names),
             _ => {
-                let mut names = HashSet::new();
-                collect_member_names(doc(), &mut names);
+                let mut found = HashSet::new();
+                collect_member_names(doc(), &mut found);
+                let mut names = MemberNames::new();
+                for name in found {
+                    names.entry(budget::stem(&name)).or_default().push(name);
+                }
                 let names = Arc::new(names);
                 if selection.is_none() {
                     // Keyed by digest: re-uploads would otherwise pile up.
@@ -1408,18 +1421,20 @@ impl Engine {
                 names
             }
         };
-        let mut requested: Vec<String> = budget::requested_words(call)
-            .into_iter()
-            .filter(|w| names.contains(w))
+        let requested: std::collections::BTreeSet<&String> = budget::requested_words(call)
+            .iter()
+            .filter_map(|w| names.get(&budget::stem(w)))
+            .flatten()
             .collect();
-        requested.sort();
-        let key = (id, status, selection, requested);
+        let requested: Vec<String> = requested.into_iter().cloned().collect();
+        let limit = budget::requested_limit(op.input.query.as_ref(), doc, call);
+        let key = (id, status, selection, requested, limit);
         if let Some(hit) = self.shapes.get(&key) {
             return hit.clone();
         }
         let words: HashSet<String> = key.3.iter().cloned().collect();
         let shaped = tracing::info_span!("mb.shape")
-            .in_scope(|| budget::shape(doc(), &words, selected, self.config.output_budget))
+            .in_scope(|| budget::shape(doc(), &words, selected, self.config.output_budget, limit))
             .map(Arc::new);
         // Every key counts against the bound: narrowed schemas vary per
         // query, requested words per call, and digests per upload.

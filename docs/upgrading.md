@@ -45,6 +45,17 @@ No migration or configuration. With an LLM and `consistency: on`, on HTTP routes
 - **A 204 update with a valid body plus an undeclared member costs one extra LLM call** on the next read, as intended: the member cannot go in the stored copy, so the read is told of it. A remainder holding only redacted values, such as `password`, is not remembered and costs no call. A body that is only told, an action's or a child's to its parent, is redacted by every name rule, so `session_title` in an action's body shows as `[redacted]`.
 - **The path says whose a resource is**: a 204 update's member contradicting the owner in its path (`PUT /orgs/octo/teams/core {"organization":"acme"}`) is neither applied nor remembered.
 
+### The output budget keeps what a request asked for
+
+No migration or configuration. With `limits.output_budget_tokens` on, for a response whose estimated answer is over budget:
+
+- **More of an answer is the model's**: `type=track` now keeps `tracks`, and a page's items stay at the page size asked for while other members can go instead. What goes instead is required members of its items, which the faker fills.
+- **A page size counts in the estimate**: `limit=50` can shape an answer that fit at the default of about four items, and `limit=1` can leave one unshaped that did not.
+- **What counts as a page size**: an integer query parameter whose `maximum` is the `maxItems` of an array in the answer, and of that array. Otherwise, as a last resort, one whose name holds `limit`, `size`, `per_page`, `first` or `top` in any case or separator (`pageSize`, `$top`), which covers the array with the heaviest items in each object: an array of words, or a lighter list beside it, is capped as any other.
+- **Answers can be shorter**: shaping used to stop over budget when a member it left out held another it had counted. It now goes on until the estimate fits.
+- **Recorded prompts**: a snapshot taken before this release may not replay for such a call, as the schema sent differs.
+- **Rust API**: `budget::shape` takes the request's page size as a `budget::PageLimit`, as `budget::requested_limit` reads it from the query schema, the answer's schema and the call.
+
 ### Action routes act on their parent resource
 
 A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how that is read](import.md#how-a-post-under-a-resource-is-read)), such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:
