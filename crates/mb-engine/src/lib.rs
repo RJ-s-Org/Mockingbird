@@ -2159,11 +2159,6 @@ fn merged_member(root: &Value, schema: Option<&Value>, held: &Value, over: &Valu
 /// value the model drifted on, a faker filled or a budget capped goes, with no list of
 /// names or per-API rule. What the copy lacks comes from the answer at the top level.
 ///
-/// A request and its answer may wrap differently. A request's only key, if the response
-/// does not declare it, is a wrapper: `{ticket: {status}}` names `status`. And a request
-/// naming no member of the response names those of the one member that holds them all,
-/// when only one does: `{status}` names `ticket.status`.
-///
 /// Identity, what the path reads by and `readOnly` members never take the answer's
 /// value, nor does an owner: an answer that moves the resource leaves the copy as it
 /// was, and what it adds goes, unless the schema needs it. Each top-level member that fits
@@ -2176,34 +2171,7 @@ fn settled_update(
     request: Option<&Value>,
 ) -> Value {
     let root = validator.schema();
-    let request = unwrapped_request(validator, request);
-    let settled = match response_wrapper(validator, request) {
-        Some(wrapper) => {
-            let inner = schema_level(root, root, Some(wrapper), 0).1;
-            let Some(below) = answer.get(wrapper) else {
-                return overlay(validator, answer, Some(&target.data));
-            };
-            // A wrapped answer is stored as what it wraps.
-            let Some(held) = target.data.get(wrapper) else {
-                let member = settled_members(root, inner, below, &target.data, request, false);
-                let member = guard.keep_identity(member);
-                let member = if guard.keeps_owner(&member) {
-                    member
-                } else {
-                    target.data.clone()
-                };
-                let settled = Value::Object(Map::from_iter([(wrapper.to_string(), member)]));
-                return overlay(validator, answer, Some(&settled));
-            };
-            let member = settled_members(root, inner, below, held, request, false);
-            let mut settled = target.data.clone();
-            if let Value::Object(members) = &mut settled {
-                members.insert(wrapper.to_string(), member);
-            }
-            settled
-        }
-        None => settled_members(root, Some(root), &answer, &target.data, request, true),
-    };
+    let settled = settled_members(root, Some(root), &answer, &target.data, request, true);
     let settled = guard.keep_identity(settled);
     if !guard.keeps_owner(&settled) {
         return overlay(
@@ -2237,54 +2205,6 @@ fn without_other_owners(
     } else {
         answer
     }
-}
-
-/// What a request's only key holds, if that is an object and the response does not
-/// declare the key.
-fn unwrapped_request<'a>(
-    validator: &SchemaValidator,
-    request: Option<&'a Value>,
-) -> Option<&'a Value> {
-    let (Some(Value::Object(members)), Some(declared)) =
-        (request, validator.declared_property_names())
-    else {
-        return request;
-    };
-    match members.iter().next() {
-        Some((key, inner))
-            if members.len() == 1 && inner.is_object() && !declared.contains(key.as_str()) =>
-        {
-            Some(inner)
-        }
-        _ => request,
-    }
-}
-
-/// The one member of the response holding all a request names, when the request names
-/// none of the response's own.
-fn response_wrapper<'a>(
-    validator: &'a SchemaValidator,
-    request: Option<&Value>,
-) -> Option<&'a str> {
-    let Value::Object(members) = request? else {
-        return None;
-    };
-    let declared = validator.declared_property_names()?;
-    if members.is_empty() || members.keys().any(|k| declared.contains(k.as_str())) {
-        return None;
-    }
-    let root = validator.schema();
-    let mut holding = declared.iter().filter(|name| {
-        schema_level(root, root, Some(name.as_str()), 0)
-            .1
-            .is_some_and(|member| {
-                members
-                    .keys()
-                    .all(|k| schema_level(root, member, Some(k), 0).1.is_some())
-            })
-    });
-    let wrapper = holding.next()?;
-    holding.next().is_none().then_some(wrapper.as_str())
 }
 
 /// [`settled_update`] at one level, `request` being what the request says at this path.

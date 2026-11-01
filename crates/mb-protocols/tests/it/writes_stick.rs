@@ -193,6 +193,7 @@ components:
           properties:
             id: {type: string}
             name: {type: string}
+            email: {type: string}
             status: {type: string}
             login: {type: string}
             profile:
@@ -266,6 +267,7 @@ fn widget() -> Value {
         "owner": {
             "id": "u1",
             "name": "Dana",
+            "email": "d@x",
             "status": "vip",
             "login": "ana",
             "profile": {"bio": "real", "name": "Dana R"},
@@ -328,20 +330,6 @@ async fn an_unnamed_array_keeps_every_item() {
     }
 }
 
-/// An array the request named is replaced, by the request where it says, and by the
-/// model's answer where the request nests it elsewhere.
-#[tokio::test]
-async fn a_named_array_is_replaced() {
-    let lines = json!([{"sku": "z", "qty": 9}]);
-    let read = widget_after(json!({"lines": lines}), |_| {}).await;
-    assert_eq!(read["lines"], lines, "{read}");
-    let read = widget_after(json!({"order": {"lines": lines}}), |w| {
-        w["lines"] = lines.clone();
-    })
-    .await;
-    assert_eq!(read["lines"], lines, "{read}");
-}
-
 /// Defect 3: identity, `readOnly`, owner and untouched members do not drift.
 #[tokio::test]
 async fn what_a_request_leaves_alone_does_not_drift() {
@@ -359,11 +347,10 @@ async fn what_a_request_leaves_alone_does_not_drift() {
     assert_eq!(read, want);
 }
 
-/// A member the contract marks `readOnly` does not take the model's value even when
-/// its key is named elsewhere in the request.
+/// A member the contract marks `readOnly` does not take the model's value.
 #[tokio::test]
-async fn a_named_read_only_member_keeps_its_stored_value() {
-    let read = widget_after(json!({"audit": {"revision": 99}}), |w| {
+async fn a_read_only_member_does_not_take_the_answers_value() {
+    let read = widget_after(json!({"name": "after"}), |w| {
         w["revision"] = json!(99);
     })
     .await;
@@ -496,46 +483,197 @@ async fn an_array_named_at_another_path_stays() {
 }
 
 /// An array named at its own path takes the request's value, not the answer's, which a
-/// budget or a model could have cut, under a wrapper the response does not declare too.
+/// budget or a model could have cut.
 #[tokio::test]
 async fn a_named_array_takes_the_requests_value() {
     let lines = json!([
         {"sku": "x", "qty": 7}, {"sku": "y", "qty": 8}, {"sku": "z", "qty": 9}
     ]);
-    for request in [json!({"lines": lines}), json!({"order": {"lines": lines}})] {
-        let read = widget_after(request.clone(), |w| w["lines"] = json!([])).await;
-        assert_eq!(read["lines"], lines, "{request}: {read}");
+    let request = json!({"lines": lines});
+    let read = widget_after(request.clone(), |w| w["lines"] = json!([])).await;
+    assert_eq!(read["lines"], lines, "{read}");
 
-        let h = budgeted(
-            SETTLING.as_bytes(),
-            vec![
-                widget(),
-                json!({"id": "w1", "name": "before", "status": "open", "lines": [{"sku": "x", "qty": 7}]}),
-            ],
-            100,
-        );
+    let h = budgeted(
+        SETTLING.as_bytes(),
+        vec![
+            widget(),
+            json!({"id": "w1", "name": "before", "status": "open", "lines": [{"sku": "x", "qty": 7}]}),
+        ],
+        100,
+    );
+    h.call("GET", WIDGET, None).await;
+    let (status, _, updated) = h.call("PATCH", WIDGET, Some(request)).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["lines"], lines, "{updated}");
+}
+
+/// A request nested otherwise than its answer names nothing of it, as on main, whether
+/// the model drifted or a faker patched its answer.
+#[tokio::test]
+async fn a_request_nested_otherwise_names_nothing() {
+    for request in [
+        json!({"note": {"status": "closed"}}),
+        json!({"settings": {"status": "closed"}}),
+        json!({"ticket": {"status": "closed"}}),
+    ] {
+        let read = widget_after(request.clone(), |w| w["status"] = json!("closed")).await;
+        assert_eq!(read["status"], "open", "{request}: {read}");
+
+        let mut answer = widget();
+        answer["status"] = json!("stuck");
+        let h = harness_with(SETTLING.as_bytes(), vec![widget(), answer], |_| {});
         h.call("GET", WIDGET, None).await;
-        let (status, _, updated) = h.call("PATCH", WIDGET, Some(request.clone())).await;
-        assert_eq!(status, StatusCode::OK, "{updated}");
-        assert_eq!(updated["lines"], lines, "{request}: {updated}");
+        let (status, source, updated) = h.call("PATCH", WIDGET, Some(request.clone())).await;
+        assert_eq!(
+            (status, source.as_str()),
+            (StatusCode::OK, "patched"),
+            "{updated}"
+        );
+        assert_eq!(updated["status"], "open", "{request}: {updated}");
     }
 }
 
-/// A request's only key, undeclared by the response, is a wrapper: what it holds is
-/// matched from the top. With a second key it is not a wrapper, and names nothing.
+/// A key the response only declares inside a nested object does not name that object's
+/// member.
 #[tokio::test]
-async fn an_undeclared_wrapper_is_stripped_only_when_it_is_the_only_key() {
-    let read = widget_after(json!({"ticket": {"status": "closed"}}), |w| {
-        w["status"] = json!("closed");
-        w["name"] = json!("drifted");
+async fn a_key_only_a_nested_object_declares_names_nothing() {
+    let read = widget_after(json!({"email": "new@x"}), |w| {
+        w["owner"]["email"] = json!("FAKER");
     })
     .await;
-    assert_eq!(read["status"], "closed", "{read}");
-    assert_eq!(read["name"], "before", "{read}");
+    assert_eq!(read["owner"]["email"], "d@x", "{read}");
+    let read = widget_after(json!({"login": "m"}), |w| {
+        w["owner"]["login"] = json!("m");
+    })
+    .await;
+    assert_eq!(read["owner"]["login"], "ana", "{read}");
+}
 
-    let request = json!({"ticket": {"status": "closed"}, "note": "x"});
-    let read = widget_after(request, |w| w["status"] = json!("closed")).await;
-    assert_eq!(read["status"], "open", "{read}");
+/// Members whose value only happens to equal a path value, for effects on an update's
+/// own target, and one named for its parameter.
+const COINCIDENCES: &str = r##"
+openapi: 3.0.0
+info: {title: Coincidences, version: "1"}
+paths:
+  /things/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+    patch:
+      operationId: patchThing
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+  /boards/{board}/cards/{id}:
+    parameters:
+      - {name: board, in: path, required: true, schema: {type: string}}
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getCard
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Card"}}}}
+    patch:
+      operationId: patchCard
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Card"}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        version: {type: integer}
+        count: {type: integer}
+        assignee: {type: string}
+        status: {type: string}
+    Card:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        board: {type: string}
+        position: {type: integer}
+"##;
+
+/// What `set` leaves on what `uri` holds, an effect on the update's own target.
+async fn after_effect(uri: &str, t: &str, stored: Value, set: Value) -> Value {
+    let id = stored["id"].clone();
+    let h = harness_with(
+        COINCIDENCES.as_bytes(),
+        vec![
+            stored.clone(),
+            json!({"effects": [{"type": t, "id": id, "set": set}], "response": stored}),
+        ],
+        |_| {},
+    );
+    h.call("GET", uri, None).await;
+    let (status, _, updated) = h.call("PATCH", uri, Some(json!({"label": "x"}))).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (_, source, read) = h.call("GET", uri, None).await;
+    assert_eq!(source, "state", "{read}");
+    read
+}
+
+/// A member holding a path value by coincidence is no path member: its effect applies.
+#[tokio::test]
+async fn a_coincidence_with_a_path_value_does_not_stop_an_effect() {
+    for (uri, t, stored, member, value) in [
+        (
+            "/things/1",
+            "things",
+            json!({"id": "1", "version": 1}),
+            "version",
+            json!(2),
+        ),
+        (
+            "/things/12",
+            "things",
+            json!({"id": "12", "count": 12}),
+            "count",
+            json!(13),
+        ),
+        (
+            "/things/alice",
+            "things",
+            json!({"id": "alice", "assignee": "alice"}),
+            "assignee",
+            json!("bob"),
+        ),
+        (
+            "/things/open",
+            "things",
+            json!({"id": "open", "status": "open"}),
+            "status",
+            json!("closed"),
+        ),
+        (
+            "/boards/7/cards/w1",
+            "cards",
+            json!({"id": "w1", "position": 7}),
+            "position",
+            json!(8),
+        ),
+    ] {
+        let read = after_effect(uri, t, stored, json!({member: value})).await;
+        assert_eq!(read[member], value, "{uri}: {read}");
+    }
+}
+
+/// A member named for the parameter whose value it holds is a path member.
+#[tokio::test]
+async fn an_effect_does_not_change_a_member_named_for_its_parameter() {
+    let read = after_effect(
+        "/boards/7/cards/w1",
+        "cards",
+        json!({"id": "w1", "board": "7", "position": 1}),
+        json!({"board": "8"}),
+    )
+    .await;
+    assert_eq!(read["board"], "7", "{read}");
 }
 
 /// A resource whose every member the faker has a say in, for telling what the faker
@@ -973,20 +1111,6 @@ async fn a_request_null_on_a_non_nullable_member_keeps_it() {
     })
     .await;
     assert_eq!(read["meta"]["b"], "kept", "{read}");
-}
-
-/// A Zendesk-style request nests the update under a member the answer does not: the
-/// key the request names still says which of the answer's members to take.
-#[tokio::test]
-async fn a_request_nested_otherwise_names_the_answers_member() {
-    let read = widget_after(json!({"ticket": {"status": "closed"}}), |w| {
-        w["status"] = json!("closed");
-        w["name"] = json!("drifted");
-    })
-    .await;
-    assert_eq!(read["status"], "closed", "{read}");
-    assert_eq!(read["name"], "before", "{read}");
-    assert!(read.get("ticket").is_none(), "{read}");
 }
 
 /// HubSpot's nested `properties`: what the request names at depth takes the model's

@@ -1351,23 +1351,13 @@ pub(super) fn own_effect_members(
     let index = rt.index();
     let paths = index.path_fields(t);
     let body = call.body.as_ref().and_then(Value::as_object);
-    let wrapped = body
-        .filter(|members| members.len() == 1)
-        .and_then(|members| {
-            let (key, inner) = members.iter().next()?;
-            (declaring && declared(key).is_none()).then_some(inner.as_object()?)
-        });
-    let named = |key: &str| {
-        wrapped
-            .or(body)
-            .is_some_and(|members| members.contains_key(key))
-    };
-    // What holds a value of this call's path, whatever the parameter is called.
+    let named = |key: &str| body.is_some_and(|members| members.contains_key(key));
+    // A member named for a parameter of this call's path, and holding its value.
     let shows_path = |key: &str| {
         held.data.get(key).and_then(id_string).is_some_and(|value| {
-            call.path_params
-                .values()
-                .any(|param| id_string(param).as_ref() == Some(&value))
+            call.path_params.iter().any(|(param, given)| {
+                named_for_param(key, param) && id_string(given).as_ref() == Some(&value)
+            })
         })
     };
     set.iter()
@@ -1382,6 +1372,15 @@ pub(super) fn own_effect_members(
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+/// Whether `member` is named for path parameter `param`: as [`tied_to_param`] has it,
+/// or as its last word, as `slug` is for `team_slug`.
+fn named_for_param(member: &str, param: &str) -> bool {
+    let last = param
+        .rfind(|c: char| c == '_' || c == '-' || c.is_uppercase())
+        .map_or(param, |at| param[at..].trim_start_matches(['_', '-']));
+    tied_to_param(member, param) || member.eq_ignore_ascii_case(last)
 }
 
 /// Whether `answer` is still `held`'s owner's: by the check a later read makes (see
