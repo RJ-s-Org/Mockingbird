@@ -2282,3 +2282,115 @@ fn the_auth0_example_reads_one_user_on_every_route() {
     // An access token is no record.
     assert_eq!(op(&bundle, "oauth_token").identity, None);
 }
+
+/// `contract` with `/{resource}/{param}` over `member`, and a create.
+fn by_path(resource: &str, param: &str, member: &str) -> Bundle {
+    let contract = format!(
+        r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /{resource}:
+    post:
+      operationId: create
+      responses: {{"201": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/R"}}}}}}}}}}
+  /{resource}/{{{param}}}:
+    parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/R"}}}}}}}}}}
+components:
+  schemas:
+    R:
+      type: object
+      properties:
+        {member}: {{type: string}}
+        name: {{type: string}}
+"##
+    );
+    compile(contract.as_bytes()).unwrap()
+}
+
+#[test]
+fn the_type_name_rule_needs_a_parameter_that_says_it_is_an_id() {
+    for param in ["id", "userId", "user_id", "_id"] {
+        let bundle = by_path("users", param, "user_id");
+        let read = op(&bundle, "read").identity.as_ref();
+        assert_eq!(read.map(|i| i.field.as_str()), Some("user_id"), "{param}");
+        let create = op(&bundle, "create").identity.as_ref();
+        assert_eq!(create.map(|i| i.field.as_str()), Some("user_id"), "{param}");
+    }
+    // A handle is not the key `user_id` holds, on the read or for what a create stores.
+    let bundle = by_path("users", "handle", "user_id");
+    assert_eq!(op(&bundle, "read").identity, None);
+    assert_eq!(op(&bundle, "create").identity, None);
+}
+
+#[test]
+fn the_type_name_rule_reads_plurals_as_the_budget_does() {
+    for (resource, member) in [
+        ("categories", "category_id"),
+        ("categories", "categoryId"),
+        ("addresses", "address_id"),
+        ("users", "userId"),
+    ] {
+        let bundle = by_path(resource, "id", member);
+        let read = op(&bundle, "read").identity.as_ref();
+        assert_eq!(read.map(|i| i.field.as_str()), Some(member), "{resource}");
+    }
+    // Another type's key is not this one's.
+    assert_eq!(
+        op(&by_path("users", "id", "order_id"), "read").identity,
+        None
+    );
+}
+
+/// `/search` listing `arrays`, and two types read by path.
+fn search_over(arrays: &str) -> Bundle {
+    let contract = format!(
+        r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /search:
+    get:
+      operationId: search
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{{arrays}}}}}}}}}}}}}
+  /tickets/{{id}}:
+    parameters: [{{name: id, in: path, required: true, schema: {{type: string}}}}]
+    get:
+      operationId: getTicket
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Ticket"}}}}}}}}}}
+components:
+  schemas:
+    Ticket: {{type: object, properties: {{id: {{type: string}}, subject: {{type: string}}}}}}
+    Hit: {{type: object, properties: {{id: {{type: string}}, label: {{type: string}}}}}}
+"##
+    );
+    compile(contract.as_bytes()).unwrap()
+}
+
+#[test]
+fn a_lookup_is_retyped_only_if_every_listed_array_holds_the_type() {
+    let tickets = r##"tickets: {type: array, items: {$ref: "#/components/schemas/Ticket"}}"##;
+    let hits = r##"users: {type: array, items: {$ref: "#/components/schemas/Hit"}}"##;
+    let type_of = |arrays: &str| {
+        let bundle = search_over(arrays);
+        op(&bundle, "search").resource_type.clone()
+    };
+    assert_eq!(type_of(tickets).as_deref(), Some("tickets"));
+    let both = format!(
+        "{tickets}, also: {{type: array, items: {{$ref: \"#/components/schemas/Ticket\"}}}}"
+    );
+    assert_eq!(type_of(&both).as_deref(), Some("tickets"));
+    // Strings are no records, and say nothing of the type.
+    let words = format!("{tickets}, tags: {{type: array, items: {{type: string}}}}");
+    assert_eq!(type_of(&words).as_deref(), Some("tickets"));
+    // Another shape beside it, or items that could be anything, stays as it was.
+    assert_eq!(
+        type_of(&format!("{hits}, {tickets}")).as_deref(),
+        Some("search")
+    );
+    let opaque = format!("{tickets}, other: {{type: array, items: {{type: object}}}}");
+    assert_eq!(type_of(&opaque).as_deref(), Some("search"));
+}
