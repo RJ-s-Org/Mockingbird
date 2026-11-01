@@ -168,6 +168,7 @@ async fn generate(
                     forced_status: None,
                     scenario: part.scenario.as_ref(),
                     response_schema: part.schema.as_deref(),
+                    earlier_requests: &[],
                 },
             }),
             None => unknown.push(part.key.clone()),

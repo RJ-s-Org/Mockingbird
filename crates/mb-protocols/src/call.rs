@@ -28,6 +28,8 @@ use crate::{
     MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
 };
 
+mod write_memory;
+
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
 const LATENCY_HEADER: &str = "x-mockingbird-latency";
@@ -670,7 +672,7 @@ pub(crate) async fn generate_pending(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
-    pending: Pending<'_>,
+    mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
     let ctx = GenerationContext {
@@ -679,8 +681,31 @@ pub(crate) async fn generate_pending(
         forced_status: plan.forced_status,
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
+        earlier_requests: &pending.earlier.shown,
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    // The LLM failed a read that only generated to catch up: what is stored
+    // still answers, as the faker must not invent a change. Nothing was stored
+    // or marked, so the next read tries again.
+    if generated.source == Source::Fallback
+        && let Some(stored) = pending.earlier.stored_answer.take()
+    {
+        tracing::warn!(
+            mock = %rt.name,
+            operation = %plan.op.id,
+            reason = generated.fallback_reason.as_deref().unwrap_or_default(),
+            "read could not catch up with earlier requests; answered from state"
+        );
+        pending
+            .state
+            .touch(&plan.session)
+            .instrument(state_span())
+            .await;
+        return Ok(GeneratedResponse {
+            usage: generated.usage,
+            ..*stored
+        });
+    }
     Ok(complete(rt, plan, call, pending, generated).await)
 }
 
@@ -702,6 +727,8 @@ pub(crate) struct Pending<'a> {
     /// The cache epoch before any state was read, and the answer's key,
     /// when the answer is cached.
     cache: Option<(CacheEpoch, String)>,
+    /// The writes the target does not show yet.
+    earlier: write_memory::Earlier,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -724,6 +751,14 @@ pub(crate) async fn prepare<'a>(
         read_context(&mut state, session, op, target_id.as_deref(), call)
             .instrument(state_span())
             .await;
+    let target = match target {
+        Some(hit) => Some(hit),
+        None => {
+            write_memory::silent_write_target(&mut state, plan, call, target_id.as_deref())
+                .instrument(state_span())
+                .await
+        }
+    };
     // Found by another field (an issue's `number`): writes go to its id.
     if let Some(found) = &target {
         target_id = Some(found.id.clone());
@@ -768,6 +803,16 @@ pub(crate) async fn prepare<'a>(
             && rt.own_reads().holds(session, stored))
     });
 
+    let mut earlier = write_memory::recall(
+        &mut state,
+        plan,
+        call,
+        target_id.as_deref().filter(|_| !foreign_key),
+        target.is_some(),
+    )
+    .instrument(state_span())
+    .await;
+
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
@@ -775,8 +820,11 @@ pub(crate) async fn prepare<'a>(
             .engine
             .serve_stored(&rt.bundle, op, &stored.data, response_schema)
     {
-        state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(served);
+        if !earlier.forces(rt, plan, call) {
+            state.touch(session).instrument(state_span()).await;
+            return Prepared::Answered(served);
+        }
+        earlier.stored_answer = Some(Box::new(served));
     }
 
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -854,6 +902,7 @@ pub(crate) async fn prepare<'a>(
         related,
         foreign_key,
         cache: since.zip(key),
+        earlier,
     })
 }
 
@@ -870,10 +919,13 @@ pub(crate) async fn complete(
     let Pending {
         mut state,
         mut target_id,
+        target,
         foreign_key,
         cache,
+        earlier,
         ..
     } = pending;
+    let acted_on = target_id.clone();
     let op = plan.op;
     let session = &plan.session;
     let resource_type = op.resource_type.as_deref();
@@ -909,7 +961,10 @@ pub(crate) async fn complete(
                 && rt.consistency
                 && target_id.is_none()
                 && !transient_fallback(&generated);
-            if (!is_query || seeding) && !unstored {
+            if (!is_query || seeding)
+                && !unstored
+                && !write_memory::keeps_stored(rt, plan, &generated, target.is_some())
+            {
                 let origin = if is_query {
                     WriteOrigin::Seeded
                 } else {
@@ -955,16 +1010,28 @@ pub(crate) async fn complete(
             && (200..300).contains(&generated.status)
             && !matches!(op.binding, Binding::Graphql { .. })
         {
-            seed_own_read(
-                &mut state,
-                session,
-                rt,
-                op,
-                call,
-                target_id.as_deref(),
-                &generated,
-            )
-            .await;
+            if is_query && !earlier.shown.is_empty() {
+                write_memory::settle_read(
+                    &mut state,
+                    plan,
+                    call,
+                    (target_id.as_deref(), target.as_ref()),
+                    &earlier,
+                    &mut generated,
+                )
+                .await;
+            } else {
+                seed_own_read(
+                    &mut state,
+                    session,
+                    rt,
+                    op,
+                    call,
+                    target_id.as_deref(),
+                    &generated,
+                )
+                .await;
+            }
         }
         // An operation with no resource type is stateless, GraphQL stores the
         // objects of its answers under their own types, and a delete's answer
@@ -1000,6 +1067,22 @@ pub(crate) async fn complete(
                 .increment(generated.dropped_effects as u64);
             }
         }
+        // After the effects: one on the resource means it shows the write.
+        write_memory::after_write(
+            &mut state,
+            rt,
+            plan,
+            &write_memory::Written {
+                call,
+                generated: &generated,
+                acted_on: acted_on.as_deref(),
+                held: target.is_some(),
+                foreign_key,
+                unstored,
+                earlier: &earlier,
+            },
+        )
+        .await;
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -1041,9 +1124,11 @@ pub(crate) async fn complete(
 
     // Seeded first, then cached: a later list never clears a cached one.
     // A fallback is cached too: a schema the LLM cannot answer in time
-    // would otherwise make every identical repeat wait as long again.
+    // would otherwise make every identical repeat wait as long again. Not one
+    // of a read still owing earlier requests, which is to try again.
     if let (Some(response_cache), Some((since, key))) = (rt.state.response_cache(), cache)
         && (200..300).contains(&generated.status)
+        && (earlier.shown.is_empty() || !transient_fallback(&generated))
     {
         response_cache.put_if_current(
             session,
@@ -3635,11 +3720,12 @@ async fn follow(
         }
         seen.push(reference.clone());
         let (types, id) = reference;
-        for t in types {
+        for t in types.iter().filter(|t| *t != mb_state::INTERNAL_TYPE) {
+            let t = t.as_str();
             if target.is_some_and(|r| r.resource_type == t && r.id == id) {
                 break;
             }
-            if let Some(hit) = state.get(session, &t, &id).await {
+            if let Some(hit) = state.get(session, t, &id).await {
                 let is_target =
                     target.is_some_and(|r| r.resource_type == hit.resource_type && r.id == hit.id);
                 if !is_target && !holds(out, &hit) {

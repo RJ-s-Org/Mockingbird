@@ -187,6 +187,13 @@ impl StoreRecorder {
 }
 
 impl RequestRecorder for StoreRecorder {
+    /// The redaction the writer applies to a record's bodies, with the same
+    /// live settings.
+    fn redact(&self, value: &mut Value) {
+        let settings = self.settings.load();
+        redact_normalized(value, &settings.redact_fields, &mut String::new());
+    }
+
     /// Queues the record for the writer. The only work done here is a
     /// cheap bound: a request body whose raw size is known to exceed
     /// [`MAX_RECORDED_BODY_BYTES`] is replaced by `{"truncated": true,
@@ -585,6 +592,32 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// What is kept beyond the log is redacted as the log is, with its live
+    /// settings.
+    #[tokio::test]
+    async fn redact_uses_the_live_settings() {
+        let store: Arc<dyn ControlStore> = Arc::new(
+            SqliteControlStore::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let recorder = StoreRecorder::new(store, 10, vec!["token".to_string()]);
+        let mut body = json!({"access_token": "a", "nested": {"note": "b"}});
+        recorder.redact(&mut body);
+        assert_eq!(
+            body,
+            json!({"access_token": REDACTED, "nested": {"note": "b"}})
+        );
+
+        recorder.set_settings(10, vec!["note".to_string()]);
+        let mut body = json!({"access_token": "a", "nested": {"note": "b"}});
+        recorder.redact(&mut body);
+        assert_eq!(
+            body,
+            json!({"access_token": "a", "nested": {"note": REDACTED}})
+        );
+    }
 
     /// A JSON body of `items` objects (about 120 bytes each), some keys
     /// redacted.

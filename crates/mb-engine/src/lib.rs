@@ -141,6 +141,9 @@ pub struct GenerationContext<'a> {
     /// (in the prompt, for validation and by the faker): the fields a
     /// GraphQL selection set asks for. Self-contained (no `$ref`).
     pub response_schema: Option<&'a Value>,
+    /// Successful writes the target does not show yet, oldest first: what the
+    /// answer must reflect. Scrubbed by whoever kept them.
+    pub earlier_requests: &'a [Value],
 }
 
 /// Where a response or item came from.
@@ -1863,8 +1866,13 @@ fn reflect(
     let Some(body) = response.body.take() else {
         return response;
     };
+    // An answer told of later writes is ahead of the stored copy, so that copy
+    // only fills what it left out. A faker's knows of none, and takes the copy.
+    let from_llm = !matches!(response.source, Source::Fallback);
+    let ahead = from_llm && !ctx.earlier_requests.is_empty();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
+            Some(target) if ahead => fill_omitted(validator, body, target),
             Some(target) => overlay_target(validator, target, body),
             None => body,
         },
@@ -1877,9 +1885,8 @@ fn reflect(
                 response.new_record = true;
                 overlaid
             } else {
-                let from_llm = !matches!(response.source, Source::Fallback);
                 let body = match ctx.target {
-                    Some(target) if op.is_action() && from_llm => {
+                    Some(target) if (op.is_action() && from_llm) || ahead => {
                         fill_omitted(validator, body, target)
                     }
                     target => overlay(validator, body, target.map(|t| &t.data)),
