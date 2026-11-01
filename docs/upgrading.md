@@ -30,6 +30,17 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Write memory
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes ([what it does](concepts.md#sessions-and-state)):
+
+- **Reads can make an extra LLM call** after a write that answered little, where they answered `state` before. One call catches up however many writes are waiting; a failing catch-up tries twice, each up to two calls, then stops until a later write. `consistency: off` and `--offline` make none.
+- **A `GET` can publish an upsert**: the catch-up replaces the stored copy, so `on_state_change` triggers, subscriptions and change feeds can fire on a read. A remembered 204 also publishes a change at write time, with the copy as it stood, where it published none.
+- **A 204 update merges** the members its read's schema declares into the stored copy, instead of replacing the copy with the request. An update naming its target by a field its reads go by (a key) now finds it, instead of storing a second resource under that key.
+- **Recorded prompts**: a snapshot or recording taken before this release may not replay after a write, as the read now generates with an `<earlier_requests>` block. Reads with no remembered request send the same prompt as before, to the byte.
+- **Rolling upgrades**: documents of the reserved type `__mockingbird.earlier_requests` are kept in the session's state. A node of an older release exports and counts them as resources, and a fixture exported through one may hold them; newer nodes drop them when seeding. Export sessions from upgraded nodes.
+- **Rust API**: `GenerationContext` gains a public field, `earlier_requests`, which breaks code constructing it in full; add `..Default::default()`. `Engine::scrub` is public. `RequestRecorder` gains a defaulted `redact`, which an implementor keeping request bodies should provide, or only the built-in credential and PII scrubbing applies.
+
 ### Action routes act on their parent resource
 
 A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how that is read](import.md#how-a-post-under-a-resource-is-read)), such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:

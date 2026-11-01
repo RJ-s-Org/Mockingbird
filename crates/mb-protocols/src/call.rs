@@ -681,12 +681,15 @@ pub(crate) async fn generate_pending(
         forced_status: plan.forced_status,
         scenario: plan.scenario.map(|s| &s.spec),
         response_schema,
-        earlier_requests: &pending.earlier.shown,
+        earlier_requests: &pending.earlier.told,
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
+    if generated.source == Source::Fallback {
+        write_memory::failed_attempt(&mut pending.state, plan, &mut pending.earlier).await;
+    }
     // The LLM failed a read that only generated to catch up: what is stored
     // still answers, as the faker must not invent a change. Nothing was stored
-    // or marked, so the next read tries again.
+    // or marked, so the next read tries again, up to the cap.
     if generated.source == Source::Fallback
         && let Some(stored) = pending.earlier.stored_answer.take()
     {
@@ -701,10 +704,17 @@ pub(crate) async fn generate_pending(
             .touch(&plan.session)
             .instrument(state_span())
             .await;
-        return Ok(GeneratedResponse {
+        let mut answer = GeneratedResponse {
             usage: generated.usage,
             ..*stored
-        });
+        };
+        write_memory::note_not_caught_up(
+            &mut answer,
+            plan,
+            pending.target.as_ref(),
+            &pending.earlier,
+        );
+        return Ok(answer);
     }
     Ok(complete(rt, plan, call, pending, generated).await)
 }
@@ -803,28 +813,32 @@ pub(crate) async fn prepare<'a>(
             && rt.own_reads().holds(session, stored))
     });
 
-    let mut earlier = write_memory::recall(
-        &mut state,
-        plan,
-        call,
-        target_id.as_deref().filter(|_| !foreign_key),
-        target.is_some(),
-    )
-    .instrument(state_span())
-    .await;
-
+    // Whether a stored answer stands depends on what is remembered; otherwise
+    // what is remembered waits until the cache has had its say.
+    let mut recalled = None;
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
-        && let Some(served) = rt
-            .engine
-            .serve_stored(&rt.bundle, op, &stored.data, response_schema)
+        && let Some(mut served) =
+            rt.engine
+                .serve_stored(&rt.bundle, op, &stored.data, response_schema)
     {
+        let mut earlier = write_memory::recall(
+            &mut state,
+            plan,
+            call,
+            target_id.as_deref().filter(|_| !foreign_key),
+            true,
+        )
+        .instrument(state_span())
+        .await;
         if !earlier.forces(rt, plan, call) {
+            write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
             state.touch(session).instrument(state_span()).await;
             return Prepared::Answered(served);
         }
         earlier.stored_answer = Some(Box::new(served));
+        recalled = Some(earlier);
     }
 
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -867,6 +881,21 @@ pub(crate) async fn prepare<'a>(
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(served);
     }
+
+    let earlier = match recalled {
+        Some(earlier) => earlier,
+        None => {
+            write_memory::recall(
+                &mut state,
+                plan,
+                call,
+                target_id.as_deref().filter(|_| !foreign_key),
+                target.is_some(),
+            )
+            .instrument(state_span())
+            .await
+        }
+    };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
     async {
@@ -922,7 +951,7 @@ pub(crate) async fn complete(
         target,
         foreign_key,
         cache,
-        earlier,
+        mut earlier,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1005,7 +1034,10 @@ pub(crate) async fn complete(
         if rt.consistency
             && plain(plan)
             && mb_engine::seed::request_seed(call).is_none()
-            && call.query.is_empty()
+            // A catch-up's answer has the whole resource's schema, whatever the
+            // query asked: it settles as a plain read does.
+            && (call.query.is_empty()
+                || (is_query && !earlier.shown.is_empty() && target.is_some()))
             && !transient_fallback(&generated)
             && (200..300).contains(&generated.status)
             && !matches!(op.binding, Binding::Graphql { .. })
@@ -1016,7 +1048,7 @@ pub(crate) async fn complete(
                     plan,
                     call,
                     (target_id.as_deref(), target.as_ref()),
-                    &earlier,
+                    &mut earlier,
                     &mut generated,
                 )
                 .await;
@@ -1076,7 +1108,7 @@ pub(crate) async fn complete(
                 call,
                 generated: &generated,
                 acted_on: acted_on.as_deref(),
-                held: target.is_some(),
+                held: target.as_ref(),
                 foreign_key,
                 unstored,
                 earlier: &earlier,
@@ -1128,7 +1160,7 @@ pub(crate) async fn complete(
     // of a read still owing earlier requests, which is to try again.
     if let (Some(response_cache), Some((since, key))) = (rt.state.response_cache(), cache)
         && (200..300).contains(&generated.status)
-        && (earlier.shown.is_empty() || !transient_fallback(&generated))
+        && (earlier.shown.is_empty() || earlier.capped() || !transient_fallback(&generated))
     {
         response_cache.put_if_current(
             session,

@@ -1,20 +1,36 @@
 //! What a 2xx write did not say, kept for the next generation of its resource.
 //!
 //! A create answering `{id, key}` or an action answering 204 leaves a stored
-//! copy that does not hold what the request asked. Its request is remembered for
-//! the resource it targets and for the parent its path names, under a reserved
-//! type of the state store ([`mb_state::INTERNAL_TYPE`]), so Redis, SQL and
-//! memory all keep it, sessions, TTLs and resets clear it, and it is no resource
-//! (not exported, counted, seeded or on a change feed). The next generation for
-//! that resource is shown the requests; a read, which could otherwise answer from
-//! state and never see them, must generate. Its validated answer replaces the
-//! stored copy and the memory goes, so a write costs one extra LLM call at most.
+//! copy that does not hold what the request asked. A 204 update's members that the
+//! read's schema declares go into the copy at once; what could not be applied is
+//! remembered for the resource the write targets, and for the parent its path names
+//! when the write is a create or an action answering nothing, under a reserved type
+//! of the state store ([`mb_state::INTERNAL_TYPE`]). So Redis, SQL and memory all
+//! keep it, sessions, TTLs and resets clear it, and it is no resource (not exported,
+//! counted or seeded, and on no change feed). A remembered write publishes a change
+//! of the resource, for replicas, feeds and triggers.
+//!
+//! The next generation for that resource is shown the requests; a read, which could
+//! otherwise answer from state and never see them, must generate. Its validated
+//! answer replaces the stored copy and the memory goes.
+//!
+//! The cost: one catch-up succeeds per batch of remembered writes, and writes
+//! landing between attempts make more. A failing catch-up tries [`MAX_ATTEMPTS`]
+//! times, each up to two LLM calls (the answer and its repair), then state answers
+//! until a later write adds a request and resets the count. Two reads at once can
+//! each generate.
+//!
+//! The document is read, changed and written back, as an effect's merge is, so two
+//! writes to one resource at the same moment can lose one request, and a count can
+//! miss a failure. No lock: what is lost is a hint to a mock's LLM.
 //!
 //! HTTP-bound operations only: GraphQL stores what its answers hold under their
 //! own types, and gRPC and SOAP are not remembered for, so their prompts and their
 //! reads are as they were.
 
+use mb_engine::REDACTED;
 use mb_state::INTERNAL_TYPE;
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -27,14 +43,21 @@ const MAX_BODY_BYTES: usize = 4 * 1024;
 const MAX_PREVIEWED_BYTES: usize = 64 * 1024;
 /// Largest memory of one resource, as serialized JSON. Oldest requests go first.
 const MAX_BYTES: usize = 16 * 1024;
-/// What a credential-named key's value is replaced with: the request log's text.
-const REDACTED: &str = "[redacted]";
+/// Catch-ups that may fail before a read stops trying, until a later write.
+const MAX_ATTEMPTS: u64 = 2;
 
 /// What a generation was told of one resource's remembered requests.
 #[derive(Default)]
 pub(super) struct Earlier {
-    /// The requests shown, oldest first.
+    /// Where they are kept.
+    key: Option<String>,
+    /// The requests as kept, oldest first, each telling apart a repeat.
     pub(super) shown: Vec<Value>,
+    /// The requests as a prompt shows them: with no time, or no prompt would
+    /// ever repeat, and order says what time would.
+    pub(super) told: Vec<Value>,
+    /// Catch-ups that failed since the last write.
+    attempts: u64,
     /// What the store holds that the read could serve, were it not behind them:
     /// it answers when the LLM fails, as a faker must not invent a change.
     pub(super) stored_answer: Option<Box<GeneratedResponse>>,
@@ -46,8 +69,8 @@ pub(super) struct Written<'a> {
     pub(super) generated: &'a GeneratedResponse,
     /// The id the call named or found, before any new record of its own.
     pub(super) acted_on: Option<&'a str>,
-    /// Whether the session held that resource for this caller.
-    pub(super) held: bool,
+    /// What the session held for this caller under that id.
+    pub(super) held: Option<&'a StoredResource>,
     /// The key holds another owner's resource.
     pub(super) foreign_key: bool,
     /// A new record that could not be stored.
@@ -55,8 +78,16 @@ pub(super) struct Written<'a> {
     pub(super) earlier: &'a Earlier,
 }
 
-fn memory_id(resource_type: &str, id: &str) -> String {
-    format!("{resource_type}/{id}")
+/// Where a resource's memory is kept. By its stored id when there is one; a value
+/// no resource holds only came from a path, and may be the secret
+/// (`POST /tokens/{token}/revoke`), so it goes by a hash.
+fn memory_key(resource_type: &str, id: &str, stored: bool) -> String {
+    if stored {
+        return format!("{resource_type}/{id}");
+    }
+    let digest = Sha256::digest(id.as_bytes());
+    let hash: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{resource_type}/#{hash}")
 }
 
 /// Whether this call may use the memory at all: with no LLM there is nothing to
@@ -92,24 +123,74 @@ pub(super) async fn recall(
     if !held && guarded(rt, plan.op, call).is_some() {
         return Earlier::default();
     }
+    let key = memory_key(t, id, held);
+    let (shown, attempts) = read_memory(state, &plan.session, &key).await;
+    let told = shown
+        .iter()
+        .map(|request| {
+            let mut told = request.clone();
+            if let Value::Object(members) = &mut told {
+                members.remove("at");
+            }
+            told
+        })
+        .collect();
     Earlier {
-        shown: requests_of(state, &plan.session, t, id).await,
+        key: Some(key),
+        shown,
+        told,
+        attempts,
         stored_answer: None,
     }
 }
 
-async fn requests_of(
+/// The requests a memory holds, and its failed catch-ups.
+async fn read_memory(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
-    resource_type: &str,
-    id: &str,
-) -> Vec<Value> {
-    let found = state
-        .get(session, INTERNAL_TYPE, &memory_id(resource_type, id))
+    key: &str,
+) -> (Vec<Value>, u64) {
+    let Some(doc) = state.get(session, INTERNAL_TYPE, key).await else {
+        return (Vec::new(), 0);
+    };
+    let requests = doc.data.get("requests").and_then(Value::as_array).cloned();
+    let attempts = doc.data.get("attempts").and_then(Value::as_u64);
+    (requests.unwrap_or_default(), attempts.unwrap_or(0))
+}
+
+async fn write_memory(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    key: &str,
+    requests: &[Value],
+    attempts: u64,
+) {
+    state
+        .upsert(
+            session,
+            StoredResource {
+                resource_type: INTERNAL_TYPE.to_string(),
+                id: key.to_string(),
+                data: serde_json::json!({ "requests": requests, "attempts": attempts }),
+            },
+        )
         .await;
-    found
-        .and_then(|doc| doc.data.get("requests")?.as_array().cloned())
-        .unwrap_or_default()
+}
+
+/// The schema of what `t`'s read by path answers, else its list items or
+/// singleton read (see [`entity_fits`]).
+fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
+    let index = rt.index();
+    match index.detail_reads.get(t) {
+        Some(i) => rt
+            .bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref(),
+        None => index.other_shapes.get(t).map(|(_, schema)| schema),
+    }
 }
 
 /// Whether `op`'s success answer is what its resource type's read by path
@@ -148,11 +229,87 @@ impl Earlier {
         call: &OperationCall,
     ) -> bool {
         !self.shown.is_empty()
+            && !self.capped()
             && matches!(plan.op.kind, OperationKind::Query)
             && plain(plan)
             && mb_engine::seed::request_seed(call).is_none()
             && reads_the_resource(rt, plan.op)
     }
+
+    /// Whether catching up has failed as often as it may.
+    pub(super) fn capped(&self) -> bool {
+        self.attempts >= MAX_ATTEMPTS
+    }
+}
+
+/// Counts a read's failed catch-up in its memory, logging the last there will be.
+pub(super) async fn failed_attempt(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    earlier: &mut Earlier,
+) {
+    if earlier.shown.is_empty()
+        || !matches!(plan.op.kind, OperationKind::Query)
+        || !plain(plan)
+        || earlier.capped()
+    {
+        return;
+    }
+    let Some(key) = earlier.key.clone() else {
+        return;
+    };
+    let (requests, attempts) = read_memory(state, &plan.session, &key).await;
+    let attempts = attempts + 1;
+    earlier.attempts = attempts;
+    write_memory(state, &plan.session, &key, &requests, attempts).await;
+    if attempts >= MAX_ATTEMPTS {
+        tracing::warn!(
+            mock = %state.rt.name,
+            operation = %plan.op.id,
+            attempts,
+            "gave up catching up with earlier requests until a later write"
+        );
+    }
+}
+
+/// Says in the request record that `answer` is behind requests it was not able
+/// to catch up with, as an outcome with nothing set.
+pub(super) fn note_not_caught_up(
+    answer: &mut GeneratedResponse,
+    plan: &CallPlan<'_>,
+    held: Option<&StoredResource>,
+    earlier: &Earlier,
+) {
+    let (false, Some(held)) = (earlier.shown.is_empty(), held) else {
+        return;
+    };
+    if !earlier.capped() && earlier.attempts == 0 {
+        return;
+    }
+    let reason = if earlier.capped() {
+        format!(
+            "behind {} earlier requests: gave up after {MAX_ATTEMPTS} attempts, until a later write",
+            earlier.shown.len()
+        )
+    } else {
+        format!(
+            "behind {} earlier requests: the catch-up failed, and a later read tries again",
+            earlier.shown.len()
+        )
+    };
+    answer.effect_outcomes.push(EffectOutcome {
+        effect: ResourceEffect {
+            resource_type: plan
+                .op
+                .resource_type
+                .clone()
+                .unwrap_or_else(|| held.resource_type.clone()),
+            id: held.id.clone(),
+            set: Map::new(),
+        },
+        rejected: Some(reason),
+        merged: None,
+    });
 }
 
 /// What a write with no answer of its own acts on, when its route does not say
@@ -195,10 +352,10 @@ pub(super) async fn silent_write_target(
     by_path_fields(state, &plan.session, t, &fields, id, owner.as_ref()).await
 }
 
-/// Whether a write leaves the stored copy alone: an update answering nothing,
-/// whose request is remembered instead. Storing that request in the copy's place
-/// would lose what it did not repeat, identity included; the read that catches up
-/// is shown both. Offline there is no such read, and the request still replaces it.
+/// Whether a write leaves the stored copy to [`after_write`]: an update answering
+/// nothing, which merges what it can. Storing the request in the copy's place would
+/// lose what it did not repeat, identity included. Offline, and with consistency
+/// off, the request still replaces it.
 pub(super) fn keeps_stored(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -210,20 +367,177 @@ pub(super) fn keeps_stored(
         && plan.op.kind == OperationKind::Command(Effect::Update)
 }
 
-/// `value` with every credential-named key's value replaced, at any depth, as
-/// [`is_sensitive`] decides for headers.
-fn redact_credentials(value: &mut Value) {
-    match value {
-        Value::Object(members) => {
-            for (key, member) in members.iter_mut() {
-                if is_sensitive(key) {
-                    *member = Value::from(REDACTED);
-                } else {
-                    redact_credentials(member);
+/// `request` on `stored`, member by member at any depth, for the members `schema`
+/// declares; the merged value, and what is left of `request`.
+fn merge_declared(
+    bundle: &mb_mcm::Bundle,
+    schema: Option<&Value>,
+    stored: &Value,
+    request: &Value,
+) -> (Value, Option<Value>) {
+    let (Value::Object(held), Value::Object(fields)) = (stored, request) else {
+        return (stored.clone(), Some(request.clone()));
+    };
+    let (parts, _) = schema_parts(bundle, schema);
+    let mut merged = held.clone();
+    let mut rest = Map::new();
+    for (key, value) in fields {
+        let Some(inner) = parts.iter().find_map(|p| p.get("properties")?.get(key)) else {
+            rest.insert(key.clone(), value.clone());
+            continue;
+        };
+        match held.get(key) {
+            Some(below) if below.is_object() && value.is_object() => {
+                let (member, left) = merge_declared(bundle, Some(inner), below, value);
+                merged.insert(key.clone(), member);
+                if let Some(left) = left {
+                    rest.insert(key.clone(), left);
+                }
+            }
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    (
+        Value::Object(merged),
+        (!rest.is_empty()).then_some(Value::Object(rest)),
+    )
+}
+
+/// A 204 update's `request` on stored `held`, as far as its read's schema declares
+/// it and the result still validates (each top-level member on its own, when not
+/// all together); the merged copy, and what could not be applied.
+fn apply_update(
+    rt: &MockRuntime,
+    held: &StoredResource,
+    request: &Value,
+) -> (Value, Option<Value>) {
+    let t = held.resource_type.as_str();
+    let schema = read_schema(rt, t);
+    let (merged, rest) = merge_declared(rt.bundle(), schema, &held.data, request);
+    if entity_fits(rt, t, &merged) {
+        return (merged, rest);
+    }
+    let (Value::Object(fields), Value::Object(whole)) = (request, &merged) else {
+        return (held.data.clone(), Some(request.clone()));
+    };
+    let mut kept = held.data.clone();
+    let mut left: Map<String, Value> = rest
+        .and_then(|r| r.as_object().cloned())
+        .unwrap_or_default();
+    for key in fields.keys() {
+        let Some(member) = whole.get(key) else {
+            continue;
+        };
+        let Value::Object(members) = &mut kept else {
+            break;
+        };
+        let previous = members.insert(key.clone(), member.clone());
+        if entity_fits(rt, t, &kept) {
+            continue;
+        }
+        if let Value::Object(members) = &mut kept {
+            match previous {
+                Some(previous) => {
+                    members.insert(key.clone(), previous);
+                }
+                None => {
+                    members.remove(key);
                 }
             }
         }
-        Value::Array(items) => items.iter_mut().for_each(redact_credentials),
+        if let Some(value) = fields.get(key) {
+            left.insert(key.clone(), value.clone());
+        }
+    }
+    (kept, (!left.is_empty()).then_some(Value::Object(left)))
+}
+
+/// More names of a credential in a body than a header would use, as whole words:
+/// `auth`, not `author`. `private_key`, in any casing, reads as these two.
+const CREDENTIAL_WORDS: [&str; 4] = ["auth", "credential", "credentials", "passwd"];
+
+/// The lowercase words of a member's name: `privateKey`, `private-key` and
+/// `PRIVATE_KEY` are `private`, `key`.
+fn name_words(name: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut lower_before = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            lower_before = false;
+            words.push(String::new());
+            continue;
+        }
+        if words.is_empty() || (c.is_uppercase() && lower_before) {
+            words.push(String::new());
+        }
+        lower_before = c.is_lowercase();
+        if let Some(word) = words.last_mut() {
+            word.extend(c.to_lowercase());
+        }
+    }
+    words.retain(|w| !w.is_empty());
+    words
+}
+
+/// Whether a member named `name` holds a credential: as [`is_sensitive`] decides for
+/// headers, one of the mock's own credential names, or [`CREDENTIAL_WORDS`].
+fn is_credential_name(rt: &MockRuntime, name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let own = rt.credential_names();
+    if is_sensitive(name) || own.headers.contains(&lower) || own.query.contains(name) {
+        return true;
+    }
+    let words = name_words(name);
+    words.iter().any(|w| CREDENTIAL_WORDS.contains(&w.as_str()))
+        || words.windows(2).any(|w| w[0] == "private" && w[1] == "key")
+}
+
+/// Whether `value` under `name` is a count, not a credential: `max_tokens: 100`.
+fn is_count(name: &str, value: &Value) -> bool {
+    value.is_number() && name.to_ascii_lowercase().ends_with("tokens")
+}
+
+/// Whether `schema` says its value is not to be shown again.
+fn schema_hides(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
+    schema_parts(bundle, schema).0.iter().any(|p| {
+        p.get("writeOnly").and_then(Value::as_bool) == Some(true)
+            || p.get("format").and_then(Value::as_str) == Some("password")
+    })
+}
+
+/// `value` with every credential replaced, at any depth: a member named as one, a
+/// `{"name": "Authorization", "value": ...}` pair, or what its schema, `schema`,
+/// marks `writeOnly` or `format: password`.
+fn redact_credentials(rt: &MockRuntime, value: &mut Value, schema: Option<&Value>) {
+    let bundle = rt.bundle();
+    let (parts, _) = schema_parts(bundle, schema);
+    match value {
+        Value::Object(members) => {
+            let named_pair = ["name", "key", "header"]
+                .iter()
+                .find_map(|n| members.get(*n)?.as_str())
+                .is_some_and(|name| is_credential_name(rt, name));
+            if named_pair && let Some(paired) = members.get_mut("value") {
+                *paired = Value::from(REDACTED);
+            }
+            for (key, member) in members.iter_mut() {
+                let inner = parts.iter().find_map(|p| p.get("properties")?.get(key));
+                let named = is_credential_name(rt, key) && !is_count(key, member);
+                if named || schema_hides(bundle, inner) {
+                    *member = Value::from(REDACTED);
+                } else {
+                    redact_credentials(rt, member, inner);
+                }
+            }
+        }
+        Value::Array(items) => {
+            let inner = parts.iter().find_map(|p| p.get("items"));
+            for item in items {
+                redact_credentials(rt, item, inner);
+            }
+        }
         _ => {}
     }
 }
@@ -232,7 +546,7 @@ fn redact_credentials(value: &mut Value) {
 /// log's own redaction, then the PII the engine scrubs from answers and effects.
 fn scrubbed(rt: &MockRuntime, plan: &CallPlan<'_>, body: &Value) -> Value {
     let mut body = body.clone();
-    redact_credentials(&mut body);
+    redact_credentials(rt, &mut body, plan.op.input.body.as_ref());
     if let Some(recorder) = &rt.recorder {
         recorder.redact(&mut body);
     }
@@ -375,62 +689,41 @@ async fn parent_of(
     None
 }
 
-/// Adds `entry` to what `resource_type`'s `id` remembers, within the caps.
-async fn remember(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    resource_type: &str,
-    id: &str,
-    entry: &Value,
-) {
-    let mut requests = requests_of(state, session, resource_type, id).await;
+/// Adds `entry` to a memory, within the caps. A new request is worth trying for,
+/// so the count of failed catch-ups starts over.
+async fn remember(state: &mut StateAccess<'_>, session: &SessionKey, key: &str, entry: &Value) {
+    let (mut requests, _) = read_memory(state, session, key).await;
     requests.push(entry.clone());
     let excess = requests.len().saturating_sub(MAX_REMEMBERED);
     requests.drain(..excess);
-    let doc = |requests: &[Value]| serde_json::json!({ "requests": requests });
-    while requests.len() > 1 && doc(&requests).to_string().len() > MAX_BYTES {
+    let size = |requests: &[Value]| {
+        serde_json::json!({ "requests": requests })
+            .to_string()
+            .len()
+    };
+    while requests.len() > 1 && size(&requests) > MAX_BYTES {
         requests.remove(0);
     }
-    state
-        .upsert(
-            session,
-            StoredResource {
-                resource_type: INTERNAL_TYPE.to_string(),
-                id: memory_id(resource_type, id),
-                data: doc(&requests),
-            },
-        )
-        .await;
+    write_memory(state, session, key, &requests, 0).await;
 }
 
-/// Takes from `id`'s memory the requests `shown`, and nothing a write added
-/// since: this answer was not told of those.
+/// Takes from a memory the requests `shown`, and nothing a write added since: this
+/// answer was not told of those.
 async fn forget_shown(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
-    resource_type: &str,
-    id: &str,
+    key: &str,
     shown: &[Value],
 ) {
-    let requests = requests_of(state, session, resource_type, id).await;
+    let (requests, _) = read_memory(state, session, key).await;
     let left: Vec<Value> = requests
         .into_iter()
         .filter(|r| !shown.contains(r))
         .collect();
-    let key = memory_id(resource_type, id);
     if left.is_empty() {
-        state.delete(session, INTERNAL_TYPE, &key).await;
+        state.delete(session, INTERNAL_TYPE, key).await;
     } else {
-        state
-            .upsert(
-                session,
-                StoredResource {
-                    resource_type: INTERNAL_TYPE.to_string(),
-                    id: key,
-                    data: serde_json::json!({ "requests": left }),
-                },
-            )
-            .await;
+        write_memory(state, session, key, &left, 0).await;
     }
 }
 
@@ -441,24 +734,46 @@ fn effect_applied(generated: &GeneratedResponse, resource_type: &str, id: &str) 
     })
 }
 
-/// After a 2xx write: remembers its request for the resource it targets, and for
-/// the parent its path names when that differs, unless that resource already
-/// shows it. The target is told when the answer said little or nothing:
+/// Stores `resource` as it is, for the change it publishes: a remembered write is a
+/// change of it, though what is stored only shows that at the catch-up.
+async fn publish_change(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    resource: StoredResource,
+) {
+    state.upsert(session, resource).await;
+}
+
+/// What a write leaves to tell its target, if anything.
+enum Told {
+    Nothing,
+    /// The request as it is.
+    Request,
+    /// Only this much of it could not be applied.
+    Rest(Value),
+}
+
+/// After a 2xx write: applies what a 204 update can, and remembers its request for
+/// the resource it targets, unless that resource already shows it:
 ///
 /// - a create, when its answer is shorter than its read and does not hold what
 ///   the request said (see [`carries`]). One answering the read's own schema was
 ///   written with the request in front of it, as a regeneration would be, and
 ///   what that schema has no member for no read could show;
-/// - an update, only when no answer replaced the target: a body-less answer, or
-///   a faker's standing in for the LLM. One that did replace it was told what was
-///   remembered, which is now done;
+/// - an update answering its read's schema replaced the target and was told what
+///   was remembered, which is now done. A shorter answer, or a faker's standing in
+///   for the LLM, is taken as a create's. One answering nothing merges the members
+///   the read declares and is remembered for the rest (see [`apply_update`]);
 /// - any other action, unless an effect of its answer changed the target.
 ///
 /// A write with a response body and no request body said what it did and asked
 /// nothing that could be lost, and the LLM shown its target listed no change, so
-/// it is not remembered for the target. The parent is different: an answer about
-/// a new child says nothing to it, so a create is remembered for its parent even
-/// with no body, the path being all there is (`POST /captures/{id}/refund`).
+/// it is not remembered for the target.
+///
+/// The parent is told of a create, even with no body, the path being all there is
+/// (`POST /captures/{id}/refund`), and of an action answering nothing: an answer
+/// about a child says nothing to it. An update or a delete of a child does not
+/// tell it, or every nested write would cost it a regeneration.
 pub(super) async fn after_write(
     state: &mut StateAccess<'_>,
     rt: &MockRuntime,
@@ -478,49 +793,65 @@ pub(super) async fn after_write(
         return;
     }
     let generated = w.generated;
-    let request = w
+    let raw = w
         .call
         .body
         .as_ref()
-        .filter(|b| !b.is_null() && b.as_object().is_none_or(|o| !o.is_empty()))
-        .map(|b| scrubbed(rt, plan, b));
+        .filter(|b| !b.is_null() && b.as_object().is_none_or(|o| !o.is_empty()));
+    let request = raw.map(|b| scrubbed(rt, plan, b));
     let answered = generated.body.is_some() && !transient_fallback(generated);
     let telling = request.is_some() || generated.body.is_none();
     // A name that may be another's, with nothing held, is nobody's to remember.
     let acted_on = w
         .acted_on
-        .filter(|_| w.held || guarded(rt, op, w.call).is_none());
-    let mut target: Option<String> = None;
+        .filter(|_| w.held.is_some() || guarded(rt, op, w.call).is_none());
+    let whole = answered && is_read_schema(rt, op, op.output_for_status(generated.status));
+    // The answer holds what the request said, as what the write stored.
+    let carried = |stored: Option<&Value>| match (&request, stored) {
+        (Some(request), Some(stored)) => {
+            (answered || generated.body.is_none()) && carries(request, stored)
+        }
+        _ => false,
+    };
+    // (id, told, is the id a stored one, does a change remain to be published)
+    let mut target: Option<(String, Told, bool, bool)> = None;
     match effect {
         Effect::Create => {
             // A body-less answer stores the request, which then holds itself.
             let stored = generated.body.as_ref().or(request.as_ref());
-            let whole = answered && is_read_schema(rt, op, op.output_for_status(generated.status));
-            let carried = match (&request, stored) {
-                (Some(request), Some(stored)) => {
-                    (answered || generated.body.is_none()) && carries(request, stored)
-                }
-                _ => false,
-            };
-            if telling && !whole && !carried {
-                target = stored.and_then(|stored| created_id(op, stored));
+            if telling && !whole && !carried(stored) {
+                target = stored
+                    .and_then(|stored| created_id(op, stored))
+                    .map(|id| (id, Told::Request, true, false));
             }
         }
         Effect::Update if generated.new_record => {}
-        Effect::Update => {
-            if answered {
-                if let Some(id) = acted_on.filter(|_| !w.earlier.shown.is_empty()) {
-                    forget_shown(state, session, t, id, &w.earlier.shown).await;
-                }
-            } else if telling {
-                target = acted_on.map(str::to_string);
+        Effect::Update if whole => {
+            if let Some(key) = w
+                .earlier
+                .key
+                .as_deref()
+                .filter(|_| !w.earlier.shown.is_empty())
+            {
+                forget_shown(state, session, key, &w.earlier.shown).await;
             }
+        }
+        Effect::Update if generated.body.is_some() => {
+            if telling
+                && !carried(generated.body.as_ref())
+                && let Some(id) = acted_on
+            {
+                target = Some((id.to_string(), Told::Request, true, false));
+            }
+        }
+        Effect::Update => {
+            target =
+                update_without_answer(state, rt, session, w, raw, request.as_ref(), acted_on).await;
         }
         Effect::Delete => {
             if let Some(id) = acted_on {
-                state
-                    .delete(session, INTERNAL_TYPE, &memory_id(t, id))
-                    .await;
+                let key = memory_key(t, id, w.held.is_some());
+                state.delete(session, INTERNAL_TYPE, &key).await;
             }
         }
         Effect::Other => {
@@ -528,59 +859,130 @@ pub(super) async fn after_write(
                 && let Some(id) = acted_on
                 && !effect_applied(generated, t, id)
             {
-                target = Some(id.to_string());
+                target = Some((id.to_string(), Told::Request, w.held.is_some(), true));
             }
         }
     }
-    let own = match effect {
-        Effect::Create => target.as_deref(),
-        _ => w.acted_on,
+    let tells_parent =
+        effect == Effect::Create || (effect == Effect::Other && generated.body.is_none());
+    let parent = if tells_parent {
+        let own = match effect {
+            Effect::Create => target.as_ref().map(|(id, ..)| id.as_str()),
+            _ => w.acted_on,
+        };
+        parent_of(state, session, op, w.call, own.map(|id| (t, id)))
+            .await
+            .filter(|p| !effect_applied(generated, &p.resource_type, &p.id))
+    } else {
+        None
     };
-    let parent = parent_of(state, session, op, w.call, own.map(|id| (t, id)))
-        .await
-        .filter(|p| !effect_applied(generated, &p.resource_type, &p.id))
-        .filter(|_| telling || effect == Effect::Create);
     if target.is_none() && parent.is_none() {
         return;
     }
-    let mut entry = Map::new();
-    entry.insert("operation".to_string(), Value::from(op.id.as_str()));
-    entry.insert("path".to_string(), Value::from(called_path(op, w.call)));
-    if let Some(request) = request {
-        entry.insert("body".to_string(), within_cap(request));
-    }
-    entry.insert(
-        "at".to_string(),
-        Value::from(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-    );
-    let entry = Value::Object(entry);
-    if let Some(id) = target {
-        remember(state, session, t, &id, &entry).await;
+    let entry = |body: Option<Value>| {
+        let mut entry = Map::new();
+        entry.insert("operation".to_string(), Value::from(op.id.as_str()));
+        entry.insert("path".to_string(), Value::from(route(op)));
+        if let Some(body) = body {
+            entry.insert("body".to_string(), within_cap(body));
+        }
+        entry.insert(
+            "at".to_string(),
+            Value::from(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+        Value::Object(entry)
+    };
+    if let Some((id, told, stored, publish)) = target {
+        let body = match told {
+            Told::Nothing => None,
+            Told::Request => request.clone(),
+            Told::Rest(rest) => Some(rest),
+        };
+        remember(state, session, &memory_key(t, &id, stored), &entry(body)).await;
+        if publish && let Some(held) = w.held {
+            publish_change(state, session, held.clone()).await;
+        }
     }
     if let Some(parent) = parent {
-        remember(state, session, &parent.resource_type, &parent.id, &entry).await;
+        let key = memory_key(&parent.resource_type, &parent.id, true);
+        remember(state, session, &key, &entry(request)).await;
+        publish_change(state, session, parent).await;
     }
 }
 
-/// The path a call was made to. Its query is left out: it may carry credentials.
-fn called_path(op: &Operation, call: &OperationCall) -> String {
-    let Binding::Http { path, .. } = &op.binding else {
-        return String::new();
+/// What an update answering nothing leaves to tell its target, having merged what
+/// it could into the stored copy (which publishes the change). One the session did
+/// not hold stored its request as it came, so that holds itself; one with no body
+/// has only its path to tell.
+async fn update_without_answer(
+    state: &mut StateAccess<'_>,
+    rt: &MockRuntime,
+    session: &SessionKey,
+    w: &Written<'_>,
+    raw: Option<&Value>,
+    request: Option<&Value>,
+    acted_on: Option<&str>,
+) -> Option<(String, Told, bool, bool)> {
+    let (Some(raw), Some(held)) = (raw, w.held) else {
+        return match raw {
+            Some(_) => None,
+            None => acted_on.map(|id| (id.to_string(), Told::Nothing, w.held.is_some(), true)),
+        };
     };
-    fill_path(call, &path_segments(path)).map_or_else(|| path.clone(), |filled| filled.path)
+    let (merged, rest) = apply_update(rt, held, raw);
+    let changed = merged != held.data;
+    if changed {
+        let resource = StoredResource {
+            data: merged.clone(),
+            ..held.clone()
+        };
+        if state.upsert(session, resource.clone()).await {
+            rt.collections().carry(session, held, &resource);
+        }
+    }
+    let id = acted_on?;
+    let rest = rest?;
+    // What is left, as it may be kept: every credential has gone by now, since a
+    // scrubbed request has the same shape. A value the copy holds has nothing to tell.
+    let kept = request.map(|r| kept_part(r, &rest));
+    let kept = kept.filter(|kept| !carries(kept, &merged))?;
+    Some((id.to_string(), Told::Rest(kept), true, !changed))
+}
+
+/// The part of scrubbed `request` that `rest` is the raw form of.
+fn kept_part(request: &Value, rest: &Value) -> Value {
+    let (Value::Object(scrubbed), Value::Object(raw)) = (request, rest) else {
+        return request.clone();
+    };
+    let kept = raw
+        .iter()
+        .filter_map(|(key, inner)| {
+            let member = scrubbed.get(key)?;
+            Some((key.clone(), kept_part(member, inner)))
+        })
+        .collect();
+    Value::Object(kept)
+}
+
+/// The route a call was made to: its template, as a path's values and its query may
+/// carry credentials, and the memory belongs to the resource they named.
+fn route(op: &Operation) -> String {
+    match &op.binding {
+        Binding::Http { path, .. } => path.clone(),
+        _ => String::new(),
+    }
 }
 
 /// What the identity of `held` says, over `answer`: a regeneration is of the same
-/// resource, however the LLM wrote its id.
+/// resource, however the LLM wrote its id or the key its path reads by.
 fn keeping_identity(rt: &MockRuntime, held: &StoredResource, answer: &Value) -> Value {
     let mut answer = answer.clone();
     let index = rt.index();
-    let fields = ["id", "number"].into_iter().chain(
-        index
-            .identity_fields(&held.resource_type)
-            .iter()
-            .map(String::as_str),
-    );
+    let t = &held.resource_type;
+    let fields = ["id", "number"]
+        .into_iter()
+        .chain(index.identity_fields(t).iter().map(String::as_str))
+        .chain(index.path_fields(t).iter().map(String::as_str));
     if let Value::Object(members) = &mut answer {
         for field in fields {
             if let Some(value) = held.data.get(field) {
@@ -591,24 +993,54 @@ fn keeping_identity(rt: &MockRuntime, held: &StoredResource, answer: &Value) -> 
     answer
 }
 
+/// `answer` as `held`'s owner's: if it no longer passes the check a later read makes
+/// (see [`key_fits`]), or links elsewhere (see [`known_foreign`]), the stored members
+/// it changed go back.
+fn keeping_owner(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &StoredResource,
+    answer: Value,
+) -> Value {
+    let Some(owner) = guarded(rt, plan.op, call) else {
+        return answer;
+    };
+    let candidate = StoredResource {
+        data: answer,
+        ..held.clone()
+    };
+    if key_fits(rt, &plan.session, &candidate, &owner)
+        && !known_foreign(rt, &plan.session, &candidate, &owner)
+    {
+        return candidate.data;
+    }
+    let mut answer = candidate.data;
+    if let (Value::Object(members), Value::Object(stored)) = (&mut answer, &held.data) {
+        members.extend(stored.clone());
+    }
+    answer
+}
+
 /// After a generated read that was told of remembered requests: when it is the
 /// whole resource, its answer takes the stored copy's place and those requests
-/// are done. A read with a query is one view, and leaves both as they are; its
-/// repeat is the response cache's. A write landing during the generation leaves
-/// them too: this answer did not know of it.
+/// are done. A write landing during the generation leaves them: this answer did not
+/// know of it. An answer that cannot be stored counts as a failed attempt.
 pub(super) async fn settle_read(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     target: (Option<&str>, Option<&StoredResource>),
-    earlier: &Earlier,
+    earlier: &mut Earlier,
     generated: &mut GeneratedResponse,
 ) {
     let rt = state.rt;
     let op = plan.op;
     let session = &plan.session;
     let (target_id, target) = target;
-    let (Some(t), Some(id)) = (op.resource_type.as_deref(), target_id) else {
+    let (Some(t), Some(id), Some(key)) =
+        (op.resource_type.as_deref(), target_id, earlier.key.clone())
+    else {
         return;
     };
     if !reads_the_resource(rt, op) {
@@ -623,9 +1055,9 @@ pub(super) async fn settle_read(
             .as_ref()
             .and_then(|b| b.get(field))
             .and_then(id_string);
-        for key in [Some(id.to_string()), own].into_iter().flatten() {
-            if state.get(session, t, &key).await.is_some() {
-                forget_shown(state, session, t, id, &earlier.shown).await;
+        for stored in [Some(id.to_string()), own].into_iter().flatten() {
+            if state.get(session, t, &stored).await.is_some() {
+                forget_shown(state, session, &key, &earlier.shown).await;
                 break;
             }
         }
@@ -635,7 +1067,9 @@ pub(super) async fn settle_read(
         return;
     };
     let answer = keeping_identity(rt, held, answer);
+    let answer = keeping_owner(rt, plan, call, held, answer);
     if !entity_fits(rt, t, &answer) {
+        failed_attempt(state, plan, earlier).await;
         return;
     }
     let current = state.get(session, t, &held.id).await;
@@ -652,7 +1086,7 @@ pub(super) async fn settle_read(
     }
     rt.collections().carry(session, held, &resource);
     generated.body = Some(answer);
-    forget_shown(state, session, t, id, &earlier.shown).await;
+    forget_shown(state, session, &key, &earlier.shown).await;
 }
 
 #[cfg(test)]
@@ -775,11 +1209,35 @@ service Items {
 
     #[test]
     fn credentials_are_redacted_at_any_depth() {
-        let mut body = json!({"a": {"api_key": "k", "b": [{"Password": "p", "c": 1}]}});
-        redact_credentials(&mut body);
+        let mut rt = MockRuntime::new(
+            "m",
+            Arc::new(mb_import::compile(SDL.as_bytes()).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::new(MemoryStore::new(Duration::from_secs(60))),
+        );
+        rt.set_data_plane_auth(crate::DataPlaneAuth {
+            mode: crate::DataPlaneAuthMode::ApiKey,
+            header: "x-house-pass".into(),
+        });
+        let mut body = json!({
+            "a": {"api_key": "k", "b": [{"Password": "p", "c": 1}]},
+            "x-house-pass": "h",
+            "privateKey": "pk",
+            "total_tokens": 7,
+            "authored": "kept",
+            "pairs": [{"key": "Cookie", "value": "c"}, {"key": "colour", "value": "red"}],
+        });
+        redact_credentials(&rt, &mut body, None);
         assert_eq!(
             body,
-            json!({"a": {"api_key": REDACTED, "b": [{"Password": REDACTED, "c": 1}]}})
+            json!({
+                "a": {"api_key": REDACTED, "b": [{"Password": REDACTED, "c": 1}]},
+                "x-house-pass": REDACTED,
+                "privateKey": REDACTED,
+                "total_tokens": 7,
+                "authored": "kept",
+                "pairs": [{"key": "Cookie", "value": REDACTED}, {"key": "colour", "value": "red"}],
+            })
         );
     }
 }

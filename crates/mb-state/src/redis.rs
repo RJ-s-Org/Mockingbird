@@ -252,7 +252,6 @@ impl RedisStateStore {
         });
     }
 
-    /// Reserves `n` consecutive recency sequence numbers; returns the last.
     /// How many of the fields of hash `res` are [`INTERNAL_TYPE`]'s. `HSCAN`, not
     /// a script: listing sessions is an Admin API call, and must not block Redis.
     async fn internal_fields(&self, res: &str) -> Result<usize, StateError> {
@@ -282,6 +281,7 @@ impl RedisStateStore {
         }
     }
 
+    /// Reserves `n` consecutive recency sequence numbers; returns the last.
     async fn next_seq(&self, n: usize) -> Result<i64, StateError> {
         let n = i64::try_from(n).unwrap_or(i64::MAX);
         Ok(redis::cmd("INCRBY")

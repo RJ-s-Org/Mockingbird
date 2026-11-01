@@ -623,6 +623,10 @@ const RESOURCE_EXT: &str = "x-mockingbird-resource";
 /// The warning of a value of [`RESOURCE_EXT`] that is not used.
 const INVALID_RESOURCE_EXT: &str = "invalid_resource_extension";
 
+/// A resource type Mockingbird keeps for itself (`mb_state::INTERNAL_TYPE`): a
+/// contract's resources under it would be hidden from exports and change feeds.
+const RESERVED_TYPE: &str = "__mockingbird.earlier_requests";
+
 /// The valid members of an operation's [`RESOURCE_EXT`].
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct ResourceHint {
@@ -661,6 +665,9 @@ pub(crate) fn resource_hint(op: &Value, op_id: &str, ctx: &mut Ctx) -> ResourceH
     for (name, value) in members {
         let text = || value.as_str().filter(|t| !t.is_empty()).map(str::to_owned);
         match name.as_str() {
+            "type" if text().as_deref() == Some(RESERVED_TYPE) => {
+                invalid(format!("member type names the reserved {RESERVED_TYPE}"));
+            }
             "type" if text().is_some_and(|t| is_type_name(&t)) => hint.resource_type = text(),
             "identity" if text().is_some() => hint.identity = text(),
             "action" if value.is_boolean() => hint.action = value.as_bool(),

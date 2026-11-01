@@ -146,6 +146,10 @@ pub struct GenerationContext<'a> {
     pub earlier_requests: &'a [Value],
 }
 
+/// What a credential's value becomes in a body kept beyond its request (see
+/// [`GenerationContext::earlier_requests`]): the request log's text.
+pub const REDACTED: &str = "[redacted]";
+
 /// Where a response or item came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Source {
@@ -1872,7 +1876,7 @@ fn reflect(
     let ahead = from_llm && !ctx.earlier_requests.is_empty();
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
-            Some(target) if ahead => fill_omitted(validator, body, target),
+            Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_requests),
             Some(target) => overlay_target(validator, target, body),
             None => body,
         },
@@ -1886,7 +1890,10 @@ fn reflect(
                 overlaid
             } else {
                 let body = match ctx.target {
-                    Some(target) if (op.is_action() && from_llm) || ahead => {
+                    Some(target) if ahead => {
+                        caught_up(validator, body, target, ctx.earlier_requests)
+                    }
+                    Some(target) if op.is_action() && from_llm => {
                         fill_omitted(validator, body, target)
                     }
                     target => overlay(validator, body, target.map(|t| &t.data)),
@@ -2016,6 +2023,84 @@ fn fill_omitted(validator: &SchemaValidator, answer: Value, target: &StoredResou
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     overlay(validator, answer, Some(&Value::Object(omitted)))
+}
+
+/// An answer told of `earlier` requests, over the stored copy it is ahead of: the
+/// copy fills what the answer left out, at any depth, and the requests' members
+/// that the schema declares stand over what the answer wrote, as a request's own
+/// do (see [`overlay_request`]). What was redacted is not a value to keep.
+fn caught_up(
+    validator: &SchemaValidator,
+    answer: Value,
+    target: &StoredResource,
+    earlier: &[Value],
+) -> Value {
+    let filled = deep_fill(&answer, &target.data);
+    let mut body = if validator.is_valid(&filled) {
+        filled
+    } else {
+        fill_omitted(validator, answer, target)
+    };
+    let Some(declared) = validator.declared_property_names() else {
+        return body;
+    };
+    for request in earlier {
+        let Some(Value::Object(fields)) = request.get("body") else {
+            continue;
+        };
+        let Value::Object(current) = &body else {
+            return body;
+        };
+        let over: Map<String, Value> = fields
+            .iter()
+            .filter(|(k, v)| declared.contains(k.as_str()) && v.as_str() != Some(REDACTED))
+            .map(|(k, v)| {
+                let merged = match current.get(k) {
+                    Some(held) => deep_over(held, v, declared),
+                    None => v.clone(),
+                };
+                (k.clone(), merged)
+            })
+            .collect();
+        body = overlay(validator, body, Some(&Value::Object(over)));
+    }
+    body
+}
+
+/// `answer` with every member of `stored` it omits, at any depth.
+fn deep_fill(answer: &Value, stored: &Value) -> Value {
+    let (Value::Object(answer_members), Value::Object(stored_members)) = (answer, stored) else {
+        return answer.clone();
+    };
+    let mut out = answer_members.clone();
+    for (k, v) in stored_members {
+        match out.get_mut(k) {
+            Some(held) => *held = deep_fill(held, v),
+            None => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// `over` on `base`, objects member by member and only the members in `declared`.
+fn deep_over(base: &Value, over: &Value, declared: &std::collections::HashSet<String>) -> Value {
+    let (Value::Object(base_members), Value::Object(over_members)) = (base, over) else {
+        return over.clone();
+    };
+    let mut out = base_members.clone();
+    for (k, v) in over_members {
+        if !declared.contains(k.as_str()) || v.as_str() == Some(REDACTED) {
+            continue;
+        }
+        let merged = match out.get(k) {
+            Some(held) => deep_over(held, v, declared),
+            None => v.clone(),
+        };
+        out.insert(k.clone(), merged);
+    }
+    Value::Object(out)
 }
 
 /// Overlay `fields`' top-level members onto an object `base`: all at once if

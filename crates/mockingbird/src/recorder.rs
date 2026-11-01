@@ -191,7 +191,7 @@ impl RequestRecorder for StoreRecorder {
     /// live settings.
     fn redact(&self, value: &mut Value) {
         let settings = self.settings.load();
-        redact_normalized(value, &settings.redact_fields, &mut String::new());
+        redact_kept(value, &settings.redact_fields, &mut String::new());
     }
 
     /// Queues the record for the writer. The only work done here is a
@@ -576,6 +576,35 @@ fn redact_normalized(value: &mut Value, fields: &[String], scratch: &mut String)
     }
 }
 
+/// [`redact_normalized`] for what is kept and shown again rather than logged,
+/// where hiding a count costs an answer: a number under a plural `...tokens` key
+/// (`max_tokens`) stays.
+fn redact_kept(value: &mut Value, fields: &[String], scratch: &mut String) {
+    if fields.is_empty() {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                normalize_key_into(key, scratch);
+                if fields.iter().any(|f| scratch.contains(f.as_str())) {
+                    if !(v.is_number() && scratch.ends_with("tokens")) {
+                        *v = Value::String(REDACTED.to_string());
+                    }
+                } else {
+                    redact_kept(v, fields, scratch);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                redact_kept(v, fields, scratch);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Replaces `out` with `key` ASCII-lowercased without `_`, `-` and `.`.
 fn normalize_key_into(key: &str, out: &mut String) {
     out.clear();
@@ -609,6 +638,10 @@ mod tests {
             body,
             json!({"access_token": REDACTED, "nested": {"note": "b"}})
         );
+
+        let mut count = json!({"max_tokens": 100, "tokens": "a"});
+        recorder.redact(&mut count);
+        assert_eq!(count, json!({"max_tokens": 100, "tokens": REDACTED}));
 
         recorder.set_settings(10, vec!["note".to_string()]);
         let mut body = json!({"access_token": "a", "nested": {"note": "b"}});

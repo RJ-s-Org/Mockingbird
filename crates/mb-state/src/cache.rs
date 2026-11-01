@@ -19,7 +19,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use crate::{
-    SWEEP_INTERVAL, SessionInfo, SessionKey, StateChanged, StateError, StateStore, StoredResource,
+    INTERNAL_TYPE, SWEEP_INTERVAL, SessionInfo, SessionKey, StateChanged, StateError, StateStore,
+    StoredResource,
 };
 
 /// Answers kept per session before the least recently used is evicted.
@@ -351,7 +352,9 @@ impl StateStore for CachingStateStore {
     async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
         let resource_type = r.resource_type.clone();
         let result = self.inner.upsert(s, r).await;
-        self.cache.invalidate_type(s, &resource_type);
+        if resource_type != INTERNAL_TYPE {
+            self.cache.invalidate_type(s, &resource_type);
+        }
         result
     }
 
@@ -366,7 +369,9 @@ impl StateStore for CachingStateStore {
         id: &str,
     ) -> Result<bool, StateError> {
         let result = self.inner.delete(s, resource_type, id).await;
-        self.cache.invalidate_type(s, resource_type);
+        if resource_type != INTERNAL_TYPE {
+            self.cache.invalidate_type(s, resource_type);
+        }
         result
     }
 
