@@ -2,7 +2,7 @@
 
 Measures three engine fixes on all journey suites: the output budget keeps what a request asked for, an update takes the model's answer at the paths the request named, and a deleted record stays deleted. 3 models, 4 repetitions, no context beyond each contract. Three runs cost about $1.20 through `proxy.py`, and this page reports the last one.
 
-**Result:** blind journeys rose from 44.4% to 55.7%, and on the default model from 45.7% to 61.4%. The default model passed every tuned check. The gain is about 60% of what the [root-cause review](../blind-baseline-2026-11-01/README.md) estimated, and 44% of blind checks still fail.
+**Result:** blind journeys rose from 44.4% to 55.7%, and on the default model from 45.7% to 61.4%. The default model passed every tuned check. The gain of 95 checks is a little over half of the 162–182 that the [root-cause review](../blind-baseline-2026-11-01/README.md) estimated for these causes, and 44% of blind checks still fail.
 
 | Suite | Before | Now |
 | --- | ---: | ---: |
