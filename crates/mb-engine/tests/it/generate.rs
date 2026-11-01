@@ -2683,8 +2683,8 @@ async fn an_action_prompt_says_it_succeeded() {
     );
     assert!(
         prompt.ends_with(
-            "`confirm` succeeded; it was not refused. If `confirm` needs something the resource \
-             lacks, that is now there: fill it in."
+            "`confirm` succeeded. If a missing member would have stopped it, that member is now \
+             there: fill it in."
         ),
         "{prompt}"
     );
@@ -2752,7 +2752,7 @@ async fn only_a_successful_action_says_it_succeeded() {
     ] {
         assert!(!prompt.contains("succeeded"), "{prompt}");
         assert!(!prompt.contains("successful"), "{prompt}");
-        assert!(!prompt.contains("must include"), "{prompt}");
+        assert!(!prompt.contains("if it changes anything"), "{prompt}");
     }
 }
 
@@ -2767,10 +2767,10 @@ async fn an_other_action_prompt_asks_for_the_effect_on_its_target() {
         data: json!({"id": "b1", "status": "confirmed"}),
     };
     let prompt = action_prompt("cancelBooking", Some(booking), None).await;
-    assert!(prompt.contains("`cancel` succeeded"), "{prompt}");
+    assert!(!prompt.contains("`cancel` succeeded"), "{prompt}");
     assert!(
         prompt.contains(
-            r#"The response is not <existing_resource>, so it changes only through "effects": they must include what `cancel` changes on it, as {"type": "bookings", "id": "b1", "set": {...}}."#
+            r#"The response is not <existing_resource>, so it changes only through "effects": they include what `cancel` changes on it, if it changes anything, as {"type": "bookings", "id": "b1", "set": {...}}."#
         ),
         "{prompt}"
     );
@@ -2781,10 +2781,10 @@ async fn an_other_action_prompt_asks_for_the_effect_on_its_target() {
 #[tokio::test]
 async fn an_effect_is_asked_for_only_of_an_other_action_with_a_target() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
-    assert!(!prompt.contains("must include"), "{prompt}");
+    assert!(!prompt.contains("if it changes anything"), "{prompt}");
     let prompt = action_prompt("cancelBooking", None, None).await;
-    assert!(prompt.contains("`cancel` succeeded"), "{prompt}");
-    assert!(!prompt.contains("must include"), "{prompt}");
+    assert!(!prompt.contains("`cancel` succeeded"), "{prompt}");
+    assert!(!prompt.contains("if it changes anything"), "{prompt}");
 }
 
 /// An action of its target's schema, for what the engine decides of its answer.

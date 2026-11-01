@@ -3375,8 +3375,8 @@ after it; or it made a new one of the same kind, so give that a new id of its ow
     assert!(
         prompt.ends_with(
             "</shown_resources>\nIf it made a new one and changed nothing else, \"effects\" is \
-empty.\n`capture` succeeded; it was not refused. If `capture` needs something the resource lacks, \
-that is now there: fill it in."
+empty.\n`capture` succeeded. If a missing member would have stopped it, that member is now there: \
+fill it in."
         ),
         "{prompt}"
     );
@@ -3418,9 +3418,8 @@ the request body."
     assert!(
         cancel.ends_with(
             "</shown_resources>\nThe response is not <existing_resource>, so it changes only \
-through \"effects\": they must include what `cancel` changes on it, as {\"type\": \
-\"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}.\n`cancel` succeeded; it was not refused. \
-If `cancel` needs something the resource lacks, that is now there: fill it in."
+through \"effects\": they include what `cancel` changes on it, if it changes anything, as \
+{\"type\": \"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
         ),
         "{cancel}"
     );

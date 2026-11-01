@@ -365,21 +365,25 @@ must follow them.\n{}\n</scenario>",
     s
 }
 
-/// What a success of an action route owes its answer, the last thing in the
-/// prompt. Models shown a resource missing what the action needs otherwise
-/// keep it as it was and invent an error. It says nothing of a status: not
-/// every action moves one or every resource has one, and measured, saying so
-/// moved a status on for actions that leave it, and listing an enum's values
-/// did not help.
+/// What a success of an action route owes an answer that is its resource, the
+/// last thing in the prompt. Models shown a resource missing what the action
+/// needs otherwise keep it as it was and invent an error. It says nothing of a
+/// status: not every action moves one or every resource has one, and measured,
+/// saying so moved a status on for actions that leave it, and listing an enum's
+/// values did not help. An action answering something else is not told: it
+/// then invents a change to its target.
 pub(crate) fn action_note(
     op: &Operation,
     status: u16,
     ctx: &GenerationContext<'_>,
 ) -> Option<String> {
+    if !decides_id(op, status, ctx) {
+        return None;
+    }
     let verb = action_verb(op, status)?;
     let mut s = format!(
-        "`{verb}` succeeded; it was not refused. If `{verb}` needs something the resource lacks, \
-that is now there: fill it in."
+        "`{verb}` succeeded. If a missing member would have stopped it, that member is now \
+there: fill it in."
     );
     if ctx.scenario.is_some() {
         s.push_str(" <scenario> overrides this.");
@@ -417,7 +421,7 @@ pub(crate) fn effects_note(op: &Operation, status: u16, ctx: &GenerationContext<
         let _ = write!(
             s,
             "\nThe response is not <existing_resource>, so it changes only through \"effects\": \
-they must include what `{verb}` changes on it, as {{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
+they include what `{verb}` changes on it, if it changes anything, as {{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
             data(&Value::from(target.resource_type.as_str())),
             data(&Value::from(target.id.as_str())),
         );
