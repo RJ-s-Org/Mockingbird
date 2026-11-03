@@ -3635,6 +3635,7 @@ pub(crate) fn recorded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<Str
 /// [`public_query`] as the request record keeps it: also without a parameter any
 /// API-key scheme of the contract names, whatever the data-plane auth mode. The call
 /// itself keeps those, for its validation.
+#[cfg(feature = "http-rest")]
 pub(crate) fn recorded_public_query(
     rt: &MockRuntime,
     pairs: &[(String, String)],
