@@ -829,11 +829,11 @@ fn task(id: &str, project: &str, title: &str) -> Value {
     json!({"id": id, "project_id": project, "title": title})
 }
 
-/// A stored record whose member a path parameter names holds another value than the
-/// path is another parent's: its list item goes, and is not overlaid. Under its own
-/// parent it is overlaid.
+/// A generated item that holds the path's value under a member another stored record's
+/// value contradicts (`project_id`) is not overlaid: it stays as generated, as which of
+/// the two is right is a guess. Under its own parent it is overlaid.
 #[tokio::test]
-async fn a_stored_record_of_another_parent_leaves_the_list() {
+async fn a_stored_record_of_another_parent_is_not_overlaid() {
     let listed = json!([task("tk-0001", "p2", "made up"), task("tk-0002", "p2", "B")]);
     let api = api_of(
         TASKS,
@@ -849,9 +849,210 @@ async fn a_stored_record_of_another_parent_leaves_the_list() {
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/projects/p2/tasks").await;
-    assert_eq!(body, json!([task("tk-0002", "p2", "B")]));
+    assert_eq!(body, listed);
     let body = api.get("/projects/p1/tasks").await;
     assert_eq!(body, json!([task("tk-0001", "p1", "A")]));
+}
+
+/// Users with followers and events, and lists with members: routes whose path
+/// parameter names the items' own identity, takes an alias, or names one of many
+/// parents.
+const PEOPLE: &str = r##"
+openapi: 3.1.0
+info: {title: People, version: "1"}
+paths:
+  /users:
+    post:
+      operationId: createUser
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /users/{user_id}:
+    parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /users/{user_id}/followers:
+    parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listFollowers
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}
+  /users/{user_id}/events:
+    parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listEvents
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Event"}}}}}
+  /events:
+    post:
+      operationId: createEvent
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Event"}}}}
+  /events/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getEvent
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Event"}}}}
+  /lists/{list_id}/members:
+    parameters: [{name: list_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listMembers
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Member"}}}}}
+    post:
+      operationId: addMember
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+  /members/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getMember
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [user_id]
+      properties: {user_id: {type: string}, name: {type: string}}
+    Event:
+      type: object
+      required: [id, user_id]
+      properties: {id: {type: string}, user_id: {type: string}, kind: {type: string}}
+    Member:
+      type: object
+      required: [id, list_id]
+      properties: {id: {type: string}, list_id: {type: string}, name: {type: string}}
+"##;
+
+/// A follower is a user, whose identity the path's `user_id` also names: no conflict,
+/// so the stored user is overlaid and stays.
+#[tokio::test]
+async fn a_path_naming_the_items_identity_is_no_parent() {
+    let api = api_of(
+        PEOPLE,
+        true,
+        vec![
+            Ok(json!({"user_id": "u2", "name": "Bea"}).to_string()),
+            Ok(json!([{"user_id": "u2", "name": "stale"}]).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/users", Some(json!({"name": "Bea"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/users/u1/followers").await;
+    assert_eq!(body, json!([{"user_id": "u2", "name": "Bea"}]));
+}
+
+/// `/users/me/events`: the generated item holds the user's id, not the alias, so
+/// nothing contradicts and the stored event is overlaid.
+#[tokio::test]
+async fn an_alias_in_the_path_is_no_parent() {
+    let event = json!({"id": "ev-0001", "user_id": "u1", "kind": "login"});
+    let api = api_of(
+        PEOPLE,
+        true,
+        vec![
+            Ok(event.to_string()),
+            Ok(json!([{"id": "ev-0001", "user_id": "u1", "kind": "stale"}]).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/events", Some(json!({"kind": "login"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/users/me/events").await;
+    assert_eq!(body, json!([event]));
+}
+
+/// A member of list A listed under B (many to many) stays in B's list, as generated.
+#[tokio::test]
+async fn a_member_of_two_lists_stays_in_both() {
+    let generated = json!([{"id": "h1", "list_id": "B", "name": "made up"}]);
+    let api = api_of(
+        PEOPLE,
+        true,
+        vec![
+            Ok(json!({"id": "h1", "list_id": "A", "name": "Hal"}).to_string()),
+            Ok(generated.to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/lists/A/members", Some(json!({"name": "Hal"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/lists/B/members").await;
+    assert_eq!(body, generated);
+}
+
+/// Notes whose summary declares its `owner` in two `allOf` parts.
+const NOTES: &str = r##"
+openapi: 3.1.0
+info: {title: Notes, version: "1"}
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/NoteItem"}}}}}
+    post:
+      operationId: createNote
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+  /notes/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getNote
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+components:
+  schemas:
+    Note:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        owner: {type: object, properties: {id: {type: string}, name: {type: string}, email: {type: string}}}
+    NoteItem:
+      allOf:
+        - type: object
+          required: [id]
+          properties:
+            id: {type: string}
+            owner: {type: object, properties: {id: {type: string}}}
+        - type: object
+          properties:
+            owner: {type: object, properties: {name: {type: string}}}
+"##;
+
+/// Two `allOf` parts declaring the same member: the overlay keeps what either declares.
+#[tokio::test]
+async fn all_of_parts_of_a_member_are_merged() {
+    let api = api_of(
+        NOTES,
+        true,
+        vec![
+            Ok(
+                json!({"id": "n1", "owner": {"id": "o1", "name": "Olu", "email": "o@x"}})
+                    .to_string(),
+            ),
+            Ok(json!([{"id": "n1", "owner": {"id": "o1"}}]).to_string()),
+        ],
+    );
+    let (status, _) = api.call("POST", "/notes", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/notes").await;
+    assert_eq!(
+        body,
+        json!([{"id": "n1", "owner": {"id": "o1", "name": "Olu"}}])
+    );
 }
 
 fn labelled() -> Value {
