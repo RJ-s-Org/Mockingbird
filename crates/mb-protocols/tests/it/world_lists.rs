@@ -344,6 +344,12 @@ paths:
         content: {application/json: {schema: {type: object, additionalProperties: true}}}
       responses:
         "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /captures/{capture_id}:
+    get:
+      operationId: getCapture
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Capture"}}}}
   /refunds/{refund_id}:
     get:
       operationId: getRefund
@@ -356,7 +362,43 @@ components:
       type: object
       required: [id, amount]
       properties: {id: {type: string}, amount: {type: string}}
+    Capture:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
 "##;
+
+/// A capture's read is shown the refunds created under its path, and another
+/// capture's is not; the read stores nothing of them.
+#[tokio::test]
+async fn a_capture_read_sees_its_refunds() {
+    let api = api_of(
+        REFUNDS,
+        true,
+        vec![
+            Ok(json!({"id": "R1", "amount": "1.00"}).to_string()),
+            Ok(json!({"id": "C1", "status": "COMPLETED"}).to_string()),
+            Ok(json!({"id": "C2", "status": "COMPLETED"}).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/captures/C1/refund", Some(json!({"amount": "1.00"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    api.get("/captures/C1").await;
+    let prompt = api.prompt(1);
+    assert!(
+        related_of(&prompt).iter().any(|l| l.contains("\"R1\"")),
+        "{prompt}"
+    );
+    api.get("/captures/C2").await;
+    let prompt = api.prompt(2);
+    assert!(!prompt.contains("\"R1\""), "{prompt}");
+    // Context only: the refund reads back as it was created.
+    let refund = api.get("/refunds/R1").await;
+    assert_eq!(refund["amount"], "1.00");
+    assert_eq!(api.provider.requests().len(), 3);
+}
 
 /// The lines of a prompt's `<related_resources>`.
 fn related_of(prompt: &str) -> Vec<&str> {
