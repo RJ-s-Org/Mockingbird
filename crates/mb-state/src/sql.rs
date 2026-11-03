@@ -155,12 +155,15 @@ impl Inner {
 pub struct SqlStateStore {
     inner: Arc<Inner>,
     tx: broadcast::Sender<StateChanged>,
+    /// See [`StateStore::local_only`]: a private in-memory SQLite database.
+    local_only: bool,
 }
 
 impl std::fmt::Debug for SqlStateStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SqlStateStore")
             .field("ttl_ms", &self.inner.ttl_ms)
+            .field("local_only", &self.local_only)
             .finish_non_exhaustive()
     }
 }
@@ -186,7 +189,9 @@ impl SqlStateStore {
                 url.split(':').next().unwrap_or_default()
             )));
         };
-        Ok(Self::from_pool(pool, keeper, ttl))
+        let mut store = Self::from_pool(pool, keeper, ttl);
+        store.local_only = private_in_memory(url);
+        Ok(store)
     }
 
     /// A Postgres store whose pool connects on first use and which runs no
@@ -219,7 +224,11 @@ impl SqlStateStore {
         });
         spawn_sweeper(Arc::downgrade(&inner));
         let (tx, _) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
-        Self { inner, tx }
+        Self {
+            inner,
+            tx,
+            local_only: false,
+        }
     }
 
     fn publish(&self, s: &SessionKey, resource_type: &str, id: &str, kind: ChangeKind) {
@@ -235,6 +244,18 @@ impl SqlStateStore {
             origin: crate::ChangeOrigin::Local,
         });
     }
+}
+
+/// Whether `url` opens a SQLite database no other connection can open: `sqlite::memory:`
+/// (or `sqlite://:memory:`, with any options), which sqlx names uniquely for this one
+/// store. A named in-memory database (`sqlite:file:x?mode=memory`) another store of this
+/// process may open as well, and a file other processes may, so neither is.
+fn private_in_memory(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("sqlite:") else {
+        return false;
+    };
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    rest.split('?').next() == Some(":memory:")
 }
 
 async fn connect_sqlite(url: &str) -> Result<(SqlitePool, Option<Keeper>), StateError> {
@@ -684,5 +705,36 @@ impl StateStore for SqlStateStore {
 
     fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
         self.tx.subscribe()
+    }
+
+    /// True of a private in-memory SQLite database (`sqlite::memory:`, the default
+    /// install's), which only this store's connections open; never of a file or Postgres.
+    fn local_only(&self) -> bool {
+        self.local_only
+    }
+}
+
+#[cfg(test)]
+mod local_only_tests {
+    use super::private_in_memory;
+
+    #[test]
+    fn only_a_private_in_memory_database_is_local() {
+        for url in [
+            "sqlite::memory:",
+            "sqlite://:memory:",
+            "sqlite::memory:?cache=shared",
+        ] {
+            assert!(private_in_memory(url), "{url}");
+        }
+        for url in [
+            "sqlite://state.db",
+            "sqlite:state.db",
+            "sqlite:file:shared?mode=memory&cache=shared",
+            "postgres://localhost/mb",
+            "memory",
+        ] {
+            assert!(!private_in_memory(url), "{url}");
+        }
     }
 }

@@ -48,7 +48,9 @@
 //! agree with the references the body sets, and must have been created in the
 //! collection the create runs in: the same one under a parent path, none at the top. Trivial
 //! values (enums, dates, booleans, short words) are never indexed, and a value two
-//! records hold is no plain match.
+//! records hold is no plain match. With a store other processes write to, which the index
+//! holds no member values of, the store itself is asked: the session's records of that
+//! type, in one bounded listing, are matched by the same rules.
 //!
 //! The index is a hint of this runtime's writes, as [`PathAliases`] is: records the
 //! Admin API seeds or upserts are not in it, and do not match through it. A delete the
@@ -66,7 +68,8 @@
 //! store. A member value's uniqueness is known only where this process sees every write:
 //! with a store other nodes write to (SQL, Redis, a bus to other nodes; see
 //! [`mb_state::StateStore::local_only`]), members are not indexed and only identities
-//! match. A single node's store, the in-memory one behind a local bus, is local only.
+//! match; [`same_values`] reads the store instead. A single node's store, the in-memory
+//! one or a private in-memory SQLite database behind a local bus, is local only.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -492,7 +495,7 @@ fn plain_value(text: &str) -> bool {
 }
 
 /// What `record` is indexed under: its identity and, with a store only this process
-/// writes to, the string members its read's schema declares that have an id's shape,
+/// writes to ([`member_values`]), the string members its read's schema declares that have an id's shape,
 /// identify what holds them ([`identifies`]), are not trivial ([`trivial_member`]), are
 /// no reference to another record and hold no credential; then, as plain values, up to
 /// [`MAX_PLAIN_MEMBERS`] of the other such members holding a [`plain_value`].
@@ -509,9 +512,17 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
             plain: false,
         });
     }
-    if !rt.state.local_only() {
-        return out;
+    if rt.state.local_only() {
+        out.extend(member_values(rt, record));
     }
+    out
+}
+
+/// The member values of `record` [`indexed_values`] takes with a store only this process
+/// writes to: what [`same_values`] compares a create's request with on any store.
+fn member_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue> {
+    let mut out = Vec::new();
+    let id = record.id.as_str();
     let (Value::Object(members), Some(schema)) = (
         &record.data,
         write_memory::read_schema(rt, &record.resource_type),
@@ -879,6 +890,88 @@ fn repeated_by(
     !plain || placed
 }
 
+/// The live records of type `own` of `session` that hold `text` under member `name`, as
+/// [`same_values`] decides from: at most [`MAX_HOLDERS`] (more is common, whatever its
+/// shape), and whether the value is plain.
+enum Holding {
+    /// No match for this member.
+    Nothing,
+    /// Nothing more is decided this call: a read failed, the breaker held the store
+    /// off, or the reads ran out.
+    Stop,
+    Live(Vec<StoredResource>, bool),
+}
+
+/// [`Holding`] from the index, with a store only this process writes to: each holder is
+/// read back, and what is gone or changed is forgotten, on the store's word only.
+async fn indexed_holding(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (own, name, text): (&str, &str, &str),
+    reads: &mut usize,
+) -> Holding {
+    let rt = state.rt;
+    let holders: Vec<Holder> = rt
+        .value_index()
+        .holders(session, text)
+        .into_iter()
+        .filter(|h| h.resource_type == own && h.member.as_deref() == Some(name))
+        .collect();
+    if holders.is_empty() || holders.len() > MAX_HOLDERS {
+        return Holding::Nothing;
+    }
+    let plain = holders.iter().any(|h| h.plain);
+    let mut live: Vec<StoredResource> = Vec::new();
+    for holder in &holders {
+        if *reads >= MAX_READS {
+            return Holding::Stop;
+        }
+        *reads += 1;
+        let hit = state.get(session, &holder.resource_type, &holder.id).await;
+        let holds_it = hit
+            .as_ref()
+            .is_some_and(|hit| hit.data.get(name).and_then(Value::as_str) == Some(text));
+        match hit {
+            Some(hit) if holds_it => live.push(hit),
+            _ if !state.available() => return Holding::Stop,
+            _ => rt
+                .value_index()
+                .forget(session, &holder.resource_type, &holder.id),
+        }
+    }
+    Holding::Live(live, plain)
+}
+
+/// What a store other processes write to holds of a create's type, newest first, read
+/// once per create: each record with its [`member_values`], and whether the listing is
+/// whole (fewer than [`MAX_SCAN`]).
+struct Scanned {
+    records: Vec<(StoredResource, Vec<IndexedValue>)>,
+    whole: bool,
+}
+
+impl Scanned {
+    /// [`Holding`] from the listing, which is the store's word: a plain value counts only
+    /// when the listing is whole, as a record left out of it could hold it too.
+    fn holding(&self, name: &str, text: &str) -> Holding {
+        let held: Vec<(&StoredResource, bool)> = self
+            .records
+            .iter()
+            .filter_map(|(record, values)| {
+                let value = values
+                    .iter()
+                    .find(|v| v.member.as_deref() == Some(name) && v.value == text)?;
+                Some((record, value.plain))
+            })
+            .collect();
+        let plain = held.iter().any(|(_, plain)| *plain);
+        if held.is_empty() || held.len() > MAX_HOLDERS || (plain && !self.whole) {
+            return Holding::Nothing;
+        }
+        Holding::Live(held.into_iter().map(|(r, _)| r.clone()).collect(), plain)
+    }
+}
+
 /// The stored records of the type `call`, a create, makes that already hold a value of
 /// its request (see the module's doc), at most [`MAX_SAME_VALUES`], each with the member
 /// it holds it under, other than what `known(type, id)` says is in hand (its target).
@@ -888,8 +981,15 @@ fn repeated_by(
 /// repeat a retry: anything else finds nothing and pays nothing. A create in a collection
 /// under a parent path (`/orgs/acme/members`) counts only records created in that very
 /// collection, and every record must agree with the references its body sets (see
-/// [`repeated_by`]). Each record is read back, and returned as stored; what the prompt
-/// shows of it is the caller's to scrub.
+/// [`repeated_by`]). Each record is returned as stored; what the prompt shows of it is
+/// the caller's to scrub.
+///
+/// With a store only this process writes to, the holders come from the index and are
+/// each read back. With any other (SQL, Redis, other nodes), whose writes the index
+/// cannot see, the store is asked instead: the session's records of the type, at most
+/// [`MAX_SCAN`], newest first, in one listing, matched by the rules the index applies
+/// ([`member_values`]). A listing the store failed, or the breaker held off, decides
+/// nothing.
 pub(super) async fn same_values(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -910,7 +1010,35 @@ pub(super) async fn same_values(
     {
         return Vec::new();
     }
+    let asked: Vec<(&String, &str)> = body
+        .iter()
+        .filter_map(|(name, value)| Some((name, value.as_str()?)))
+        .filter(|(name, text)| {
+            !write_memory::is_credential_name(rt, name)
+                && !mb_mcm::credentials::is_credential_value(text)
+        })
+        .collect();
+    if asked.is_empty() {
+        return Vec::new();
+    }
     let session = &plan.session;
+    let scanned = if rt.state.local_only() {
+        None
+    } else {
+        let listed = state.list(session, own, MAX_SCAN).await;
+        if !state.available() {
+            return Vec::new();
+        }
+        let whole = listed.len() < MAX_SCAN;
+        let records = listed
+            .into_iter()
+            .map(|r| {
+                let values = member_values(rt, &r);
+                (r, values)
+            })
+            .collect();
+        Some(Scanned { records, whole })
+    };
     let collection = collection_of(op, call);
     // The collection the hit was created or listed under must be the create's: none
     // for a top-level create, and the very same one under a parent path.
@@ -918,47 +1046,19 @@ pub(super) async fn same_values(
         |hit: &StoredResource| rt.collections().get(session, hit).as_ref() == collection.as_ref();
     let mut reads = 0;
     let mut out: Vec<(StoredResource, String)> = Vec::new();
-    'members: for (name, value) in body {
+    for (name, text) in asked {
         if out.len() >= MAX_SAME_VALUES {
             break;
         }
-        let Value::String(text) = value else {
-            continue;
+        let holding = match &scanned {
+            Some(scanned) => scanned.holding(name, text),
+            None => indexed_holding(state, session, (own, name, text), &mut reads).await,
         };
-        if write_memory::is_credential_name(rt, name)
-            || mb_mcm::credentials::is_credential_value(text)
-        {
-            continue;
-        }
-        let holders: Vec<Holder> = rt
-            .value_index()
-            .holders(session, text)
-            .into_iter()
-            .filter(|h| h.resource_type == own && h.member.as_deref() == Some(name.as_str()))
-            .collect();
-        // A value this many hold is common, whatever its shape.
-        if holders.is_empty() || holders.len() > MAX_HOLDERS {
-            continue;
-        }
-        let plain = holders.iter().any(|h| h.plain);
-        let mut live: Vec<StoredResource> = Vec::new();
-        for holder in &holders {
-            if reads >= MAX_READS {
-                break 'members;
-            }
-            reads += 1;
-            let hit = state.get(session, &holder.resource_type, &holder.id).await;
-            let holds_it = hit
-                .as_ref()
-                .is_some_and(|hit| hit.data.get(name).and_then(Value::as_str) == Some(text));
-            match hit {
-                Some(hit) if holds_it => live.push(hit),
-                _ if !state.available() => break 'members,
-                _ => rt
-                    .value_index()
-                    .forget(session, &holder.resource_type, &holder.id),
-            }
-        }
+        let (mut live, plain) = match holding {
+            Holding::Nothing => continue,
+            Holding::Stop => break,
+            Holding::Live(live, plain) => (live, plain),
+        };
         // A plain value two live records hold is no match, nor one no refusal the
         // create may be offered names the member of.
         if plain && (live.len() != 1 || !mb_engine::guards::a_refusal_names(op, name)) {
