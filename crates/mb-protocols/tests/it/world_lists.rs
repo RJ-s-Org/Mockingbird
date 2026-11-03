@@ -28,6 +28,7 @@ paths:
         - {name: status, in: query, schema: {type: string}}
         - {name: Price, in: query, schema: {type: string}}
         - {name: PageSize, in: query, schema: {type: integer}}
+        - {name: topic_id, in: query, schema: {type: integer}}
         - {name: q, in: query, schema: {type: string}}
       responses:
         "200":
@@ -182,6 +183,118 @@ async fn a_page_size_caps_the_list() {
     let body = api.get("/messages?PageSize=2").await;
     assert_eq!(sids(&body), ["SM1", "SM2"]);
     assert_eq!(body["total"], 3);
+}
+
+/// A name that only holds a page-size word (`top` in `topic_id`) is no page size.
+#[tokio::test]
+async fn a_word_inside_a_name_caps_nothing() {
+    let api = api_of(LISTS, true, vec![three_messages()]);
+    let body = api.get("/messages?topic_id=2").await;
+    assert_eq!(sids(&body), ["SM1", "SM2", "SM3"]);
+}
+
+/// Issues whose `state` is plain text, filtered by an optional parameter with an
+/// `enum` of its own, and by a `name`.
+const ISSUES: &str = r##"
+openapi: 3.0.0
+info: {title: Issues, version: "1"}
+paths:
+  /issues:
+    get:
+      operationId: listIssues
+      parameters:
+        - {name: state, in: query, schema: {type: string, enum: [opened, closed, all]}}
+        - {name: name, in: query, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}
+    post:
+      operationId: createIssue
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /issues/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getIssue
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+    delete:
+      operationId: deleteIssue
+      responses:
+        "204": {description: gone}
+components:
+  schemas:
+    Issue:
+      type: object
+      required: [id, state, name]
+      properties: {id: {type: string}, state: {type: string}, name: {type: string}}
+"##;
+
+fn issue(id: &str, state: &str, name: &str) -> Value {
+    json!({"id": id, "state": state, "name": name})
+}
+
+fn ids(body: &Value) -> Vec<&str> {
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect()
+}
+
+/// A value of the parameter's own `enum` (`all`) says nothing of a plain-text member.
+#[tokio::test]
+async fn a_parameter_enum_beside_plain_text_filters_nothing() {
+    let answer = json!([issue("i5", "opened", "a"), issue("i7", "closed", "b")]);
+    let api = api_of(ISSUES, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/issues?state=all").await;
+    assert_eq!(ids(&body), ["i5", "i7"]);
+}
+
+/// A plain-text member keeps the items holding the value, in any case.
+#[tokio::test]
+async fn a_plain_text_filter_keeps_what_holds_the_value() {
+    let answer = json!([
+        issue("i1", "opened", "Anna"),
+        issue("i2", "opened", "Bob"),
+        issue("i3", "opened", "joanne"),
+    ]);
+    let api = api_of(ISSUES, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/issues?name=Ann").await;
+    assert_eq!(ids(&body), ["i1", "i3"]);
+}
+
+/// Deleting an `opened` issue marks only its identity: an optional filter's value is
+/// no key, so other opened issues stay.
+#[tokio::test]
+async fn a_delete_does_not_mark_an_optional_filter_value() {
+    let answer = json!([
+        issue("i5", "opened", "a"),
+        issue("i6", "opened", "b"),
+        issue("i7", "closed", "c"),
+    ]);
+    let contract = ISSUES.replace(
+        "state: {type: string}",
+        "state: {type: string, enum: [opened, closed]}",
+    );
+    let api = api_of(
+        &contract,
+        true,
+        vec![
+            Ok(issue("i1", "opened", "x").to_string()),
+            Ok(answer.to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/issues", Some(json!({"state": "opened"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = api.call("DELETE", "/issues/i1", None).await;
+    assert!(status.is_success(), "{status}");
+    let body = api.get("/issues?state=opened").await;
+    assert_eq!(ids(&body), ["i5", "i6"]);
 }
 
 /// A search names no member, and a text parameter beside a number member is no filter.

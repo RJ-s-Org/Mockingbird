@@ -1162,6 +1162,12 @@ mod tests {
         assert_eq!(size(json!({"q": "5"})), None);
         assert_eq!(size(json!({"PageSize": 5})), Some(5));
         assert_eq!(size(json!({"per-page": 5})), Some(5));
+        assert_eq!(size(json!({"page_size": 5})), Some(5));
+        assert_eq!(size(json!({"maxResults": 5})), Some(5));
+        // A page-size word inside another name is no page size.
+        for other in ["topic_id", "desktop", "first_seen", "image_size", "limited"] {
+            assert_eq!(size(json!({other: 5})), None, "{other}");
+        }
         // Earlier words go first, whatever the query's order.
         assert_eq!(size(json!({"top": 7, "limit": 5})), Some(5));
         // Declared as text, it is no size.
