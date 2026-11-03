@@ -2619,10 +2619,16 @@ async fn a_searched_offer_keeps_what_the_search_listed() {
         "price": {"total": {"amount": "148.30", "currency": "EUR"}, "taxes": []},
         "payment": {"type": "card", "brand": "visa", "last4": "4242", "expMonth": 8,
                     "expYear": 2030, "holderName": "Ana Silva"}});
+    let mut fewer = flight_offer(OFFER_ID, "148.30", "TP764");
+    fewer["seatsRemaining"] = json!(3);
+    for member in ["taxes", "baggage", "fareRules"] {
+        fewer[member] = detail[member].clone();
+    }
     let api = travel(vec![
         Ok(found.to_string()),
         Ok(detail.to_string()),
         Ok(booked.to_string()),
+        Ok(fewer.to_string()),
     ]);
     let (status, _, _) = api
         .call("POST", "/flights/search", Some(flight_search()))
@@ -2652,11 +2658,19 @@ async fn a_searched_offer_keeps_what_the_search_listed() {
         "{prompt}"
     );
 
-    // The booking emptied the cache: the store answers, whole.
+    // The booking names the offer, so the offer's next read is told of it once, shown
+    // the booking as new. An answer listing no effect on the offer changes nothing:
+    // the store's copy answers, whole, then and after.
+    let (source, told) = read(&api, &format!("/offers/{OFFER_ID}")).await;
+    assert_eq!(source, "llm");
+    let prompt = prompt_of(&api, 3);
+    assert!(prompt.contains("<new_resources>"), "{prompt}");
+    assert!(prompt.contains("H4K2P9"), "{prompt}");
+    assert_eq!(told, offer);
     let (source, again) = read(&api, &format!("/offers/{OFFER_ID}")).await;
     assert_eq!(source, "state");
     assert_eq!(again, offer);
-    assert_eq!(api.provider.requests().len(), 3);
+    assert_eq!(api.provider.requests().len(), 4);
 }
 
 /// With consistency off, a search stores no offers.

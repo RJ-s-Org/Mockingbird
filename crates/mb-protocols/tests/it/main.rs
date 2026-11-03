@@ -39,6 +39,7 @@ mod http_media;
 mod http_rest;
 mod identity_by_contract;
 mod provider_policy;
+mod related_writes;
 mod runtime;
 mod soap;
 mod sse;
