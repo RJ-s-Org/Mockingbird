@@ -192,13 +192,58 @@ pub fn is_credential_value(text: &str) -> bool {
 ///   is not;
 /// - a short letter prefix (2 to 8) and `_` or `-`, with a later run of 12 or more
 ///   letters and digits that mixes them, or of 20 or more that mixes cases
-///   (`sk_live_51HxYzAbCdEf`, `ghp_…`, `xoxb-…`); a snake_case name is not.
+///   (`sk_live_51HxYzAbCdEf`, `ghp_…`, `xoxb-…`); a snake_case name is not;
+/// - base64 of 24 or more characters that is padded with `=` or holds `+` or `/`, not
+///   starting with `/`, with upper and lower case and digits, at least 12 distinct, 3
+///   or more lower-to-upper case changes and 2 or more letter/digit switches
+///   (`wJalrXUtnFEMI/K7MDENG/…`); a path or a list of words joined by `/` is not.
 ///
 /// Example ids of that shape count too: in prose shown to a model that costs little.
 #[must_use]
 pub fn is_token_shaped(word: &str) -> bool {
-    let word = word.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
-    is_long_token(word) || is_prefixed_token(word)
+    let word = word.trim_matches(|c: char| {
+        !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '='))
+    });
+    let unpadded = word.trim_end_matches('=');
+    is_long_token(unpadded) || is_prefixed_token(unpadded) || is_base64_token(word)
+}
+
+fn is_base64_token(word: &str) -> bool {
+    let body = word
+        .strip_suffix("==")
+        .or_else(|| word.strip_suffix('='))
+        .unwrap_or(word);
+    let padded = body.len() < word.len();
+    let bytes = body.as_bytes();
+    if body.len() < 24
+        || body.starts_with('/')
+        || !bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/'))
+        || !(padded || bytes.iter().any(|b| matches!(b, b'+' | b'/')))
+    {
+        return false;
+    }
+    let has = |f: fn(&u8) -> bool| bytes.iter().any(f);
+    let distinct = bytes
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let case_changes = bytes
+        .windows(2)
+        .filter(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase())
+        .count();
+    let switches = bytes
+        .windows(2)
+        .filter(|w| w[0].is_ascii_digit() != w[1].is_ascii_digit())
+        .filter(|w| w[0].is_ascii_alphanumeric() && w[1].is_ascii_alphanumeric())
+        .count();
+    has(u8::is_ascii_uppercase)
+        && has(u8::is_ascii_lowercase)
+        && has(u8::is_ascii_digit)
+        && distinct >= 12
+        && case_changes >= 3
+        && switches >= 2
 }
 
 fn is_long_token(word: &str) -> bool {
@@ -603,6 +648,11 @@ mod tests {
             "9f8e7d6c5b4a32109f8e",
             "\"sk_live_51HxYzAbCdEf\",",
             "(AKIAIOSFODNN7EXAMPLE).",
+            // Base64, padded or with `+` and `/`.
+            "dGhpcyBpcyBhIHNlY3JldCBrZXk=",
+            "\"dGhpcyBpcyBhIHNlY3JldCBrZXk=\",",
+            concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"),
+            "dXNlcjpwYXNzd29yZCB0aGF0IGlzIGxvbmc+/w",
         ] {
             assert!(is_token_shaped(word), "{word}");
         }
@@ -619,6 +669,14 @@ mod tests {
             "https://example.com/path",
             "unique",
             "",
+            // Prose and paths that only use the base64 alphabet.
+            "application/vnd.example+json",
+            "/v1/orders/listAllOrdersForUser2/items",
+            "https://docs.example.com/Auth/Tokens2/refresh",
+            "read/write/admin/owner/billing",
+            "Orders/Customers/Invoices/Refund2",
+            "SHA256/RSA",
+            "a+b=c",
         ] {
             assert!(!is_token_shaped(word), "{word}");
         }

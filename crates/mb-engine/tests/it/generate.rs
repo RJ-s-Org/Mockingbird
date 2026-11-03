@@ -2012,8 +2012,48 @@ fn the_api_description_redacts_credentials_in_prose() {
         ),
         ("Config: api_key: sk_test_abc123", "sk_test_abc123"),
         (r#"Example {"api_key": "sk_live_abc123"}"#, "sk_live_abc123"),
-        ("Use password=hunter2, then token=\"abc.def\".", "hunter2"),
-        ("Use password=hunter2, then token=\"abc.def\".", "abc.def"),
+        (
+            "Use password=s3cr3tpass, then token=\"abc.def.ghi\".",
+            "s3cr3tpass",
+        ),
+        (
+            "Use password=s3cr3tpass, then token=\"abc.def.ghi\".",
+            "abc.def.ghi",
+        ),
+        // A spaced `=` or `:` keeps the value after the name.
+        (
+            "Set client_secret = abcDEF123456xyz first.",
+            "abcDEF123456xyz",
+        ),
+        (
+            "Set client_secret : abcDEF123456xyz first.",
+            "abcDEF123456xyz",
+        ),
+        // curl's user and password.
+        (
+            "Run curl -u admin:s3cr3tpass https://api.example.com",
+            "s3cr3tpass",
+        ),
+        (
+            "Run curl --user admin:s3cr3tpass https://api.example.com",
+            "s3cr3tpass",
+        ),
+        (
+            "Run curl --user=admin:s3cr3tpass https://api.example.com",
+            "s3cr3tpass",
+        ),
+        // Base64, padded or with `+` and `/`.
+        (
+            "Its key is dGhpcyBpcyBhIHNlY3JldCBrZXk= here.",
+            "dGhpcyBpcyBhIHNlY3JldCBrZXk",
+        ),
+        (
+            concat!(
+                "Use wJalrXUtnFEMI/K7MDENG/",
+                "bPxRfiCYEXAMPLEKEY as the secret."
+            ),
+            "bPxRfiCYEXAMPLEKEY",
+        ),
         (
             "Use sk_live_51HxYzAbCdEf as the key.",
             "sk_live_51HxYzAbCdEf",
@@ -2052,6 +2092,9 @@ fn the_api_description_keeps_scope_names_and_plain_values() {
         "Use a Bearer token, or Basic auth over TLS.",
         "Rate limits: 100/min at 10:30, see https://docs.example.com/auth.",
         "Event names like order_created_notification_v2 are stable.",
+        "Authorization: OAuth2 only. Token: HS256 signed.",
+        "Media types like application/vnd.example+json and paths like /v1/orders/listAllOrdersForUser2/items.",
+        "Run curl -u to pass a user.",
     ] {
         let shown = shown_api_description(text);
         assert_eq!(shown, text, "{shown}");
@@ -2073,6 +2116,37 @@ fn response_descriptions_are_redacted_too() {
     assert!(
         system
             .contains("<response_description>The key, such as [redacted].</response_description>"),
+        "{system}"
+    );
+}
+
+/// Descriptions inside the prompt's JSON Schema are redacted as the other contract
+/// text is, at any depth; one with nothing to redact stays exactly as written.
+#[test]
+fn schema_descriptions_are_redacted_too() {
+    let mut bundle = inline(KEYS);
+    let key = bundle.defs.get_mut("Key").unwrap();
+    key["description"] = json!("An API key.\nKeep it   safe.");
+    key["properties"]["name"]["description"] =
+        json!("Such as sk_live_51HxYzAbCdEf, or set token = abcDEF123456xyz.");
+    key["properties"]["description"] = json!({"type": "string", "description": "Free text."});
+    let op = bundle.operation("createKey").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let c = key_call("createKey", json!({"name": "ci"}));
+    let messages = mb_engine::prompt::build_messages(&bundle, op, 201, &schema, &c, &ctx(), None);
+    let system = &messages[0].content;
+    assert!(!system.contains("sk_live_51HxYzAbCdEf"), "{system}");
+    assert!(!system.contains("abcDEF123456xyz"), "{system}");
+    assert!(
+        system.contains("Such as [redacted], or set token = [redacted]."),
+        "{system}"
+    );
+    assert!(
+        system.contains(r#""An API key.\nKeep it   safe.""#),
+        "{system}"
+    );
+    assert!(
+        system.contains(r#""description":{"description":"Free text.","type":"string"}"#),
         "{system}"
     );
 }

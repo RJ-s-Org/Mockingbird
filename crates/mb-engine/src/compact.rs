@@ -21,13 +21,38 @@ pub const MAX_DESCRIPTION: usize = 160;
 /// `schema` with its reachable definitions, fitted to the prompt budget. A
 /// schema that carries its own `$defs` (one shaped to the output budget) is
 /// taken as complete.
+/// Its `description` strings have their credentials redacted, as the prompt's other
+/// contract text does.
 pub fn prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
-    let doc = if schema.get("$defs").is_some() {
+    let mut doc = if schema.get("$defs").is_some() {
         schema.clone()
     } else {
         bundle.with_reachable_defs(schema)
     };
+    redact_descriptions(&mut doc);
     fit(doc, PROMPT_SCHEMA_BUDGET)
+}
+
+/// Every `description` string in `value`, at any depth, with its credentials
+/// redacted (see [`crate::prompt::redacted_text`]); one with none is left as written.
+/// A member named `description` whose value is a schema is walked, not replaced.
+fn redact_descriptions(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            for (k, v) in obj.iter_mut() {
+                match v {
+                    Value::String(d) if k == "description" => {
+                        if let Some(redacted) = crate::prompt::redacted_text(d) {
+                            *d = redacted;
+                        }
+                    }
+                    other => redact_descriptions(other),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_descriptions),
+        _ => {}
+    }
 }
 
 /// [`prompt_schema`] for a response the engine finishes (see

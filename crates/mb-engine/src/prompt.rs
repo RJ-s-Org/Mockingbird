@@ -1124,9 +1124,13 @@ fn capped_to(text: &str, max: usize) -> String {
 enum After {
     /// Nothing.
     Prose,
-    /// It is a credential's name ending in `:` or `=`, or an auth scheme
-    /// (`Bearer`, `Basic`): the next word is its value.
+    /// It is a credential's name ending in `:` or `=`, an auth scheme (`Bearer`,
+    /// `Basic`), curl's `-u` or `--user`, or a lone `=` or `:` after a credential's
+    /// name: the next word is its value.
     Value,
+    /// It is a credential's name alone: a lone `=` or `:` next makes the word after
+    /// it a value (`client_secret = …`).
+    Name,
 }
 
 /// `word` of contract prose as a prompt shows it, and what it says of the next word.
@@ -1152,20 +1156,35 @@ fn redacted_word(word: &str, after: After) -> (String, After) {
     let (start, end) = core(word);
     let bare = &word[start..end];
     let name_of = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_owned();
+    let credential_name = |raw: &str| {
+        let name = name_of(raw);
+        !name.is_empty() && (hides_in_context(&name) || raw == "--user")
+    };
 
+    // A spaced `=` or `:` carries on what the word before it said.
+    if word == "=" || word == ":" {
+        let next = match after {
+            After::Name | After::Value => After::Value,
+            After::Prose => After::Prose,
+        };
+        return (word.to_owned(), next);
+    }
     if after == After::Value && secret_like(bare) {
         return (redact_core(word), After::Prose);
     }
     if is_credential_value(bare) || is_token_shaped(bare) {
         return (redact_core(word), After::Prose);
     }
-    if bare.eq_ignore_ascii_case("bearer") || bare.eq_ignore_ascii_case("basic") {
+    if bare.eq_ignore_ascii_case("bearer")
+        || bare.eq_ignore_ascii_case("basic")
+        || bare == "-u"
+        || bare == "--user"
+    {
         return (word.to_owned(), After::Value);
     }
     // `name:` or `name=`, whose value is the next word.
     if let Some(name) = word.trim_end_matches(['"', '\'']).strip_suffix([':', '=']) {
-        let name = name_of(name);
-        let next = if !name.is_empty() && hides_in_context(&name) {
+        let next = if credential_name(name) {
             After::Value
         } else {
             After::Prose
@@ -1174,10 +1193,9 @@ fn redacted_word(word: &str, after: After) -> (String, After) {
     }
     // `name=value` or `name:value` in one word.
     if let Some(at) = bare.find(['=', ':']) {
-        let name = name_of(&bare[..at]);
         let value = &bare[at + 1..];
         let (vs, ve) = core(value);
-        if !name.is_empty() && hides_in_context(&name) && secret_like(&value[vs..ve]) {
+        if credential_name(&bare[..at]) && secret_like(&value[vs..ve]) {
             let head = start + at + 1;
             return (
                 format!(
@@ -1190,21 +1208,48 @@ fn redacted_word(word: &str, after: After) -> (String, After) {
                 After::Prose,
             );
         }
+        return (word.to_owned(), After::Prose);
     }
-    (word.to_owned(), After::Prose)
+    let next = if credential_name(bare) {
+        After::Name
+    } else {
+        After::Prose
+    };
+    (word.to_owned(), next)
 }
 
-/// Whether a value given under a credential's name looks like one: not a plain word
-/// (letters only, all lowercase or capitalized), not a small number (up to 8 digits),
-/// and not empty.
+/// Whether a value given under a credential's name looks like one: 8 or more
+/// characters or more than one switch between letters and digits (so `OAuth2` and
+/// `HS256` read as names of schemes, not secrets), not a plain word (letters only,
+/// all lowercase or capitalized) and not a small number (up to 8 digits).
 fn secret_like(value: &str) -> bool {
-    if value.is_empty() {
-        return false;
-    }
     let letters = value.chars().all(char::is_alphabetic);
     let plain_case = value.chars().skip(1).all(char::is_lowercase);
     let small_number = value.len() <= 8 && value.chars().all(|c| c.is_ascii_digit());
-    !(letters && plain_case) && !small_number
+    let chars: Vec<char> = value.chars().collect();
+    let switches = chars
+        .windows(2)
+        .filter(|w| w[0].is_alphanumeric() && w[1].is_alphanumeric())
+        .filter(|w| w[0].is_ascii_digit() != w[1].is_ascii_digit())
+        .count();
+    let long_or_mixed = chars.len() >= 8 || switches > 1;
+    !value.is_empty() && long_or_mixed && !(letters && plain_case) && !small_number
+}
+
+/// `text` with its credentials redacted as [`capped_to`] redacts them, or `None`
+/// when it has none, so text with nothing to redact keeps its spacing. Where
+/// something is redacted, the words are rejoined with single spaces.
+pub(crate) fn redacted_text(text: &str) -> Option<String> {
+    let mut changed = false;
+    let mut after = After::Prose;
+    let mut words = Vec::new();
+    for word in text.split_whitespace() {
+        let (shown, next) = redacted_word(word, after);
+        after = next;
+        changed |= shown != word;
+        words.push(shown);
+    }
+    changed.then(|| words.join(" "))
 }
 
 /// Cut `text` to at most `max` bytes (on a char boundary), marking the cut.
