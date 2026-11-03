@@ -3407,27 +3407,19 @@ ids and field values) and, for create or update operations, with the request bod
         instructions(&h, 1),
         format!(
             "{TRUST} This call acts on the API: the response shows the state after it, which \
-usually differs from <existing_resource> (an action moves a status on). What the call does not \
-change stays as it is in the existing and related resources (same ids, same values), and the \
-response stays consistent with the request body. This is a successful `cancel`: the call \
-succeeded, so the resource has moved to the state that follows `cancel`, whatever it needed \
-before."
+usually differs from <existing_resource>. What the call does not change stays as it is in the \
+existing and related resources (same ids, same values), and the response stays consistent with \
+the request body."
         )
     );
-    assert_eq!(
-        instructions(&h, 2),
-        format!(
-            "{consistent} This is a successful `confirm`: the call succeeded, so the resource \
-has moved to the state that follows `confirm`, whatever it needed before."
-        )
-    );
+    assert_eq!(instructions(&h, 2), consistent);
     assert_eq!(instructions(&h, 3), consistent);
     let cancel = prompt_of(&h, 1);
     assert!(
         cancel.ends_with(
             "</shown_resources>\nThe response is not <existing_resource>, so it changes only \
-through \"effects\": they must include what `cancel` changes on it, as {\"type\": \
-\"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
+through \"effects\": they include what `cancel` changes on it, if it changes anything, as \
+{\"type\": \"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
         ),
         "{cancel}"
     );
