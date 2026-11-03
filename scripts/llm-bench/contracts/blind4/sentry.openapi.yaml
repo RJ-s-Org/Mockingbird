@@ -1,0 +1,672 @@
+openapi: 3.0.3
+info:
+  title: Sentry API (teams, projects, client keys, issues)
+  version: "0"
+  description: |
+    A subset of the Sentry web API, written from its public documentation.
+    Organizations, teams and projects are addressed by slug (or id) in the path,
+    and a project's path nests under its organization:
+    `/api/0/projects/{organization}/{project}/`. A project is created under the team
+    that will own it. Slugs are unique within an organization. Lists page with a
+    cursor passed back as `cursor`; the cursors for the previous and next pages come
+    in the `Link` response header. Issues are made by events the SDKs send, so the API
+    reads, updates and deletes them but does not create them. Paths end with a slash.
+servers:
+  - url: https://sentry.io
+    description: Also served from https://us.sentry.io and https://de.sentry.io
+security:
+  - bearer: []
+tags:
+  - name: Teams
+  - name: Projects
+  - name: Client keys
+  - name: Issues
+paths:
+  /api/0/organizations/{organization_id_or_slug}/teams/:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+    get:
+      tags: [Teams]
+      operationId: listOrganizationTeams
+      summary: List an organization's teams
+      parameters:
+        - name: detailed
+          in: query
+          description: '"0" leaves out projects and other details.'
+          schema: {type: string}
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: The organization's teams.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Team"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Teams]
+      operationId: createTeam
+      summary: Create a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                slug:
+                  type: string
+                  maxLength: 50
+                  pattern: "^[a-z0-9_-]+$"
+                  description: Made from the name when omitted.
+                name:
+                  type: string
+                  deprecated: true
+                  description: Defaults to the slug.
+      responses:
+        "201":
+          description: The created team.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Team"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: A team with this slug already exists.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /api/0/organizations/{organization_id_or_slug}/projects/:
+    get:
+      tags: [Projects]
+      operationId: listOrganizationProjects
+      summary: List an organization's projects
+      description: Projects being deleted are not listed.
+      parameters:
+        - $ref: "#/components/parameters/organization"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: The organization's projects.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/ProjectSummary"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/0/teams/{organization_id_or_slug}/{team_id_or_slug}/projects/:
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Create a new project for a team
+      parameters:
+        - $ref: "#/components/parameters/organization"
+        - name: team_id_or_slug
+          in: path
+          required: true
+          description: The team that will own the project.
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, maxLength: 50}
+                slug:
+                  type: string
+                  maxLength: 50
+                  pattern: "^[a-z0-9_-]+$"
+                  description: Made from the name when omitted.
+                platform: {type: string, example: python-django}
+                default_rules:
+                  type: boolean
+                  default: true
+                  description: Create the default alert rule ("alert on every new issue").
+      responses:
+        "201":
+          description: The created project.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: A project with this slug already exists in the organization.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /api/0/projects/{organization_id_or_slug}/{project_id_or_slug}/:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+    get:
+      tags: [Projects]
+      operationId: retrieveProject
+      summary: Retrieve a project
+      responses:
+        "200":
+          description: The project.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Projects]
+      operationId: updateProject
+      summary: Update a project
+      description: Changes only the fields sent. A new slug moves the project to a new path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, maxLength: 200}
+                slug: {type: string, maxLength: 50, pattern: "^[a-z0-9_-]+$"}
+                platform: {type: string}
+                isBookmarked: {type: boolean}
+                subjectPrefix: {type: string, maxLength: 200}
+                subjectTemplate: {type: string}
+                resolveAge: {type: integer, description: Hours of inactivity after which issues resolve; 0 never.}
+                highlightContext: {type: object, additionalProperties: {type: array, items: {type: string}}}
+                highlightTags: {type: array, items: {type: string}}
+      responses:
+        "200":
+          description: The project after the update.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+        "400":
+          description: Not valid, for example a slug another project of the organization already uses.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Projects]
+      operationId: deleteProject
+      summary: Delete a project
+      description: Schedules the project for deletion; it stops being served at once.
+      responses:
+        "204":
+          description: The project is being deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/0/projects/{organization_id_or_slug}/{project_id_or_slug}/keys/:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+    get:
+      tags: [Client keys]
+      operationId: listProjectKeys
+      summary: List a project's client keys
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - name: status
+          in: query
+          schema: {type: string, enum: [active, inactive]}
+      responses:
+        "200":
+          description: The project's client keys.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/ClientKey"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Client keys]
+      operationId: createProjectKey
+      summary: Create a new client key
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, maxLength: 64}
+                rateLimit:
+                  type: object
+                  properties:
+                    window: {type: integer, description: Seconds.}
+                    count: {type: integer}
+                useCase: {type: string, enum: [user, profiling, escalating_issues, tempest, demo], default: user}
+      responses:
+        "201":
+          description: The created key.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ClientKey"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/0/organizations/{organization_id_or_slug}/issues/:
+    get:
+      tags: [Issues]
+      operationId: listOrganizationIssues
+      summary: List an organization's issues
+      parameters:
+        - $ref: "#/components/parameters/organization"
+        - name: project
+          in: query
+          description: Project ids to limit to; repeat for several. -1 means all projects.
+          schema: {type: array, items: {type: integer}}
+          style: form
+          explode: true
+        - name: environment
+          in: query
+          schema: {type: array, items: {type: string}}
+          style: form
+          explode: true
+        - name: statsPeriod
+          in: query
+          schema: {type: string, example: 14d}
+        - name: start
+          in: query
+          schema: {type: string, format: date-time}
+        - name: end
+          in: query
+          schema: {type: string, format: date-time}
+        - name: query
+          in: query
+          description: A Sentry search query.
+          schema: {type: string, default: "is:unresolved"}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [date, freq, inbox, new, trends, user], default: date}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 100}
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Matching issues.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Issue"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /api/0/organizations/{organization_id_or_slug}/issues/{issue_id}/:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/issue"
+    get:
+      tags: [Issues]
+      operationId: retrieveIssue
+      summary: Retrieve an issue
+      responses:
+        "200":
+          description: The issue.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Issue"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Issues]
+      operationId: updateIssue
+      summary: Update an issue
+      description: Changes only the attributes sent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: {type: string, enum: [resolved, resolvedInNextRelease, unresolved, ignored]}
+                statusDetails:
+                  type: object
+                  properties:
+                    inRelease: {type: string}
+                    inNextRelease: {type: boolean}
+                    inCommit: {type: string}
+                    ignoreDuration: {type: integer}
+                    ignoreCount: {type: integer}
+                    ignoreWindow: {type: integer}
+                    ignoreUserCount: {type: integer}
+                    ignoreUserWindow: {type: integer}
+                assignedTo: {type: string, description: '"user:<id>", "team:<id>", a username or an email.'}
+                hasSeen: {type: boolean}
+                isBookmarked: {type: boolean}
+                isSubscribed: {type: boolean}
+                isPublic: {type: boolean}
+      responses:
+        "200":
+          description: The issue after the update.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Issue"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Issues]
+      operationId: deleteIssue
+      summary: Remove an issue
+      responses:
+        "202":
+          description: The issue is being removed.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/0/organizations/{organization_id_or_slug}/issues/{issue_id}/events/:
+    get:
+      tags: [Issues]
+      operationId: listIssueEvents
+      summary: List an issue's events
+      parameters:
+        - $ref: "#/components/parameters/organization"
+        - $ref: "#/components/parameters/issue"
+        - name: full
+          in: query
+          description: Include the full event body, stacktraces included.
+          schema: {type: boolean, default: false}
+        - name: environment
+          in: query
+          schema: {type: array, items: {type: string}}
+          style: form
+          explode: true
+        - name: query
+          in: query
+          schema: {type: string}
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: The issue's events, newest first.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Event"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: An auth token (organization token, user token or internal integration token).
+  parameters:
+    organization:
+      name: organization_id_or_slug
+      in: path
+      required: true
+      description: The organization's slug or id.
+      schema: {type: string}
+    project:
+      name: project_id_or_slug
+      in: path
+      required: true
+      description: The project's slug or id.
+      schema: {type: string}
+    issue:
+      name: issue_id
+      in: path
+      required: true
+      description: The issue's numeric id.
+      schema: {type: string, pattern: "^[0-9]+$"}
+    cursor:
+      name: cursor
+      in: query
+      description: A cursor from the Link header of a previous page.
+      schema: {type: string}
+  headers:
+    Link:
+      description: |
+        Previous and next page links, for example
+        `<https://sentry.io/api/0/...?&cursor=0:100:0>; rel="next"; results="true"; cursor="0:100:0"`.
+        `results="false"` means that page is empty.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: No valid auth token.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Forbidden:
+      description: The token lacks the scope for this.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: {type: string, example: "The requested resource does not exist"}
+    Avatar:
+      type: object
+      properties:
+        avatarType: {type: string, enum: [letter_avatar, upload]}
+        avatarUuid: {type: string, nullable: true}
+    OrganizationSummary:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        dateCreated: {type: string, format: date-time}
+        status:
+          type: object
+          properties:
+            id: {type: string, enum: [active, pending_deletion, deletion_in_progress]}
+            name: {type: string}
+    TeamSummary:
+      type: object
+      required: [id, slug, name]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+    Team:
+      type: object
+      required: [id, slug, name, dateCreated]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        dateCreated: {type: string, format: date-time}
+        isMember: {type: boolean}
+        teamRole: {type: string, nullable: true, enum: [contributor, admin, null]}
+        hasAccess: {type: boolean}
+        isPending: {type: boolean}
+        memberCount: {type: integer}
+        avatar: {$ref: "#/components/schemas/Avatar"}
+        externalTeams: {type: array, items: {type: object}}
+        projects: {type: array, items: {$ref: "#/components/schemas/ProjectSummary"}}
+    ProjectSummary:
+      type: object
+      required: [id, slug, name, dateCreated]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        platform: {type: string, nullable: true}
+        dateCreated: {type: string, format: date-time}
+        isBookmarked: {type: boolean}
+        isMember: {type: boolean}
+        hasAccess: {type: boolean}
+        firstEvent: {type: string, format: date-time, nullable: true}
+        features: {type: array, items: {type: string}}
+        status: {type: string, enum: [active, disabled, pending_deletion, deletion_in_progress]}
+    Project:
+      allOf:
+        - $ref: "#/components/schemas/ProjectSummary"
+        - type: object
+          required: [organization, teams]
+          properties:
+            organization: {$ref: "#/components/schemas/OrganizationSummary"}
+            team: {$ref: "#/components/schemas/TeamSummary"}
+            teams: {type: array, items: {$ref: "#/components/schemas/TeamSummary"}}
+            subjectPrefix: {type: string}
+            subjectTemplate: {type: string}
+            resolveAge: {type: integer}
+            color: {type: string}
+            isPublic: {type: boolean}
+            avatar: {$ref: "#/components/schemas/Avatar"}
+            hasSessions: {type: boolean}
+            hasMonitors: {type: boolean}
+            highlightTags: {type: array, items: {type: string}}
+    ClientKey:
+      type: object
+      required: [id, name, label, public, secret, projectId, isActive, dsn, dateCreated]
+      properties:
+        id: {type: string, description: Equal to the public key.}
+        name: {type: string}
+        label: {type: string}
+        public: {type: string, pattern: "^[0-9a-f]{32}$"}
+        secret: {type: string, pattern: "^[0-9a-f]{32}$"}
+        projectId: {type: integer}
+        isActive: {type: boolean}
+        rateLimit:
+          type: object
+          nullable: true
+          properties:
+            window: {type: integer}
+            count: {type: integer}
+        dsn:
+          type: object
+          required: [public, secret]
+          properties:
+            public:
+              type: string
+              format: uri
+              description: '`https://<public key>@o<organization id>.ingest.sentry.io/<project id>`'
+            secret: {type: string, format: uri}
+            csp: {type: string, format: uri}
+            security: {type: string, format: uri}
+            minidump: {type: string, format: uri}
+            nel: {type: string, format: uri}
+            unreal: {type: string, format: uri}
+            cdn: {type: string, format: uri}
+            crons: {type: string, format: uri}
+        browserSdkVersion: {type: string}
+        browserSdk:
+          type: object
+          properties:
+            choices: {type: array, items: {type: array, items: {type: string}}}
+        dateCreated: {type: string, format: date-time}
+        useCase: {type: string}
+    Issue:
+      type: object
+      required: [id, shortId, title, status, level, project, firstSeen, lastSeen, count, userCount, permalink]
+      properties:
+        id: {type: string}
+        shortId: {type: string, example: PUMP-STATION-1AB}
+        title: {type: string}
+        culprit: {type: string}
+        permalink: {type: string, format: uri}
+        logger: {type: string, nullable: true}
+        level: {type: string, enum: [sample, debug, info, warning, error, fatal]}
+        status: {type: string, enum: [resolved, unresolved, ignored]}
+        statusDetails: {type: object}
+        substatus: {type: string, nullable: true, enum: [archived_until_escalating, archived_until_condition_met, archived_forever, escalating, ongoing, regressed, new, null]}
+        isPublic: {type: boolean}
+        platform: {type: string}
+        project:
+          type: object
+          required: [id, slug, name]
+          properties:
+            id: {type: string}
+            slug: {type: string}
+            name: {type: string}
+            platform: {type: string, nullable: true}
+        type: {type: string, enum: [default, error, csp, hpkp, expectct, expectstaple, transaction, generic]}
+        metadata: {type: object}
+        numComments: {type: integer}
+        assignedTo:
+          type: object
+          nullable: true
+          properties:
+            type: {type: string, enum: [user, team]}
+            id: {type: string}
+            name: {type: string}
+            email: {type: string, format: email}
+        isBookmarked: {type: boolean}
+        isSubscribed: {type: boolean}
+        hasSeen: {type: boolean}
+        count: {type: string, description: Events seen, as a string.}
+        userCount: {type: integer}
+        firstSeen: {type: string, format: date-time}
+        lastSeen: {type: string, format: date-time}
+    Event:
+      type: object
+      required: [id, eventID, groupID, dateCreated]
+      properties:
+        id: {type: string}
+        eventID: {type: string, pattern: "^[0-9a-f]{32}$"}
+        groupID: {type: string, description: The id of the issue the event belongs to.}
+        projectID: {type: string}
+        title: {type: string}
+        message: {type: string}
+        platform: {type: string}
+        culprit: {type: string}
+        location: {type: string, nullable: true}
+        dateCreated: {type: string, format: date-time}
+        event.type: {type: string}
+        user:
+          type: object
+          nullable: true
+          properties:
+            id: {type: string, nullable: true}
+            email: {type: string, nullable: true}
+            username: {type: string, nullable: true}
+            ip_address: {type: string, nullable: true}
+        tags:
+          type: array
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key: {type: string}
+              value: {type: string}

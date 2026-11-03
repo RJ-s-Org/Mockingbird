@@ -1,0 +1,799 @@
+openapi: 3.0.3
+info:
+  title: Pipedrive API v2 (deals, persons, organizations, products)
+  version: "2.0.0"
+  description: |
+    A subset of the Pipedrive API v2, written from its public documentation.
+    Every answer is wrapped in an envelope: `success`, the record or records under
+    `data`, and, for lists, `additional_data.next_cursor`. Lists page with an opaque
+    cursor: pass the `next_cursor` of one page as `cursor` to get the next; it is null
+    on the last page. Updates are PATCH with only the fields to change; fields that are
+    not sent keep their values. A deleted deal is marked deleted and is left out of
+    lists unless `status=deleted` is asked for.
+servers:
+  - url: https://api.pipedrive.com
+    description: Also served from https://{companydomain}.pipedrive.com
+security:
+  - apiToken: []
+  - oauth2: []
+tags:
+  - name: Deals
+  - name: Persons
+  - name: Organizations
+  - name: Products
+paths:
+  /api/v2/deals:
+    get:
+      tags: [Deals]
+      operationId: getDeals
+      summary: Get all deals
+      description: Returns deals that are not deleted, unless `status` asks for deleted ones.
+      parameters:
+        - $ref: "#/components/parameters/filter_id"
+        - name: ids
+          in: query
+          description: Comma-separated deal ids to fetch; at most 100.
+          schema: {type: string}
+        - name: owner_id
+          in: query
+          description: Only deals owned by this user.
+          schema: {type: integer}
+        - name: person_id
+          in: query
+          description: Only deals linked to this person.
+          schema: {type: integer}
+        - name: org_id
+          in: query
+          description: Only deals linked to this organization.
+          schema: {type: integer}
+        - name: pipeline_id
+          in: query
+          schema: {type: integer}
+        - name: stage_id
+          in: query
+          schema: {type: integer}
+        - name: status
+          in: query
+          description: |
+            Comma-separated statuses among open, won, lost and deleted. When omitted,
+            every deal that is not deleted is returned.
+          schema: {type: string, example: "open,won"}
+        - $ref: "#/components/parameters/updated_since"
+        - $ref: "#/components/parameters/updated_until"
+        - $ref: "#/components/parameters/sort_by"
+        - $ref: "#/components/parameters/sort_direction"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of deals.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealList"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Deals]
+      operationId: addDeal
+      summary: Add a new deal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DealCreate"}
+      responses:
+        "200":
+          description: The created deal.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v2/deals/search:
+    get:
+      tags: [Deals]
+      operationId: searchDeals
+      summary: Search deals
+      description: Searches deals by title, notes and custom fields. Results are ranked by `result_score`.
+      parameters:
+        - name: term
+          in: query
+          required: true
+          description: The search term, at least 2 characters (1 with exact_match).
+          schema: {type: string, minLength: 1}
+        - name: fields
+          in: query
+          description: Comma-separated fields to search among title, notes and custom_fields.
+          schema: {type: string, example: "title"}
+        - name: exact_match
+          in: query
+          description: Only full, case-insensitive matches of the term.
+          schema: {type: boolean, default: false}
+        - name: person_id
+          in: query
+          schema: {type: integer}
+        - name: organization_id
+          in: query
+          schema: {type: integer}
+        - name: status
+          in: query
+          schema: {type: string, enum: [open, won, lost]}
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Search results.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealSearchResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v2/deals/{id}:
+    parameters:
+      - $ref: "#/components/parameters/dealId"
+    get:
+      tags: [Deals]
+      operationId: getDeal
+      summary: Get details of a deal
+      responses:
+        "200":
+          description: The deal.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Deals]
+      operationId: updateDeal
+      summary: Update a deal
+      description: Changes only the fields sent; every other field keeps its value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DealUpdate"}
+      responses:
+        "200":
+          description: The whole deal after the update.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Deals]
+      operationId: deleteDeal
+      summary: Delete a deal
+      description: Marks the deal as deleted. It is removed for good after 30 days.
+      responses:
+        "200":
+          description: The id of the deleted deal.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeletedResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/deals/{id}/products:
+    parameters:
+      - $ref: "#/components/parameters/dealId"
+    get:
+      tags: [Deals]
+      operationId: getDealProducts
+      summary: List products attached to a deal
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: sort_by
+          in: query
+          schema: {type: string, enum: [id, add_time, update_time, order_nr], default: id}
+        - $ref: "#/components/parameters/sort_direction"
+      responses:
+        "200":
+          description: The deal's product lines.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealProductList"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Deals]
+      operationId: addDealProduct
+      summary: Add a product to a deal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DealProductCreate"}
+      responses:
+        "201":
+          description: The new product line.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DealProductResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/persons:
+    get:
+      tags: [Persons]
+      operationId: getPersons
+      summary: Get all persons
+      parameters:
+        - $ref: "#/components/parameters/filter_id"
+        - name: ids
+          in: query
+          schema: {type: string}
+        - name: owner_id
+          in: query
+          schema: {type: integer}
+        - name: org_id
+          in: query
+          description: Only persons linked to this organization.
+          schema: {type: integer}
+        - $ref: "#/components/parameters/updated_since"
+        - $ref: "#/components/parameters/updated_until"
+        - $ref: "#/components/parameters/sort_by"
+        - $ref: "#/components/parameters/sort_direction"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of persons.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PersonList"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Persons]
+      operationId: addPerson
+      summary: Add a new person
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PersonCreate"}
+      responses:
+        "200":
+          description: The created person.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PersonResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v2/persons/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The id of the person.
+        schema: {type: integer}
+    get:
+      tags: [Persons]
+      operationId: getPerson
+      summary: Get details of a person
+      responses:
+        "200":
+          description: The person.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PersonResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Persons]
+      operationId: updatePerson
+      summary: Update a person
+      description: Changes only the fields sent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PersonUpdate"}
+      responses:
+        "200":
+          description: The whole person after the update.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PersonResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/organizations:
+    post:
+      tags: [Organizations]
+      operationId: addOrganization
+      summary: Add a new organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OrganizationCreate"}
+      responses:
+        "200":
+          description: The created organization.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OrganizationResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v2/organizations/{id}:
+    get:
+      tags: [Organizations]
+      operationId: getOrganization
+      summary: Get details of an organization
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: integer}
+      responses:
+        "200":
+          description: The organization.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OrganizationResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/products:
+    post:
+      tags: [Products]
+      operationId: addProduct
+      summary: Add a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProductCreate"}
+      responses:
+        "201":
+          description: The created product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProductResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+components:
+  securitySchemes:
+    apiToken:
+      type: apiKey
+      in: header
+      name: x-api-token
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://oauth.pipedrive.com/oauth/authorize
+          tokenUrl: https://oauth.pipedrive.com/oauth/token
+          scopes:
+            deals:full: Read and write deals
+            contacts:full: Read and write persons and organizations
+            products:full: Read and write products
+  parameters:
+    dealId:
+      name: id
+      in: path
+      required: true
+      description: The id of the deal.
+      schema: {type: integer}
+    filter_id:
+      name: filter_id
+      in: query
+      description: A saved filter to apply.
+      schema: {type: integer}
+    updated_since:
+      name: updated_since
+      in: query
+      description: Only records updated at or after this RFC 3339 time.
+      schema: {type: string, format: date-time}
+    updated_until:
+      name: updated_until
+      in: query
+      description: Only records updated before this RFC 3339 time.
+      schema: {type: string, format: date-time}
+    sort_by:
+      name: sort_by
+      in: query
+      schema: {type: string, enum: [id, update_time, add_time], default: id}
+    sort_direction:
+      name: sort_direction
+      in: query
+      schema: {type: string, enum: [asc, desc], default: asc}
+    limit:
+      name: limit
+      in: query
+      description: Records per page, at most 500.
+      schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+    cursor:
+      name: cursor
+      in: query
+      description: The `next_cursor` of the previous page.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: The API token is missing or not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No record has this id.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [success, error]
+      properties:
+        success: {type: boolean, enum: [false]}
+        error: {type: string, example: "Deal not found"}
+        error_info: {type: string, example: "Please check developers.pipedrive.com for more information about Pipedrive API."}
+        data: {nullable: true}
+        additional_data: {nullable: true}
+    Cursor:
+      type: object
+      required: [next_cursor]
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` for the next page; null on the last page.
+    VisibleTo:
+      type: integer
+      enum: [1, 3, 5, 7]
+      description: 1 owner only, 3 owner's visibility group, 5 owner's group and sub-groups, 7 entire company.
+    Deal:
+      type: object
+      required: [id, title, owner_id, value, currency, status, is_deleted, add_time, update_time]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        creator_user_id: {type: integer}
+        owner_id: {type: integer}
+        value: {type: number}
+        currency: {type: string, description: ISO 4217 code, example: EUR}
+        person_id: {type: integer, nullable: true}
+        org_id: {type: integer, nullable: true}
+        pipeline_id: {type: integer}
+        stage_id: {type: integer}
+        status: {type: string, enum: [open, won, lost]}
+        probability: {type: integer, nullable: true, minimum: 0, maximum: 100}
+        lost_reason: {type: string, nullable: true}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        expected_close_date: {type: string, format: date, nullable: true}
+        add_time: {type: string, format: date-time}
+        update_time: {type: string, format: date-time}
+        stage_change_time: {type: string, format: date-time, nullable: true}
+        close_time: {type: string, format: date-time, nullable: true}
+        won_time: {type: string, format: date-time, nullable: true}
+        lost_time: {type: string, format: date-time, nullable: true}
+        is_deleted: {type: boolean}
+        custom_fields: {type: object, additionalProperties: true}
+    DealCreate:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1}
+        owner_id: {type: integer}
+        person_id: {type: integer}
+        org_id: {type: integer}
+        pipeline_id: {type: integer}
+        stage_id: {type: integer}
+        value: {type: number}
+        currency: {type: string, description: Defaults to the company's default currency.}
+        status: {type: string, enum: [open, won, lost], default: open}
+        probability: {type: integer, minimum: 0, maximum: 100}
+        lost_reason: {type: string}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        expected_close_date: {type: string, format: date}
+        add_time: {type: string, format: date-time}
+        close_time: {type: string, format: date-time}
+        custom_fields: {type: object, additionalProperties: true}
+    DealUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title: {type: string, minLength: 1}
+        owner_id: {type: integer}
+        person_id: {type: integer, nullable: true}
+        org_id: {type: integer, nullable: true}
+        pipeline_id: {type: integer}
+        stage_id: {type: integer}
+        value: {type: number}
+        currency: {type: string}
+        status: {type: string, enum: [open, won, lost]}
+        probability: {type: integer, minimum: 0, maximum: 100}
+        lost_reason: {type: string}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        expected_close_date: {type: string, format: date}
+        custom_fields: {type: object, additionalProperties: true}
+    DealResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data: {$ref: "#/components/schemas/Deal"}
+    DealList:
+      type: object
+      required: [success, data, additional_data]
+      properties:
+        success: {type: boolean}
+        data: {type: array, items: {$ref: "#/components/schemas/Deal"}}
+        additional_data: {$ref: "#/components/schemas/Cursor"}
+    DealSearchItem:
+      type: object
+      required: [result_score, item]
+      properties:
+        result_score: {type: number}
+        item:
+          type: object
+          required: [id, type, title]
+          properties:
+            id: {type: integer}
+            type: {type: string, enum: [deal]}
+            title: {type: string}
+            value: {type: number}
+            currency: {type: string}
+            status: {type: string, enum: [open, won, lost]}
+            visible_to: {$ref: "#/components/schemas/VisibleTo"}
+            owner:
+              type: object
+              properties:
+                id: {type: integer}
+            stage:
+              type: object
+              properties:
+                id: {type: integer}
+                name: {type: string}
+            person:
+              type: object
+              nullable: true
+              properties:
+                id: {type: integer}
+                name: {type: string}
+            organization:
+              type: object
+              nullable: true
+              properties:
+                id: {type: integer}
+                name: {type: string}
+                address: {type: string, nullable: true}
+            custom_fields: {type: array, items: {type: string}}
+            notes: {type: array, items: {type: string}}
+    DealSearchResponse:
+      type: object
+      required: [success, data, additional_data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [items]
+          properties:
+            items: {type: array, items: {$ref: "#/components/schemas/DealSearchItem"}}
+        additional_data: {$ref: "#/components/schemas/Cursor"}
+    DealProduct:
+      type: object
+      required: [id, deal_id, product_id, item_price, quantity, sum, currency]
+      properties:
+        id: {type: integer}
+        deal_id: {type: integer}
+        product_id: {type: integer}
+        product_variation_id: {type: integer, nullable: true}
+        name: {type: string}
+        item_price: {type: number}
+        quantity: {type: number}
+        discount: {type: number, default: 0}
+        discount_type: {type: string, enum: [percentage, amount], default: percentage}
+        tax: {type: number, default: 0}
+        tax_method: {type: string, enum: [exclusive, inclusive, none]}
+        sum: {type: number, description: The line total after discount and tax.}
+        currency: {type: string}
+        comments: {type: string, nullable: true}
+        is_enabled: {type: boolean, default: true}
+        billing_frequency: {type: string, enum: [one-time, annually, semi-annually, quarterly, monthly, weekly], default: one-time}
+        billing_frequency_cycles: {type: integer, nullable: true}
+        billing_start_date: {type: string, format: date, nullable: true}
+        add_time: {type: string, format: date-time}
+        update_time: {type: string, format: date-time}
+    DealProductCreate:
+      type: object
+      required: [product_id, item_price, quantity]
+      properties:
+        product_id: {type: integer}
+        item_price: {type: number}
+        quantity: {type: number, minimum: 0}
+        discount: {type: number, minimum: 0}
+        discount_type: {type: string, enum: [percentage, amount]}
+        tax: {type: number, minimum: 0}
+        tax_method: {type: string, enum: [exclusive, inclusive, none]}
+        comments: {type: string}
+        is_enabled: {type: boolean}
+        product_variation_id: {type: integer}
+        billing_frequency: {type: string, enum: [one-time, annually, semi-annually, quarterly, monthly, weekly]}
+        billing_frequency_cycles: {type: integer}
+        billing_start_date: {type: string, format: date}
+    DealProductResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data: {$ref: "#/components/schemas/DealProduct"}
+    DealProductList:
+      type: object
+      required: [success, data, additional_data]
+      properties:
+        success: {type: boolean}
+        data: {type: array, items: {$ref: "#/components/schemas/DealProduct"}}
+        additional_data: {$ref: "#/components/schemas/Cursor"}
+    DeletedResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data:
+          type: object
+          required: [id]
+          properties:
+            id: {type: integer}
+    ContactDetail:
+      type: object
+      required: [value]
+      properties:
+        value: {type: string}
+        primary: {type: boolean, default: false}
+        label: {type: string, enum: [work, home, mobile, other], default: work}
+    Person:
+      type: object
+      required: [id, name, owner_id, emails, phones, is_deleted, add_time, update_time]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        first_name: {type: string, nullable: true}
+        last_name: {type: string, nullable: true}
+        owner_id: {type: integer}
+        org_id: {type: integer, nullable: true}
+        emails: {type: array, items: {$ref: "#/components/schemas/ContactDetail"}}
+        phones: {type: array, items: {$ref: "#/components/schemas/ContactDetail"}}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        picture_id: {type: integer, nullable: true}
+        is_deleted: {type: boolean}
+        add_time: {type: string, format: date-time}
+        update_time: {type: string, format: date-time}
+        custom_fields: {type: object, additionalProperties: true}
+    PersonCreate:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        owner_id: {type: integer}
+        org_id: {type: integer}
+        emails: {type: array, items: {$ref: "#/components/schemas/ContactDetail"}}
+        phones: {type: array, items: {$ref: "#/components/schemas/ContactDetail"}}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        add_time: {type: string, format: date-time}
+        custom_fields: {type: object, additionalProperties: true}
+    PersonUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1}
+        owner_id: {type: integer}
+        org_id: {type: integer, nullable: true}
+        emails: {type: array, items: {$ref: "#/components/schemas/ContactDetail"}}
+        phones: {type: array, items: {$ref: "#/components/schemas/ContactDetail"}}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        custom_fields: {type: object, additionalProperties: true}
+    PersonResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data: {$ref: "#/components/schemas/Person"}
+    PersonList:
+      type: object
+      required: [success, data, additional_data]
+      properties:
+        success: {type: boolean}
+        data: {type: array, items: {$ref: "#/components/schemas/Person"}}
+        additional_data: {$ref: "#/components/schemas/Cursor"}
+    Address:
+      type: object
+      properties:
+        value: {type: string}
+        country: {type: string}
+        locality: {type: string}
+        postal_code: {type: string}
+        route: {type: string}
+        street_number: {type: string}
+    Organization:
+      type: object
+      required: [id, name, owner_id, is_deleted, add_time, update_time]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        owner_id: {type: integer}
+        address: {allOf: [{$ref: "#/components/schemas/Address"}], nullable: true}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        is_deleted: {type: boolean}
+        add_time: {type: string, format: date-time}
+        update_time: {type: string, format: date-time}
+        custom_fields: {type: object, additionalProperties: true}
+    OrganizationCreate:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        owner_id: {type: integer}
+        address: {$ref: "#/components/schemas/Address"}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        label_ids: {type: array, items: {type: integer}}
+        add_time: {type: string, format: date-time}
+        custom_fields: {type: object, additionalProperties: true}
+    OrganizationResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data: {$ref: "#/components/schemas/Organization"}
+    ProductPrice:
+      type: object
+      required: [price, currency]
+      properties:
+        price: {type: number}
+        currency: {type: string}
+        cost: {type: number}
+        direct_cost: {type: number}
+        notes: {type: string}
+    Product:
+      type: object
+      required: [id, name, owner_id, is_deleted, prices, add_time]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        code: {type: string, nullable: true}
+        description: {type: string, nullable: true}
+        unit: {type: string, nullable: true}
+        tax: {type: number}
+        category: {type: string, nullable: true}
+        owner_id: {type: integer}
+        is_linkable: {type: boolean}
+        is_deleted: {type: boolean}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        prices: {type: array, items: {$ref: "#/components/schemas/ProductPrice"}}
+        billing_frequency: {type: string, enum: [one-time, annually, semi-annually, quarterly, monthly, weekly]}
+        add_time: {type: string, format: date-time}
+        update_time: {type: string, format: date-time}
+    ProductCreate:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        code: {type: string}
+        description: {type: string}
+        unit: {type: string}
+        tax: {type: number}
+        category: {type: string}
+        owner_id: {type: integer}
+        is_linkable: {type: boolean}
+        visible_to: {$ref: "#/components/schemas/VisibleTo"}
+        prices: {type: array, items: {$ref: "#/components/schemas/ProductPrice"}}
+        billing_frequency: {type: string, enum: [one-time, annually, semi-annually, quarterly, monthly, weekly]}
+    ProductResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: {type: boolean}
+        data: {$ref: "#/components/schemas/Product"}

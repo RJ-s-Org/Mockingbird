@@ -1,0 +1,564 @@
+openapi: 3.0.3
+info:
+  title: Contentful Content Management API (environments, content types, entries)
+  version: "1.0.0"
+  description: |
+    A subset of the Contentful Content Management API, written from its public
+    documentation. Content lives two levels down: in an environment of a space,
+    `/spaces/{space_id}/environments/{environment_id}/...`. Every resource carries a
+    `sys` block with its id, type, version and links. Writes to an existing resource
+    send its current `sys.version` in `X-Contentful-Version`; a stale version is
+    refused with 409 VersionMismatch. Every write, publishing included, raises
+    `sys.version` by one, and publishing records the version it published in
+    `sys.publishedVersion`. A content type must be activated (published) before
+    entries of it can be made. Entry fields are keyed by field id, then by locale.
+    Collections page with `skip` and `limit` and report `total`.
+servers:
+  - url: https://api.contentful.com
+security:
+  - bearer: []
+tags:
+  - name: Environments
+  - name: Content types
+  - name: Entries
+paths:
+  /spaces/{space_id}/environments/{environment_id}:
+    get:
+      tags: [Environments]
+      operationId: getEnvironment
+      summary: Get an environment
+      parameters:
+        - $ref: "#/components/parameters/space_id"
+        - $ref: "#/components/parameters/environment_id"
+      responses:
+        "200":
+          description: The environment.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Environment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /spaces/{space_id}/environments/{environment_id}/content_types:
+    parameters:
+      - $ref: "#/components/parameters/space_id"
+      - $ref: "#/components/parameters/environment_id"
+    get:
+      tags: [Content types]
+      operationId: getContentTypes
+      summary: Get all content types of an environment
+      parameters:
+        - $ref: "#/components/parameters/skip"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/order"
+      responses:
+        "200":
+          description: A page of content types.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/ContentTypeCollection"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Content types]
+      operationId: createContentType
+      summary: Create a content type with a generated id
+      requestBody:
+        required: true
+        content:
+          application/vnd.contentful.management.v1+json:
+            schema: {$ref: "#/components/schemas/ContentTypeInput"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ContentTypeInput"}
+      responses:
+        "201":
+          description: The created content type, at version 1 and not active.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/ContentType"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+  /spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}:
+    parameters:
+      - $ref: "#/components/parameters/space_id"
+      - $ref: "#/components/parameters/environment_id"
+      - $ref: "#/components/parameters/content_type_id"
+    get:
+      tags: [Content types]
+      operationId: getContentType
+      summary: Get a content type
+      responses:
+        "200":
+          description: The content type.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/ContentType"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Content types]
+      operationId: putContentType
+      summary: Create a content type with this id, or update it
+      description: |
+        Without `X-Contentful-Version` it creates the content type with the id in
+        the path (201). With the current version it replaces it (200).
+      parameters:
+        - $ref: "#/components/parameters/version_optional"
+      requestBody:
+        required: true
+        content:
+          application/vnd.contentful.management.v1+json:
+            schema: {$ref: "#/components/schemas/ContentTypeInput"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ContentTypeInput"}
+      responses:
+        "200":
+          description: The updated content type.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/ContentType"}
+        "201":
+          description: The created content type, at version 1 and not active.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/ContentType"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/VersionMismatch"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+  /spaces/{space_id}/environments/{environment_id}/content_types/{content_type_id}/published:
+    put:
+      tags: [Content types]
+      operationId: activateContentType
+      summary: Activate a content type
+      parameters:
+        - $ref: "#/components/parameters/space_id"
+        - $ref: "#/components/parameters/environment_id"
+        - $ref: "#/components/parameters/content_type_id"
+        - $ref: "#/components/parameters/version"
+      responses:
+        "200":
+          description: The active content type; `sys.publishedVersion` is the version sent.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/ContentType"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/VersionMismatch"}
+  /spaces/{space_id}/environments/{environment_id}/entries:
+    parameters:
+      - $ref: "#/components/parameters/space_id"
+      - $ref: "#/components/parameters/environment_id"
+    get:
+      tags: [Entries]
+      operationId: getEntries
+      summary: Get entries of an environment
+      parameters:
+        - name: content_type
+          in: query
+          description: Only entries of this content type.
+          schema: {type: string}
+        - name: query
+          in: query
+          description: Full-text search across the entries' text and symbol fields.
+          schema: {type: string}
+        - name: sys.id[in]
+          in: query
+          description: Comma-separated entry ids.
+          schema: {type: string}
+        - name: select
+          in: query
+          description: Comma-separated paths to return, such as `sys.id,fields.title`.
+          schema: {type: string}
+        - $ref: "#/components/parameters/skip"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/order"
+      responses:
+        "200":
+          description: A page of entries, drafts included.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/EntryCollection"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Entries]
+      operationId: createEntry
+      summary: Create an entry with a generated id
+      parameters:
+        - $ref: "#/components/parameters/content_type_header"
+      requestBody:
+        required: true
+        content:
+          application/vnd.contentful.management.v1+json:
+            schema: {$ref: "#/components/schemas/EntryInput"}
+          application/json:
+            schema: {$ref: "#/components/schemas/EntryInput"}
+      responses:
+        "201":
+          description: The created entry, a draft at version 1.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Entry"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+  /spaces/{space_id}/environments/{environment_id}/entries/{entry_id}:
+    parameters:
+      - $ref: "#/components/parameters/space_id"
+      - $ref: "#/components/parameters/environment_id"
+      - $ref: "#/components/parameters/entry_id"
+    get:
+      tags: [Entries]
+      operationId: getEntry
+      summary: Get an entry
+      responses:
+        "200":
+          description: The entry, with its latest (possibly draft) fields.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Entry"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Entries]
+      operationId: putEntry
+      summary: Create an entry with this id, or update it
+      description: |
+        With `X-Contentful-Version` it replaces the entry's fields (200); fields left
+        out of the body are removed. Without it, and with `X-Contentful-Content-Type`,
+        it creates the entry with the id in the path (201).
+      parameters:
+        - $ref: "#/components/parameters/version_optional"
+        - name: X-Contentful-Content-Type
+          in: header
+          description: Required when creating.
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/vnd.contentful.management.v1+json:
+            schema: {$ref: "#/components/schemas/EntryInput"}
+          application/json:
+            schema: {$ref: "#/components/schemas/EntryInput"}
+      responses:
+        "200":
+          description: The updated entry.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Entry"}
+        "201":
+          description: The created entry.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Entry"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/VersionMismatch"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+    delete:
+      tags: [Entries]
+      operationId: deleteEntry
+      summary: Delete an entry
+      description: Only a draft (unpublished) entry can be deleted.
+      parameters:
+        - $ref: "#/components/parameters/version_optional"
+      responses:
+        "204":
+          description: The entry was deleted.
+        "400":
+          description: The entry is published; unpublish it first.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/VersionMismatch"}
+  /spaces/{space_id}/environments/{environment_id}/entries/{entry_id}/published:
+    parameters:
+      - $ref: "#/components/parameters/space_id"
+      - $ref: "#/components/parameters/environment_id"
+      - $ref: "#/components/parameters/entry_id"
+    put:
+      tags: [Entries]
+      operationId: publishEntry
+      summary: Publish an entry
+      parameters:
+        - $ref: "#/components/parameters/version"
+      responses:
+        "200":
+          description: |
+            The published entry: `sys.publishedVersion` is the version sent and
+            `sys.version` is one higher.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Entry"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/VersionMismatch"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+    delete:
+      tags: [Entries]
+      operationId: unpublishEntry
+      summary: Unpublish an entry
+      parameters:
+        - $ref: "#/components/parameters/version"
+      responses:
+        "200":
+          description: The entry, a draft again with no `sys.publishedVersion`.
+          content:
+            application/vnd.contentful.management.v1+json:
+              schema: {$ref: "#/components/schemas/Entry"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/VersionMismatch"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A personal access token or an OAuth token.
+  parameters:
+    space_id:
+      name: space_id
+      in: path
+      required: true
+      schema: {type: string}
+    environment_id:
+      name: environment_id
+      in: path
+      required: true
+      description: The environment's id, such as `master`.
+      schema: {type: string}
+    content_type_id:
+      name: content_type_id
+      in: path
+      required: true
+      schema: {type: string, pattern: "^[a-zA-Z0-9-_.]{1,64}$"}
+    entry_id:
+      name: entry_id
+      in: path
+      required: true
+      schema: {type: string, pattern: "^[a-zA-Z0-9-_.]{1,64}$"}
+    version:
+      name: X-Contentful-Version
+      in: header
+      required: true
+      description: The resource's current `sys.version`.
+      schema: {type: integer, minimum: 1}
+    version_optional:
+      name: X-Contentful-Version
+      in: header
+      description: The resource's current `sys.version`; required to change an existing resource.
+      schema: {type: integer, minimum: 1}
+    content_type_header:
+      name: X-Contentful-Content-Type
+      in: header
+      required: true
+      description: The id of the entry's content type.
+      schema: {type: string}
+    skip:
+      name: skip
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
+    limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
+    order:
+      name: order
+      in: query
+      description: A sys or field path to sort by, `-` first for descending, such as `-sys.createdAt`.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid.
+      content:
+        application/vnd.contentful.management.v1+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: AccessTokenInvalid.
+      content:
+        application/vnd.contentful.management.v1+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: NotFound.
+      content:
+        application/vnd.contentful.management.v1+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    VersionMismatch:
+      description: VersionMismatch, the version sent is not the resource's current version.
+      content:
+        application/vnd.contentful.management.v1+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    ValidationFailed:
+      description: ValidationFailed, the body does not fit the content type.
+      content:
+        application/vnd.contentful.management.v1+json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Link:
+      type: object
+      required: [sys]
+      properties:
+        sys:
+          type: object
+          required: [type, linkType, id]
+          properties:
+            type: {type: string, enum: [Link]}
+            linkType: {type: string, enum: [Space, Environment, ContentType, Entry, Asset, User]}
+            id: {type: string}
+    Error:
+      type: object
+      required: [sys, message]
+      properties:
+        sys:
+          type: object
+          required: [type, id]
+          properties:
+            type: {type: string, enum: [Error]}
+            id:
+              type: string
+              enum: [BadRequest, AccessTokenInvalid, NotFound, VersionMismatch, ValidationFailed, InvalidQuery, RateLimitExceeded, ServerError]
+        message: {type: string}
+        details: {type: object}
+        requestId: {type: string}
+    Environment:
+      type: object
+      required: [sys, name]
+      properties:
+        name: {type: string}
+        sys:
+          type: object
+          required: [id, type, version, space]
+          properties:
+            id: {type: string}
+            type: {type: string, enum: [Environment]}
+            version: {type: integer}
+            space: {$ref: "#/components/schemas/Link"}
+            status: {$ref: "#/components/schemas/Link"}
+            aliases: {type: array, items: {$ref: "#/components/schemas/Link"}}
+            createdAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+    Field:
+      type: object
+      required: [id, name, type]
+      properties:
+        id: {type: string, pattern: "^[a-zA-Z][a-zA-Z0-9_]*$"}
+        name: {type: string}
+        type: {type: string, enum: [Symbol, Text, RichText, Integer, Number, Date, Location, Boolean, Object, Link, Array]}
+        linkType: {type: string, enum: [Entry, Asset], description: When type is Link.}
+        items:
+          type: object
+          description: When type is Array.
+          properties:
+            type: {type: string, enum: [Symbol, Link]}
+            linkType: {type: string, enum: [Entry, Asset]}
+            validations: {type: array, items: {type: object}}
+        required: {type: boolean, default: false}
+        localized: {type: boolean, default: false}
+        disabled: {type: boolean, default: false}
+        omitted: {type: boolean, default: false}
+        validations: {type: array, items: {type: object}}
+        defaultValue: {type: object}
+    ContentTypeInput:
+      type: object
+      required: [name, fields]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        displayField: {type: string, description: The id of the field used as the entry's title.}
+        fields: {type: array, minItems: 1, maxItems: 50, items: {$ref: "#/components/schemas/Field"}}
+    ContentType:
+      type: object
+      required: [sys, name, fields]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        displayField: {type: string}
+        fields: {type: array, items: {$ref: "#/components/schemas/Field"}}
+        sys:
+          type: object
+          required: [id, type, version, space, environment, createdAt, updatedAt]
+          properties:
+            id: {type: string}
+            type: {type: string, enum: [ContentType]}
+            version: {type: integer, minimum: 1}
+            space: {$ref: "#/components/schemas/Link"}
+            environment: {$ref: "#/components/schemas/Link"}
+            createdAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+            createdBy: {$ref: "#/components/schemas/Link"}
+            updatedBy: {$ref: "#/components/schemas/Link"}
+            publishedVersion: {type: integer, description: Absent until activated.}
+            publishedAt: {type: string, format: date-time}
+            firstPublishedAt: {type: string, format: date-time}
+            publishedCounter: {type: integer}
+    ContentTypeCollection:
+      type: object
+      required: [sys, total, skip, limit, items]
+      properties:
+        sys:
+          type: object
+          properties:
+            type: {type: string, enum: [Array]}
+        total: {type: integer}
+        skip: {type: integer}
+        limit: {type: integer}
+        items: {type: array, items: {$ref: "#/components/schemas/ContentType"}}
+    LocalizedFields:
+      type: object
+      description: 'Field id to a map of locale code to value, such as {"title": {"en-US": "Pancakes"}}.'
+      additionalProperties:
+        type: object
+        additionalProperties: {}
+    EntryInput:
+      type: object
+      required: [fields]
+      properties:
+        fields: {$ref: "#/components/schemas/LocalizedFields"}
+        metadata:
+          type: object
+          properties:
+            tags: {type: array, items: {$ref: "#/components/schemas/Link"}}
+    Entry:
+      type: object
+      required: [sys, fields]
+      properties:
+        fields: {$ref: "#/components/schemas/LocalizedFields"}
+        metadata:
+          type: object
+          properties:
+            tags: {type: array, items: {$ref: "#/components/schemas/Link"}}
+        sys:
+          type: object
+          required: [id, type, version, space, environment, contentType, createdAt, updatedAt]
+          properties:
+            id: {type: string}
+            type: {type: string, enum: [Entry]}
+            version: {type: integer, minimum: 1}
+            space: {$ref: "#/components/schemas/Link"}
+            environment: {$ref: "#/components/schemas/Link"}
+            contentType: {$ref: "#/components/schemas/Link"}
+            createdAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+            createdBy: {$ref: "#/components/schemas/Link"}
+            updatedBy: {$ref: "#/components/schemas/Link"}
+            publishedVersion: {type: integer, description: Absent while the entry is a draft that was never published or was unpublished.}
+            publishedAt: {type: string, format: date-time}
+            firstPublishedAt: {type: string, format: date-time}
+            publishedCounter: {type: integer}
+            archivedVersion: {type: integer}
+            archivedAt: {type: string, format: date-time}
+            automationTags: {type: array, items: {type: object}}
+    EntryCollection:
+      type: object
+      required: [sys, total, skip, limit, items]
+      properties:
+        sys:
+          type: object
+          properties:
+            type: {type: string, enum: [Array]}
+        total: {type: integer}
+        skip: {type: integer}
+        limit: {type: integer}
+        items: {type: array, items: {$ref: "#/components/schemas/Entry"}}

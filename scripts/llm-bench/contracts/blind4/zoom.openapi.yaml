@@ -1,0 +1,651 @@
+openapi: 3.0.3
+info:
+  title: Zoom Meetings API (users, meetings, registrants)
+  version: "2.0.0"
+  description: |
+    A subset of the Zoom API v2 for scheduling meetings and managing their
+    registrants, written from its public documentation. `userId` may be the user's
+    id, email address, or `me` for the user the token belongs to. Lists page with
+    `next_page_token`: pass it back to get the next page; it is an empty string when
+    there are no more. A meeting update is PATCH with only the fields to change and
+    answers 204 No Content; read the meeting to see it. Errors carry a numeric Zoom
+    `code` and a `message`.
+servers:
+  - url: https://api.zoom.us
+security:
+  - bearer: []
+tags:
+  - name: Users
+  - name: Meetings
+  - name: Registrants
+paths:
+  /v2/users/{userId}:
+    get:
+      tags: [Users]
+      operationId: user
+      summary: Get a user
+      parameters:
+        - $ref: "#/components/parameters/userId"
+        - name: login_type
+          in: query
+          schema: {type: integer, enum: [0, 1, 11, 21, 23, 24, 27, 97, 98, 99, 100, 101]}
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: "User does not exist (code 1001)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /v2/users/{userId}/meetings:
+    parameters:
+      - $ref: "#/components/parameters/userId"
+    get:
+      tags: [Meetings]
+      operationId: meetings
+      summary: List a user's meetings
+      parameters:
+        - name: type
+          in: query
+          description: |
+            scheduled: every valid scheduled meeting, previous meetings excluded;
+            live: meetings in progress; upcoming: upcoming meetings, live ones included;
+            upcoming_meetings: upcoming meetings; previous_meetings: past meetings.
+          schema:
+            type: string
+            enum: [scheduled, live, upcoming, upcoming_meetings, previous_meetings]
+            default: scheduled
+        - $ref: "#/components/parameters/page_size"
+        - $ref: "#/components/parameters/next_page_token"
+        - name: page_number
+          in: query
+          deprecated: true
+          schema: {type: integer, minimum: 1}
+        - name: from
+          in: query
+          schema: {type: string, format: date}
+        - name: to
+          in: query
+          schema: {type: string, format: date}
+        - name: timezone
+          in: query
+          schema: {type: string, example: America/Los_Angeles}
+      responses:
+        "200":
+          description: A page of meetings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MeetingList"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: "User does not exist (code 1001)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    post:
+      tags: [Meetings]
+      operationId: meetingCreate
+      summary: Create a meeting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MeetingCreate"}
+      responses:
+        "201":
+          description: The created meeting.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Meeting"}
+        "300":
+          description: "Too many meetings created for this user today (code 3000)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: "User does not exist (code 1001)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /v2/meetings/{meetingId}:
+    parameters:
+      - $ref: "#/components/parameters/meetingId"
+    get:
+      tags: [Meetings]
+      operationId: meeting
+      summary: Get a meeting
+      parameters:
+        - $ref: "#/components/parameters/occurrence_id"
+        - name: show_previous_occurrences
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The meeting.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Meeting"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+    patch:
+      tags: [Meetings]
+      operationId: meetingUpdate
+      summary: Update a meeting
+      description: Changes only the fields sent. Answers no content.
+      parameters:
+        - $ref: "#/components/parameters/occurrence_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MeetingUpdate"}
+      responses:
+        "204":
+          description: The meeting was updated.
+        "300":
+          description: "Invalid enforce_login_domains (code 300)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+    delete:
+      tags: [Meetings]
+      operationId: meetingDelete
+      summary: Delete a meeting
+      parameters:
+        - $ref: "#/components/parameters/occurrence_id"
+        - name: schedule_for_reminder
+          in: query
+          description: Email the host and alternative hosts about the cancellation.
+          schema: {type: boolean}
+        - name: cancel_meeting_reminder
+          in: query
+          description: Email the registrants about the cancellation.
+          schema: {type: boolean}
+      responses:
+        "204":
+          description: The meeting was deleted.
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+  /v2/meetings/{meetingId}/status:
+    put:
+      tags: [Meetings]
+      operationId: meetingStatus
+      summary: End a meeting or recover a deleted one
+      parameters:
+        - $ref: "#/components/parameters/meetingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [end, recover]
+                  description: end ends a live meeting; recover restores a meeting deleted in the last 7 days.
+      responses:
+        "204":
+          description: The status was changed.
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+  /v2/meetings/{meetingId}/invitation:
+    get:
+      tags: [Meetings]
+      operationId: meetingInvitation
+      summary: Get the meeting invitation text
+      parameters:
+        - $ref: "#/components/parameters/meetingId"
+      responses:
+        "200":
+          description: The invitation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitation]
+                properties:
+                  invitation: {type: string, description: The invitation text, join link included.}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+  /v2/meetings/{meetingId}/registrants:
+    parameters:
+      - $ref: "#/components/parameters/meetingId"
+    get:
+      tags: [Registrants]
+      operationId: meetingRegistrants
+      summary: List meeting registrants
+      parameters:
+        - $ref: "#/components/parameters/occurrence_id"
+        - name: status
+          in: query
+          description: Registrants with this status only.
+          schema: {type: string, enum: [pending, approved, denied], default: approved}
+        - $ref: "#/components/parameters/page_size"
+        - $ref: "#/components/parameters/next_page_token"
+        - name: page_number
+          in: query
+          deprecated: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: A page of registrants.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RegistrantList"}
+        "300":
+          description: "Registration is not enabled for this meeting (code 3003)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+    post:
+      tags: [Registrants]
+      operationId: meetingRegistrantCreate
+      summary: Add a meeting registrant
+      description: |
+        Registers a participant for a meeting that has registration enabled
+        (settings.approval_type 0 or 1). With approval_type 0 the registrant is
+        approved at once; with 1 it waits as pending.
+      parameters:
+        - name: occurrence_ids
+          in: query
+          description: Comma-separated occurrence ids to register for.
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RegistrantCreate"}
+      responses:
+        "201":
+          description: The registration.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RegistrantCreated"}
+        "300":
+          description: "Registration is not enabled for this meeting (code 3003)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+  /v2/meetings/{meetingId}/registrants/status:
+    put:
+      tags: [Registrants]
+      operationId: meetingRegistrantStatus
+      summary: Approve, deny or cancel registrants
+      parameters:
+        - $ref: "#/components/parameters/meetingId"
+        - $ref: "#/components/parameters/occurrence_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: {type: string, enum: [approve, cancel, deny]}
+                registrants:
+                  type: array
+                  maxItems: 30
+                  items:
+                    type: object
+                    properties:
+                      id: {type: string}
+                      email: {type: string, format: email}
+      responses:
+        "204":
+          description: The registrants' status was changed.
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/MeetingNotFound"}
+  /v2/meetings/{meetingId}/registrants/{registrantId}:
+    parameters:
+      - $ref: "#/components/parameters/meetingId"
+      - name: registrantId
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Registrants]
+      operationId: meetingRegistrantGet
+      summary: Get a meeting registrant
+      responses:
+        "200":
+          description: The registrant.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Registrant"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: "Meeting or registrant does not exist (code 3001 or 3043)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    delete:
+      tags: [Registrants]
+      operationId: meetingRegistrantDelete
+      summary: Delete a meeting registrant
+      parameters:
+        - $ref: "#/components/parameters/occurrence_id"
+      responses:
+        "204":
+          description: The registrant was deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: "Meeting or registrant does not exist (code 3001 or 3043)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A Server-to-Server OAuth or user OAuth access token.
+  parameters:
+    userId:
+      name: userId
+      in: path
+      required: true
+      description: The user's id or email address, or `me`.
+      schema: {type: string}
+    meetingId:
+      name: meetingId
+      in: path
+      required: true
+      description: The meeting's id (a long integer, not its uuid).
+      schema: {type: integer, format: int64}
+    occurrence_id:
+      name: occurrence_id
+      in: query
+      description: The id of one occurrence of a recurring meeting.
+      schema: {type: string}
+    page_size:
+      name: page_size
+      in: query
+      description: Records per page, at most 300.
+      schema: {type: integer, minimum: 1, maximum: 300, default: 30}
+    next_page_token:
+      name: next_page_token
+      in: query
+      description: The `next_page_token` of the previous page.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: "The request is not valid (code 300)."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: "The access token is missing, expired or not valid (code 124)."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    MeetingNotFound:
+      description: "Meeting does not exist (code 3001)."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: integer, example: 3001}
+        message: {type: string, example: "Meeting does not exist: 85746065432."}
+    User:
+      type: object
+      required: [id, email, type, status]
+      properties:
+        id: {type: string}
+        first_name: {type: string}
+        last_name: {type: string}
+        display_name: {type: string}
+        email: {type: string, format: email}
+        type: {type: integer, enum: [1, 2, 4, 99], description: 1 basic, 2 licensed, 4 unassigned without meetings basic, 99 none.}
+        role_name: {type: string}
+        pmi: {type: integer, format: int64}
+        use_pmi: {type: boolean}
+        personal_meeting_url: {type: string, format: uri}
+        timezone: {type: string}
+        language: {type: string}
+        dept: {type: string}
+        account_id: {type: string}
+        status: {type: string, enum: [pending, active, inactive]}
+        created_at: {type: string, format: date-time}
+        last_login_time: {type: string, format: date-time}
+        verified: {type: integer, enum: [0, 1]}
+    MeetingSettings:
+      type: object
+      properties:
+        host_video: {type: boolean}
+        participant_video: {type: boolean}
+        join_before_host: {type: boolean, default: false}
+        jbh_time: {type: integer, enum: [0, 5, 10, 15]}
+        mute_upon_entry: {type: boolean, default: false}
+        waiting_room: {type: boolean}
+        watermark: {type: boolean}
+        approval_type:
+          type: integer
+          enum: [0, 1, 2]
+          default: 2
+          description: 0 registration required and approved at once, 1 registration required and approved by hand, 2 no registration.
+        registration_type:
+          type: integer
+          enum: [1, 2, 3]
+          default: 1
+          description: For recurring meetings with registration, 1 once for all occurrences, 2 each occurrence, 3 once for chosen occurrences.
+        audio: {type: string, enum: [both, telephony, voip, thirdParty], default: both}
+        auto_recording: {type: string, enum: [local, cloud, none], default: none}
+        alternative_hosts: {type: string, description: Semicolon-separated emails or ids.}
+        meeting_authentication: {type: boolean}
+        registrants_email_notification: {type: boolean}
+        registrants_confirmation_email: {type: boolean}
+        close_registration: {type: boolean, default: false}
+        email_notification: {type: boolean, default: true}
+        private_meeting: {type: boolean}
+        contact_name: {type: string}
+        contact_email: {type: string, format: email}
+    Recurrence:
+      type: object
+      required: [type]
+      properties:
+        type: {type: integer, enum: [1, 2, 3], description: 1 daily, 2 weekly, 3 monthly.}
+        repeat_interval: {type: integer, minimum: 1}
+        weekly_days: {type: string, description: Comma-separated days, 1 Sunday to 7 Saturday.}
+        monthly_day: {type: integer, minimum: 1, maximum: 31}
+        monthly_week: {type: integer, enum: [-1, 1, 2, 3, 4]}
+        monthly_week_day: {type: integer, minimum: 1, maximum: 7}
+        end_times: {type: integer, minimum: 1, maximum: 60}
+        end_date_time: {type: string, format: date-time}
+    Occurrence:
+      type: object
+      properties:
+        occurrence_id: {type: string}
+        start_time: {type: string, format: date-time}
+        duration: {type: integer}
+        status: {type: string, enum: [available, deleted]}
+    MeetingType:
+      type: integer
+      enum: [1, 2, 3, 8, 10]
+      description: 1 instant, 2 scheduled, 3 recurring with no fixed time, 8 recurring with a fixed time, 10 screen share only.
+    MeetingCreate:
+      type: object
+      properties:
+        topic: {type: string, maxLength: 200}
+        type: {allOf: [{$ref: "#/components/schemas/MeetingType"}], default: 2}
+        start_time:
+          type: string
+          format: date-time
+          description: For scheduled and fixed-time recurring meetings. In GMT with a trailing Z, or local time in `timezone`.
+        duration: {type: integer, minimum: 1, description: Minutes.}
+        timezone: {type: string}
+        password: {type: string, maxLength: 10}
+        default_password: {type: boolean, default: false}
+        agenda: {type: string, maxLength: 2000}
+        pre_schedule: {type: boolean, default: false}
+        schedule_for: {type: string, description: Email or id of the user to schedule for.}
+        template_id: {type: string}
+        recurrence: {$ref: "#/components/schemas/Recurrence"}
+        settings: {$ref: "#/components/schemas/MeetingSettings"}
+    MeetingUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        topic: {type: string, maxLength: 200}
+        type: {$ref: "#/components/schemas/MeetingType"}
+        start_time: {type: string, format: date-time}
+        duration: {type: integer, minimum: 1}
+        timezone: {type: string}
+        password: {type: string, maxLength: 10}
+        agenda: {type: string, maxLength: 2000}
+        pre_schedule: {type: boolean}
+        schedule_for: {type: string}
+        template_id: {type: string}
+        recurrence: {$ref: "#/components/schemas/Recurrence"}
+        settings: {$ref: "#/components/schemas/MeetingSettings"}
+    Meeting:
+      type: object
+      required: [id, uuid, host_id, topic, type, created_at, join_url]
+      properties:
+        id: {type: integer, format: int64}
+        uuid: {type: string, description: Unique per meeting instance.}
+        host_id: {type: string, description: The id of the user who hosts the meeting.}
+        host_email: {type: string, format: email}
+        assistant_id: {type: string}
+        topic: {type: string}
+        type: {$ref: "#/components/schemas/MeetingType"}
+        status: {type: string, enum: [waiting, started]}
+        start_time: {type: string, format: date-time}
+        duration: {type: integer}
+        timezone: {type: string}
+        agenda: {type: string}
+        created_at: {type: string, format: date-time}
+        start_url: {type: string, format: uri}
+        join_url: {type: string, format: uri}
+        registration_url: {type: string, format: uri, description: Present when registration is enabled.}
+        password: {type: string}
+        h323_password: {type: string}
+        pstn_password: {type: string}
+        encrypted_password: {type: string}
+        pre_schedule: {type: boolean}
+        occurrences: {type: array, items: {$ref: "#/components/schemas/Occurrence"}}
+        recurrence: {$ref: "#/components/schemas/Recurrence"}
+        settings: {$ref: "#/components/schemas/MeetingSettings"}
+    MeetingListItem:
+      type: object
+      required: [id, uuid, host_id, topic, type, join_url]
+      properties:
+        id: {type: integer, format: int64}
+        uuid: {type: string}
+        host_id: {type: string}
+        topic: {type: string}
+        type: {$ref: "#/components/schemas/MeetingType"}
+        start_time: {type: string, format: date-time}
+        duration: {type: integer}
+        timezone: {type: string}
+        agenda: {type: string}
+        created_at: {type: string, format: date-time}
+        join_url: {type: string, format: uri}
+        pmi: {type: string}
+    MeetingList:
+      type: object
+      required: [page_size, total_records, next_page_token, meetings]
+      properties:
+        page_size: {type: integer}
+        total_records: {type: integer}
+        next_page_token: {type: string, description: Empty when there are no more pages.}
+        page_count: {type: integer}
+        page_number: {type: integer}
+        meetings: {type: array, items: {$ref: "#/components/schemas/MeetingListItem"}}
+    CustomQuestion:
+      type: object
+      properties:
+        title: {type: string}
+        value: {type: string}
+    RegistrantCreate:
+      type: object
+      required: [email, first_name]
+      properties:
+        email: {type: string, format: email, maxLength: 128}
+        first_name: {type: string, maxLength: 64}
+        last_name: {type: string, maxLength: 64}
+        address: {type: string}
+        city: {type: string}
+        state: {type: string}
+        zip: {type: string}
+        country: {type: string, description: Two-letter country code.}
+        phone: {type: string}
+        comments: {type: string}
+        industry: {type: string}
+        job_title: {type: string}
+        org: {type: string}
+        no_of_employees: {type: string, enum: ["", "1-20", "21-50", "51-100", "101-500", "500-1,000", "1,001-5,000", "5,001-10,000", "More than 10,000"]}
+        purchasing_time_frame: {type: string, enum: ["", "Within a month", "1-3 months", "4-6 months", "More than 6 months", "No timeframe"]}
+        role_in_purchase_process: {type: string, enum: ["", "Decision Maker", "Evaluator/Recommender", "Influencer", "Not involved"]}
+        language: {type: string, enum: [en-US, de-DE, es-ES, fr-FR, jp-JP, pt-PT, ru-RU, zh-CN, zh-TW, ko-KO, it-IT, vi-VN, pl-PL, Tr-TR]}
+        custom_questions: {type: array, items: {$ref: "#/components/schemas/CustomQuestion"}}
+        auto_approve: {type: boolean}
+    RegistrantCreated:
+      type: object
+      required: [id, registrant_id, join_url, topic]
+      properties:
+        id: {type: integer, format: int64, description: The meeting's id.}
+        registrant_id: {type: string}
+        join_url: {type: string, format: uri, description: The registrant's own join link.}
+        participant_pin_code: {type: integer, format: int64}
+        start_time: {type: string, format: date-time}
+        topic: {type: string, description: The meeting's topic.}
+        occurrences: {type: array, items: {$ref: "#/components/schemas/Occurrence"}}
+    Registrant:
+      type: object
+      required: [id, email, first_name, status, create_time, join_url]
+      properties:
+        id: {type: string, description: The registrant's id.}
+        email: {type: string, format: email}
+        first_name: {type: string}
+        last_name: {type: string}
+        address: {type: string}
+        city: {type: string}
+        state: {type: string}
+        zip: {type: string}
+        country: {type: string}
+        phone: {type: string}
+        comments: {type: string}
+        industry: {type: string}
+        job_title: {type: string}
+        org: {type: string}
+        language: {type: string}
+        custom_questions: {type: array, items: {$ref: "#/components/schemas/CustomQuestion"}}
+        status: {type: string, enum: [approved, pending, denied]}
+        create_time: {type: string, format: date-time}
+        join_url: {type: string, format: uri}
+        participant_pin_code: {type: integer, format: int64}
+    RegistrantList:
+      type: object
+      required: [page_size, total_records, next_page_token, registrants]
+      properties:
+        page_size: {type: integer}
+        total_records: {type: integer}
+        next_page_token: {type: string}
+        page_count: {type: integer}
+        page_number: {type: integer}
+        registrants: {type: array, items: {$ref: "#/components/schemas/Registrant"}}

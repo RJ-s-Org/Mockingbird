@@ -43,6 +43,10 @@ Suites (contracts are in-repo, so the bench is reproducible):
   `scripts/llm-bench/contracts/blind3/`: Trello boards, Asana tasks, GitLab issues,
   Freshdesk tickets and Mailchimp audiences. Not in the default suites. Same rule; no
   check gates the rest.
+- journeys_blind4: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind4/`: Pipedrive deals, Zoom meetings, Sentry
+  projects, Contentful entries and DigitalOcean droplets. Not in the default suites.
+  Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -78,7 +82,7 @@ from datetime import datetime
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
-          "journeys_blind3")
+          "journeys_blind3", "journeys_blind4")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -2594,6 +2598,420 @@ def run_journeys_blind3(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- fourth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind4/). Between them they
+# wrap answers in envelopes (Pipedrive `data`, DigitalOcean `droplet`), page with
+# cursors (Pipedrive, Zoom), nest resources two levels deep (Contentful environments in
+# spaces, Sentry projects in organizations), update with partial PATCH bodies (Pipedrive,
+# Zoom) and address records by slug or name (Sentry, DigitalOcean tags). No check gates
+# the rest: a journey goes on with an id of its own when a call gave none. A check
+# asserts only what its contract promises a client. Do not edit a check to suit results.
+BLIND4_CHECKS = {
+    "pipedrive": [
+        "organization has an id", "person names its organization", "deal links its person and organization",
+        "deal keeps value and currency", "read matches the created deal", "patch changes the value sent",
+        "patch keeps what it was not sent", "person filter holds only the person's deals",
+        "limit returns one deal and a cursor", "cursor reaches the other deal", "search finds the deal by title",
+        "deal product keeps what was sent", "deal products list the product",
+        "default list leaves out the deleted deal",
+    ],
+    "zoom": [
+        "meeting has a numeric id", "meeting is hosted by the caller", "meeting keeps topic, start and duration",
+        "meeting keeps its settings", "read matches the created meeting", "patch answers no content",
+        "patch changes the topic", "patch keeps what it was not sent", "scheduled list holds both meetings",
+        "page_size 1 returns one meeting and a token", "next page holds another meeting",
+        "registration names the meeting", "approved registrants list the registrant", "deleted meeting is gone",
+    ],
+    "sentry": [
+        "team keeps its slug and name", "organization teams list the team", "project takes the slug asked for",
+        "project is owned by its team", "read by slug matches the created project",
+        "organization projects list the project", "a taken slug is refused", "update answers the new name and slug",
+        "new slug reads the same project", "key keeps its name", "key belongs to the project",
+        "project keys list the key", "unknown issue is not found", "deleted project leaves the organization's list",
+    ],
+    "contentful": [
+        "content type takes the id asked for", "content type keeps its fields",
+        "activation records the version published", "entry names its content type", "entry keeps its localized fields",
+        "a new entry is not published", "read matches the created entry", "publish records the version published",
+        "publish raises the version by one", "a stale version is refused", "the current version updates the entry",
+        "content_type filter holds both entries", "full-text query finds the entry", "deleted entry is gone",
+    ],
+    "digitalocean": [
+        "tag keeps its name", "droplet is accepted with an id", "droplet keeps its name, region and size",
+        "droplet carries its tag", "create links its create action", "read matches the created droplet",
+        "tag filter holds only tagged droplets", "per_page pages the droplets", "tag counts both droplets",
+        "tag filter now holds the second droplet", "action keeps its type and droplet",
+        "droplet actions list the action", "action reads back by id", "deleted droplet is gone",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND4_CHECKS)
+BLIND4_DIR = "scripts/llm-bench/contracts/blind4"
+# Contracts alone: no persona.
+BLIND4_MOCKS = {name: (f"{BLIND4_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND4_CHECKS}
+
+
+def pipedrive_steps(j):
+    # Every answer is wrapped as {success, data}; lists add additional_data.next_cursor.
+    # A deleted deal stays readable for 30 days, so its check is the default list, which
+    # leaves deleted deals out. The organization is new, so its deals are the two made here.
+    j.headers["x-api-token"] = "bench-placeholder"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def data(value):
+        return obj(obj(value).get("data"))
+
+    def rows(value):
+        return dicts(obj(value).get("data"))
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**6, 10**7)
+
+    org = data(j.call("POST", "/api/v2/organizations", body={"name": f"Northwind {tag}"}))
+    j.check("organization has an id", j.last["status"] == 200 and is_int(org.get("id")), id=org.get("id"))
+    org_id = own(org.get("id"))
+    email = f"ana.{tag}@northwind.example"
+    person = data(j.call("POST", "/api/v2/persons", body={
+        "name": "Ana Silva", "org_id": org_id, "emails": [{"value": email, "primary": True, "label": "work"}]}))
+    j.check("person names its organization", eq(person.get("org_id"), org_id), org_id=person.get("org_id"))
+    person_id = own(person.get("id"))
+    word = f"harbor{tag}"
+    sent = {"title": f"Fleet renewal {word}", "value": 48000, "currency": "EUR", "person_id": person_id,
+            "org_id": org_id, "expected_close_date": "2026-12-15"}
+    deal = data(j.call("POST", "/api/v2/deals", body=sent))
+    j.check("deal links its person and organization", same(deal, sent, "person_id", "org_id"))
+    j.check("deal keeps value and currency", same(deal, sent, "value", "currency"))
+    d1 = own(deal.get("id"))
+    read = data(j.call("GET", f"/api/v2/deals/{d1}"))
+    j.check("read matches the created deal", eq(read.get("id"), d1) and same(read, sent, "title", "expected_close_date"))
+    patched = data(j.call("PATCH", f"/api/v2/deals/{d1}", body={"value": 52500}))
+    j.check("patch changes the value sent", eq(patched.get("value"), 52500), value=patched.get("value"))
+    read = data(j.call("GET", f"/api/v2/deals/{d1}"))
+    j.check("patch keeps what it was not sent", same(read, sent, "title", "currency", "person_id", "org_id"))
+    second = data(j.call("POST", "/api/v2/deals",
+                         body={"title": f"Spare parts {tag}", "value": 3200, "currency": "EUR", "org_id": org_id}))
+    d2 = own(second.get("id"))
+    listed = rows(j.call("GET", "/api/v2/deals", query={"person_id": person_id}))
+    j.check("person filter holds only the person's deals",
+            bool(by_id(listed, d1)) and not by_id(listed, d2) and all(eq(r.get("person_id"), person_id) for r in listed),
+            listed=ids_of(listed))
+    page = obj(j.call("GET", "/api/v2/deals", query={"org_id": org_id, "limit": 1}))
+    first = rows(page)
+    cursor = obj(page.get("additional_data")).get("next_cursor")
+    j.check("limit returns one deal and a cursor", len(first) == 1 and isinstance(cursor, str) and bool(cursor),
+            listed=ids_of(first), next_cursor=cursor)
+    query = {"org_id": org_id, "limit": 1}
+    if isinstance(cursor, str) and cursor:
+        query["cursor"] = cursor
+    nxt = rows(j.call("GET", "/api/v2/deals", query=query))
+    j.check("cursor reaches the other deal", len(nxt) == 1 and sorted(ids_of(first + nxt)) == sorted([d1, d2]),
+            first=ids_of(first), listed=ids_of(nxt))
+    found = dicts(obj(data(j.call("GET", "/api/v2/deals/search", query={"term": word, "fields": "title"}))).get("items"))
+    hits = [obj(i.get("item")).get("id") for i in found]
+    j.check("search finds the deal by title", d1 in hits and d2 not in hits, listed=hits)
+    product = data(j.call("POST", "/api/v2/products", body={
+        "name": f"Service plan {tag}", "code": f"SP-{tag}", "prices": [{"price": 1200, "currency": "EUR"}]}))
+    product_id = own(product.get("id"))
+    line = data(j.call("POST", f"/api/v2/deals/{d1}/products",
+                       body={"product_id": product_id, "item_price": 1200, "quantity": 3}))
+    j.check("deal product keeps what was sent",
+            j.last["status"] == 201 and eq(line.get("product_id"), product_id) and eq(line.get("item_price"), 1200)
+            and eq(line.get("quantity"), 3))
+    lines = rows(j.call("GET", f"/api/v2/deals/{d1}/products"))
+    j.check("deal products list the product",
+            product_id in ids_of(lines, "product_id") and all(eq(r.get("deal_id"), d1) for r in lines),
+            listed=ids_of(lines, "product_id"))
+    j.call("DELETE", f"/api/v2/deals/{d2}")
+    deleted = j.last["status"]
+    listed = rows(j.call("GET", "/api/v2/deals", query={"org_id": org_id}))
+    j.check("default list leaves out the deleted deal",
+            j.last["status"] == 200 and bool(by_id(listed, d1)) and not by_id(listed, d2),
+            delete_status=deleted, listed=ids_of(listed))
+
+
+def zoom_steps(j):
+    # A meeting update answers 204, so what it changed is read back. The meeting asks for
+    # approval_type 0, which registers and approves a registrant at once. Meetings are
+    # scheduled for the user the token belongs to, `me`.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**10, 10**11)
+
+    host = obj(j.call("GET", "/v2/users/me")).get("id")
+    sent = {"topic": f"Quarterly planning {tag}", "type": 2, "start_time": "2026-12-08T15:00:00Z", "duration": 45,
+            "timezone": "UTC", "agenda": "Budget, hiring and the roadmap.",
+            "settings": {"approval_type": 0, "mute_upon_entry": True}}
+    made = obj(j.call("POST", "/v2/users/me/meetings", body=sent))
+    j.check("meeting has a numeric id", j.last["status"] == 201 and is_int(made.get("id")), id=made.get("id"))
+    j.check("meeting is hosted by the caller", isinstance(host, str) and bool(host) and eq(made.get("host_id"), host),
+            host_id=made.get("host_id"), me=host)
+    j.check("meeting keeps topic, start and duration",
+            eq(made.get("topic"), sent["topic"]) and eq(instant(made.get("start_time")), instant(sent["start_time"]))
+            and eq(made.get("duration"), sent["duration"]), start_time=made.get("start_time"))
+    settings = obj(made.get("settings"))
+    j.check("meeting keeps its settings", eq(settings.get("approval_type"), 0) and settings.get("mute_upon_entry") is True,
+            settings=settings)
+    mid = own(made.get("id"))
+    read = obj(j.call("GET", f"/v2/meetings/{mid}"))
+    j.check("read matches the created meeting", eq(read.get("id"), mid) and same(read, made, "uuid", "topic", "join_url"))
+    topic = f"Quarterly planning and budget {tag}"
+    j.call("PATCH", f"/v2/meetings/{mid}", body={"topic": topic})
+    j.check("patch answers no content", j.last["status"] == 204)
+    read = obj(j.call("GET", f"/v2/meetings/{mid}"))
+    j.check("patch changes the topic", eq(read.get("topic"), topic), topic=read.get("topic"))
+    j.check("patch keeps what it was not sent", same(read, sent, "duration", "agenda") and
+            eq(instant(read.get("start_time")), instant(sent["start_time"])))
+    other = obj(j.call("POST", "/v2/users/me/meetings", body={
+        "topic": f"Design review {tag}", "type": 2, "start_time": "2026-12-09T10:00:00Z", "duration": 30}))
+    mid2 = own(other.get("id"))
+    listed = ids_of(obj(j.call("GET", "/v2/users/me/meetings", query={"type": "scheduled", "page_size": 300})).get("meetings"))
+    j.check("scheduled list holds both meetings", mid in listed and mid2 in listed, listed=listed)
+    page = obj(j.call("GET", "/v2/users/me/meetings", query={"type": "scheduled", "page_size": 1}))
+    first = ids_of(page.get("meetings"))
+    token = page.get("next_page_token")
+    j.check("page_size 1 returns one meeting and a token", len(first) == 1 and isinstance(token, str) and bool(token),
+            listed=first, next_page_token=token)
+    query = {"type": "scheduled", "page_size": 1}
+    if isinstance(token, str) and token:
+        query["next_page_token"] = token
+    nxt = ids_of(obj(j.call("GET", "/v2/users/me/meetings", query=query)).get("meetings"))
+    j.check("next page holds another meeting", len(nxt) == 1 and nxt[0] not in first, first=first, listed=nxt)
+    reg = obj(j.call("POST", f"/v2/meetings/{mid}/registrants",
+                     body={"email": f"ana.{tag}@example.org", "first_name": "Ana", "last_name": "Silva"}))
+    j.check("registration names the meeting", j.last["status"] == 201 and eq(reg.get("id"), mid) and eq(reg.get("topic"), topic),
+            id=reg.get("id"), topic=reg.get("topic"))
+    rid = reg.get("registrant_id") if isinstance(reg.get("registrant_id"), str) and reg.get("registrant_id") \
+        else "".join(j.rng.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(22))
+    rows = dicts(obj(j.call("GET", f"/v2/meetings/{mid}/registrants")).get("registrants"))
+    j.check("approved registrants list the registrant",
+            bool(by_id(rows, rid)) and all(eq(r.get("status"), "approved") for r in rows), listed=ids_of(rows))
+    j.call("DELETE", f"/v2/meetings/{mid2}")
+    deleted = j.last["status"]
+    j.call("GET", f"/v2/meetings/{mid2}")
+    j.check("deleted meeting is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def sentry_steps(j):
+    # Projects are addressed by organization and project slug. Issues are made by events,
+    # which nothing here sends, so the issue check is only that an unknown one is not found.
+    # An old slug may redirect after a rename, so only the new one is read.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    org, team_slug, slug, renamed = f"acme-{tag}", f"payments-{tag}", f"checkout-api-{tag}", f"checkout-{tag}"
+    team = obj(j.call("POST", f"/api/0/organizations/{org}/teams/", body={"slug": team_slug, "name": "Payments"}))
+    j.check("team keeps its slug and name",
+            j.last["status"] == 201 and eq(team.get("slug"), team_slug) and eq(team.get("name"), "Payments"))
+    listed = ids_of(j.call("GET", f"/api/0/organizations/{org}/teams/"), "slug")
+    j.check("organization teams list the team", team_slug in listed, listed=listed)
+    project = obj(j.call("POST", f"/api/0/teams/{org}/{team_slug}/projects/",
+                         body={"name": "Checkout API", "slug": slug, "platform": "python-django"}))
+    j.check("project takes the slug asked for", j.last["status"] == 201 and eq(project.get("slug"), slug),
+            slug=project.get("slug"))
+    j.check("project is owned by its team", team_slug in ids_of(project.get("teams"), "slug"),
+            teams=ids_of(project.get("teams"), "slug"))
+    pid = project.get("id") if isinstance(project.get("id"), str) and project.get("id") \
+        else str(j.rng.randrange(10**6, 10**7))
+    read = obj(j.call("GET", f"/api/0/projects/{org}/{slug}/"))
+    j.check("read by slug matches the created project",
+            eq(read.get("id"), pid) and eq(read.get("slug"), slug) and eq(read.get("name"), "Checkout API")
+            and eq(read.get("platform"), "python-django"))
+    listed = ids_of(j.call("GET", f"/api/0/organizations/{org}/projects/"), "slug")
+    j.check("organization projects list the project", slug in listed, listed=listed)
+    j.call("POST", f"/api/0/teams/{org}/{team_slug}/projects/", body={"name": "Checkout API again", "slug": slug})
+    j.check("a taken slug is refused", j.last["status"] == 409)
+    updated = obj(j.call("PUT", f"/api/0/projects/{org}/{slug}/", body={"name": "Checkout", "slug": renamed}))
+    j.check("update answers the new name and slug", eq(updated.get("name"), "Checkout") and eq(updated.get("slug"), renamed))
+    read = obj(j.call("GET", f"/api/0/projects/{org}/{renamed}/"))
+    j.check("new slug reads the same project", j.last["status"] == 200 and eq(read.get("id"), pid), id=read.get("id"))
+    key = obj(j.call("POST", f"/api/0/projects/{org}/{renamed}/keys/", body={"name": "Backend"}))
+    j.check("key keeps its name", j.last["status"] == 201 and eq(key.get("name"), "Backend"))
+    j.check("key belongs to the project", str(key.get("projectId")) == pid, projectId=key.get("projectId"), project=pid)
+    kid = key.get("id") if isinstance(key.get("id"), str) and key.get("id") \
+        else "".join(j.rng.choice("0123456789abcdef") for _ in range(32))
+    keys = j.call("GET", f"/api/0/projects/{org}/{renamed}/keys/")
+    j.check("project keys list the key", bool(by_id(keys, kid)), listed=ids_of(keys))
+    j.call("GET", f"/api/0/organizations/{org}/issues/{j.rng.randrange(10**9, 10**10)}/")
+    j.check("unknown issue is not found", j.last["status"] == 404)
+    j.call("DELETE", f"/api/0/projects/{org}/{renamed}/")
+    deleted = j.last["status"]
+    rows = j.call("GET", f"/api/0/organizations/{org}/projects/")
+    j.check("deleted project leaves the organization's list",
+            j.last["status"] == 200 and isinstance(rows, list) and not by_id(rows, pid)
+            and renamed not in ids_of(rows, "slug"), delete_status=deleted, listed=ids_of(rows, "slug"))
+
+
+def contentful_steps(j):
+    # Writes send the current sys.version in X-Contentful-Version, taken from the last
+    # answer; when an answer gave none the journey goes on with the version the contract
+    # says it must be. The deleted entry is a draft, since a published one must be
+    # unpublished first.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    base = f"/spaces/space{tag}/environments/master"
+
+    def call(method, path, version=None, content_type=None, **kw):
+        extra = {}
+        if version is not None:
+            extra["X-Contentful-Version"] = str(version)
+        if content_type:
+            extra["X-Contentful-Content-Type"] = content_type
+        j.headers.update(extra)
+        try:
+            return obj(j.call(method, base + path, **kw))
+        finally:
+            for k in extra:
+                j.headers.pop(k, None)
+
+    def sys_of(value):
+        return obj(obj(value).get("sys"))
+
+    def version(value, fallback):
+        v = sys_of(value).get("version")
+        return v if is_int(v) else fallback
+
+    def link_id(value):
+        return obj(obj(value).get("sys")).get("id")
+
+    def entry_ids(rows):
+        return [sys_of(r).get("id") for r in rows]
+
+    ct = f"recipe{tag}"
+    fields = [{"id": "title", "name": "Title", "type": "Symbol", "required": True},
+              {"id": "body", "name": "Body", "type": "Text"},
+              {"id": "servings", "name": "Servings", "type": "Integer"}]
+    made = call("PUT", f"/content_types/{ct}", body={"name": "Recipe", "displayField": "title", "fields": fields})
+    j.check("content type takes the id asked for", j.last["status"] == 201 and eq(sys_of(made).get("id"), ct),
+            id=sys_of(made).get("id"))
+    j.check("content type keeps its fields", ids_of(made.get("fields")) == ["title", "body", "servings"],
+            fields=ids_of(made.get("fields")))
+    v = version(made, 1)
+    active = call("PUT", f"/content_types/{ct}/published", version=v)
+    j.check("activation records the version published", eq(sys_of(active).get("publishedVersion"), v),
+            sent_version=v, publishedVersion=sys_of(active).get("publishedVersion"))
+    word = f"saffron{tag}"
+    sent = {"title": {"en-US": f"Paella with {word}"}, "body": {"en-US": "Toast the rice first."},
+            "servings": {"en-US": 4}}
+    entry = call("POST", "/entries", content_type=ct, body={"fields": sent})
+    j.check("entry names its content type",
+            j.last["status"] == 201 and eq(link_id(sys_of(entry).get("contentType")), ct),
+            contentType=link_id(sys_of(entry).get("contentType")))
+    j.check("entry keeps its localized fields", eq(entry.get("fields"), sent), fields=entry.get("fields"))
+    j.check("a new entry is not published",
+            j.last["status"] == 201 and bool(sys_of(entry).get("id")) and sys_of(entry).get("publishedVersion") is None,
+            publishedVersion=sys_of(entry).get("publishedVersion"))
+    eid = sys_of(entry).get("id") or f"entry{tag}"
+    read = call("GET", f"/entries/{eid}")
+    j.check("read matches the created entry", eq(sys_of(read).get("id"), eid) and eq(read.get("fields"), sent))
+    v = version(read, 1)
+    published = call("PUT", f"/entries/{eid}/published", version=v)
+    j.check("publish records the version published", eq(sys_of(published).get("publishedVersion"), v),
+            sent_version=v, publishedVersion=sys_of(published).get("publishedVersion"))
+    j.check("publish raises the version by one", eq(sys_of(published).get("version"), v + 1),
+            sent_version=v, version=sys_of(published).get("version"))
+    current = version(published, v + 1)
+    changed = dict(sent, title={"en-US": f"Paella valenciana with {word}"})
+    call("PUT", f"/entries/{eid}", version=current - 1, body={"fields": changed})
+    j.check("a stale version is refused", j.last["status"] == 409, sent_version=current - 1)
+    updated = call("PUT", f"/entries/{eid}", version=current, body={"fields": changed})
+    j.check("the current version updates the entry",
+            j.last["status"] == 200 and eq(obj(obj(updated.get("fields")).get("title")).get("en-US"),
+                                           changed["title"]["en-US"]), sent_version=current)
+    draft = call("POST", "/entries", content_type=ct, body={"fields": {"title": {"en-US": f"Gazpacho {tag}"}}})
+    e2 = sys_of(draft).get("id") or f"draft{tag}"
+    rows = dicts(call("GET", "/entries", query={"content_type": ct}).get("items"))
+    listed = entry_ids(rows)
+    j.check("content_type filter holds both entries",
+            eid in listed and e2 in listed and all(eq(link_id(sys_of(r).get("contentType")), ct) for r in rows),
+            listed=listed)
+    listed = entry_ids(dicts(call("GET", "/entries", query={"query": word}).get("items")))
+    j.check("full-text query finds the entry", eid in listed and e2 not in listed, listed=listed)
+    call("DELETE", f"/entries/{e2}", version=version(draft, 1))
+    deleted = j.last["status"]
+    call("GET", f"/entries/{e2}")
+    j.check("deleted entry is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def digitalocean_steps(j):
+    # Answers wrap their record under its own name. Creating a droplet is asynchronous,
+    # so nothing here waits for it to become active. A tag is addressed by its name.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**8, 10**9)
+
+    def droplets(query):
+        return dicts(obj(j.call("GET", "/v2/droplets", query=query)).get("droplets"))
+
+    label = f"web-{tag}"
+    made = obj(obj(j.call("POST", "/v2/tags", body={"name": label})).get("tag"))
+    j.check("tag keeps its name", j.last["status"] == 201 and eq(made.get("name"), label), tag_name=made.get("name"))
+    sent = {"name": f"web-{tag}-1", "region": "nyc3", "size": "s-1vcpu-1gb", "image": "ubuntu-24-04-x64",
+            "tags": [label], "monitoring": True}
+    answer = obj(j.call("POST", "/v2/droplets", body=sent))
+    droplet = obj(answer.get("droplet"))
+    j.check("droplet is accepted with an id", j.last["status"] == 202 and is_int(droplet.get("id")), id=droplet.get("id"))
+    j.check("droplet keeps its name, region and size",
+            eq(droplet.get("name"), sent["name"]) and eq(obj(droplet.get("region")).get("slug"), "nyc3")
+            and eq(droplet.get("size_slug"), "s-1vcpu-1gb"))
+    j.check("droplet carries its tag", isinstance(droplet.get("tags"), list) and label in droplet["tags"],
+            tags=droplet.get("tags"))
+    links = dicts(obj(answer.get("links")).get("actions"))
+    j.check("create links its create action", any(eq(a.get("rel"), "create") and is_int(a.get("id")) for a in links),
+            links=links)
+    d1 = own(droplet.get("id"))
+    read = obj(obj(j.call("GET", f"/v2/droplets/{d1}")).get("droplet"))
+    j.check("read matches the created droplet",
+            eq(read.get("id"), d1) and eq(read.get("name"), sent["name"]) and eq(read.get("size_slug"), sent["size"]))
+    second = obj(obj(j.call("POST", "/v2/droplets", body={
+        "name": f"worker-{tag}", "region": "nyc3", "size": "s-1vcpu-1gb", "image": "ubuntu-24-04-x64"})).get("droplet"))
+    d2 = own(second.get("id"))
+    rows = droplets({"tag_name": label})
+    j.check("tag filter holds only tagged droplets",
+            bool(by_id(rows, d1)) and not by_id(rows, d2) and all(label in (r.get("tags") or []) for r in rows),
+            listed=ids_of(rows))
+    page = obj(j.call("GET", "/v2/droplets", query={"per_page": 1}))
+    following = obj(obj(page.get("links")).get("pages")).get("next")
+    j.check("per_page pages the droplets",
+            len(dicts(page.get("droplets"))) == 1 and isinstance(following, str) and bool(following),
+            listed=ids_of(page.get("droplets")), next=following)
+    j.call("POST", f"/v2/tags/{label}/resources",
+           body={"resources": [{"resource_id": str(d2), "resource_type": "droplet"}]})
+    tagged = j.last["status"]
+    got = obj(obj(j.call("GET", f"/v2/tags/{label}")).get("tag"))
+    j.check("tag counts both droplets", eq(obj(obj(got.get("resources")).get("droplets")).get("count"), 2),
+            tag_status=tagged, resources=got.get("resources"))
+    rows = droplets({"tag_name": label})
+    j.check("tag filter now holds the second droplet", bool(by_id(rows, d2)), listed=ids_of(rows))
+    action = obj(obj(j.call("POST", f"/v2/droplets/{d1}/actions", body={"type": "power_off"})).get("action"))
+    j.check("action keeps its type and droplet",
+            j.last["status"] == 201 and eq(action.get("type"), "power_off") and eq(action.get("resource_id"), d1)
+            and eq(action.get("resource_type"), "droplet"))
+    aid = own(action.get("id"))
+    rows = dicts(obj(j.call("GET", f"/v2/droplets/{d1}/actions")).get("actions"))
+    j.check("droplet actions list the action", bool(by_id(rows, aid)), listed=ids_of(rows))
+    got = obj(obj(j.call("GET", f"/v2/actions/{aid}")).get("action"))
+    j.check("action reads back by id",
+            eq(got.get("id"), aid) and eq(got.get("type"), "power_off") and eq(got.get("resource_id"), d1))
+    j.call("DELETE", f"/v2/droplets/{d2}")
+    deleted = j.last["status"]
+    j.call("GET", f"/v2/droplets/{d2}")
+    j.check("deleted droplet is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+BLIND4_JOURNEYS = {"pipedrive": pipedrive_steps, "zoom": zoom_steps, "sentry": sentry_steps,
+                   "contentful": contentful_steps, "digitalocean": digitalocean_steps}
+
+
+def run_journeys_blind4(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND4_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -2605,6 +3023,7 @@ RUNNERS = {
     "journeys_blind": (BLIND_MOCKS, run_journeys_blind),
     "journeys_blind2": (BLIND2_MOCKS, run_journeys_blind2),
     "journeys_blind3": (BLIND3_MOCKS, run_journeys_blind3),
+    "journeys_blind4": (BLIND4_MOCKS, run_journeys_blind4),
 }
 
 
