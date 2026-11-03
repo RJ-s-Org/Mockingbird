@@ -31,6 +31,7 @@ use crate::{
 mod deleted;
 mod lists;
 mod minted;
+mod pages;
 mod value_index;
 mod world;
 
@@ -912,6 +913,16 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(served);
     }
 
+    // The next page of a list this session cut, by the token it minted.
+    if target.is_none()
+        && let Some(served) = pages::serve(&mut state, plan, call)
+            .instrument(state_span())
+            .await
+    {
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(served);
+    }
+
     let is_query = matches!(op.kind, OperationKind::Query);
     let cache = rt
         .state
@@ -1164,7 +1175,11 @@ pub(crate) async fn complete(
         {
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
-            lists::narrow(rt, plan, call, body);
+            if let Some(cut) = lists::narrow(rt, plan, call, body)
+                && !transient_fallback(&generated)
+            {
+                pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+            }
         }
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type

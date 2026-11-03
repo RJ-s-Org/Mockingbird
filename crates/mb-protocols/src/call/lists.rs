@@ -121,7 +121,7 @@ impl<'a> Member<'a> {
 }
 
 /// The types `parts` declare, `null` aside.
-fn types_of<'a>(parts: &[&'a Value]) -> BTreeSet<&'a str> {
+pub(super) fn types_of<'a>(parts: &[&'a Value]) -> BTreeSet<&'a str> {
     let mut types = BTreeSet::new();
     for part in parts {
         match part.get("type") {
@@ -439,26 +439,32 @@ fn declared_count(parts: &[&Value], keyword: &str) -> Option<u64> {
         .max()
 }
 
+/// What cutting a list answer to its page size left out.
+pub(super) struct Cut {
+    /// The items past the page, in order.
+    pub(super) rest: Vec<Value>,
+    /// The page size.
+    pub(super) size: usize,
+    /// The query parameter that asked for it.
+    pub(super) size_param: String,
+}
+
 /// Applies a list read's equality filters and page size to its generated answer (see
-/// the module's doc).
+/// the module's doc), and says what the page size left out.
 pub(super) fn narrow(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     body: &mut Value,
-) {
+) -> Option<Cut> {
     if call.query.is_empty() {
-        return;
+        return None;
     }
     let bundle = rt.bundle();
     let op = plan.op;
-    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
-        return;
-    };
+    let schema = op.success_output().and_then(|o| o.schema.as_ref())?;
     let mut held = None;
-    let Some((array_parts, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
-        return;
-    };
+    let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
     let fewest = declared_count(&array_parts, "minItems").unwrap_or(0);
     let query = op.input.query.as_ref();
     let doc = std::cell::OnceCell::new();
@@ -519,30 +525,33 @@ pub(super) fn narrow(
             }
         }
     }
-    let Some((_, limit)) = page else {
-        return;
-    };
+    let (_, limit) = page?;
     // A size the contract ties to another array is not this one's.
     if limit
         .maximum
         .is_some_and(|maximum| declared_count(&array_parts, "maxItems") != Some(maximum))
         || limit.items < fewest
     {
-        return;
+        return None;
     }
     let mut capped = body.clone();
-    let Some(items) = list_items_mut(&mut capped) else {
-        return;
-    };
+    let items = list_items_mut(&mut capped)?;
     let Ok(size) = usize::try_from(limit.items) else {
-        return;
+        return None;
     };
-    if items.len() > size {
-        items.truncate(size);
-        if valid(&capped) {
-            *body = capped;
-        }
+    if items.len() <= size {
+        return None;
     }
+    let rest = items.split_off(size);
+    if !valid(&capped) {
+        return None;
+    }
+    *body = capped;
+    Some(Cut {
+        rest,
+        size,
+        size_param: page.map(|(name, _)| name.to_string())?,
+    })
 }
 
 /// `value` as `schema` declares it, at every depth: of an object, the members its parts

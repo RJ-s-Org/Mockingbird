@@ -12,7 +12,7 @@ use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_protocols::{MockRuntime, http_rest};
-use mb_state::MemoryStore;
+use mb_state::{CachingStateStore, MemoryStore, StateStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -73,6 +73,27 @@ struct Api {
 }
 
 fn api_of(contract: &str, consistency: bool, script: Vec<Result<String, LlmError>>) -> Api {
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    api_over(contract, consistency, script, store)
+}
+
+/// [`api_of`] over a store that caches answers, as a served mock's does.
+fn cached_api_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Api {
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600))) as Arc<dyn StateStore>;
+    let cached = CachingStateStore::wrap(
+        store,
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    api_over(contract, true, script, cached)
+}
+
+fn api_over(
+    contract: &str,
+    consistency: bool,
+    script: Vec<Result<String, LlmError>>,
+    store: Arc<dyn StateStore>,
+) -> Api {
     let provider = Arc::new(ScriptedProvider::new(script));
     let mut rt = MockRuntime::new(
         "lists",
@@ -81,7 +102,7 @@ fn api_of(contract: &str, consistency: bool, script: Vec<Result<String, LlmError
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        store,
     );
     rt.consistency = consistency;
     Api {
@@ -1262,7 +1283,7 @@ fn ids_in<'a>(body: &'a Value, member: &str) -> Vec<&'a str> {
 #[tokio::test]
 async fn a_cut_page_mints_a_token_for_the_rest() {
     let answer = json!({"users": users(5), "next_page_token": "model-token", "total_records": 5});
-    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let api = cached_api_of(PAGES, vec![Ok(answer.to_string())]);
     let first = api.get("/users?page_size=2").await;
     assert_eq!(ids_in(&first, "users"), ["u1", "u2"]);
     let token = first["next_page_token"].as_str().unwrap().to_string();
