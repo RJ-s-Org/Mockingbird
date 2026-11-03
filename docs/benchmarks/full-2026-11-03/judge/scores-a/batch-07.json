@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-07",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "06b267f963",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "The id is echoed, Dana Whitfield, the wholesale description and metadata (account_manager, tier) are realistic, invoice_prefix DW4K2P9Q matches the initials, and created is in the recent past."
+    },
+    {
+      "opaque_id": "64cf0ce139",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "The id is echoed, and the realistic name/email, empty metadata, null phone/description, varied invoice_prefix 7F2K9Q1M and recent created are all consistent."
+    },
+    {
+      "opaque_id": "60b696da15",
+      "realism": 3,
+      "coherence": 5,
+      "rationale": "The id is echoed and consistent (currency null, balance 0), but Alice Smith / alice@example.com and invoice_prefix A1B2C3D4 are generic placeholder values."
+    }
+  ]
+}

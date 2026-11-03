@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-03",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "97e28c19bd",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "Minimal partialSuccess with rejectedSpans \"0\" is a plausible collector reply, but it accepts a span that is an empty object with no trace_id/span_id without any warning."
+    },
+    {
+      "opaque_id": "49414c1f54",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "partialSuccess with empty errorMessage and rejectedSpans \"0\" is valid OTLP shape; accepting the empty {} span with no ids silently is a small mismatch with the request."
+    },
+    {
+      "opaque_id": "e80929a5af",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "rejectedSpans \"1\" matches the single empty span in the request, and the errorMessage explains the missing trace_id/span_id, as the OTLP partial_success rules require."
+    }
+  ]
+}

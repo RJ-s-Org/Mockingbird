@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-04",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "956314900c",
+      "realism": 4,
+      "coherence": 3,
+      "rationale": "DivideResult 2.508389566... is wrong: 976.32/389.15 = 2.508852... (off from the 4th decimal). The value looks like a real double, so realism is fine."
+    },
+    {
+      "opaque_id": "e9ae8d0cf5",
+      "realism": 4,
+      "coherence": 3,
+      "rationale": "DivideResult 3.360355427... vs correct 886.3/263.76 = 3.360251744...; off at the 4th decimal, a material arithmetic error for a calculator."
+    },
+    {
+      "opaque_id": "c5148bf140",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "DivideResult 0.73123629... vs correct 632.82/865.41 = 0.73123722...; close, but the 6th decimal is wrong."
+    }
+  ]
+}

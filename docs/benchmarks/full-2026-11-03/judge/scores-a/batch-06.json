@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-06",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "6d34d3c1e4",
+      "realism": 4,
+      "coherence": 3,
+      "rationale": "bookingId and reason are echoed, but a payment_failed cancellation with refund 0.00 and fee 0.00 has status refund_pending and an expectedBy date: there is nothing to refund, so it should be cancelled."
+    },
+    {
+      "opaque_id": "099ae40bad",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "bookingId and reason are echoed, refund 412.50 USD with a 41.25 (10%) fee is realistic, and status refund_pending is consistent; expectedBy is optional."
+    },
+    {
+      "opaque_id": "16afd4c7e2",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "bookingId and reason are echoed, and refund_pending with expectedBy a week out is consistent. A 29.95 refund is low for a hotel booking but possible."
+    }
+  ]
+}

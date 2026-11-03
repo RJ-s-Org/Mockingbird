@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-02",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "e50deaf6c2",
+      "realism": 3,
+      "coherence": 4,
+      "rationale": "ids prod_001/variant_001, 'Acme Co', two variants both titled 'Black / XL'; inventory 25+25=50 ok."
+    },
+    {
+      "opaque_id": "04228f95d5",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "Gid-style ids, sums 24+22=46 and 18+13=31 hold; endCursor 'raven' just echoes request cursor."
+    },
+    {
+      "opaque_id": "672a35b2c8",
+      "realism": 3,
+      "coherence": 4,
+      "rationale": "Totals match variants (62+54+32=148), but mixed CAD/EUR/GBP in one store and negative inventory -3."
+    }
+  ]
+}

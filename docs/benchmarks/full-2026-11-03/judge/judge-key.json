@@ -1,0 +1,426 @@
+{
+  "seed": "20261103",
+  "models": [
+    "deepseek/deepseek-v4.1-flash-1017",
+    "nvidia/nemotron-3.5-lightning",
+    "openai/gpt-6-luna"
+  ],
+  "pool": {
+    "candidates": 54,
+    "no_common_rep": [],
+    "duplicates_ignored": 0,
+    "warnings": []
+  },
+  "strata": [
+    {
+      "stratum": "api_type:rest",
+      "batch_id": "batch-01",
+      "contract": "rest/social-discord",
+      "target": "get_message",
+      "rep": 0,
+      "candidates": 34
+    },
+    {
+      "stratum": "api_type:graphql",
+      "batch_id": "batch-02",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.products",
+      "rep": 0,
+      "candidates": 8
+    },
+    {
+      "stratum": "api_type:grpc",
+      "batch_id": "batch-03",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "candidates": 2
+    },
+    {
+      "stratum": "api_type:soap",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "candidates": 5
+    },
+    {
+      "stratum": "api_type:asyncapi",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "candidates": 5
+    },
+    {
+      "stratum": "domain:travel",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-hotels",
+      "target": "cancelBooking",
+      "rep": 0,
+      "candidates": 6
+    },
+    {
+      "stratum": "domain:payments",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "candidates": 7
+    }
+  ],
+  "strata_skipped": [],
+  "presentation_order": [
+    "batch-03",
+    "batch-04",
+    "batch-01",
+    "batch-02",
+    "batch-05",
+    "batch-06",
+    "batch-07"
+  ],
+  "recheck_batches": [
+    "batch-03",
+    "batch-04"
+  ],
+  "batches": [
+    {
+      "batch_id": "batch-01",
+      "file": "judge/batch-01.json",
+      "stratum": "api_type:rest",
+      "contract": "rest/social-discord",
+      "target": "get_message",
+      "api_type": "rest",
+      "domain": "social-media",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 34,
+      "judged": [
+        "f637f3e774",
+        "4ef22e176b",
+        "3b54a0422e"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-02",
+      "file": "judge/batch-02.json",
+      "stratum": "api_type:graphql",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.products",
+      "api_type": "graphql",
+      "domain": "ecommerce",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 8,
+      "judged": [
+        "e50deaf6c2",
+        "04228f95d5",
+        "672a35b2c8"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-03",
+      "file": "judge/batch-03.json",
+      "stratum": "api_type:grpc",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "api_type": "grpc",
+      "domain": "devtools",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 2,
+      "judged": [
+        "97e28c19bd",
+        "49414c1f54",
+        "e80929a5af"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-04",
+      "file": "judge/batch-04.json",
+      "stratum": "api_type:soap",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "api_type": "soap",
+      "domain": "generic",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 5,
+      "judged": [
+        "956314900c",
+        "e9ae8d0cf5",
+        "c5148bf140"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-05",
+      "file": "judge/batch-05.json",
+      "stratum": "api_type:asyncapi",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "api_type": "asyncapi",
+      "domain": "ecommerce",
+      "target_kind": "channel",
+      "rep": 0,
+      "pool_candidates": 5,
+      "judged": [
+        "cf284851c6",
+        "bf8213b30c",
+        "168809f674"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-06",
+      "file": "judge/batch-06.json",
+      "stratum": "domain:travel",
+      "contract": "rest/travel-hotels",
+      "target": "cancelBooking",
+      "api_type": "rest",
+      "domain": "travel",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 6,
+      "judged": [
+        "6d34d3c1e4",
+        "099ae40bad",
+        "16afd4c7e2"
+      ],
+      "auto": []
+    },
+    {
+      "batch_id": "batch-07",
+      "file": "judge/batch-07.json",
+      "stratum": "domain:payments",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "api_type": "rest",
+      "domain": "payments",
+      "target_kind": "operation",
+      "rep": 0,
+      "pool_candidates": 7,
+      "judged": [
+        "06b267f963",
+        "64cf0ce139",
+        "60b696da15"
+      ],
+      "auto": []
+    }
+  ],
+  "items": {
+    "3b54a0422e": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-01",
+      "contract": "rest/social-discord",
+      "target": "get_message",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "4ef22e176b": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-01",
+      "contract": "rest/social-discord",
+      "target": "get_message",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "f637f3e774": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-01",
+      "contract": "rest/social-discord",
+      "target": "get_message",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "672a35b2c8": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-02",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.products",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e50deaf6c2": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-02",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.products",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "04228f95d5": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-02",
+      "contract": "graphql/ecommerce-shopify-admin",
+      "target": "Query.products",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "97e28c19bd": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-03",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "49414c1f54": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-03",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e80929a5af": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-03",
+      "contract": "grpc/otlp-trace-service",
+      "target": "TraceService.Export",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "c5148bf140": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "e9ae8d0cf5": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "956314900c": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-04",
+      "contract": "soap/calculator",
+      "target": "Divide",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "bf8213b30c": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "168809f674": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "cf284851c6": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-05",
+      "contract": "asyncapi/orders-amqp-2.6",
+      "target": "orderCancelled",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "099ae40bad": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-hotels",
+      "target": "cancelBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "16afd4c7e2": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-hotels",
+      "target": "cancelBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "6d34d3c1e4": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-06",
+      "contract": "rest/travel-hotels",
+      "target": "cancelBooking",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "06b267f963": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "60b696da15": {
+      "model": "nvidia/nemotron-3.5-lightning",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    },
+    "64cf0ce139": {
+      "model": "openai/gpt-6-luna",
+      "batch_id": "batch-07",
+      "contract": "rest/payments-stripe",
+      "target": "GetCustomersCustomer",
+      "rep": 0,
+      "auto": false,
+      "auto_reason": null,
+      "auto_scores": null
+    }
+  }
+}
