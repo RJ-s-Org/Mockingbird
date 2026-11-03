@@ -1,0 +1,563 @@
+openapi: 3.0.3
+info:
+  title: Trello REST API (boards, lists, cards and comments)
+  version: "1"
+  description: |
+    A subset of the Trello REST API: boards, the lists on a board, the cards in a
+    list, and comments on a card. Every request is authorized with an API key and a
+    user token passed as the `key` and `token` query parameters. Like the real API,
+    create and update calls take their fields as query parameters.
+
+    Ids are 24-character hexadecimal strings. A card always belongs to exactly one
+    list and to the board of that list; moving a card to another list changes its
+    `idList`. Archiving (`closed=true`) hides a card or list from the default
+    (open) views without deleting it. Deleting a card is permanent: afterwards
+    reads of it answer 404.
+servers:
+  - url: https://api.trello.com
+security:
+  - apiKey: []
+    apiToken: []
+tags:
+  - name: boards
+  - name: lists
+  - name: cards
+paths:
+  /1/boards:
+    post:
+      tags: [boards]
+      operationId: createBoard
+      summary: Create a board
+      parameters:
+        - name: name
+          in: query
+          required: true
+          description: The new name for the board. 1 to 16384 characters long.
+          schema: {type: string, minLength: 1, maxLength: 16384}
+        - name: desc
+          in: query
+          description: A new description for the board, 0 to 16384 characters long.
+          schema: {type: string, maxLength: 16384}
+        - name: defaultLists
+          in: query
+          description: Whether to add the default set of lists (To Do, Doing, Done) to the board.
+          schema: {type: boolean, default: true}
+        - name: idOrganization
+          in: query
+          description: The id or name of the Workspace the board should belong to.
+          schema: {$ref: '#/components/schemas/TrelloID'}
+        - name: prefs_permissionLevel
+          in: query
+          description: The permissions level of the board.
+          schema: {type: string, enum: [org, private, public], default: private}
+      responses:
+        '200':
+          description: The created board.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Board'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /1/boards/{id}:
+    parameters:
+      - $ref: '#/components/parameters/BoardId'
+    get:
+      tags: [boards]
+      operationId: getBoard
+      summary: Get a board
+      responses:
+        '200':
+          description: The board.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Board'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [boards]
+      operationId: updateBoard
+      summary: Update a board
+      description: Changes only the fields given; the others keep their values.
+      parameters:
+        - name: name
+          in: query
+          schema: {type: string, minLength: 1, maxLength: 16384}
+        - name: desc
+          in: query
+          schema: {type: string, maxLength: 16384}
+        - name: closed
+          in: query
+          description: Whether the board is closed.
+          schema: {type: boolean}
+        - name: prefs/permissionLevel
+          in: query
+          schema: {type: string, enum: [org, private, public]}
+      responses:
+        '200':
+          description: The updated board.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Board'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [boards]
+      operationId: deleteBoard
+      summary: Delete a board
+      responses:
+        '200':
+          description: The board was deleted.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Deleted'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /1/boards/{id}/lists:
+    parameters:
+      - $ref: '#/components/parameters/BoardId'
+    get:
+      tags: [boards, lists]
+      operationId: getBoardLists
+      summary: Get the lists on a board
+      parameters:
+        - name: filter
+          in: query
+          description: Which lists to return.
+          schema: {type: string, enum: [all, closed, none, open], default: open}
+        - name: cards
+          in: query
+          description: Which cards to nest in each list.
+          schema: {type: string, enum: [all, closed, none, open], default: none}
+      responses:
+        '200':
+          description: The lists on the board, in position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/List'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /1/boards/{id}/cards/{filter}:
+    parameters:
+      - $ref: '#/components/parameters/BoardId'
+      - name: filter
+        in: path
+        required: true
+        description: |
+          Which cards to return: `open` (not archived), `closed` (archived only),
+          `visible` (open cards on open lists), `all`, or `none`.
+        schema: {type: string, enum: [all, closed, none, open, visible]}
+    get:
+      tags: [boards, cards]
+      operationId: getBoardCardsFiltered
+      summary: Get filtered cards on a board
+      responses:
+        '200':
+          description: The cards on the board that match the filter.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Card'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /1/lists:
+    post:
+      tags: [lists]
+      operationId: createList
+      summary: Create a list on a board
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 16384}
+        - name: idBoard
+          in: query
+          required: true
+          description: The id of the board the list should be created on.
+          schema: {$ref: '#/components/schemas/TrelloID'}
+        - name: pos
+          in: query
+          description: Position of the list on the board, `top`, `bottom`, or a positive float.
+          schema:
+            oneOf:
+              - {type: string, enum: [top, bottom]}
+              - {type: number, minimum: 0}
+      responses:
+        '200':
+          description: The created list.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/List'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /1/lists/{id}/cards:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The id of the list.
+        schema: {$ref: '#/components/schemas/TrelloID'}
+    get:
+      tags: [lists, cards]
+      operationId: getListCards
+      summary: Get the open cards in a list
+      responses:
+        '200':
+          description: The open (not archived) cards in the list, in position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Card'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /1/cards:
+    post:
+      tags: [cards]
+      operationId: createCard
+      summary: Create a card in a list
+      parameters:
+        - name: idList
+          in: query
+          required: true
+          description: The id of the list the card should be created in.
+          schema: {$ref: '#/components/schemas/TrelloID'}
+        - name: name
+          in: query
+          description: The name for the card.
+          schema: {type: string}
+        - name: desc
+          in: query
+          description: The description for the card.
+          schema: {type: string, maxLength: 16384}
+        - name: pos
+          in: query
+          description: The position of the new card, `top`, `bottom`, or a positive float.
+          schema:
+            oneOf:
+              - {type: string, enum: [top, bottom]}
+              - {type: number, minimum: 0}
+        - name: due
+          in: query
+          description: A due date for the card.
+          schema: {type: string, format: date-time}
+        - name: dueComplete
+          in: query
+          schema: {type: boolean}
+        - name: idMembers
+          in: query
+          description: Comma-separated list of member ids to add to the card.
+          schema: {type: string}
+        - name: idLabels
+          in: query
+          description: Comma-separated list of label ids to add to the card.
+          schema: {type: string}
+      responses:
+        '200':
+          description: The created card.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Card'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /1/cards/{id}:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    get:
+      tags: [cards]
+      operationId: getCard
+      summary: Get a card
+      responses:
+        '200':
+          description: The card.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Card'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [cards]
+      operationId: updateCard
+      summary: Update a card
+      description: |
+        Changes only the fields given. Setting `idList` moves the card to that list
+        (and to its board when `idBoard` is given too); `closed=true` archives it.
+      parameters:
+        - name: name
+          in: query
+          schema: {type: string}
+        - name: desc
+          in: query
+          schema: {type: string, maxLength: 16384}
+        - name: closed
+          in: query
+          description: Whether the card is archived.
+          schema: {type: boolean}
+        - name: idList
+          in: query
+          description: The id of the list the card should be in.
+          schema: {$ref: '#/components/schemas/TrelloID'}
+        - name: idBoard
+          in: query
+          description: The id of the board the card should be on.
+          schema: {$ref: '#/components/schemas/TrelloID'}
+        - name: pos
+          in: query
+          schema:
+            oneOf:
+              - {type: string, enum: [top, bottom]}
+              - {type: number, minimum: 0}
+        - name: due
+          in: query
+          schema: {type: string, format: date-time, nullable: true}
+        - name: dueComplete
+          in: query
+          schema: {type: boolean}
+      responses:
+        '200':
+          description: The updated card.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Card'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [cards]
+      operationId: deleteCard
+      summary: Delete a card
+      description: Deletes the card for good. It cannot be read again.
+      responses:
+        '200':
+          description: The card was deleted.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Deleted'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /1/cards/{id}/actions/comments:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    post:
+      tags: [cards]
+      operationId: addCardComment
+      summary: Add a comment to a card
+      parameters:
+        - name: text
+          in: query
+          required: true
+          description: The comment.
+          schema: {type: string, minLength: 1, maxLength: 16384}
+      responses:
+        '200':
+          description: The `commentCard` action that records the comment.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Action'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /1/cards/{id}/actions:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    get:
+      tags: [cards]
+      operationId: getCardActions
+      summary: Get the actions on a card
+      parameters:
+        - name: filter
+          in: query
+          description: A comma-separated list of action types to return.
+          schema: {type: string, default: commentCard}
+        - name: page
+          in: query
+          description: The page of results for actions. Each page has 50 actions.
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: The card's actions of the asked types, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Action'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: query
+      name: key
+    apiToken:
+      type: apiKey
+      in: query
+      name: token
+  parameters:
+    BoardId:
+      name: id
+      in: path
+      required: true
+      description: The id of the board.
+      schema: {$ref: '#/components/schemas/TrelloID'}
+    CardId:
+      name: id
+      in: path
+      required: true
+      description: The id of the card.
+      schema: {$ref: '#/components/schemas/TrelloID'}
+  responses:
+    BadRequest:
+      description: The request was malformed, for example an invalid id.
+      content:
+        text/plain:
+          schema: {type: string, example: invalid id}
+    Unauthorized:
+      description: The key or token is missing or invalid.
+      content:
+        text/plain:
+          schema: {type: string, example: invalid key}
+    NotFound:
+      description: No resource has that id.
+      content:
+        text/plain:
+          schema: {type: string, example: The requested resource was not found.}
+  schemas:
+    TrelloID:
+      type: string
+      pattern: '^[0-9a-fA-F]{24}$'
+      example: 5abbe4b7ddc1b351ef961414
+    Deleted:
+      type: object
+      required: [_value]
+      properties:
+        _value:
+          nullable: true
+          example: null
+    Board:
+      type: object
+      required: [id, name, desc, closed, url, shortUrl, prefs]
+      properties:
+        id: {$ref: '#/components/schemas/TrelloID'}
+        name: {type: string}
+        desc: {type: string}
+        closed: {type: boolean}
+        idOrganization:
+          allOf: [{$ref: '#/components/schemas/TrelloID'}]
+          nullable: true
+        idMemberCreator: {$ref: '#/components/schemas/TrelloID'}
+        pinned: {type: boolean}
+        url: {type: string, format: uri}
+        shortUrl: {type: string, format: uri}
+        dateLastActivity: {type: string, format: date-time, nullable: true}
+        prefs:
+          type: object
+          required: [permissionLevel]
+          properties:
+            permissionLevel: {type: string, enum: [org, private, public, enterprise]}
+            background: {type: string}
+            backgroundColor: {type: string, nullable: true}
+            comments: {type: string, enum: [disabled, members, observers, org, public]}
+    List:
+      type: object
+      required: [id, name, closed, idBoard, pos]
+      properties:
+        id: {$ref: '#/components/schemas/TrelloID'}
+        name: {type: string}
+        closed: {type: boolean}
+        idBoard: {$ref: '#/components/schemas/TrelloID'}
+        pos: {type: number}
+        subscribed: {type: boolean}
+    Card:
+      type: object
+      required: [id, name, desc, closed, idList, idBoard, pos, idLabels, idMembers, shortLink, url]
+      properties:
+        id: {$ref: '#/components/schemas/TrelloID'}
+        name: {type: string}
+        desc: {type: string}
+        closed: {type: boolean}
+        idList: {$ref: '#/components/schemas/TrelloID'}
+        idBoard: {$ref: '#/components/schemas/TrelloID'}
+        idShort: {type: integer, description: The card's number on its board.}
+        pos: {type: number}
+        due: {type: string, format: date-time, nullable: true}
+        dueComplete: {type: boolean}
+        start: {type: string, format: date-time, nullable: true}
+        idLabels:
+          type: array
+          items: {$ref: '#/components/schemas/TrelloID'}
+        idMembers:
+          type: array
+          items: {$ref: '#/components/schemas/TrelloID'}
+        labels:
+          type: array
+          items: {$ref: '#/components/schemas/Label'}
+        badges:
+          type: object
+          properties:
+            comments: {type: integer, minimum: 0}
+            attachments: {type: integer, minimum: 0}
+            due: {type: string, format: date-time, nullable: true}
+        shortLink: {type: string, pattern: '^[A-Za-z0-9]{8}$'}
+        shortUrl: {type: string, format: uri}
+        url: {type: string, format: uri}
+        dateLastActivity: {type: string, format: date-time}
+    Label:
+      type: object
+      required: [id, idBoard, name, color]
+      properties:
+        id: {$ref: '#/components/schemas/TrelloID'}
+        idBoard: {$ref: '#/components/schemas/TrelloID'}
+        name: {type: string}
+        color:
+          type: string
+          nullable: true
+          enum: [green, yellow, orange, red, purple, blue, sky, lime, pink, black, null]
+    Action:
+      type: object
+      required: [id, idMemberCreator, type, date, data]
+      properties:
+        id: {$ref: '#/components/schemas/TrelloID'}
+        idMemberCreator: {$ref: '#/components/schemas/TrelloID'}
+        type:
+          type: string
+          description: The kind of action; a comment is `commentCard`.
+          enum: [commentCard, createCard, updateCard, deleteCard, createList, createBoard, updateBoard]
+        date: {type: string, format: date-time}
+        data:
+          type: object
+          properties:
+            text: {type: string, description: 'The comment, for a `commentCard` action.'}
+            card:
+              type: object
+              required: [id]
+              properties:
+                id: {$ref: '#/components/schemas/TrelloID'}
+                name: {type: string}
+                idShort: {type: integer}
+                shortLink: {type: string}
+            board:
+              type: object
+              required: [id]
+              properties:
+                id: {$ref: '#/components/schemas/TrelloID'}
+                name: {type: string}
+                shortLink: {type: string}
+            list:
+              type: object
+              required: [id]
+              properties:
+                id: {$ref: '#/components/schemas/TrelloID'}
+                name: {type: string}
+        memberCreator:
+          type: object
+          properties:
+            id: {$ref: '#/components/schemas/TrelloID'}
+            fullName: {type: string}
+            username: {type: string}

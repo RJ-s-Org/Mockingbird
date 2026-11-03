@@ -97,6 +97,8 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 
 `server_suites.py --suite journeys_blind2` is that new set: five journeys of 14 checks each over Twilio, SendGrid, Plaid, PayPal payments and OpenWeatherMap, written under the same rule from each contract alone. No check gates the rest of its journey, so one bad answer costs only the checks that depend on it. The suite is not in the default set; it costs real calls.
 
+`server_suites.py --suite journeys_blind3` is the third set, and its contracts are new too: Trello boards, Asana tasks, GitLab issues, Freshdesk tickets and Mailchimp audiences, written for this suite from each API's public documentation and kept in [`contracts/blind3/`](contracts/blind3/), so no one working on the engine has seen them. Each journey has 14 checks covering write-then-read, list-after-write, filters and search, child resources, references between resources, updates and deletes. Each check asserts only what its contract promises a client, and no check gates the rest. Do not edit a check or a contract to suit results. The suite is not in the default set; it costs real calls.
+
 ## Testing without spend
 
 Both scripts accept a hidden `--upstream URL` flag that points the proxy at a fake chat endpoint. With it, `run.py` skips the key calls. `fake_llm.py` can stand in for OpenRouter:
