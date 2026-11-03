@@ -1396,6 +1396,7 @@ pub(crate) async fn complete(
             )
             .await;
             generated.effect_outcomes.extend(outcomes);
+            write_memory::serve_own_effects(rt, op, own, &mut generated);
             if generated.dropped_effects > 0 {
                 metrics::counter!(
                     EFFECTS_METRIC,

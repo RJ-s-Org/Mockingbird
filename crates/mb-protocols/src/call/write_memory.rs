@@ -14,8 +14,9 @@
 //! A create also tells the held records its request refers to by value, by the
 //! matching [`world`] shows a request's references with: a reply the message it
 //! answers, a refund its payment. Those change only by the effects their next read's
-//! answer lists, and that read answers the stored copy (see [`Earlier::by_effects`]). A
-//! parent and those keep, with the request, the record it created, which the read
+//! answer lists, and that read answers the stored copy (see [`Earlier::by_effects`]); a
+//! direct update of one settles as though nothing were remembered, and the memory waits
+//! for that read. A parent and those keep, with the request, the record it created, which the read
 //! catching up is shown as new (see [`created_since`]).
 //!
 //! The next generation for that resource is shown the requests; a read, which could
@@ -78,6 +79,8 @@ pub(super) struct Earlier {
     pub(super) own: Option<Value>,
     /// Every request kept only referred to the resource (see [`after_write`]): it
     /// changes only by the effects a read's answer lists, and the stored copy stands.
+    /// Never for an update of the resource itself, which is told none of them (see
+    /// [`recall`]).
     pub(super) by_effects: bool,
     /// Catch-ups that failed since the last write.
     attempts: u64,
@@ -168,6 +171,16 @@ pub(super) async fn recall(
             .requests
             .iter()
             .all(|r| r.get(REFERENCED) == Some(&Value::Bool(true)));
+    // What only referred to the record says nothing of a direct update of it, which
+    // changes it as it would with nothing remembered: its answer settles on the stored
+    // copy, with what the request names. The requests stay for the record's next read,
+    // which changes by effects alone.
+    if by_effects && plan.op.kind == OperationKind::Command(Effect::Update) {
+        return Earlier {
+            key: Some(key),
+            ..Earlier::default()
+        };
+    }
     Earlier {
         key: Some(key),
         by_effects,
@@ -1926,6 +1939,54 @@ pub(super) fn own_effect_members(
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+/// What the applied effects of an update's answer set on `own`, the target it just stored,
+/// shown in the answer the client is served, as the store now has it. An answer settling
+/// on its target keeps only what the request names (see [`mb_engine::UpdateGuard`]), and
+/// a request may name what no member of the read is (`state_event: close` for `state`),
+/// so an effect is how what followed reaches the store; it reaches the answer too. Each
+/// member an effect set goes as it now stands, which is what [`own_effect_members`]
+/// allowed, and only on an answer with the read's schema that still suits the type with
+/// them. A rejected effect shows nothing.
+pub(super) fn serve_own_effects(
+    rt: &MockRuntime,
+    op: &Operation,
+    own: Option<(&str, &str)>,
+    generated: &mut GeneratedResponse,
+) {
+    let Some((t, id)) = own else {
+        return;
+    };
+    if !is_read_schema(rt, op, op.output_for_status(generated.status)) {
+        return;
+    }
+    let mut set = Map::new();
+    for outcome in &generated.effect_outcomes {
+        let (None, Some(Value::Object(merged))) = (&outcome.rejected, &outcome.merged) else {
+            continue;
+        };
+        if outcome.effect.resource_type != t || outcome.effect.id != id {
+            continue;
+        }
+        for key in outcome.effect.set.keys() {
+            if let Some(value) = merged.get(key) {
+                set.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let Some(Value::Object(body)) = generated.body.as_ref() else {
+        return;
+    };
+    if set.iter().all(|(k, v)| body.get(k) == Some(v)) {
+        return;
+    }
+    let mut served = body.clone();
+    served.extend(set);
+    let served = Value::Object(served);
+    if entity_fits(rt, t, &served) {
+        generated.body = Some(served);
+    }
 }
 
 /// Whether `member` is named for path parameter `param`: as [`tied_to_param`] has it,

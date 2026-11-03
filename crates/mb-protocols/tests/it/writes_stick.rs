@@ -14,6 +14,9 @@ use mb_state::{CachingStateStore, MemoryStore, SessionKey, StateStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+/// Where the write memory lives.
+const MEMORY: &str = "__mockingbird.earlier_requests";
+
 struct Harness {
     router: axum::Router,
     provider: Arc<ScriptedProvider>,
@@ -1067,6 +1070,71 @@ async fn an_effect_breaking_its_own_target_does_not_apply() {
     assert_eq!(read["count"], 12, "{read}");
 }
 
+/// The GitLab case: `state_event: close` names no member of the read, so the answer's
+/// `closed` went though its effect applied, and the client was served the copy from
+/// before. What an applied effect set on the update's own target is what it answers,
+/// a `readOnly` member too, and nothing else the answer changed unasked.
+#[tokio::test]
+async fn an_applied_effect_on_its_own_target_is_served() {
+    let mut answer = widget();
+    answer["status"] = json!("closed");
+    answer["completed_at"] = json!("2026-11-03");
+    answer["name"] = json!("drifted");
+    let h = harness_with(
+        SETTLING.as_bytes(),
+        vec![
+            widget(),
+            json!({
+                "effects": [{
+                    "type": "widgets",
+                    "id": "w1",
+                    "set": {"status": "closed", "completed_at": "2026-11-03"},
+                }],
+                "response": answer,
+            }),
+        ],
+        |_| {},
+    );
+    h.call("GET", WIDGET, None).await;
+    let (status, _, updated) = h
+        .call("PATCH", WIDGET, Some(json!({"state_event": "close"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["status"], "closed", "{updated}");
+    assert_eq!(updated["completed_at"], "2026-11-03", "{updated}");
+    assert_eq!(updated["name"], "before", "no effect lists it: {updated}");
+    let (_, source, read) = h.call("GET", WIDGET, None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read, updated, "served as stored");
+    assert_eq!(h.calls(), 2);
+}
+
+/// An effect that is rejected is not served either: the answer's change goes with it.
+#[tokio::test]
+async fn a_rejected_effect_on_its_own_target_is_not_served() {
+    let mut answer = widget();
+    answer["status"] = json!("closed");
+    let h = harness_with(
+        SETTLING.as_bytes(),
+        vec![
+            widget(),
+            json!({
+                "effects": [{"type": "widgets", "id": "w1", "set": {"status": "shut"}}],
+                "response": answer,
+            }),
+        ],
+        |_| {},
+    );
+    h.call("GET", WIDGET, None).await;
+    let (status, _, updated) = h
+        .call("PATCH", WIDGET, Some(json!({"state_event": "close"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["status"], "open", "{updated}");
+    let (_, _, read) = h.call("GET", WIDGET, None).await;
+    assert_eq!(read, updated);
+}
+
 /// The Lightning case: a model nulls what it was not asked about, at any depth, and
 /// the stored value stands.
 #[tokio::test]
@@ -1326,6 +1394,147 @@ async fn an_updates_effect_on_its_own_target_adds_no_member() {
         .unwrap()
         .unwrap();
     assert!(held.data.get("lifecyclestage").is_none(), "{}", held.data);
+}
+
+/// A deal HubSpot creates with an association to the contact.
+fn deal_for_contact() -> (Value, Value) {
+    let request = json!({
+        "properties": {"dealname": "Renewal", "amount": "5000", "dealstage": "qualifiedtobuy", "pipeline": "default"},
+        "associations": [{
+            "to": {"id": "512345"},
+            "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 3}],
+        }],
+    });
+    let answer = json!({
+        "id": "1234567890",
+        "properties": {
+            "dealname": "Renewal",
+            "amount": "5000",
+            "dealstage": "qualifiedtobuy",
+            "pipeline": "default",
+            "closedate": "2026-12-01T00:00:00Z",
+            "createdate": "2026-11-03T09:00:00Z",
+            "hs_lastmodifieddate": "2026-11-03T09:00:00Z",
+            "hs_object_id": "1234567890",
+        },
+        "createdAt": "2026-11-03T09:00:00Z",
+        "updatedAt": "2026-11-03T09:00:00Z",
+        "archived": false,
+    });
+    (request, answer)
+}
+
+/// The contact's resource type, as the contract names it.
+fn contact_type() -> String {
+    let bundle = compile(&hubspot_contract()).unwrap();
+    let op = bundle
+        .operation("patch-/crm/v3/objects/contacts/{contactId}_update")
+        .unwrap();
+    op.resource_type.clone().unwrap()
+}
+
+/// The HubSpot case: a deal's create referred to the contact, so its memory held only
+/// that, and the contact's own `PATCH` could not settle: the stale copy stood over a
+/// correct answer and the nested `properties` the request named were lost. A direct
+/// update of the record settles as though nothing were remembered, merging what it
+/// names at depth, and keeps the memory for the contact's next read, which still
+/// changes by effects alone.
+#[tokio::test]
+async fn an_update_of_a_record_a_create_referred_to_settles() {
+    let t = contact_type();
+    let (deal, deal_answer) = deal_for_contact();
+    let mut answer = contact("opportunity", None);
+    answer["properties"]["firstname"] = json!("Drifted");
+    answer["updatedAt"] = json!("2026-11-03T10:00:00Z");
+    let mut guessed = contact("customer", None);
+    guessed["properties"]["lastname"] = json!("Guessed");
+    let h = harness_with(
+        &hubspot_contract(),
+        vec![
+            contact("lead", None),
+            deal_answer,
+            json!({
+                "effects": [{"type": t, "id": "512345", "set": {"updatedAt": "2026-11-03T10:00:00Z"}}],
+                "response": answer,
+            }),
+            json!({"effects": [], "response": guessed}),
+        ],
+        |_| {},
+    );
+    let create = json!({"properties": {"email": "dana@example.com", "firstname": "Dana", "lastname": "Reyes"}});
+    let (status, _, _) = h
+        .call("POST", "/crm/v3/objects/contacts", Some(create))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = h.call("POST", "/crm/v3/objects/deals", Some(deal)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let memory = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    assert!(
+        memory.iter().any(|doc| doc.id == format!("{t}/512345")),
+        "the deal referred to the contact: {memory:?}"
+    );
+
+    let request = json!({"properties": {"lifecyclestage": "opportunity"}});
+    let (status, source, updated) = h.call("PATCH", CONTACT, Some(request)).await;
+    assert_eq!(
+        (status, source.as_str()),
+        (StatusCode::OK, "llm"),
+        "{updated}"
+    );
+    let properties = &updated["properties"];
+    assert_eq!(properties["lifecyclestage"], "opportunity", "{updated}");
+    assert_eq!(properties["firstname"], "Dana", "not named: {updated}");
+    assert_eq!(properties["email"], "dana@example.com", "{updated}");
+    assert_eq!(updated["updatedAt"], "2026-11-03T10:00:00Z", "{updated}");
+    let prompt = h.provider.requests()[2]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone();
+    assert!(!prompt.contains("<earlier_requests>"), "{prompt}");
+
+    // Still behind the deal: the read generates, and answers what is stored.
+    let (_, source, read) = h.call("GET", CONTACT, None).await;
+    assert_eq!(source, "llm", "{read}");
+    assert_eq!(read, updated, "a guessed body changes nothing");
+    let prompt = h.provider.requests()[3]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone();
+    assert!(prompt.contains("<earlier_requests>"), "{prompt}");
+    assert_eq!(h.calls(), 4);
+}
+
+/// What a record merely referenced is protected from stays so: the read after the
+/// deal's create answers the stored contact, whatever its answer guessed, as the
+/// deal's own write and answer change nothing on it.
+#[tokio::test]
+async fn a_record_a_create_referred_to_still_changes_by_effects_alone() {
+    let (deal, mut deal_answer) = deal_for_contact();
+    deal_answer["properties"]["dealname"] = json!("Renewal");
+    let mut guessed = contact("customer", None);
+    guessed["properties"]["firstname"] = json!("Guessed");
+    let h = harness_with(
+        &hubspot_contract(),
+        vec![
+            contact("lead", None),
+            deal_answer,
+            json!({"effects": [], "response": guessed}),
+        ],
+        |_| {},
+    );
+    let create = json!({"properties": {"email": "dana@example.com", "firstname": "Dana", "lastname": "Reyes"}});
+    let (_, _, created) = h
+        .call("POST", "/crm/v3/objects/contacts", Some(create))
+        .await;
+    h.call("POST", "/crm/v3/objects/deals", Some(deal)).await;
+    let (_, source, read) = h.call("GET", CONTACT, None).await;
+    assert_eq!(source, "llm", "{read}");
+    assert_eq!(read, created, "{read}");
+    assert_eq!(h.calls(), 3);
 }
 
 /// Items with a declared 404 and a counted envelope, things with neither, a read
