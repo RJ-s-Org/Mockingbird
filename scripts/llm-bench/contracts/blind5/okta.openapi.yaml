@@ -1,0 +1,514 @@
+openapi: 3.0.3
+info:
+  title: Okta Management API (users, lifecycle, groups)
+  version: "2025.01.0"
+  description: |
+    A subset of the Okta Users and Groups APIs, written from Okta's public
+    documentation. A user's `status` follows a lifecycle that changes only through
+    the `/lifecycle/...` operations (and creation):
+
+    - created with `activate=false`: STAGED
+    - activate (from STAGED, PROVISIONED or DEPROVISIONED): ACTIVE when the user has a
+      password, else PROVISIONED; with `sendEmail=false` the answer carries the
+      activation token and URL instead of emailing them
+    - suspend (from ACTIVE only): SUSPENDED; unsuspend (from SUSPENDED only): ACTIVE
+    - deactivate (from any status but DEPROVISIONED): DEPROVISIONED
+    - delete: a user that is not DEPROVISIONED is deactivated first; deleting a
+      DEPROVISIONED user removes it for good, after which reading it is 404.
+
+    A transition from a status it does not apply to is refused with 400
+    (E0000001) or 403 (E0000016 for activating an active user). A user is addressed
+    by its id (`00u` + 17 characters) or its `profile.login`. POST to a user updates
+    only the profile properties sent; PUT replaces the profile. `search` takes an
+    expression over user properties, such as
+    `profile.department eq "Finance" and status eq "ACTIVE"`.
+servers:
+  - url: https://{yourOktaDomain}
+    variables:
+      yourOktaDomain:
+        default: example.okta.com
+security:
+  - apiToken: []
+tags:
+  - name: Users
+  - name: User lifecycle
+  - name: Groups
+paths:
+  /api/v1/users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      summary: List users
+      parameters:
+        - name: q
+          in: query
+          description: Matches the start of firstName, lastName or email.
+          schema: {type: string}
+        - name: filter
+          in: query
+          description: 'A filter on status, lastUpdated, id or profile.login, such as status eq "ACTIVE".'
+          schema: {type: string}
+        - name: search
+          in: query
+          description: A search expression over any user property, profile properties included.
+          schema: {type: string}
+        - name: sortBy
+          in: query
+          description: A property to sort by; only with search.
+          schema: {type: string}
+        - name: sortOrder
+          in: query
+          schema: {type: string, enum: [asc, desc]}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 200}
+        - name: after
+          in: query
+          description: The cursor from the `next` link of the previous page.
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of users; a `Link` header with rel="next" points to the next page.
+          headers:
+            Link:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/User"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Users]
+      operationId: createUser
+      summary: Create a user
+      parameters:
+        - name: activate
+          in: query
+          description: Activate the user on creation. With false, the user is STAGED.
+          schema: {type: boolean, default: true}
+        - name: provider
+          in: query
+          schema: {type: boolean, default: false}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile]
+              properties:
+                profile: {$ref: "#/components/schemas/UserProfile"}
+                credentials: {$ref: "#/components/schemas/CredentialsInput"}
+                groupIds:
+                  type: array
+                  description: Groups the user is added to on creation.
+                  items: {type: string}
+      responses:
+        "200":
+          description: The created user.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "400":
+          description: E0000001, such as a login that another user already has.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/userId"
+    get:
+      tags: [Users]
+      operationId: getUser
+      summary: Get a user by id or login
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Users]
+      operationId: updateUser
+      summary: Update a user's profile partially
+      description: Only the profile properties sent change; the others keep their values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {$ref: "#/components/schemas/UserProfilePatch"}
+                credentials: {$ref: "#/components/schemas/CredentialsInput"}
+      responses:
+        "200":
+          description: The whole updated user.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Users]
+      operationId: deleteUser
+      summary: Deactivate or delete a user
+      description: |
+        A user that is not DEPROVISIONED is deactivated. A DEPROVISIONED user is
+        deleted for good.
+      parameters:
+        - name: sendEmail
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "204":
+          description: The user was deactivated or deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/users/{id}/lifecycle/activate:
+    post:
+      tags: [User lifecycle]
+      operationId: activateUser
+      summary: Activate a user
+      parameters:
+        - $ref: "#/components/parameters/userId"
+        - name: sendEmail
+          in: query
+          required: true
+          description: Email the activation link to the user. With false, it is in the answer.
+          schema: {type: boolean, default: true}
+      responses:
+        "200":
+          description: With sendEmail=false, the activation token and URL; else an empty object.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ActivationToken"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403":
+          description: E0000016, the user is already active.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/users/{id}/lifecycle/deactivate:
+    post:
+      tags: [User lifecycle]
+      operationId: deactivateUser
+      summary: Deactivate a user
+      description: The user becomes DEPROVISIONED and loses access to all apps.
+      parameters:
+        - $ref: "#/components/parameters/userId"
+        - name: sendEmail
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The user is deactivated.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/users/{id}/lifecycle/suspend:
+    post:
+      tags: [User lifecycle]
+      operationId: suspendUser
+      summary: Suspend an active user
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: The user is SUSPENDED.
+          content:
+            application/json:
+              schema: {type: object}
+        "400":
+          description: E0000001, the user is not ACTIVE.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/users/{id}/lifecycle/unsuspend:
+    post:
+      tags: [User lifecycle]
+      operationId: unsuspendUser
+      summary: Unsuspend a suspended user
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: The user is ACTIVE again.
+          content:
+            application/json:
+              schema: {type: object}
+        "400":
+          description: E0000001, the user is not SUSPENDED.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/users/{id}/groups:
+    get:
+      tags: [Users]
+      operationId: listUserGroups
+      summary: List the groups a user is a member of
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: The user's groups.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Group"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/groups:
+    post:
+      tags: [Groups]
+      operationId: addGroup
+      summary: Create a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile]
+              properties:
+                profile: {$ref: "#/components/schemas/GroupProfile"}
+      responses:
+        "200":
+          description: The created group, of type OKTA_GROUP.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Group"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v1/groups/{groupId}:
+    get:
+      tags: [Groups]
+      operationId: getGroup
+      summary: Get a group
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+      responses:
+        "200":
+          description: The group.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Group"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/groups/{groupId}/users:
+    get:
+      tags: [Groups]
+      operationId: listGroupUsers
+      summary: List the members of a group
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 1000}
+        - name: after
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: The group's members.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/User"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/groups/{groupId}/users/{userId}:
+    put:
+      tags: [Groups]
+      operationId: assignUserToGroup
+      summary: Add a user to a group
+      parameters:
+        - $ref: "#/components/parameters/groupId"
+        - name: userId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "204":
+          description: The user is a member of the group.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403":
+          description: E0000006, the group is not an OKTA_GROUP and its members cannot be changed here.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    apiToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: '"SSWS {API token}", or "Bearer {access token}" with OAuth 2.0.'
+  parameters:
+    userId:
+      name: id
+      in: path
+      required: true
+      description: The user's id, or its profile.login.
+      schema: {type: string}
+    groupId:
+      name: groupId
+      in: path
+      required: true
+      schema: {type: string, pattern: "^00g[A-Za-z0-9]{17}$"}
+  responses:
+    BadRequest:
+      description: E0000001, the request is not valid for the resource or its status.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: E0000011, the token is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: E0000007, the resource is not found.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [errorCode, errorSummary, errorId]
+      properties:
+        errorCode: {type: string, enum: [E0000001, E0000006, E0000007, E0000011, E0000016, E0000047]}
+        errorSummary: {type: string}
+        errorLink: {type: string}
+        errorId: {type: string}
+        errorCauses:
+          type: array
+          items:
+            type: object
+            properties:
+              errorSummary: {type: string}
+    UserStatus:
+      type: string
+      enum: [STAGED, PROVISIONED, ACTIVE, RECOVERY, PASSWORD_EXPIRED, LOCKED_OUT, SUSPENDED, DEPROVISIONED]
+    UserProfile:
+      type: object
+      required: [firstName, lastName, email, login]
+      properties:
+        firstName: {type: string}
+        lastName: {type: string}
+        email: {type: string, format: email}
+        login: {type: string, description: Unique across the org; usually an email address.}
+        mobilePhone: {type: string, nullable: true}
+        secondEmail: {type: string, format: email, nullable: true}
+        title: {type: string}
+        department: {type: string}
+        employeeNumber: {type: string}
+        manager: {type: string}
+        city: {type: string}
+        countryCode: {type: string}
+    UserProfilePatch:
+      type: object
+      description: The profile properties to change.
+      properties:
+        firstName: {type: string}
+        lastName: {type: string}
+        email: {type: string, format: email}
+        login: {type: string}
+        mobilePhone: {type: string, nullable: true}
+        secondEmail: {type: string, format: email, nullable: true}
+        title: {type: string}
+        department: {type: string}
+        employeeNumber: {type: string}
+        manager: {type: string}
+        city: {type: string}
+        countryCode: {type: string}
+    CredentialsInput:
+      type: object
+      properties:
+        password:
+          type: object
+          properties:
+            value: {type: string, format: password}
+        recovery_question:
+          type: object
+          properties:
+            question: {type: string}
+            answer: {type: string}
+    User:
+      type: object
+      required: [id, status, created, lastUpdated, statusChanged, profile, _links]
+      properties:
+        id: {type: string, pattern: "^00u[A-Za-z0-9]{17}$"}
+        status: {$ref: "#/components/schemas/UserStatus"}
+        transitioningToStatus:
+          type: string
+          nullable: true
+          enum: [ACTIVE, DEPROVISIONED, PROVISIONED]
+        created: {type: string, format: date-time}
+        activated: {type: string, format: date-time, nullable: true, description: Null until the user is first activated.}
+        statusChanged: {type: string, format: date-time, nullable: true}
+        lastLogin: {type: string, format: date-time, nullable: true}
+        lastUpdated: {type: string, format: date-time}
+        passwordChanged: {type: string, format: date-time, nullable: true}
+        type:
+          type: object
+          properties:
+            id: {type: string}
+        profile: {$ref: "#/components/schemas/UserProfile"}
+        credentials:
+          type: object
+          properties:
+            emails:
+              type: array
+              items:
+                type: object
+                properties:
+                  value: {type: string, format: email}
+                  status: {type: string, enum: [VERIFIED, UNVERIFIED]}
+                  type: {type: string, enum: [PRIMARY, SECONDARY]}
+            provider:
+              type: object
+              properties:
+                type: {type: string, enum: [OKTA, ACTIVE_DIRECTORY, LDAP, FEDERATION, SOCIAL, IMPORT]}
+                name: {type: string}
+        _links: {type: object, additionalProperties: true}
+    ActivationToken:
+      type: object
+      properties:
+        activationUrl: {type: string, format: uri}
+        activationToken: {type: string}
+    GroupProfile:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        description: {type: string}
+    Group:
+      type: object
+      required: [id, created, lastUpdated, lastMembershipUpdated, objectClass, type, profile]
+      properties:
+        id: {type: string, pattern: "^00g[A-Za-z0-9]{17}$"}
+        created: {type: string, format: date-time}
+        lastUpdated: {type: string, format: date-time}
+        lastMembershipUpdated: {type: string, format: date-time}
+        objectClass: {type: array, items: {type: string}}
+        type: {type: string, enum: [OKTA_GROUP, APP_GROUP, BUILT_IN]}
+        profile: {$ref: "#/components/schemas/GroupProfile"}
+        _links: {type: object, additionalProperties: true}

@@ -1,0 +1,644 @@
+openapi: 3.0.3
+info:
+  title: Cal.com API v2 (event types, slots, bookings)
+  version: "2"
+  description: |
+    A subset of the Cal.com API v2, written from its public documentation. Every
+    operation takes a `cal-api-version` header naming the version of that endpoint
+    this contract describes; answers are wrapped as `{status, data}`.
+
+    An event type is a kind of meeting the caller offers, with a `slug` and a
+    `lengthInMinutes`; its owner is the caller (`GET /v2/me`). `GET /v2/slots` answers
+    the free start times of an event type between `start` and `end`, grouped by
+    date (`YYYY-MM-DD` in `timeZone`). A booking takes a `start` (UTC) and an event
+    type; it lasts the event type's length unless `lengthInMinutes` is sent, so
+    `end` is `start` plus `duration` minutes. Bookings are addressed by their `uid`.
+
+    Rescheduling makes a new booking at the new start whose `rescheduledFromUid` is
+    the old booking's uid; the old booking becomes `cancelled` and its
+    `rescheduledToUid` is the new booking's uid. Cancelling sets `status` to
+    `cancelled` and keeps the `cancellationReason`. Only `accepted` and `pending`
+    bookings can be rescheduled or cancelled; others are refused with 400. The
+    bookings list filters by status, attendee, event type and by a date range
+    (`afterStart`, `beforeEnd`), and pages with `limit` and `pagination.nextCursor`.
+servers:
+  - url: https://api.cal.com
+security:
+  - bearer: []
+tags:
+  - name: Me
+  - name: Event types
+  - name: Slots
+  - name: Bookings
+paths:
+  /v2/me:
+    get:
+      tags: [Me]
+      operationId: getMe
+      summary: Get the caller's profile
+      responses:
+        "200":
+          description: The caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status: {$ref: "#/components/schemas/Status"}
+                  data: {$ref: "#/components/schemas/Me"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /v2/event-types:
+    get:
+      tags: [Event types]
+      operationId: getEventTypes
+      summary: List event types
+      parameters:
+        - $ref: "#/components/parameters/version_event_types"
+        - name: username
+          in: query
+          description: The event types of this user.
+          schema: {type: string}
+        - name: eventSlug
+          in: query
+          description: With username, only the event type with this slug.
+          schema: {type: string}
+        - name: sortCreatedAt
+          in: query
+          schema: {type: string, enum: [asc, desc]}
+      responses:
+        "200":
+          description: The event types.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status: {$ref: "#/components/schemas/Status"}
+                  data: {type: array, items: {$ref: "#/components/schemas/EventType"}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Event types]
+      operationId: createEventType
+      summary: Create an event type owned by the caller
+      parameters:
+        - $ref: "#/components/parameters/version_event_types"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/EventTypeFields"
+                - type: object
+                  required: [lengthInMinutes, title, slug]
+      responses:
+        "201":
+          description: The created event type.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EventTypeAnswer"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: The caller already has an event type with this slug.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /v2/event-types/{eventTypeId}:
+    parameters:
+      - $ref: "#/components/parameters/version_event_types"
+      - name: eventTypeId
+        in: path
+        required: true
+        schema: {type: integer}
+    get:
+      tags: [Event types]
+      operationId: getEventTypeById
+      summary: Get an event type
+      responses:
+        "200":
+          description: The event type.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EventTypeAnswer"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Event types]
+      operationId: updateEventType
+      summary: Update an event type, changing only the fields sent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/EventTypeFields"}
+      responses:
+        "200":
+          description: The whole updated event type.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EventTypeAnswer"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Event types]
+      operationId: deleteEventType
+      summary: Delete an event type
+      responses:
+        "200":
+          description: The deleted event type.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status: {$ref: "#/components/schemas/Status"}
+                  data:
+                    type: object
+                    required: [id, lengthInMinutes, title, slug]
+                    properties:
+                      id: {type: integer}
+                      lengthInMinutes: {type: integer}
+                      title: {type: string}
+                      slug: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/slots:
+    get:
+      tags: [Slots]
+      operationId: getAvailableSlots
+      summary: Get the free start times of an event type in a date range
+      parameters:
+        - name: cal-api-version
+          in: header
+          required: true
+          schema: {type: string, enum: ["2024-09-04"]}
+        - name: eventTypeId
+          in: query
+          description: The event type; or eventTypeSlug with username.
+          schema: {type: integer}
+        - name: eventTypeSlug
+          in: query
+          schema: {type: string}
+        - name: username
+          in: query
+          schema: {type: string}
+        - name: start
+          in: query
+          required: true
+          description: The first date (or UTC date-time) to look at, such as 2050-09-05.
+          schema: {type: string}
+        - name: end
+          in: query
+          required: true
+          description: The last date (or UTC date-time) to look at; a date includes that whole day.
+          schema: {type: string}
+        - name: timeZone
+          in: query
+          description: The time zone of the dates in the answer; defaults to UTC.
+          schema: {type: string, default: UTC}
+        - name: duration
+          in: query
+          description: Only for event types that allow several lengths.
+          schema: {type: integer}
+        - name: format
+          in: query
+          description: time answers start only; range answers start and end.
+          schema: {type: string, enum: [time, range], default: time}
+      responses:
+        "200":
+          description: The free start times, grouped by date; every one lies between start and end.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status: {$ref: "#/components/schemas/Status"}
+                  data:
+                    type: object
+                    description: 'Date (YYYY-MM-DD) to the free slots that start on it, such as {"2050-09-05": [{"start": "2050-09-05T09:00:00.000Z"}]}.'
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: object
+                        required: [start]
+                        properties:
+                          start: {type: string, format: date-time}
+                          end: {type: string, format: date-time, description: With format=range.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/bookings:
+    get:
+      tags: [Bookings]
+      operationId: getBookings
+      summary: List bookings
+      parameters:
+        - name: cal-api-version
+          in: header
+          required: true
+          schema: {type: string, enum: ["2026-05-01"]}
+        - name: status
+          in: query
+          schema: {type: string, enum: [upcoming, recurring, past, cancelled, unconfirmed]}
+        - name: attendeeEmail
+          in: query
+          schema: {type: string}
+        - name: attendeeName
+          in: query
+          schema: {type: string}
+        - name: eventTypeId
+          in: query
+          schema: {type: string}
+        - name: eventTypeIds
+          in: query
+          description: Comma-separated event type ids.
+          schema: {type: string}
+        - name: afterStart
+          in: query
+          description: Only bookings that start on or after this date.
+          schema: {type: string, format: date}
+        - name: beforeEnd
+          in: query
+          description: Only bookings that end on or before this date.
+          schema: {type: string, format: date}
+        - name: sortStart
+          in: query
+          schema: {type: string, enum: [asc, desc]}
+        - name: sortCreated
+          in: query
+          schema: {type: string, enum: [asc, desc]}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+        - name: cursor
+          in: query
+          description: The previous answer's pagination.nextCursor.
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of bookings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data, pagination]
+                properties:
+                  status: {$ref: "#/components/schemas/Status"}
+                  data: {type: array, items: {$ref: "#/components/schemas/Booking"}}
+                  pagination:
+                    type: object
+                    required: [nextCursor, hasMore]
+                    properties:
+                      nextCursor: {type: string, nullable: true}
+                      hasMore: {type: boolean}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Bookings]
+      operationId: createBooking
+      summary: Book an event type
+      parameters:
+        - $ref: "#/components/parameters/version_bookings"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [start, attendee]
+              properties:
+                start: {type: string, format: date-time, description: The start in UTC.}
+                eventTypeId: {type: integer, description: The event type; or eventTypeSlug with username.}
+                eventTypeSlug: {type: string}
+                username: {type: string}
+                attendee: {$ref: "#/components/schemas/AttendeeInput"}
+                guests: {type: array, items: {type: string, format: email}}
+                lengthInMinutes: {type: integer, minimum: 1}
+                metadata:
+                  type: object
+                  maxProperties: 50
+                  additionalProperties: {type: string, maxLength: 500}
+                bookingFieldsResponses: {type: object, additionalProperties: true}
+      responses:
+        "201":
+          description: The booking.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BookingAnswer"}
+        "400":
+          description: The start is not a free slot of the event type, or the body is not valid.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/bookings/{bookingUid}:
+    get:
+      tags: [Bookings]
+      operationId: getBooking
+      summary: Get a booking by uid
+      parameters:
+        - $ref: "#/components/parameters/version_bookings"
+        - $ref: "#/components/parameters/bookingUid"
+      responses:
+        "200":
+          description: The booking.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BookingAnswer"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/bookings/{bookingUid}/reschedule:
+    post:
+      tags: [Bookings]
+      operationId: rescheduleBooking
+      summary: Reschedule a booking to a new start
+      parameters:
+        - $ref: "#/components/parameters/version_bookings"
+        - $ref: "#/components/parameters/bookingUid"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [start]
+              properties:
+                start: {type: string, format: date-time}
+                rescheduledBy: {type: string, format: email}
+                reschedulingReason: {type: string}
+                lengthInMinutes: {type: integer, minimum: 1}
+      responses:
+        "201":
+          description: The new booking; rescheduledFromUid is the old booking's uid.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BookingAnswer"}
+        "400":
+          description: The booking is cancelled, rejected or awaiting a host.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/bookings/{bookingUid}/cancel:
+    post:
+      tags: [Bookings]
+      operationId: cancelBooking
+      summary: Cancel a booking
+      parameters:
+        - $ref: "#/components/parameters/version_bookings"
+        - $ref: "#/components/parameters/bookingUid"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cancellationReason: {type: string}
+                cancelSubsequentBookings: {type: boolean, description: For recurring bookings.}
+      responses:
+        "200":
+          description: The cancelled booking.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BookingAnswer"}
+        "400":
+          description: The booking is already cancelled.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/bookings/{bookingUid}/mark-absent:
+    post:
+      tags: [Bookings]
+      operationId: markNoShow
+      summary: Mark the host or attendees absent from a past booking
+      parameters:
+        - $ref: "#/components/parameters/version_bookings"
+        - $ref: "#/components/parameters/bookingUid"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host: {type: boolean}
+                attendees:
+                  type: array
+                  items:
+                    type: object
+                    required: [email, absent]
+                    properties:
+                      email: {type: string, format: email}
+                      absent: {type: boolean}
+      responses:
+        "200":
+          description: The booking, with absentHost and each attendee's absent flag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BookingAnswer"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: An API key (`cal_...`), a managed user access token or an OAuth access token.
+  parameters:
+    version_event_types:
+      name: cal-api-version
+      in: header
+      required: true
+      schema: {type: string, enum: ["2024-06-14"]}
+    version_bookings:
+      name: cal-api-version
+      in: header
+      required: true
+      schema: {type: string, enum: ["2026-02-25"]}
+    bookingUid:
+      name: bookingUid
+      in: path
+      required: true
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: The token is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: The resource is not found.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Status:
+      type: string
+      enum: [success, error]
+    Error:
+      type: object
+      required: [status, error]
+      properties:
+        status: {type: string, enum: [error]}
+        timestamp: {type: string, format: date-time}
+        path: {type: string}
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, enum: [BadRequestException, UnauthorizedException, NotFoundException, ConflictException, ForbiddenException]}
+            message: {type: string}
+            details: {type: object}
+    Me:
+      type: object
+      required: [id, username, email, timeZone]
+      properties:
+        id: {type: integer}
+        username: {type: string}
+        email: {type: string, format: email}
+        name: {type: string, nullable: true}
+        timeFormat: {type: integer, enum: [12, 24]}
+        defaultScheduleId: {type: integer, nullable: true}
+        weekStart: {type: string, enum: [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]}
+        timeZone: {type: string}
+        organizationId: {type: integer, nullable: true}
+    EventTypeFields:
+      type: object
+      properties:
+        lengthInMinutes: {type: integer, minimum: 1}
+        title: {type: string}
+        slug: {type: string, pattern: "^[a-z0-9-]+$"}
+        description: {type: string}
+        minimumBookingNotice: {type: integer, minimum: 0, description: Minutes.}
+        beforeEventBuffer: {type: integer, minimum: 0}
+        afterEventBuffer: {type: integer, minimum: 0}
+        slotInterval: {type: integer, minimum: 1, nullable: true}
+        scheduleId: {type: integer, description: The availability schedule; defaults to the owner's default schedule.}
+        hidden: {type: boolean}
+        lengthInMinutesOptions: {type: array, items: {type: integer}}
+        locations:
+          type: array
+          items:
+            type: object
+            required: [type]
+            properties:
+              type: {type: string, enum: [address, link, integration, phone, attendeeAddress, attendeePhone, attendeeDefined]}
+              address: {type: string}
+              link: {type: string, format: uri}
+              integration: {type: string, enum: [cal-video, google-meet, zoom, office365-video]}
+              phone: {type: string}
+              public: {type: boolean}
+    EventType:
+      type: object
+      required: [id, ownerId, lengthInMinutes, title, slug, hidden]
+      properties:
+        id: {type: integer}
+        ownerId: {type: integer, description: The id of the user who owns it.}
+        lengthInMinutes: {type: integer}
+        title: {type: string}
+        slug: {type: string}
+        description: {type: string, nullable: true}
+        minimumBookingNotice: {type: integer}
+        beforeEventBuffer: {type: integer}
+        afterEventBuffer: {type: integer}
+        slotInterval: {type: integer, nullable: true}
+        scheduleId: {type: integer, nullable: true}
+        hidden: {type: boolean}
+        lengthInMinutesOptions: {type: array, items: {type: integer}}
+        locations: {type: array, items: {type: object}}
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: integer}
+              username: {type: string}
+    EventTypeAnswer:
+      type: object
+      required: [status, data]
+      properties:
+        status: {$ref: "#/components/schemas/Status"}
+        data: {$ref: "#/components/schemas/EventType"}
+    AttendeeInput:
+      type: object
+      required: [name, timeZone]
+      properties:
+        name: {type: string}
+        email: {type: string, format: email}
+        timeZone: {type: string, description: An IANA time zone, such as Europe/Lisbon.}
+        phoneNumber: {type: string}
+        language: {type: string, default: en}
+    Host:
+      type: object
+      required: [id, name, email, username, timeZone]
+      properties:
+        id: {type: integer}
+        uuid: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        displayEmail: {type: string}
+        username: {type: string}
+        timeZone: {type: string}
+    Attendee:
+      type: object
+      required: [name, email, timeZone, absent]
+      properties:
+        name: {type: string}
+        email: {type: string, format: email}
+        displayEmail: {type: string}
+        timeZone: {type: string}
+        language: {type: string}
+        absent: {type: boolean}
+        phoneNumber: {type: string}
+    Booking:
+      type: object
+      required: [id, uid, title, status, start, end, duration, eventTypeId, eventType, hosts, attendees, absentHost, createdAt]
+      properties:
+        id: {type: integer}
+        uid: {type: string}
+        title: {type: string}
+        description: {type: string}
+        status: {type: string, enum: [cancelled, accepted, rejected, pending, awaiting_host]}
+        cancellationReason: {type: string}
+        cancelledByEmail: {type: string}
+        reschedulingReason: {type: string}
+        rescheduledFromUid: {type: string, description: The uid of the booking this one replaced.}
+        rescheduledToUid: {type: string, description: The uid of the booking that replaced this one.}
+        start: {type: string, format: date-time}
+        end: {type: string, format: date-time}
+        duration: {type: integer, description: Minutes from start to end.}
+        eventTypeId: {type: integer}
+        eventType:
+          type: object
+          required: [id, slug]
+          properties:
+            id: {type: integer}
+            slug: {type: string}
+        location: {type: string}
+        meetingUrl: {type: string}
+        absentHost: {type: boolean}
+        hosts: {type: array, items: {$ref: "#/components/schemas/Host"}}
+        attendees: {type: array, items: {$ref: "#/components/schemas/Attendee"}}
+        guests: {type: array, items: {type: string}}
+        metadata: {type: object, additionalProperties: {type: string}}
+        bookingFieldsResponses: {type: object, additionalProperties: true}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time, nullable: true}
+    BookingAnswer:
+      type: object
+      required: [status, data]
+      properties:
+        status: {$ref: "#/components/schemas/Status"}
+        data: {$ref: "#/components/schemas/Booking"}

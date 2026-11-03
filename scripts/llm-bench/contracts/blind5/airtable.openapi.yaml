@@ -1,0 +1,567 @@
+openapi: 3.0.3
+info:
+  title: Airtable Web API (tables, records, comments)
+  version: "0"
+  description: |
+    A subset of the Airtable Web API, written from its public documentation. A base
+    (`app` + 14 characters) holds tables (`tbl...`); a table has typed fields
+    (`fld...`) and records (`rec...`). A record's `fields` is a map from field name to
+    value; the value's shape follows the field's type (text, number, single select
+    choice name, ISO date). Fields with empty values are left out of `fields`.
+
+    Record endpoints address a table by its id or its name. Writes take up to 10
+    records at a time. PATCH changes only the fields sent; PUT replaces the record,
+    clearing every field it was not sent. Lists filter with `filterByFormula` (an
+    Airtable formula such as `{Status} = 'Done'`; a record is returned when the
+    formula is truthy for it), sort with `sort[N][field]` and `sort[N][direction]`,
+    and page with `pageSize` (at most 100): while more records remain, the answer has
+    an `offset` string that the next request sends back as `offset` to get the next
+    page. A field name the table does not have is refused with 422
+    UNKNOWN_FIELD_NAME; an unknown record is 404 NOT_FOUND.
+servers:
+  - url: https://api.airtable.com
+security:
+  - bearer: []
+tags:
+  - name: Tables
+  - name: Records
+  - name: Comments
+paths:
+  /v0/meta/bases/{baseId}/tables:
+    parameters:
+      - $ref: "#/components/parameters/baseId"
+    get:
+      tags: [Tables]
+      operationId: getBaseSchema
+      summary: List the tables of a base, with their fields and views
+      responses:
+        "200":
+          description: The tables of the base.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables: {type: array, items: {$ref: "#/components/schemas/Table"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Tables]
+      operationId: createTable
+      summary: Create a table
+      description: The first field in `fields` becomes the table's primary field.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TableInput"}
+      responses:
+        "200":
+          description: The created table, its fields in the order sent.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Table"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v0/meta/bases/{baseId}/tables/{tableId}/fields:
+    post:
+      tags: [Tables]
+      operationId: createField
+      summary: Add a field to a table
+      parameters:
+        - $ref: "#/components/parameters/baseId"
+        - name: tableId
+          in: path
+          required: true
+          schema: {type: string, pattern: "^tbl[A-Za-z0-9]{14}$"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/FieldInput"}
+      responses:
+        "200":
+          description: The created field.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Field"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v0/{baseId}/{tableIdOrName}:
+    parameters:
+      - $ref: "#/components/parameters/baseId"
+      - $ref: "#/components/parameters/tableIdOrName"
+    get:
+      tags: [Records]
+      operationId: listRecords
+      summary: List records of a table
+      parameters:
+        - name: filterByFormula
+          in: query
+          description: A formula; only records for which it is truthy are returned.
+          schema: {type: string}
+        - name: "sort[0][field]"
+          in: query
+          description: Name of the field to sort by first.
+          schema: {type: string}
+        - name: "sort[0][direction]"
+          in: query
+          schema: {type: string, enum: [asc, desc], default: asc}
+        - name: "sort[1][field]"
+          in: query
+          schema: {type: string}
+        - name: "sort[1][direction]"
+          in: query
+          schema: {type: string, enum: [asc, desc], default: asc}
+        - name: pageSize
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 100}
+        - name: maxRecords
+          in: query
+          description: The most records to return across all pages.
+          schema: {type: integer, minimum: 1}
+        - name: offset
+          in: query
+          description: The `offset` of the previous page.
+          schema: {type: string}
+        - name: view
+          in: query
+          description: Name or id of a view; only its records, in its order.
+          schema: {type: string}
+        - name: "fields[]"
+          in: query
+          description: A field to return; repeat for several. Others are left out.
+          schema: {type: string}
+        - name: cellFormat
+          in: query
+          schema: {type: string, enum: [json, string], default: json}
+        - name: timeZone
+          in: query
+          schema: {type: string}
+        - name: returnFieldsByFieldId
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: A page of records.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RecordPage"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    post:
+      tags: [Records]
+      operationId: createRecords
+      summary: Create up to 10 records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: object
+                    required: [fields]
+                    properties:
+                      fields: {$ref: "#/components/schemas/Fields"}
+                typecast:
+                  type: boolean
+                  default: false
+                  description: Convert string values to the field's type, creating select choices as needed.
+                returnFieldsByFieldId: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The created records, in the order sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records]
+                properties:
+                  records: {type: array, items: {$ref: "#/components/schemas/Record"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    patch:
+      tags: [Records]
+      operationId: updateRecords
+      summary: Update up to 10 records, changing only the fields sent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RecordsUpdate"}
+      responses:
+        "200":
+          description: The updated records, whole.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RecordsUpdated"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    put:
+      tags: [Records]
+      operationId: replaceRecords
+      summary: Replace up to 10 records, clearing the fields not sent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RecordsUpdate"}
+      responses:
+        "200":
+          description: The replaced records.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RecordsUpdated"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    delete:
+      tags: [Records]
+      operationId: deleteRecords
+      summary: Delete up to 10 records
+      parameters:
+        - name: "records[]"
+          in: query
+          required: true
+          description: A record id to delete; repeat for several.
+          schema: {type: string, pattern: "^rec[A-Za-z0-9]{14}$"}
+      responses:
+        "200":
+          description: The deleted records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records]
+                properties:
+                  records: {type: array, items: {$ref: "#/components/schemas/Deleted"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v0/{baseId}/{tableIdOrName}/{recordId}:
+    parameters:
+      - $ref: "#/components/parameters/baseId"
+      - $ref: "#/components/parameters/tableIdOrName"
+      - $ref: "#/components/parameters/recordId"
+    get:
+      tags: [Records]
+      operationId: getRecord
+      summary: Get a record
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Record"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Records]
+      operationId: updateRecord
+      summary: Update a record, changing only the fields sent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RecordUpdate"}
+      responses:
+        "200":
+          description: The whole record after the update.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Record"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    put:
+      tags: [Records]
+      operationId: replaceRecord
+      summary: Replace a record, clearing the fields not sent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RecordUpdate"}
+      responses:
+        "200":
+          description: The record after the replace; only the fields sent have values.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Record"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    delete:
+      tags: [Records]
+      operationId: deleteRecord
+      summary: Delete a record
+      responses:
+        "200":
+          description: The record was deleted; reading it again is 404.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Deleted"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v0/{baseId}/{tableIdOrName}/{recordId}/comments:
+    parameters:
+      - $ref: "#/components/parameters/baseId"
+      - $ref: "#/components/parameters/tableIdOrName"
+      - $ref: "#/components/parameters/recordId"
+    get:
+      tags: [Comments]
+      operationId: listComments
+      summary: List the comments on a record, newest first
+      parameters:
+        - name: pageSize
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 100}
+        - name: offset
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of comments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [comments]
+                properties:
+                  comments: {type: array, items: {$ref: "#/components/schemas/Comment"}}
+                  offset: {type: string, nullable: true}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Comments]
+      operationId: createComment
+      summary: Comment on a record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: {type: string, minLength: 1}
+                parentCommentId: {type: string, description: Reply to this comment.}
+      responses:
+        "200":
+          description: The created comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Comment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A personal access token (`pat...`) or an OAuth access token.
+  parameters:
+    baseId:
+      name: baseId
+      in: path
+      required: true
+      schema: {type: string, pattern: "^app[A-Za-z0-9]{14}$"}
+    tableIdOrName:
+      name: tableIdOrName
+      in: path
+      required: true
+      description: The table's id (`tbl...`) or its name, URL-encoded.
+      schema: {type: string}
+    recordId:
+      name: recordId
+      in: path
+      required: true
+      schema: {type: string, pattern: "^rec[A-Za-z0-9]{14}$"}
+  responses:
+    Unauthorized:
+      description: AUTHENTICATION_REQUIRED.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: NOT_FOUND, or MODEL_ID_NOT_FOUND for an unknown table or record id.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Invalid:
+      description: |
+        The request cannot be processed: INVALID_REQUEST_UNKNOWN, UNKNOWN_FIELD_NAME
+        (a field the table does not have), INVALID_VALUE_FOR_COLUMN (a value that does
+        not fit the field's type), INVALID_FILTER_BY_FORMULA, INVALID_MULTIPLE_CHOICE_OPTIONS.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [AUTHENTICATION_REQUIRED, NOT_FOUND, MODEL_ID_NOT_FOUND, INVALID_REQUEST_UNKNOWN, UNKNOWN_FIELD_NAME,
+                     INVALID_VALUE_FOR_COLUMN, INVALID_FILTER_BY_FORMULA, INVALID_MULTIPLE_CHOICE_OPTIONS,
+                     ROW_DOES_NOT_EXIST, TOO_MANY_REQUESTS]
+            message: {type: string}
+    Fields:
+      type: object
+      description: Field name to value. Fields with empty values are left out.
+      additionalProperties: {}
+    Record:
+      type: object
+      required: [id, createdTime, fields]
+      properties:
+        id: {type: string, pattern: "^rec[A-Za-z0-9]{14}$"}
+        createdTime: {type: string, format: date-time}
+        fields: {$ref: "#/components/schemas/Fields"}
+        commentCount: {type: integer, description: "Only when asked for with recordMetadata[]=commentCount."}
+    RecordPage:
+      type: object
+      required: [records]
+      properties:
+        records: {type: array, items: {$ref: "#/components/schemas/Record"}}
+        offset:
+          type: string
+          description: Present while more records remain; send it back as `offset` for the next page.
+    RecordUpdate:
+      type: object
+      required: [fields]
+      properties:
+        fields: {$ref: "#/components/schemas/Fields"}
+        typecast: {type: boolean, default: false}
+        returnFieldsByFieldId: {type: boolean, default: false}
+    RecordsUpdate:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+            required: [fields]
+            properties:
+              id: {type: string, description: Required unless performUpsert is set.}
+              fields: {$ref: "#/components/schemas/Fields"}
+        performUpsert:
+          type: object
+          required: [fieldsToMergeOn]
+          properties:
+            fieldsToMergeOn: {type: array, minItems: 1, maxItems: 3, items: {type: string}}
+        typecast: {type: boolean, default: false}
+        returnFieldsByFieldId: {type: boolean, default: false}
+    RecordsUpdated:
+      type: object
+      required: [records]
+      properties:
+        records: {type: array, items: {$ref: "#/components/schemas/Record"}}
+        createdRecords: {type: array, items: {type: string}, description: With performUpsert, the ids created.}
+        updatedRecords: {type: array, items: {type: string}, description: With performUpsert, the ids updated.}
+    Deleted:
+      type: object
+      required: [id, deleted]
+      properties:
+        id: {type: string}
+        deleted: {type: boolean, enum: [true]}
+    FieldType:
+      type: string
+      enum: [singleLineText, multilineText, email, url, phoneNumber, number, currency, percent, checkbox, date, dateTime,
+             singleSelect, multipleSelects, multipleRecordLinks, rating, duration, createdTime, lastModifiedTime, autoNumber]
+    FieldInput:
+      type: object
+      required: [name, type]
+      properties:
+        name: {type: string}
+        type: {$ref: "#/components/schemas/FieldType"}
+        description: {type: string}
+        options:
+          type: object
+          description: |
+            Per type: `precision` (number, currency, percent), `choices` (singleSelect,
+            multipleSelects), `dateFormat` (date), `linkedTableId` (multipleRecordLinks).
+          properties:
+            precision: {type: integer, minimum: 0, maximum: 8}
+            choices:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: {type: string}
+                  color: {type: string}
+            dateFormat:
+              type: object
+              properties:
+                name: {type: string, enum: [local, friendly, us, european, iso]}
+            linkedTableId: {type: string}
+    Field:
+      type: object
+      required: [id, name, type]
+      properties:
+        id: {type: string, pattern: "^fld[A-Za-z0-9]{14}$"}
+        name: {type: string}
+        type: {$ref: "#/components/schemas/FieldType"}
+        description: {type: string}
+        options: {type: object}
+    View:
+      type: object
+      required: [id, name, type]
+      properties:
+        id: {type: string, pattern: "^viw[A-Za-z0-9]{14}$"}
+        name: {type: string}
+        type: {type: string, enum: [grid, form, calendar, gallery, kanban, timeline, block]}
+    TableInput:
+      type: object
+      required: [name, fields]
+      properties:
+        name: {type: string}
+        description: {type: string}
+        fields: {type: array, minItems: 1, items: {$ref: "#/components/schemas/FieldInput"}}
+    Table:
+      type: object
+      required: [id, name, primaryFieldId, fields, views]
+      properties:
+        id: {type: string, pattern: "^tbl[A-Za-z0-9]{14}$"}
+        name: {type: string}
+        description: {type: string}
+        primaryFieldId: {type: string, description: The id of the table's first field.}
+        fields: {type: array, items: {$ref: "#/components/schemas/Field"}}
+        views: {type: array, items: {$ref: "#/components/schemas/View"}}
+    Comment:
+      type: object
+      required: [id, author, text, createdTime]
+      properties:
+        id: {type: string, pattern: "^com[A-Za-z0-9]{14}$"}
+        author:
+          type: object
+          required: [id]
+          properties:
+            id: {type: string}
+            email: {type: string, format: email}
+            name: {type: string}
+        text: {type: string}
+        createdTime: {type: string, format: date-time}
+        lastUpdatedTime: {type: string, format: date-time, nullable: true}
+        parentCommentId: {type: string}
