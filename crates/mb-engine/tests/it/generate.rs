@@ -2168,6 +2168,181 @@ async fn request_values_survive_format_patching() {
     assert_eq!(body["ownerId"], "bob");
 }
 
+/// `GET /playlists/{id}`: a playlist whose `tracks` paging object declares
+/// neither `type` nor `uri`.
+fn playlists() -> Bundle {
+    inline(
+        r##"{
+  "openapi": "3.1.0",
+  "info": {"title": "Playlists", "version": "1"},
+  "paths": {"/playlists/{id}": {"get": {
+    "operationId": "getPlaylist",
+    "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+    "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+      "$ref": "#/components/schemas/Playlist"
+    }}}}}
+  }}},
+  "components": {"schemas": {
+    "Playlist": {
+      "type": "object",
+      "required": ["id", "name", "type", "uri", "tracks"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9A-Za-z]{22}$"},
+        "name": {"type": "string"},
+        "type": {"type": "string", "enum": ["playlist"]},
+        "uri": {"type": "string", "pattern": "^spotify:playlist:[0-9A-Za-z]{22}$"},
+        "tracks": {"$ref": "#/components/schemas/Paging"}
+      }
+    },
+    "Paging": {
+      "type": "object",
+      "required": ["href", "items", "total"],
+      "properties": {
+        "href": {"type": "string", "pattern": "^https://"},
+        "items": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}}}},
+        "total": {"type": "integer"}
+      }
+    }
+  }}
+}"##,
+    )
+}
+
+/// The root's `type` and `uri` written inside `tracks` (a misplaced
+/// closing brace) are moved back up: the answer is patched without a
+/// repair call, and a broken pattern beside them is patched as before.
+#[tokio::test]
+async fn root_members_nested_in_a_child_are_patched_without_repair() {
+    let bundle = playlists();
+    let op = bundle.operation("getPlaylist").unwrap();
+    let id = "37i9dQZF1DXcBWIGoYBM5M";
+    let (provider, engine) = scripted(vec![Ok(json!({
+        "id": id,
+        "name": "Today's Top Hits",
+        "tracks": {
+            "href": "/v1/playlists/x/tracks",
+            "items": [{"name": "a"}],
+            "total": 1,
+            "type": "playlist",
+            "uri": format!("spotify:playlist:{id}")
+        }
+    })
+    .to_string())]);
+    let mut path_params = Map::new();
+    path_params.insert("id".into(), json!(id));
+    let call = OperationCall {
+        operation_id: "getPlaylist".into(),
+        path_params,
+        query: Map::new(),
+        headers: Map::new(),
+        body: None,
+    };
+    let out = engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    assert_eq!(out.source, Source::Patched, "{:?}", out.fallback_reason);
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    let body = out.body.unwrap();
+    assert_eq!(body["type"], "playlist");
+    assert_eq!(body["uri"], format!("spotify:playlist:{id}"));
+    assert_eq!(body["name"], "Today's Top Hits");
+    assert!(
+        body["tracks"]["href"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://")
+    );
+    assert!(body["tracks"].get("type").is_none(), "{body}");
+    assert!(body["tracks"].get("uri").is_none(), "{body}");
+    assert_eq!(body["tracks"]["total"], 1);
+    validator(&bundle, "Playlist").validate(&body).unwrap();
+}
+
+/// `GET /series/{series_id}` with unbounded integer path and query values,
+/// and a response `id` limited to 1..=300000.
+fn series() -> Bundle {
+    inline(
+        r##"{
+  "openapi": "3.1.0",
+  "info": {"title": "Series", "version": "1"},
+  "paths": {"/series/{series_id}": {"get": {
+    "operationId": "getSeries",
+    "parameters": [
+      {"name": "series_id", "in": "path", "required": true, "schema": {"type": "integer"}},
+      {"name": "page", "in": "query", "schema": {"type": "integer"}}
+    ],
+    "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {
+      "type": "object",
+      "required": ["id", "page", "name", "poster"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 1, "maximum": 300000},
+        "page": {"type": "integer", "maximum": 2},
+        "name": {"type": "string"},
+        "poster": {"type": "string", "pattern": "^/[a-z]{8}\\.jpg$"}
+      }
+    }}}}}
+  }}}
+}"##,
+    )
+}
+
+fn series_call(id: i64, page: i64) -> OperationCall {
+    let mut path_params = Map::new();
+    path_params.insert("series_id".into(), json!(id));
+    let mut query = Map::new();
+    query.insert("page".into(), json!(page));
+    OperationCall {
+        operation_id: "getSeries".into(),
+        path_params,
+        query,
+        headers: Map::new(),
+        body: None,
+    }
+}
+
+/// An answer member repeating the request's integer path or query value is
+/// an echo: where it breaks the response's own bounds it is clamped to the
+/// bound it breaks, never swapped for an unrelated draw.
+#[tokio::test]
+async fn echoed_integers_are_clamped_not_redrawn() {
+    let bundle = series();
+    let op = bundle.operation("getSeries").unwrap();
+    let answer =
+        |id: i64| Ok(json!({"id": id, "page": 3, "name": "Show", "poster": "/x.jpg"}).to_string());
+
+    // In bounds: kept while the broken poster is patched.
+    let (_p, engine) = scripted(vec![answer(1234)]);
+    let out = engine
+        .generate(&bundle, op, &series_call(1234, 3), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Patched, "{:?}", out.fallback_reason);
+    let body = out.body.unwrap();
+    assert_eq!(body["id"], 1234);
+    // The query's `page` 3 breaks `maximum: 2`: clamped, not redrawn.
+    assert_eq!(body["page"], 2);
+
+    // Out of bounds: the echoed path id is clamped to its bound.
+    let (provider, engine) = scripted(vec![answer(821_766)]);
+    let out = engine
+        .generate(&bundle, op, &series_call(821_766, 3), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Patched, "{:?}", out.fallback_reason);
+    assert_eq!(provider.requests().len(), 1, "no repair call");
+    assert_eq!(out.body.unwrap()["id"], 300_000);
+
+    // Not an echo: refilled within the bounds as before.
+    let (_p, engine) = scripted(vec![answer(821_766)]);
+    let out = engine
+        .generate(&bundle, op, &series_call(5, 1), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Patched, "{:?}", out.fallback_reason);
+    let body = out.body.unwrap();
+    let id = body["id"].as_i64().unwrap();
+    assert!((1..=300_000).contains(&id), "{id}");
+    assert!(body["page"].as_i64().unwrap() <= 2, "{body}");
+}
+
 /// Request validators built with `SchemaValidator::new` keep formats as
 /// annotations; output validators assert the formats the faker produces.
 #[test]

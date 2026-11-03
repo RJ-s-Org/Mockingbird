@@ -133,22 +133,24 @@ pub(crate) enum Checked {
     Rejected(String),
 }
 
-/// Request values an answer may repeat where they break an asserted
-/// `format`: a path id or query value echoed into a `format: uuid` field
-/// is kept, not refilled (see [`SchemaValidator::patch_keeping`]).
+/// Request values an answer may repeat: a path id or query value echoed
+/// into a `format: uuid` field is kept, not refilled, and an echoed integer
+/// breaking a numeric range is moved to the nearest value it allows, never
+/// redrawn (see [`SchemaValidator::patch_keeping`]).
 #[derive(Default)]
 pub(crate) struct Echoes<'a>(Vec<&'a Value>);
 
 impl<'a> Echoes<'a> {
-    /// The string path and query values of `calls` (and the strings of a
-    /// repeated query parameter).
+    /// The string and integer path and query values of `calls` (and those
+    /// of a repeated query parameter).
     pub(crate) fn of(calls: impl IntoIterator<Item = &'a crate::OperationCall>) -> Self {
+        let echoed = |v: &Value| v.is_string() || v.is_i64() || v.is_u64();
         let mut values = Vec::new();
         for call in calls {
             for value in call.path_params.values().chain(call.query.values()) {
                 match value {
-                    Value::String(_) => values.push(value),
-                    Value::Array(items) => values.extend(items.iter().filter(|v| v.is_string())),
+                    Value::Array(items) => values.extend(items.iter().filter(|v| echoed(v))),
+                    v if echoed(v) => values.push(value),
                     _ => {}
                 }
             }
