@@ -1788,7 +1788,9 @@ paths:
                 Some("key"),
             ),
             ("201", "{Id: {type: string}}", "id", Some("Id")),
-            ("201", "{_id: {type: string}}", "shipment_id", None),
+            // `shipment_id` ends in the word `_id` is.
+            ("201", "{_id: {type: string}}", "shipment_id", Some("_id")),
+            ("201", "{_id: {type: string}}", "tracking", None),
             (
                 "201",
                 "{data: {type: object}, links: {type: object}}",
@@ -2726,6 +2728,27 @@ fn a_path_parameter_names_its_key_by_its_trailing_words() {
     assert_eq!((create.path_param, create.field.as_str()), (None, "id"));
     // An object member is no key, whatever the parameter's words say.
     assert_eq!(op(&bundle, "getBoard").identity, None);
+}
+
+/// A create of a type no route reads by path names no key in the paths: a `sid` or a
+/// `uuid` is still its identity, so a list sees what it made.
+#[test]
+fn a_create_with_no_read_by_path_still_goes_by_a_sid() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /calls:
+    post:
+      operationId: createCall
+      responses: {"201": {description: ok, content: {application/json: {schema: {type: object, properties: {sid: {type: string}, to: {type: string}}}}}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let identity = op(&bundle, "createCall").identity.clone().unwrap();
+    assert_eq!(
+        (identity.path_param, identity.field.as_str()),
+        (None, "sid")
+    );
 }
 
 /// Freshdesk's and Trello's shapes: notes and replies created under a ticket are its

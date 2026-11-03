@@ -30,6 +30,18 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Keys from path parameters, types from record schemas
+
+No migration or configuration. A compiled bundle can change, also for offline mocks ([how it is read](import.md#how-a-resources-identity-is-read)).
+
+- **A path parameter names its key by its words**: the longest group of its last words that names a member, not an object or a list, separators and case aside. The fixed endings (`Number`, `Sid`, `Key`, `IdOrKey`, `Uuid`) are gone, and GitHub's, Jira's and Twilio's messages and calls compile as before. In the examples and benchmark contracts, the changes are Asana's tasks and projects (`gid`, in a `{data}` envelope), GitLab's issue read and edit (by `iid`, beside the `id` they are stored by), and Twilio's `FetchPhoneNumber`, which now reads by `phone_number`: a looked-up number is stored, and the same lookup is answered from state.
+- **A create goes by the member its type's reads by path use**, when its answer has no `id`: Asana's `POST /tasks` by `gid`. A `sid` or a `uuid` counts only where no read by path names a key, so a create of a type nothing reads by path is still stored.
+- **A parameter's words can now name a member beside an `id`** that only the runtime's name fallback found before: GitHub's `/orgs/{org}/teams/{team_slug}` reads a team by `slug`, stored by `id`. A generated read by such a member is stored under its answer's `id` when the answer holds the path's value in that member and an `id` that is not the path's value, and shows the path's owner, so an update finds the team and keeps its slug as before. A read whose `id` was taken from the path (GitHub's `/issues/{issue_number}`) still stores nothing.
+- **`unknown_ids: 404` can answer 404 where it generated before**, on these routes, as a read now knows it is by id and that the session does not hold it.
+- **A create can change type**: when its own type has no `GET` by path and another type reads exactly its record, by a `GET` by path, else by its only lists. Freshdesk's `addNoteToTicket` and `replyToTicket` are `conversations`, Trello's `addCardComment` is `actions`, and Asana's `createSubtaskForTask` is a create of `tasks`, where it was an update of the parent. A list of each such type now shows what the create stored.
+- **A version segment is never a type**: Mailchimp's `searchMembers` is `search-members` (was `3.0`), and Spotify's `search` is `search` (was `v1`). A path whose static segments are all versions has no type.
+- **Not covered**: a parameter whose words name nothing in the record (`/users/{handle}` over `login`), and a create beside two lists of other types listing its record, which keeps its type.
+
 ### Prompts show where a minted value came from, and a write can be refused
 
 No migration or configuration. With an LLM and `consistency: on`, on HTTP routes:
