@@ -3130,7 +3130,8 @@ fn unpaid_intent() -> StoredResource {
     }
 }
 
-/// A successful action's prompt says it succeeded and names it.
+/// A successful action's prompt names its verb and leaves the model to decide
+/// whether it changed its target or made a new one.
 #[tokio::test]
 async fn an_action_prompt_says_it_succeeded() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
@@ -3144,6 +3145,27 @@ async fn an_action_prompt_says_it_succeeded() {
     );
 }
 
+/// No action is told a status moved: `preview` or `validate` move none, and a
+/// resource may have none. Measured, saying so made models invent one.
+#[tokio::test]
+async fn an_action_prompt_does_not_assume_a_status() {
+    let booking = StoredResource {
+        resource_type: "bookings".into(),
+        id: "b1".into(),
+        data: json!({"id": "b1", "status": "confirmed"}),
+    };
+    for prompt in [
+        action_prompt("confirmIntent", Some(unpaid_intent()), None).await,
+        action_prompt("cancelBooking", Some(booking), None).await,
+        action_prompt("cancelBooking", None, None).await,
+    ] {
+        let (instructions, _) = prompt.split_once("<now>").unwrap();
+        assert!(!instructions.contains("status"), "{instructions}");
+        assert!(!prompt.contains("has moved"), "{prompt}");
+        assert!(!prompt.contains("must include"), "{prompt}");
+    }
+}
+
 /// Nothing is said of an action answered with an error, of a write on the
 /// resource itself, or of a read.
 #[tokio::test]
@@ -3153,8 +3175,9 @@ async fn only_a_successful_action_says_it_succeeded() {
         action_prompt("updateIntent", Some(unpaid_intent()), None).await,
         action_prompt("getIntent", Some(unpaid_intent()), None).await,
     ] {
+        assert!(!prompt.contains("succeeded"), "{prompt}");
         assert!(!prompt.contains("successful"), "{prompt}");
-        assert!(!prompt.contains("must include"), "{prompt}");
+        assert!(!prompt.contains("if it changes anything"), "{prompt}");
     }
 }
 
@@ -3169,10 +3192,10 @@ async fn an_other_action_prompt_asks_for_the_effect_on_its_target() {
         data: json!({"id": "b1", "status": "confirmed"}),
     };
     let prompt = action_prompt("cancelBooking", Some(booking), None).await;
-    assert!(prompt.contains("successful `cancel`"), "{prompt}");
+    assert!(!prompt.contains("`cancel` succeeded"), "{prompt}");
     assert!(
         prompt.contains(
-            r#"The response is not <existing_resource>, so it changes only through "effects": they must include what `cancel` changes on it, as {"type": "bookings", "id": "b1", "set": {...}}."#
+            r#"The response is not <existing_resource>, so it changes only through "effects": they include what `cancel` changes on it, if it changes anything, as {"type": "bookings", "id": "b1", "set": {...}}."#
         ),
         "{prompt}"
     );
@@ -3183,10 +3206,9 @@ async fn an_other_action_prompt_asks_for_the_effect_on_its_target() {
 #[tokio::test]
 async fn an_effect_is_asked_for_only_of_an_other_action_with_a_target() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
-    assert!(!prompt.contains("must include"), "{prompt}");
+    assert!(!prompt.contains("if it changes anything"), "{prompt}");
     let prompt = action_prompt("cancelBooking", None, None).await;
-    assert!(prompt.contains("successful `cancel`"), "{prompt}");
-    assert!(!prompt.contains("must include"), "{prompt}");
+    assert!(!prompt.contains("changes only through"), "{prompt}");
 }
 
 /// An action of its target's schema, for what the engine decides of its answer.
