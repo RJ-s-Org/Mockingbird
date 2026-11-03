@@ -1132,6 +1132,9 @@ paths:
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
   /projects/{id}/issues:
     parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: listIssues
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}}
     post:
       operationId: createIssue
       requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
@@ -1142,7 +1145,12 @@ paths:
       - {name: issue_iid, in: path, required: true, schema: {type: integer}}
     get:
       operationId: getIssue
-      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+        "404": {description: missing, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+    delete:
+      operationId: deleteIssue
+      responses: {"204": {description: gone}}
 components:
   schemas:
     TaskData:
@@ -1156,7 +1164,7 @@ components:
     Issue:
       type: object
       required: [id, iid, title]
-      properties: {id: {type: integer}, iid: {type: integer}, title: {type: string}}
+      properties: {id: {type: integer}, iid: {type: integer}, title: {type: string}, project_id: {type: integer}}
 "##;
 
 #[tokio::test]
@@ -1205,7 +1213,7 @@ async fn an_issue_is_read_back_by_its_iid() {
 async fn a_generated_issue_read_by_its_iid_keeps_its_id() {
     let h = harness(
         KEYED_BY_PARAM,
-        vec![json!({"id": 501, "iid": 3, "title": "Login fails"})],
+        vec![json!({"id": 501, "iid": 3, "title": "Login fails", "project_id": 1})],
     );
     let (status, _, read) = h.call("GET", "/projects/1/issues/7", None).await;
     assert_eq!(status, StatusCode::OK, "{read}");
@@ -1219,6 +1227,75 @@ async fn a_generated_issue_read_by_its_iid_keeps_its_id() {
     assert_eq!(source, "state", "{again}");
     assert_eq!(again, read);
     assert_eq!(h.calls(), 1);
+}
+
+/// A generated read by `iid` that shows another project than the path's is not stored.
+#[tokio::test]
+async fn a_generated_issue_read_of_another_project_is_not_stored() {
+    let h = harness(
+        KEYED_BY_PARAM,
+        vec![json!({"id": 501, "iid": 3, "title": "Login fails", "project_id": 9})],
+    );
+    let (status, _, read) = h.call("GET", "/projects/1/issues/7", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert!(h.exported().await.is_empty(), "{:?}", h.exported().await);
+}
+
+/// The delete on the read's parameter goes by the same member: an issue deleted by its
+/// `iid` reads as gone, though another issue shares that `iid` under its own `id`.
+#[tokio::test]
+async fn an_issue_deleted_by_its_iid_stays_gone() {
+    let issue = |id: i64| json!({"id": id, "iid": 2, "title": "Login fails", "project_id": 1});
+    let h = harness(KEYED_BY_PARAM, vec![issue(501), json!([issue(502)])]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/projects/1/issues",
+            Some(json!({"title": "Login fails"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _, listed) = h.call("GET", "/projects/1/issues", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let (status, _, _) = h.call("DELETE", "/projects/1/issues/2", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, read) = h.call("GET", "/projects/1/issues/2", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{read}");
+}
+
+/// A tag read by `{tag_name}` teaches no key to reports: two created "Weekly" reports
+/// are not stored as one record keyed by `name`.
+#[tokio::test]
+async fn two_reports_of_one_name_are_not_one_record() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tags/{tag_name}:
+    parameters: [{name: tag_name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTag
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}}
+  /reports:
+    post:
+      operationId: createReport
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Report"}}}}}
+components:
+  schemas:
+    Tag: {type: object, required: [name], properties: {name: {type: string}}}
+    Report: {type: object, required: [name, rows], properties: {name: {type: string}, rows: {type: integer}}}
+"##;
+    let report = |rows: i64| json!({"name": "Weekly", "rows": rows});
+    let h = harness(contract, vec![report(3), report(8)]);
+    for _ in 0..2 {
+        let (status, _, made) = h
+            .call("POST", "/reports", Some(json!({"name": "Weekly"})))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{made}");
+    }
+    let stored = h.exported().await;
+    assert_ne!(stored.len(), 1, "{stored:?}");
 }
 
 /// Freshdesk's shape: a note created under a ticket is one of its conversations.

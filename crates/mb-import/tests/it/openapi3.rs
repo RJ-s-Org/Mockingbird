@@ -2676,6 +2676,9 @@ paths:
     get:
       operationId: getIssue
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+    delete:
+      operationId: deleteIssue
+      responses: {"204": {description: gone}}
   /boards/{board_kind}:
     parameters: [{name: board_kind, in: path, required: true, schema: {type: string}}]
     get:
@@ -2724,10 +2727,69 @@ fn a_path_parameter_names_its_key_by_its_trailing_words() {
             record: None,
         })
     );
+    // The delete on the same parameter goes by the same member.
+    assert_eq!(
+        op(&bundle, "deleteIssue").identity,
+        op(&bundle, "getIssue").identity
+    );
     let create = op(&bundle, "createIssue").identity.clone().unwrap();
     assert_eq!((create.path_param, create.field.as_str()), (None, "id"));
     // An object member is no key, whatever the parameter's words say.
     assert_eq!(op(&bundle, "getBoard").identity, None);
+}
+
+/// A type's key is taught by its own reads by path only: a tag read by `{tag_name}` does
+/// not make a report, which has no read by path, go by `name`.
+#[test]
+fn a_key_does_not_leak_to_another_type() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tags/{tag_name}:
+    parameters: [{name: tag_name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTag
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}}
+  /reports:
+    get:
+      operationId: listReports
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Report"}}}}}}
+    post:
+      operationId: createReport
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Report"}}}}}
+  /jobs:
+    post:
+      operationId: createJob
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Report"}}}}}
+  /reports/2024-01-01:
+    get:
+      operationId: newYearReport
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Report"}}}}}
+components:
+  schemas:
+    Tag: {type: object, properties: {name: {type: string}}}
+    Report: {type: object, properties: {name: {type: string}, rows: {type: integer}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    assert_eq!(
+        op(&bundle, "getTag")
+            .identity
+            .as_ref()
+            .map(|i| i.field.as_str()),
+        Some("name")
+    );
+    for id in ["createReport", "createJob", "newYearReport"] {
+        assert_eq!(op(&bundle, id).identity, None, "{id}");
+    }
+    assert_eq!(
+        op(&bundle, "createJob").resource_type.as_deref(),
+        Some("jobs")
+    );
+    assert_eq!(
+        op(&bundle, "newYearReport").resource_type.as_deref(),
+        Some("2024-01-01")
+    );
 }
 
 /// A create of a type no route reads by path names no key in the paths: a `sid` or a
@@ -2861,10 +2923,27 @@ paths:
     get:
       operationId: search
       responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
-  /users/v1beta2:
+  /v1beta2/users:
     get:
       operationId: users
       responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+  /users/v1beta2:
+    get:
+      operationId: lastSegment
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+  /v2/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getV2
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}}
+  /v2/{id}/cancel:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: cancel
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}}
+components:
+  schemas:
+    Widget: {type: object, properties: {id: {type: string}, state: {type: string}}}
 "##;
     let bundle = compile(contract.as_bytes()).unwrap();
     let type_of = |id: &str| op(&bundle, id).resource_type.clone();
@@ -2873,4 +2952,12 @@ paths:
     assert_eq!(type_of("getAccounts").as_deref(), Some("accounts"));
     assert_eq!(type_of("search").as_deref(), Some("search"));
     assert_eq!(type_of("users").as_deref(), Some("users"));
+    // A version-shaped segment is a version only with a static segment after it.
+    assert_eq!(type_of("lastSegment").as_deref(), Some("v1beta2"));
+    assert_eq!(type_of("getV2").as_deref(), Some("v2"));
+    assert_eq!(type_of("cancel").as_deref(), Some("v2"));
+    assert_eq!(
+        op(&bundle, "cancel").kind,
+        OperationKind::Command(Effect::Update)
+    );
 }
