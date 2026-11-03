@@ -166,6 +166,7 @@ operations:
           code: 204
         content_type: ~
         schema: ~
+        description: Deleted
     resource_type: orders
     identity: ~
     semantic_hints: []

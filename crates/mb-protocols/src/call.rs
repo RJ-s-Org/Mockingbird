@@ -1442,8 +1442,12 @@ pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
             .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
 }
 
-/// The id of `generated`'s answer, when the session already holds a resource
-/// under it and the request did not ask for it.
+/// The id of `generated`'s answer, when the request did not ask for it and the
+/// session already holds a resource of this type under it, or the request carries it
+/// (see [`request_values`]) as the id of a record of another type the session holds
+/// (see [`world::held_elsewhere`]): a new message is not the channel it names. Another
+/// type's id the request does not carry says nothing, and neither does a value the
+/// request carries that is no held record's (`{"name": "my-bucket"}`).
 async fn taken_id(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1459,13 +1463,62 @@ async fn taken_id(
         .as_ref()
         .and_then(|b| b.get(field))
         .and_then(id_string);
-    (requested.as_deref() != Some(id.as_str())
-        && state.get(session, resource_type, &id).await.is_some())
-    .then_some(id)
+    if requested.as_deref() == Some(id.as_str()) {
+        return None;
+    }
+    if state.get(session, resource_type, &id).await.is_some()
+        || (request_values(op, call).contains(&id)
+            && world::held_elsewhere(state, session, resource_type, &id).await)
+    {
+        return Some(id);
+    }
+    None
 }
 
-/// Gives a create's answer a fresh identity when the session already holds
-/// a resource under the generated one and the request did not ask for it.
+/// The values a request carries in its path and, as strings, anywhere in its body. A
+/// create's path value naming the record itself, and a body member named as the
+/// identity at any depth (`{"book": {"id": ..}}`, or `@id` for an XML attribute), are
+/// its request for an id, and left out.
+fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
+    fn strings(value: &Value, field: &str, depth: usize, out: &mut HashSet<String>) {
+        match value {
+            Value::String(s) if !s.is_empty() => {
+                out.insert(s.clone());
+            }
+            Value::Array(items) if depth < 8 => {
+                for item in items {
+                    strings(item, field, depth + 1, out);
+                }
+            }
+            Value::Object(members) if depth < 8 => {
+                // `@id` is how an XML attribute `id` reads (see the SOAP mapper).
+                let own = |name: &str| name.strip_prefix('@').unwrap_or(name) == field;
+                for (_, member) in members.iter().filter(|(name, _)| !own(name)) {
+                    strings(member, field, depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let identity = op.identity.as_ref();
+    let own_param = identity
+        .and_then(|i| i.path_param.as_deref())
+        .filter(|_| matches!(op.kind, OperationKind::Command(Effect::Create)));
+    let mut out: HashSet<String> = call
+        .path_params
+        .iter()
+        .filter(|(name, _)| Some(name.as_str()) != own_param)
+        .filter_map(|(_, v)| id_string(v))
+        .collect();
+    let field = identity.map_or("id", |i| i.field.as_str());
+    if let Some(body) = &call.body {
+        strings(body, field, 0, &mut out);
+    }
+    out
+}
+
+/// Gives a create's answer a fresh identity when its generated one is taken (see
+/// [`taken_id`]).
 async fn unique_create_id(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
@@ -1485,6 +1538,7 @@ async fn unique_create_id(
     let Some(body) = generated.body.as_ref() else {
         return;
     };
+    let carried = request_values(op, call);
     for _ in 0..3 {
         let Some(fresh) = rt
             .engine
@@ -1495,7 +1549,9 @@ async fn unique_create_id(
         let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
             return;
         };
-        if state.get(session, resource_type, &fresh_id).await.is_none() {
+        if !carried.contains(&fresh_id)
+            && state.get(session, resource_type, &fresh_id).await.is_none()
+        {
             generated.body = Some(fresh);
             return;
         }
@@ -1521,6 +1577,7 @@ async fn place_new_record(
     };
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let mut fresh = None;
+    let carried = request_values(op, call);
     if let Some(body) = generated.body.as_ref() {
         for attempt in 0..3 {
             let draw = rt
@@ -1530,7 +1587,9 @@ async fn place_new_record(
             let Some(drawn) = drawn else {
                 break;
             };
-            if state.get(session, resource_type, &drawn).await.is_none() {
+            if !carried.contains(&drawn)
+                && state.get(session, resource_type, &drawn).await.is_none()
+            {
                 fresh = draw;
                 break;
             }

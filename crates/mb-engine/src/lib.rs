@@ -1108,7 +1108,16 @@ impl Engine {
             op,
         } = target;
         let response = encode_base64(validator, bundle, schema, response);
-        let response = reflect(validator, op, call, ctx, response);
+        // A create reflects the defaults of what its body leaves out; a scenario's
+        // `set` still beats them.
+        let defaulted = prompt::with_body_defaults(bundle, op, call);
+        let response = reflect(
+            validator,
+            op,
+            defaulted.as_ref().unwrap_or(call),
+            ctx,
+            response,
+        );
         let response = self.keep_persona_formats(validator, call, response, draws);
         let response = if matches!(op.kind, OperationKind::Query)
             && ctx.target.is_none()

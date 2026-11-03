@@ -978,6 +978,7 @@ impl<'a> Wsdl<'a> {
             content_type: Some(CONTENT_TYPE.into()),
             schema: output,
             headers: Default::default(),
+            description: None,
         }];
         if let Some(fault) = self.fault(xsd, op)? {
             outputs.push(OutputVariant {
@@ -985,6 +986,7 @@ impl<'a> Wsdl<'a> {
                 content_type: Some(CONTENT_TYPE.into()),
                 schema: Some(fault),
                 headers: Default::default(),
+                description: None,
             });
         }
         Ok(Operation {
