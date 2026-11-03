@@ -248,30 +248,16 @@ async fn leader_gain_starts_watch() {
         node.reconciles.load(Ordering::SeqCst) == 1
     })
     .await;
-    // The watcher starts after the reconcile; an edit made before it
-    // watches is missed, so the edit is repeated until it is applied.
+    // One edit is enough, even one made before the watch is armed: the
+    // watch re-reads the file once it is.
     let mocks = mocks_section(&[("orders", "openapi/orders-3.0.yaml")]);
+    std::fs::write(
+        dir.path().join("mockingbird.yaml"),
+        sqlite_config(dir.path(), &mocks),
+    )
+    .unwrap();
     let url = format!("{data}/orders/orders/o1");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut rewrite = Instant::now();
-    loop {
-        if Instant::now() >= rewrite {
-            std::fs::write(
-                dir.path().join("mockingbird.yaml"),
-                sqlite_config(dir.path(), &mocks),
-            )
-            .unwrap();
-            rewrite = Instant::now() + mockingbird::watch::DEBOUNCE * 2;
-        }
-        if status(&url).await == 200 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the leader's watch never applied the edit"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_status(&url, 200, Duration::from_secs(5)).await;
 
     // Losing leadership stops the watch: a later change is not applied.
     leader_tx.send(false).unwrap();

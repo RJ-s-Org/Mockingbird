@@ -3448,6 +3448,41 @@ fn a_non_loopback_proxy_must_block_unmapped_hosts() {
     assert_eq!(FileConfig::default().proxy.host.to_string(), "127.0.0.1");
 }
 
+/// An edit made after the config was last applied but before the watch is
+/// armed (a new leader reconciles, then starts watching) raises no event;
+/// the watch's first read applies it with no further edit.
+#[tokio::test]
+async fn watch_applies_an_edit_made_before_it_started() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let state = no_state();
+    reconcile(store.as_ref(), state.as_ref(), &ws.load("mocks: {}\n"))
+        .await
+        .unwrap();
+    ws.write("mocks:\n  orders:\n    contract: orders.yaml\n");
+    let _watch = mockingbird::watch::spawn_with(
+        ws.config_path(),
+        store.clone(),
+        state,
+        Arc::new(|_: &mut FileConfig| Ok(())),
+    )
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the edit made before the watch started was not applied"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A config with no `mocks:` at startup, then a `mocks:` block added while
 /// the server runs (with a mock created through the API in between): the
 /// new file mock is served without a restart.

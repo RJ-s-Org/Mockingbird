@@ -147,8 +147,10 @@ fn normalize(path: &Path) -> Option<(PathBuf, PathBuf)> {
 
 /// Watches `config_path` and its contracts, reconciling the store after
 /// each change settles (debounced by [`DEBOUNCE`]) with the `MB_*`
-/// environment variables applied. A config that fails to load or
-/// reconcile is logged and the previous state kept.
+/// environment variables applied. It also reconciles once as soon as the
+/// watch is armed, so an edit made between the caller's last read of the
+/// file and the start of the watch is not lost. A config that fails to
+/// load or reconcile is logged and the previous state kept.
 ///
 /// Must be called inside a Tokio runtime.
 ///
@@ -272,53 +274,27 @@ pub fn spawn_with_status(
     }
     let watcher = Arc::new(Mutex::new(watcher));
 
-    let shared = Arc::clone(&watcher);
+    let reloader = Reloader {
+        config_path,
+        store,
+        state,
+        prepare,
+        applied,
+        status,
+        watcher: Arc::clone(&watcher),
+    };
     let task = tokio::spawn(async move {
+        // The file is watched from here on, but an edit made before then
+        // (after the caller last read it, e.g. during a new leader's
+        // reconcile) raised no event: re-read it once.
+        reloader.reload(true).await;
         while let Some(batch) = rx.recv().await {
-            let relevant = match shared.lock() {
+            let relevant = match reloader.watcher.lock() {
                 Ok(w) => w.concerns_batch(&batch),
                 Err(_) => return,
             };
-            if !relevant {
-                continue;
-            }
-            match load_and_reconcile(&config_path, store.as_ref(), state.as_ref(), &prepare).await {
-                Ok((cfg, report)) => {
-                    status.succeeded();
-                    if let Ok(mut w) = shared.lock() {
-                        for path in contract_paths(&cfg) {
-                            if let Err(error) = w.add(&path) {
-                                tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
-                            }
-                        }
-                    }
-                    if let Some(applied) = &applied {
-                        applied(cfg).await;
-                    }
-                    if report.is_empty() {
-                        tracing::info!(config = %config_path.display(), "config reloaded: no changes");
-                    } else {
-                        let changed = report.summary();
-                        tracing::info!(
-                            config = %config_path.display(),
-                            added = report.created.len(),
-                            removed = report.deleted.len(),
-                            created = ?report.created,
-                            updated = ?report.updated,
-                            deleted = ?report.deleted,
-                            new_versions = ?report.new_versions,
-                            "config reloaded: {changed}"
-                        );
-                    }
-                }
-                Err(error) => {
-                    status.failed(format!("{error:#}"));
-                    tracing::error!(
-                        config = %config_path.display(),
-                        error = %format!("{error:#}"),
-                        "config reload failed; keeping the previous state"
-                    );
-                }
+            if relevant {
+                reloader.reload(false).await;
             }
         }
     });
@@ -327,6 +303,76 @@ pub fn spawn_with_status(
         _watcher: watcher,
         task,
     })
+}
+
+/// What a reload needs: the config, where it goes, and the watcher to add
+/// new contracts to.
+struct Reloader {
+    config_path: PathBuf,
+    store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
+    prepare: Prepare,
+    applied: Option<Applied>,
+    status: ReloadStatus,
+    watcher: Arc<Mutex<Watcher>>,
+}
+
+impl Reloader {
+    /// Re-reads the config and reconciles it, keeping the previous state
+    /// when that fails. `initial` is the check made as the watch starts,
+    /// which usually finds nothing changed and then logs at debug level.
+    async fn reload(&self, initial: bool) {
+        let path = self.config_path.display();
+        match load_and_reconcile(
+            &self.config_path,
+            self.store.as_ref(),
+            self.state.as_ref(),
+            &self.prepare,
+        )
+        .await
+        {
+            Ok((cfg, report)) => {
+                self.status.succeeded();
+                if let Ok(mut w) = self.watcher.lock() {
+                    for contract in contract_paths(&cfg) {
+                        if let Err(error) = w.add(&contract) {
+                            tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
+                        }
+                    }
+                }
+                if let Some(applied) = &self.applied {
+                    applied(cfg).await;
+                }
+                if report.is_empty() {
+                    if initial {
+                        tracing::debug!(config = %path, "config unchanged since it was last applied");
+                    } else {
+                        tracing::info!(config = %path, "config reloaded: no changes");
+                    }
+                } else {
+                    let changed = report.summary();
+                    tracing::info!(
+                        config = %path,
+                        added = report.created.len(),
+                        removed = report.deleted.len(),
+                        created = ?report.created,
+                        updated = ?report.updated,
+                        deleted = ?report.deleted,
+                        new_versions = ?report.new_versions,
+                        "config reloaded: {changed}"
+                    );
+                }
+            }
+            Err(error) => {
+                self.status.failed(format!("{error:#}"));
+                tracing::error!(
+                    config = %path,
+                    error = %format!("{error:#}"),
+                    "config reload failed; keeping the previous state"
+                );
+            }
+        }
+    }
 }
 
 async fn load_and_reconcile(
