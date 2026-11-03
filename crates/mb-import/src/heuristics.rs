@@ -685,10 +685,94 @@ fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>, keys
     }
 }
 
+/// What a member's schema holds, as far as an envelope is concerned.
+#[derive(Debug, Clone, PartialEq)]
+enum Held {
+    /// A single value: a string, a number, a boolean, or nothing declared.
+    Value,
+    /// A list.
+    List,
+    /// An object, with its members when one schema declares them.
+    Object(Option<Map<String, Value>>),
+}
+
+/// Whether a schema is only `null`: an `anyOf` branch that makes a member nullable.
+fn is_null_schema(schema: &Value) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some("null")
+        || schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|e| e.iter().all(Value::is_null))
+}
+
+/// What `schema` holds ([`Held`]), through `$ref`s, `allOf`, `anyOf` and `oneOf` (their
+/// `null` branches aside) and a list of types: an object nullable by any of these is
+/// an object, and a choice between two objects is one with no members to go by.
+fn held(schema: &Value, defs: &Map<String, Value>) -> Held {
+    held_at(schema, defs, 0)
+}
+
+fn held_at(schema: &Value, defs: &Map<String, Value>, depth: usize) -> Held {
+    let Some(schema) = resolve(schema, defs).filter(|_| depth < 16) else {
+        return Held::Value;
+    };
+    let types: Vec<&str> = match schema.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    if types.contains(&"array") || schema.get("items").is_some() {
+        return Held::List;
+    }
+    let mut branches: Vec<Held> = Vec::new();
+    for key in ["anyOf", "oneOf"] {
+        let choices = schema
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        branches.extend(
+            choices
+                .filter(|c| resolve(c, defs).is_some_and(|c| !is_null_schema(c)))
+                .map(|c| held_at(c, defs, depth + 1)),
+        );
+    }
+    let parts: Vec<Held> = schema
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|part| held_at(part, defs, depth + 1))
+        .collect();
+    if branches.contains(&Held::List) || parts.contains(&Held::List) {
+        return Held::List;
+    }
+    let objects: Vec<&Held> = branches
+        .iter()
+        .filter(|b| matches!(b, Held::Object(_)))
+        .collect();
+    let own = types.contains(&"object")
+        || schema.get("properties").is_some()
+        || parts.iter().any(|p| matches!(p, Held::Object(_)));
+    match (own, objects.as_slice()) {
+        (false, []) => Held::Value,
+        (false, [one]) if branches.len() == 1 => (*one).clone(),
+        (true, []) => Held::Object(schema_properties(Some(schema), defs).map(Cow::into_owned)),
+        _ => Held::Object(None),
+    }
+}
+
+/// Whether a member is a single value ([`Held::Value`]): only such a member can be a
+/// key, or sit beside a record in its envelope.
+fn holds_value(schema: &Value, defs: &Map<String, Value>) -> bool {
+    held(schema, defs) == Held::Value
+}
+
 /// The record of an envelope of several members that only its structure tells: the
-/// one member whose schema is an object with members, every other member a single
-/// value (`{code, message, invoice: {...}}`, `{success, data: {...}}`,
+/// one member that holds an object with members, every other member a single value
+/// (`{code, message, invoice: {...}}`, `{success, data: {...}}`,
 /// `{item: {...}, request_id}`). Two objects, or a list beside it, leave it unknown.
+/// It is the member, its schema, and the record's members.
 fn wrapped_member(
     schema: &Value,
     defs: &Map<String, Value>,
@@ -697,58 +781,75 @@ fn wrapped_member(
     if props.len() < 2 {
         return None;
     }
-    let mut objects = props
-        .iter()
-        .filter(|(_, inner)| !is_scalar_member(inner, defs));
-    let (Some((member, inner)), None) = (objects.next(), objects.next()) else {
+    let mut others = props.iter().filter(|(_, inner)| !holds_value(inner, defs));
+    let (Some((member, inner)), None) = (others.next(), others.next()) else {
         return None;
     };
-    let inner = resolve(inner, defs)?;
-    if array_items(inner, defs).is_some() {
+    let Held::Object(Some(record)) = held(inner, defs) else {
         return None;
-    }
-    let record = schema_properties(Some(inner), defs)?.into_owned();
+    };
     (!record.is_empty()).then(|| (member.clone(), inner.clone(), record))
 }
 
-/// The [`mb_mcm::stem`] of the words of `name` before a last `id` (`invoice_id`,
+/// The [`mb_mcm::stem`] of a name, separators and case aside.
+fn name_stem(name: &str) -> String {
+    mb_mcm::stem(&mb_mcm::joined_name(name))
+}
+
+/// The [`name_stem`] of the words of `name` before a last `id` (`invoice_id`,
 /// `invoiceId`, `InvoiceID`: `invoice`), when it ends in one after other words.
 fn id_owner(name: &str) -> Option<String> {
     let words = mb_mcm::words(name);
     let (last, owner) = words.split_last()?;
-    (last.eq_ignore_ascii_case("id") && !owner.is_empty())
-        .then(|| mb_mcm::stem(&mb_mcm::joined_name(&owner.concat())))
+    (last.eq_ignore_ascii_case("id") && !owner.is_empty()).then(|| name_stem(&owner.concat()))
 }
 
-/// The one scalar member of `record` named as the key of one of `owners` (the
-/// envelope's member, the route's type): an `<x>_id` or `<x>Id` whose `<x>` has the
-/// [`mb_mcm::stem`] of an owner. `invoice_id` under `invoice`, `item_id` under `item`;
-/// `customer_id` there refers to another record.
+/// The record's `id`, when it is a single value.
+fn record_id(record: &Map<String, Value>, defs: &Map<String, Value>) -> Option<&'static str> {
+    record
+        .get("id")
+        .is_some_and(|s| holds_value(s, defs))
+        .then_some("id")
+}
+
+/// The one single-value member of `record` named as the key of the route's type: an
+/// `<x>_id` or `<x>Id` whose `<x>` has the [`name_stem`] of `resource_type`
+/// (`invoice_id` on `invoices`). The envelope's member names no key: under `request`,
+/// `request_id` is the request's. When the record also has a key named for that
+/// member, of another stem than the type (`{payment: {payment_id, invoice_id}}` on
+/// `invoices`), the record is the member's, and the type's key refers to it.
 fn owned_key<'a>(
     record: &'a Map<String, Value>,
-    owners: &[&str],
+    member: &str,
+    resource_type: &str,
     defs: &Map<String, Value>,
 ) -> Option<&'a str> {
-    let owners: Vec<String> = owners
-        .iter()
-        .map(|o| mb_mcm::stem(&mb_mcm::joined_name(o)))
-        .collect();
-    let mut keyed = record.iter().filter(|(member, schema)| {
-        id_owner(member).is_some_and(|owner| owners.contains(&owner))
-            && is_scalar_member(schema, defs)
-    });
-    let (Some((key, _)), None) = (keyed.next(), keyed.next()) else {
-        return None;
+    let (own, held_as) = (name_stem(resource_type), name_stem(member));
+    let named_for = |stem: &str| {
+        record
+            .iter()
+            .filter(|(name, schema)| {
+                id_owner(name).as_deref() == Some(stem) && holds_value(schema, defs)
+            })
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
     };
-    Some(key.as_str())
+    if held_as != own && !named_for(&held_as).is_empty() {
+        return None;
+    }
+    match named_for(&own).as_slice() {
+        [key] => Some(key),
+        _ => None,
+    }
 }
 
 /// The identity of a route ending in path parameter `param` whose answer holds
-/// `record` under `member` ([`wrapped_member`]). The record goes by its `id` when it
-/// has one, else by the member `param` names ([`param_field`]) or, for a bare `{id}`,
-/// by its [`owned_key`]. A parameter naming the `id` only by its last word
-/// (`{environment_id}`) says it is the `environment`'s: a record under another member
-/// (`{name, sys: {id}}`) is a part of the answer, not that record, so it has none.
+/// `record` under `member` ([`wrapped_member`]), of type `resource_type`. A bare `{id}`
+/// reads the record's `id`, else its [`owned_key`]. Another parameter must name a member
+/// of the record ([`param_field`]); one that names its `id` only by its last word
+/// (`{environment_id}`) must be named for the member or the type. Then the record goes
+/// by its `id` when it has one, the path being the member it names, as
+/// [`identity_for`] has it. A parameter that names nothing gives no identity.
 fn wrapped_by_path(
     param: &str,
     member: &str,
@@ -756,30 +857,21 @@ fn wrapped_by_path(
     record: &Map<String, Value>,
     defs: &Map<String, Value>,
 ) -> Option<Identity> {
-    let has_id = record.get("id").is_some_and(|s| is_scalar_member(s, defs));
     let (field, named) = if mb_mcm::is_generic_id(param) {
-        let field = if has_id {
-            "id"
-        } else {
-            owned_key(record, &[member, resource_type], defs)?
-        };
+        let field =
+            record_id(record, defs).or_else(|| owned_key(record, member, resource_type, defs))?;
         (field, None)
     } else {
-        let full = property(record, param).filter(|m| {
-            record
-                .get(*m)
-                .is_some_and(|schema| is_scalar_member(schema, defs))
-        });
-        let named = match (full, id_owner(param)) {
-            (Some(full), _) => Some(full),
-            (None, Some(owner)) if owner == mb_mcm::stem(&mb_mcm::joined_name(member)) => {
-                param_field(param, record, defs)
-            }
-            (None, Some(_)) => return None,
-            (None, None) => param_field(param, record, defs),
-        };
-        let field = if has_id { "id" } else { named? };
-        (field, named)
+        let named = param_field(param, record, defs)
+            .filter(|n| record.get(*n).is_some_and(|s| holds_value(s, defs)))?;
+        if named == "id"
+            && !id_owner(param).is_some_and(|owner| {
+                owner == name_stem(member) || owner == name_stem(resource_type)
+            })
+        {
+            return None;
+        }
+        (record_id(record, defs).unwrap_or(named), Some(named))
     };
     Some(Identity {
         path_param: Some(param.to_owned()),
@@ -792,41 +884,68 @@ fn wrapped_by_path(
 
 /// Gives a route that still has no identity, answering its record in an envelope of
 /// several members that only structure tells ([`wrapped_member`]), the record's key,
-/// with the member it is under. A route ending in a path parameter goes by what
+/// with the member it is under. Structure alone does not say the object is the
+/// route's record and not a related one (`{order_number, customer: {id}}`) or a part
+/// of the answer (`{count, page: {id}}`), so the member must be corroborated: named
+/// with the stem of the route's type (`invoice` on `invoices`), or answered under the
+/// same member with the same schema by two or more of the type's routes, one of them a
+/// `GET` by path. A route ending in a path parameter then goes by what
 /// [`wrapped_by_path`] finds. One with none goes by the key the type's routes by path
 /// read the same schema under the same member by; when they find none, or disagree,
 /// it has none either. With no such route, the record's `id`, else its [`owned_key`].
-/// So `{code, message, invoice: {invoice_id}}`, `{success, data: {id}}` and
-/// `{item: {item_id}, request_id}` are stored by their record's key, and a record with
-/// no key changes nothing.
 fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>) {
+    type Wrapped = (String, String, String);
+    let wrapped = |op: &Operation| -> Option<(Wrapped, Option<String>, Map<String, Value>)> {
+        if is_stream(op) {
+            return None;
+        }
+        let (_, path) = http_path(op)?;
+        let t = op.resource_type.clone()?;
+        let (member, inner, record) = answer(op).and_then(|a| wrapped_member(a, defs))?;
+        let param = trailing_param(path).map(str::to_owned);
+        Some(((t, member, inner.to_string()), param, record))
+    };
+    // How many of each type's routes answer each envelope, and whether a `GET` by
+    // path is one of them.
+    let mut answered: HashMap<Wrapped, (usize, bool)> = HashMap::new();
+    for op in operations.iter() {
+        let Some((key, param, _)) = wrapped(op) else {
+            continue;
+        };
+        let read_by_path =
+            param.is_some() && http_path(op).is_some_and(|(m, _)| m == HttpMethod::Get);
+        let seen = answered.entry(key).or_default();
+        seen.0 += 1;
+        seen.1 |= read_by_path;
+    }
+    let corroborated = |key: &Wrapped| {
+        let (t, member, _) = key;
+        name_stem(member) == name_stem(t)
+            || answered
+                .get(key)
+                .is_some_and(|&(count, read)| count >= 2 && read)
+    };
     let applies = |op: &Operation| {
         op.identity.is_none()
-            && !is_stream(op)
-            && http_path(op).is_some()
             && matches!(
                 op.kind,
                 OperationKind::Query | OperationKind::Command(Effect::Create | Effect::Update)
             )
     };
-    let wrapped = |op: &Operation| {
-        let (member, inner, record) = answer(op).and_then(|a| wrapped_member(a, defs))?;
-        let t = op.resource_type.clone().unwrap_or_default();
-        let param = http_path(op)
-            .and_then(|(_, path)| trailing_param(path))
-            .map(str::to_owned);
-        Some((t, param, member, inner.to_string(), record))
-    };
     // What each type's routes by path read the record of an envelope by, per member
     // and schema; `None` where one finds no key or two disagree.
-    let mut taught: HashMap<(String, String, String), Option<String>> = HashMap::new();
+    let mut taught: HashMap<Wrapped, Option<String>> = HashMap::new();
     for op in operations.iter().filter(|op| applies(op)) {
-        let Some((t, Some(param), member, inner, record)) = wrapped(op) else {
+        let Some((key, Some(param), record)) = wrapped(op) else {
             continue;
         };
-        let field = wrapped_by_path(&param, &member, &t, &record, defs).map(|i| i.field);
+        if !corroborated(&key) {
+            continue;
+        }
+        let (t, member, _) = &key;
+        let field = wrapped_by_path(&param, member, t, &record, defs).map(|i| i.field);
         taught
-            .entry((t, member, inner))
+            .entry(key)
             .and_modify(|known| {
                 if *known != field {
                     *known = None;
@@ -835,19 +954,20 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
             .or_insert(field);
     }
     for op in operations.iter_mut().filter(|op| applies(op)) {
-        let Some((t, param, member, inner, record)) = wrapped(op) else {
+        let Some((key, param, record)) = wrapped(op) else {
             continue;
         };
+        if !corroborated(&key) {
+            continue;
+        }
+        let (t, member, _) = &key;
         let identity = match param {
-            Some(param) => wrapped_by_path(&param, &member, &t, &record, defs),
+            Some(param) => wrapped_by_path(&param, member, t, &record, defs),
             None => {
-                let field = match taught.get(&(t.clone(), member.clone(), inner)) {
+                let field = match taught.get(&key) {
                     Some(learned) => learned.clone(),
-                    None => record
-                        .get("id")
-                        .filter(|s| is_scalar_member(s, defs))
-                        .map(|_| "id")
-                        .or_else(|| owned_key(&record, &[&member, &t], defs))
+                    None => record_id(&record, defs)
+                        .or_else(|| owned_key(&record, member, t, defs))
                         .map(str::to_owned),
                 };
                 field.map(|field| Identity {
@@ -860,7 +980,7 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
             }
         };
         if let Some(mut identity) = identity {
-            identity.record = Some(mb_mcm::RecordAt::Member(member));
+            identity.record = Some(mb_mcm::RecordAt::Member(member.clone()));
             op.identity = Some(identity);
         }
     }
@@ -2086,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_beside_a_request_id_goes_by_the_key_named_for_its_member() {
+    fn a_record_named_for_its_type_beside_a_request_id_goes_by_the_types_key() {
         let envelope = json!({"type": "object", "properties": {
             "link": {"$ref": "#/components/schemas/Link"},
             "request_id": {"type": "string"},
@@ -2105,35 +2225,237 @@ mod tests {
         );
     }
 
+    fn obj(props: Value) -> Value {
+        json!({"type": "object", "properties": props})
+    }
+
+    /// `envelope` answered by `POST /<collection>` and `GET /<collection>/{<param>}`
+    /// (ids `create` and `read`), so two of the type's routes, one a read by path,
+    /// corroborate whatever member structure picks.
+    fn corroborated(collection: &str, param: &str, envelope: &Value) -> mb_mcm::Bundle {
+        compiled(
+            &json!({
+                format!("/{collection}"): {"post": answering("create", envelope)},
+                format!("/{collection}/{{{param}}}"): {
+                    "parameters": path_param(param),
+                    "get": answering("read", envelope),
+                },
+            }),
+            &json!({"Gadget": obj(json!({"id": {"type": "string"}, "name": {"type": "string"}}))}),
+        )
+    }
+
+    fn unknown(bundle: &mb_mcm::Bundle, ids: &[&str]) {
+        for id in ids {
+            assert_eq!(identity_of(bundle, id), None, "{id}");
+        }
+    }
+
     #[test]
-    fn an_envelope_whose_record_structure_does_not_tell_stays_unknown() {
-        let record = |key: &str| json!({"type": "object", "properties": {key: {"type": "string"}, "name": {"type": "string"}}});
-        // Two objects: either could be the record.
-        let two = json!({"type": "object", "properties": {
+    fn an_envelope_with_two_objects_stays_unknown() {
+        let record = |key: &str| obj(json!({key: {"type": "string"}, "name": {"type": "string"}}));
+        let two = obj(json!({
             "code": {"type": "integer"},
             "order": record("order_id"),
             "customer": record("customer_id"),
-        }});
-        // A part of the record, named for something else than what the path reads.
-        let part = json!({"type": "object", "properties": {
-            "name": {"type": "string"},
-            "meta": record("id"),
-        }});
-        // A key that refers to another record.
-        let other = json!({"type": "object", "properties": {
+        }));
+        unknown(
+            &corroborated("orders", "order_id", &two),
+            &["create", "read"],
+        );
+    }
+
+    #[test]
+    fn a_nullable_or_composed_record_is_an_object_beside_another() {
+        let gadget = json!({"$ref": "#/components/schemas/Gadget"});
+        let error = obj(json!({"id": {"type": "string"}, "detail": {"type": "string"}}));
+        let page = obj(json!({"id": {"type": "string"}, "next": {"type": "string"}}));
+        let nullable_all_of = obj(json!({
+            "success": {"type": "boolean"},
+            "data": {"allOf": [gadget], "nullable": true},
+            "error": error,
+        }));
+        unknown(
+            &corroborated("gadgets", "id", &nullable_all_of),
+            &["create", "read"],
+        );
+        let any_of_null = obj(json!({
             "ok": {"type": "boolean"},
-            "receipt": record("customer_id"),
-        }});
+            "data": {"anyOf": [gadget, {"type": "null"}]},
+            "meta": page,
+        }));
+        unknown(
+            &corroborated("gadgets", "id", &any_of_null),
+            &["create", "read"],
+        );
+        let typed_null = obj(json!({
+            "ok": {"type": "boolean"},
+            "data": gadget,
+            "meta": {"type": ["object", "null"], "properties": {"id": {"type": "string"}}},
+        }));
+        unknown(
+            &corroborated("gadgets", "id", &typed_null),
+            &["create", "read"],
+        );
+        // Alone beside single values, the nullable record is the record.
+        let alone = obj(json!({
+            "ok": {"type": "boolean"},
+            "data": {"anyOf": [gadget, {"type": "null"}]},
+        }));
+        let bundle = corroborated("gadgets", "id", &alone);
+        assert_eq!(identity_of(&bundle, "create"), wrapped(None, "id", "data"));
+        assert_eq!(
+            identity_of(&bundle, "read"),
+            wrapped(Some("id"), "id", "data")
+        );
+    }
+
+    #[test]
+    fn an_uncorroborated_object_is_not_the_record() {
+        let related = obj(json!({"id": {"type": "string"}, "name": {"type": "string"}}));
         let bundle = compiled(
             &json!({
-                "/orders": {"post": answering("two", &two)},
-                "/stages/{stage_id}": {"parameters": path_param("stage_id"), "get": answering("part", &part)},
-                "/receipts": {"post": answering("other", &other)},
+                // A related record beside the answer's own members, by a bare `{id}`.
+                "/orders/{id}": {"parameters": path_param("id"), "put": answering("orderPut", &obj(json!({
+                    "order_number": {"type": "string"},
+                    "status": {"type": "string"},
+                    "customer": related,
+                })))},
+                // Creates no read by path corroborates.
+                "/notes": {"post": answering("noteCreate", &obj(json!({
+                    "note_key": {"type": "string"},
+                    "title": {"type": "string"},
+                    "owner": related,
+                })))},
+                "/exports": {"post": answering("exportCreate", &obj(json!({
+                    "status": {"type": "string"},
+                    "job": obj(json!({"id": {"type": "string"}, "state": {"type": "string"}})),
+                })))},
+                // A foreign key named for the type, in another member's record.
+                "/invoices": {"post": answering("invoiceCreate", &obj(json!({
+                    "code": {"type": "integer"},
+                    "payment": obj(json!({"amount": {"type": "number"}, "invoice_id": {"type": "string"}})),
+                })))},
+                // A query's pagination object.
+                "/reports": {"get": answering("reportList", &obj(json!({
+                    "count": {"type": "integer"},
+                    "page": obj(json!({"id": {"type": "string"}, "next": {"type": "string"}})),
+                })))},
             }),
             &json!({}),
         );
-        for id in ["two", "part", "other"] {
-            assert_eq!(identity_of(&bundle, id), None, "{id}");
-        }
+        unknown(
+            &bundle,
+            &[
+                "orderPut",
+                "noteCreate",
+                "exportCreate",
+                "invoiceCreate",
+                "reportList",
+            ],
+        );
+    }
+
+    #[test]
+    fn a_parameter_that_names_nothing_gives_no_identity_and_teaches_none() {
+        let envelope = obj(json!({
+            "success": {"type": "boolean"},
+            "data": {"$ref": "#/components/schemas/Gadget"},
+        }));
+        // `{sku}` names no member: neither the read nor, taught by it, the create
+        // falls back to the record's `id`.
+        unknown(
+            &corroborated("products", "sku", &envelope),
+            &["create", "read"],
+        );
+        // `{owner_id}` names the `id` only by its last word, for neither the member
+        // nor the type.
+        let part = obj(
+            json!({"name": {"type": "string"}, "meta": {"$ref": "#/components/schemas/Gadget"}}),
+        );
+        unknown(
+            &corroborated("stages", "owner_id", &part),
+            &["create", "read"],
+        );
+    }
+
+    #[test]
+    fn a_key_named_for_the_member_is_not_the_types() {
+        let request = obj(json!({
+            "status": {"type": "string"},
+            "request": obj(json!({"request_id": {"type": "string"}, "received_at": {"type": "string"}})),
+        }));
+        unknown(
+            &corroborated("widgets", "id", &request),
+            &["create", "read"],
+        );
+        let error = obj(json!({
+            "ok": {"type": "boolean"},
+            "error": obj(json!({"error_id": {"type": "string"}})),
+        }));
+        unknown(&corroborated("widgets", "id", &error), &["create", "read"]);
+        // The record has a key named for its member beside the type's: it is the
+        // member's record, and the type's key refers to it.
+        let payment = obj(json!({
+            "code": {"type": "integer"},
+            "payment": obj(json!({"payment_id": {"type": "string"}, "invoice_id": {"type": "string"}})),
+        }));
+        unknown(
+            &corroborated("invoices", "id", &payment),
+            &["create", "read"],
+        );
+        // A key named for the type, under a generic member, is the record's.
+        let data = obj(json!({
+            "ok": {"type": "boolean"},
+            "data": obj(json!({"ticket_id": {"type": "string"}, "owner_id": {"type": "string"}})),
+        }));
+        let bundle = corroborated("tickets", "id", &data);
+        assert_eq!(
+            identity_of(&bundle, "create"),
+            wrapped(None, "ticket_id", "data")
+        );
+        assert_eq!(
+            identity_of(&bundle, "read"),
+            wrapped(Some("id"), "ticket_id", "data")
+        );
+    }
+
+    #[test]
+    fn a_create_goes_by_the_key_its_read_by_path_teaches() {
+        // The read by `{code}` goes by `code`; the create's own fallback would be
+        // `widget_id`, but the type's read says otherwise.
+        let envelope = obj(json!({
+            "ok": {"type": "boolean"},
+            "widget": obj(json!({"code": {"type": "string"}, "widget_id": {"type": "string"}})),
+        }));
+        let bundle = corroborated("widgets", "code", &envelope);
+        assert_eq!(
+            identity_of(&bundle, "create"),
+            wrapped(None, "code", "widget")
+        );
+        assert_eq!(
+            identity_of(&bundle, "read"),
+            wrapped(Some("code"), "code", "widget")
+        );
+        // A record with an `id` goes by it, the path naming the member it reads.
+        let with_id = obj(json!({
+            "ok": {"type": "boolean"},
+            "widget": obj(json!({"id": {"type": "string"}, "widget_id": {"type": "string"}})),
+        }));
+        let bundle = corroborated("widgets", "widget_id", &with_id);
+        assert_eq!(
+            identity_of(&bundle, "read"),
+            Some(Identity {
+                path_param: Some("widget_id".into()),
+                field: "id".into(),
+                input_field: None,
+                path_field: Some("widget_id".into()),
+                record: Some(mb_mcm::RecordAt::Member("widget".into())),
+            })
+        );
+        assert_eq!(
+            identity_of(&bundle, "create"),
+            wrapped(None, "id", "widget")
+        );
     }
 }
