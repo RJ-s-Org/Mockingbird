@@ -282,6 +282,9 @@ pub struct EffectOutcome {
     pub rejected: Option<String>,
     /// The whole resource after it, when it was applied.
     pub merged: Option<Value>,
+    /// The top-level members of `effect.set` it applied, when it was applied: a check
+    /// may keep only some of them. Empty when it was rejected.
+    pub applied: Vec<String>,
 }
 
 /// A generated answer to one call.
