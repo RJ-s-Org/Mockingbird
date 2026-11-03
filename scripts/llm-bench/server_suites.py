@@ -31,6 +31,14 @@ Suites (contracts are in-repo, so the bench is reproducible):
   fixed against: PayPal orders, Jira issues, Zendesk tickets, Notion pages and Square
   payments. Not in the default suites. Measures how `journeys` generalises, so its
   checks are written from each contract and are not edited to suit results.
+- journeys_blind: the same kind of journey over five more contracts: Spotify playlists,
+  Discord messages, Auth0 users, HubSpot CRM and Slack messages. Not in the default
+  suites. Its checks were written from the contracts and from what each real API
+  promises a client, without looking at the engine or at any past result, so it
+  measures behaviour on contracts nobody tuned against. Do not edit a check to suit results.
+- journeys_blind2: the same again over five more contracts: Twilio messages and calls,
+  SendGrid templates and bounces, Plaid items, PayPal refunds and OpenWeatherMap. Not in
+  the default suites. Written under the same rule, and no check gates the rest of its journey.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -64,7 +72,7 @@ import uuid
 from datetime import datetime
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout")
+SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -116,6 +124,22 @@ HELDOUT_MOCKS = {
     "zendesk": ("examples/apis/zendesk/zendesk.openapi.yaml", "/zendesk", None),
     "notion": ("examples/apis/notion/notion.openapi.yaml", "/notion", None),
     "square": ("examples/apis/square/square.openapi.yaml", "/square", None),
+}
+# The blind journeys, contracts alone as well: no persona.
+BLIND_MOCKS = {
+    "spotify": ("examples/apis/spotify/spotify.openapi.yaml", "/spotify", None),
+    "discord": ("examples/apis/discord/discord.openapi.yaml", "/discord", None),
+    "auth0": ("examples/apis/auth0-management/auth0-management.openapi.yaml", "/auth0", None),
+    "hubspot": ("examples/apis/hubspot/hubspot.openapi.yaml", "/hubspot", None),
+    "slack": ("examples/apis/slack/slack.openapi.yaml", "/slack", None),
+}
+# The second blind journeys, contracts alone as well: no persona.
+BLIND2_MOCKS = {
+    "twilio": ("examples/apis/twilio/twilio.openapi.yaml", "/twilio", None),
+    "sendgrid": ("examples/apis/sendgrid/sendgrid.openapi.yaml", "/sendgrid", None),
+    "plaid": ("examples/apis/plaid/plaid.openapi.yaml", "/plaid", None),
+    "paypalpayments": ("examples/apis/paypal/paypal-payments.openapi.yaml", "/paypalpayments", None),
+    "openweathermap": ("examples/apis/openweathermap/openweathermap.openapi.yaml", "/openweathermap", None),
 }
 SSE_MOCKS = {
     "events": ("fixtures/openapi/events-3.1.yaml", "/events",
@@ -1371,6 +1395,805 @@ def run_journeys_heldout(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- blind journeys
+
+# These journeys measure the engine on contracts nobody tuned against. They were
+# written from the contracts and from what each real API promises a client, with no
+# look at the engine or at past results. A check that is hard for a mock stays; a
+# check is left out only when its contract has no route for it or its schema rules the
+# answer out, and a comment says so. Do not edit a check to suit results.
+BLIND_CHECKS = {
+    "spotify": [
+        "search returned tracks", "search answers what was asked", "track detail keeps the listed track",
+        "artist detail keeps the track's artist", "top tracks credit the artist",
+        "playlist read names the playlist asked for", "add returns a new snapshot",
+        "item list shows the new tracks first", "items carry the full track", "items name who added them",
+        "insert lands at its position", "older path adds to the same playlist",
+        "read shows the latest snapshot and count", "read keeps the playlist's details",
+    ],
+    "discord": [
+        "guild read names the guild asked for", "channels name their guild", "guild has a text channel",
+        "message has an id", "message keeps what was sent", "author is the bot", "read matches the created message",
+        "reply names the message it answers", "read keeps the reference", "list holds both, newest first",
+        "after filter holds only the later message", "before filter holds only the earlier message",
+        "deleted message is gone", "list drops the deleted message",
+    ],
+    "auth0": [
+        "user has an id", "user keeps the profile", "user belongs to the connection", "read matches the created user",
+        "password never comes back", "update changes the fields", "update merges the metadata", "read shows the update",
+        "search finds the user as updated", "search misses another email", "lookup by email finds the user",
+        "tenant offers a role", "user holds the assigned role", "deleted user is gone",
+    ],
+    "hubspot": [
+        "company has an id", "company keeps its properties", "read matches the created company", "contact has an id",
+        "contact keeps its properties", "read returns the properties asked for", "deal has an id",
+        "read matches the created deal", "deal list holds the new deal", "update changes the contact",
+        "read shows the update and keeps the rest", "search finds the contact in its new stage",
+        "search by the old stage misses the contact", "archived contact is gone",
+    ],
+    "slack": [
+        "auth names the bot", "channel list offers a channel", "channel list answers the filter",
+        "user info keeps the listed bot", "post returns a timestamp", "message keeps text and author",
+        "history holds the new message", "history lists newest first", "oldest filter holds only the later message",
+        "latest filter holds only the earlier message", "reply names its thread and stays out of the channel",
+        "parent counts the reply", "reaction shows on the message", "a repeated reaction is refused",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND_CHECKS)
+
+
+def spotify_uris(page):
+    return [obj(item.get("track")).get("uri") for item in dicts(page.get("items"))]
+
+
+def spotify_steps(j):
+    # A playlist the client was given: the contract has no route to create one, and
+    # none to update its details, remove an item or delete anything. Item lists are read
+    # from their start and inserts go there too, because its Paging schema pins offset to 0.
+    j.headers.update(HELDOUT_AUTH)
+    term = "love"
+    found = obj(j.call("GET", "/v1/search", query={"q": term, "type": "track,artist", "market": "DE", "limit": 5}))
+    track_page, artist_page = obj(found.get("tracks")), obj(found.get("artists"))
+    tracks = dicts(track_page.get("items"))
+    need(j, "search returned tracks", len(tracks) >= 3 and all(t.get("id") and t.get("uri") for t in tracks))
+    listed_artists = artist_page.get("items")
+    j.check("search answers what was asked",
+            eq(track_page.get("limit"), 5) and eq(artist_page.get("limit"), 5) and isinstance(listed_artists, list)
+            and "albums" not in found and term in json.dumps([tracks, listed_artists]).lower())
+    first = tracks[0]
+    track = obj(j.call("GET", f"/v1/tracks/{first['id']}", query={"market": "DE"}))
+    j.check("track detail keeps the listed track",
+            same(track, first, "id", "name", "uri", "duration_ms") and same(obj(track.get("album")), obj(first.get("album")), "id", "name"))
+    credit = head(first.get("artists"))
+    artist = obj(j.call("GET", f"/v1/artists/{credit.get('id')}"))
+    j.check("artist detail keeps the track's artist", same(artist, credit, "id", "name", "uri"))
+    top = dicts(obj(j.call("GET", f"/v1/artists/{credit.get('id')}/top-tracks", query={"market": "DE"})).get("tracks"))
+    j.check("top tracks credit the artist",
+            bool(top) and credit.get("id") is not None
+            and all(by_id(t.get("artists"), credit.get("id")) for t in top), listed=len(top))
+    me = obj(j.call("GET", "/v1/me"))
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    pid = "".join(j.rng.choice(alphabet) for _ in range(22))
+    path = f"/v1/playlists/{pid}"
+    before = obj(j.call("GET", path))
+    need(j, "playlist read names the playlist asked for",
+         eq(before.get("id"), pid) and eq(before.get("uri"), f"spotify:playlist:{pid}") and before.get("snapshot_id"))
+    count = obj(before.get("tracks")).get("total")
+
+    def grown(page, by):
+        return isinstance(count, int) and eq(page.get("total"), count + by)
+
+    pair = [tracks[0]["uri"], tracks[1]["uri"]]
+    added = obj(j.call("POST", f"{path}/items", body={"uris": pair, "position": 0}))
+    j.check("add returns a new snapshot",
+            j.last["status"] == 201 and added.get("snapshot_id") and added["snapshot_id"] != before.get("snapshot_id"),
+            snapshot=added.get("snapshot_id"))
+    page = obj(j.call("GET", f"{path}/items", query={"limit": 5}))
+    j.check("item list shows the new tracks first", spotify_uris(page)[:2] == pair and grown(page, 2),
+            uris=spotify_uris(page), total=page.get("total"), before=count)
+    items = dicts(page.get("items"))
+    j.check("items carry the full track",
+            same(obj(head(items).get("track")), first, "id", "name", "uri", "duration_ms"))
+    j.check("items name who added them",
+            len(items) >= 2 and all(eq(obj(i.get("added_by")).get("id"), me.get("id")) and i.get("added_at") for i in items[:2]))
+    inserted = tracks[2]["uri"]
+    j.call("POST", f"{path}/items", body={"uris": [inserted], "position": 1})
+    page = obj(j.call("GET", f"{path}/items", query={"limit": 5}))
+    j.check("insert lands at its position", spotify_uris(page)[:3] == [pair[0], inserted, pair[1]], uris=spotify_uris(page))
+    older = head(top).get("uri") or pair[0]  # the same track twice is allowed in a playlist
+    last = obj(j.call("POST", f"{path}/tracks", body={"uris": [older], "position": 0}))
+    page = obj(j.call("GET", f"{path}/items", query={"limit": 5}))
+    j.check("older path adds to the same playlist",
+            spotify_uris(page)[:4] == [older, pair[0], inserted, pair[1]], uris=spotify_uris(page))
+    read = obj(j.call("GET", path))
+    j.check("read shows the latest snapshot and count",
+            eq(read.get("snapshot_id"), last.get("snapshot_id")) and grown(obj(read.get("tracks")), 4),
+            total=obj(read.get("tracks")).get("total"), before=count)
+    j.check("read keeps the playlist's details",
+            same(read, before, "id", "uri", "name", "owner", "public", "collaborative"))
+
+
+def discord_steps(j):
+    # A guild the client was given: the contract has no route to create one or to list the
+    # bot's guilds. It has no route to edit or pin a message either. Its interaction callback
+    # is left out: it needs an interaction from the gateway and answers 204, so nothing
+    # shows its effect. Usernames are not compared: UserResponse's pattern rules out the
+    # const username of UserPIIResponse.
+    j.headers["authorization"] = "Bot bench-placeholder"
+    me = obj(j.call("GET", "/users/@me"))
+    gid = str(1200000000000000000 + j.rng.randrange(10 ** 17))
+    guild = obj(j.call("GET", f"/guilds/{gid}", query={"with_counts": "true"}))
+    j.check("guild read names the guild asked for",
+            eq(guild.get("id"), gid) and isinstance(guild.get("approximate_member_count"), int))
+    channels = dicts(j.call("GET", f"/guilds/{gid}/channels"))
+    j.check("channels name their guild", bool(channels) and all(eq(c.get("guild_id"), gid) for c in channels))
+    channel = next((c for c in channels if c.get("type") == 0), {})
+    cid = channel.get("id")
+    need(j, "guild has a text channel", cid)
+    messages = f"/channels/{cid}/messages"
+    content, title = f"Doors open at {j.rng.randint(17, 20)}:30 tonight.", "Meetup reminder"
+    nonce = f"bench-{j.rng.randint(100000, 999999)}"
+    first = obj(j.call("POST", messages, body={
+        "content": content, "nonce": nonce, "embeds": [{"title": title, "description": "Bring a laptop."}],
+    }))
+    mid = first.get("id")
+    need(j, "message has an id", mid)
+    embed = head(first.get("embeds"))
+    j.check("message keeps what was sent",
+            eq(first.get("content"), content) and eq(first.get("channel_id"), cid) and eq(first.get("nonce"), nonce)
+            and eq(embed.get("title"), title) and eq(embed.get("description"), "Bring a laptop."))
+    j.check("author is the bot", eq(obj(first.get("author")).get("id"), me.get("id")))
+    read = obj(j.call("GET", f"{messages}/{mid}"))
+    j.check("read matches the created message",
+            same(read, first, "id", "content", "channel_id", "timestamp", "embeds")
+            and eq(obj(read.get("author")).get("id"), me.get("id")) and read.get("pinned") is False
+            and "edited_timestamp" in read and read["edited_timestamp"] is None)
+    answer = "Will the talks be recorded?"
+    reply = obj(j.call("POST", messages, body={"content": answer, "message_reference": {"message_id": mid}}))
+    rid = reply.get("id")
+    j.check("reply names the message it answers",
+            eq(reply.get("type"), 19) and eq(reply.get("content"), answer)
+            and eq(obj(reply.get("message_reference")).get("message_id"), mid))
+    read2 = obj(j.call("GET", f"{messages}/{rid}"))
+    j.check("read keeps the reference",
+            eq(read2.get("id"), rid) and eq(obj(read2.get("message_reference")).get("message_id"), mid))
+
+    def ids(**query):
+        return [m.get("id") for m in dicts(j.call("GET", messages, query=query))]
+
+    listed = ids(limit=50)
+    j.check("list holds both, newest first",
+            rid in listed and mid in listed and listed.index(rid) < listed.index(mid), listed=listed)
+    later = ids(after=mid)
+    j.check("after filter holds only the later message", rid in later and mid not in later, listed=later)
+    earlier = ids(before=rid)
+    j.check("before filter holds only the earlier message", mid in earlier and rid not in earlier, listed=earlier)
+    j.call("DELETE", f"{messages}/{mid}")
+    deleted = j.last["status"]
+    j.call("GET", f"{messages}/{mid}")
+    j.check("deleted message is gone", deleted == 204 and j.last["status"] == 404, delete_status=deleted)
+    left = ids(limit=50)
+    j.check("list drops the deleted message", rid in left and mid not in left, listed=left)
+
+
+def auth0_user(users, wanted):
+    return next((u for u in dicts(users) if eq(u.get("user_id"), wanted)), {})
+
+
+def auth0_steps(j):
+    # The contract has no route to create a role, so the role comes from the tenant's list.
+    j.headers.update(HELDOUT_AUTH)
+    connection = "Username-Password-Authentication"
+    tag = j.rng.randint(1000, 9999)
+    email, name = f"ana.silva{tag}@example.org", "Ana Silva"
+    user_meta = {"plan": "team"}
+    app_meta = {"region": "eu"}
+    created = obj(j.call("POST", "/api/v2/users", body={
+        "connection": connection, "email": email, "password": f"Bench-Placeholder-{tag}!", "name": name,
+        "given_name": "Ana", "family_name": "Silva", "user_metadata": user_meta, "app_metadata": app_meta,
+    }))
+    uid = created.get("user_id")
+    need(j, "user has an id", uid)
+    path = f"/api/v2/users/{urllib.parse.quote(str(uid), safe='')}"  # the id holds a `|`
+    j.check("user keeps the profile",
+            eq(created.get("email"), email) and eq(created.get("name"), name)
+            and eq(created.get("given_name"), "Ana") and eq(created.get("family_name"), "Silva"))
+    identity = head(created.get("identities"))
+    j.check("user belongs to the connection",
+            eq(identity.get("connection"), connection) and eq(identity.get("provider"), "auth0")
+            and eq(f"auth0|{identity.get('user_id')}", uid), identity=identity)
+    read = obj(j.call("GET", path))
+    j.check("read matches the created user",
+            same(read, created, "user_id", "email", "name", "given_name", "family_name", "created_at", "identities")
+            and eq(read.get("user_metadata"), user_meta) and eq(read.get("app_metadata"), app_meta))
+    j.check("password never comes back", bool(read) and "password" not in created and "password" not in read)
+    updated = obj(j.call("PATCH", path, body={"blocked": True, "given_name": "Anabela", "user_metadata": {"locale": "de"}}))
+    merged = dict(user_meta, locale="de")
+    j.check("update changes the fields",
+            eq(updated.get("user_id"), uid) and updated.get("blocked") is True and eq(updated.get("given_name"), "Anabela"))
+    j.check("update merges the metadata",
+            eq(updated.get("user_metadata"), merged) and eq(updated.get("app_metadata"), app_meta),
+            user_metadata=updated.get("user_metadata"))
+    read2 = obj(j.call("GET", path))
+    j.check("read shows the update",
+            read2.get("blocked") is True and eq(read2.get("given_name"), "Anabela") and eq(read2.get("family_name"), "Silva")
+            and eq(read2.get("user_metadata"), merged) and eq(read2.get("created_at"), created.get("created_at"))
+            and read2.get("updated_at") is not None and read2["updated_at"] != created.get("updated_at"),
+            updated_at=read2.get("updated_at"))
+    found = obj(j.call("GET", "/api/v2/users", query={"q": f'email:"{email}"', "search_engine": "v3", "include_totals": "true"}))
+    hit = auth0_user(found.get("users"), uid)
+    j.check("search finds the user as updated",
+            eq(hit.get("email"), email) and hit.get("blocked") is True and eq(hit.get("given_name"), "Anabela")
+            and eq(found.get("total"), 1), total=found.get("total"))
+    missed = obj(j.call("GET", "/api/v2/users",
+                        query={"q": f'email:"nobody{tag}@example.org"', "search_engine": "v3", "include_totals": "true"}))
+    j.check("search misses another email", missed.get("users") == [] and eq(missed.get("total"), 0), total=missed.get("total"))
+    by_email = j.call("GET", "/api/v2/users-by-email", query={"email": email})
+    j.check("lookup by email finds the user", eq(auth0_user(by_email, uid).get("email"), email))
+    role = head(obj(j.call("GET", "/api/v2/roles", query={"include_totals": "true"})).get("roles"))
+    need(j, "tenant offers a role", role.get("id"))
+    held = obj(j.call("GET", f"{path}/roles", query={"include_totals": "true"}))
+    j.call("POST", f"{path}/roles", body={"roles": [role["id"]]})
+    assigned = j.last["status"]
+    after = obj(j.call("GET", f"{path}/roles", query={"include_totals": "true"}))
+    j.check("user holds the assigned role",
+            eq(held.get("total"), 0) and assigned == 204 and eq(after.get("total"), 1)
+            and same(by_id(after.get("roles"), role["id"]), role, "id", "name"),
+            before=held.get("total"), after=after.get("total"), assign_status=assigned)
+    j.call("DELETE", path)
+    deleted = j.last["status"]
+    j.call("GET", path)
+    gone = j.last["status"]
+    left = j.call("GET", "/api/v2/users-by-email", query={"email": email})
+    j.check("deleted user is gone", deleted == 204 and gone == 404 and left == [],
+            delete_status=deleted, read_status=gone)
+
+
+def hubspot_props(thing):
+    return obj(thing.get("properties"))
+
+
+def hubspot_search(j, *filters):
+    query = {"filterGroups": [{"filters": [{"propertyName": p, "operator": "EQ", "value": v} for p, v in filters]}],
+             "properties": ["email", "firstname", "lastname", "lifecyclestage"], "limit": 10}
+    return obj(j.call("POST", "/crm/v3/objects/contacts/search", body=query))
+
+
+def hubspot_steps(j):
+    # The contract has no route or parameter to read associations back, so a deal's links
+    # are sent as a client would send them and the references checked are its properties.
+    # It has no route to update or delete a company or a deal. An archived contact is not
+    # read with archived=true: the Contact schema pins archived to false.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randint(1000, 9999)
+    made = {"name": f"Fjord Logistics {tag}", "domain": f"fjord{tag}.example.org",
+            "industry": "LOGISTICS_AND_SUPPLY_CHAIN", "city": "Oslo"}
+    company = obj(j.call("POST", "/crm/v3/objects/companies", body={"properties": made}))
+    company_id = company.get("id")
+    need(j, "company has an id", company_id)
+    j.check("company keeps its properties", all(eq(hubspot_props(company).get(k), v) for k, v in made.items()))
+    got = obj(j.call("GET", f"/crm/v3/objects/companies/{company_id}", query={"properties": ",".join(made)}))
+    j.check("read matches the created company",
+            eq(got.get("id"), company_id) and all(eq(hubspot_props(got).get(k), v) for k, v in made.items()))
+    owner = "52550153"
+    email = f"ana.silva{tag}@example.org"
+    person = {"email": email, "firstname": "Ana", "lastname": "Silva", "phone": f"+1 617 555 0{tag % 1000:03d}",
+              "company": made["name"], "jobtitle": "Buyer", "lifecyclestage": "lead", "hubspot_owner_id": owner}
+
+    def link(to, kind):
+        return {"to": {"id": to}, "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": kind}]}
+
+    contact = obj(j.call("POST", "/crm/v3/objects/contacts", body={"properties": person, "associations": [link(company_id, 1)]}))
+    contact_id = contact.get("id")
+    need(j, "contact has an id", contact_id)
+    path = f"/crm/v3/objects/contacts/{contact_id}"
+    j.check("contact keeps its properties", all(eq(hubspot_props(contact).get(k), v) for k, v in person.items()))
+    # HubSpot returns only a default set unless the client names the properties it wants.
+    asked = {"properties": ",".join(person)}
+    read = obj(j.call("GET", path, query=asked))
+    j.check("read returns the properties asked for",
+            eq(read.get("id"), contact_id) and all(eq(hubspot_props(read).get(k), v) for k, v in person.items()))
+    sale = {"dealname": f"Fjord renewal {tag}", "amount": f"{j.rng.randint(2, 90)}000", "dealstage": "qualifiedtobuy",
+            "pipeline": "default", "closedate": "2026-12-31T00:00:00.000Z", "hubspot_owner_id": owner}
+    deal = obj(j.call("POST", "/crm/v3/objects/deals",
+                      body={"properties": sale, "associations": [link(contact_id, 3), link(company_id, 5)]}))
+    deal_id = deal.get("id")
+    need(j, "deal has an id", deal_id)
+    got_deal = obj(j.call("GET", f"/crm/v3/objects/deals/{deal_id}", query={"properties": ",".join(sale)}))
+    j.check("read matches the created deal",
+            eq(got_deal.get("id"), deal_id) and all(eq(hubspot_props(got_deal).get(k), v) for k, v in sale.items()))
+    deals = obj(j.call("GET", "/crm/v3/objects/deals", query={"limit": 100, "properties": ",".join(sale)}))
+    j.check("deal list holds the new deal",
+            all(eq(hubspot_props(by_id(deals.get("results"), deal_id)).get(k), sale[k]) for k in ("dealname", "amount")))
+    updated = obj(j.call("PATCH", path, body={"properties": {"lifecyclestage": "opportunity", "jobtitle": "Head of buying"}}))
+    j.check("update changes the contact",
+            eq(updated.get("id"), contact_id) and eq(hubspot_props(updated).get("lifecyclestage"), "opportunity")
+            and eq(hubspot_props(updated).get("jobtitle"), "Head of buying"))
+    read2 = obj(j.call("GET", path, query=asked))
+    props2 = hubspot_props(read2)
+    j.check("read shows the update and keeps the rest",
+            eq(props2.get("lifecyclestage"), "opportunity") and eq(props2.get("jobtitle"), "Head of buying")
+            and all(eq(props2.get(k), person[k]) for k in ("email", "firstname", "lastname", "phone", "company"))
+            and same(read2, read, "id", "createdAt"), stage=props2.get("lifecyclestage"))
+    found = hubspot_search(j, ("email", email), ("lifecyclestage", "opportunity"))
+    j.check("search finds the contact in its new stage",
+            eq(hubspot_props(by_id(found.get("results"), contact_id)).get("lastname"), "Silva") and eq(found.get("total"), 1),
+            total=found.get("total"))
+    stale = hubspot_search(j, ("email", email), ("lifecyclestage", "lead"))
+    j.check("search by the old stage misses the contact",
+            stale.get("results") == [] and eq(stale.get("total"), 0), total=stale.get("total"))
+    j.call("DELETE", path)
+    archived = j.last["status"]
+    j.call("GET", path)
+    gone = j.last["status"]
+    after = hubspot_search(j, ("email", email))
+    j.check("archived contact is gone",
+            archived == 204 and gone == 404 and after.get("results") == [] and eq(after.get("total"), 0),
+            archive_status=archived, read_status=gone, total=after.get("total"))
+
+
+def slack_history(j, channel, **query):
+    return dicts(obj(j.call("GET", "/conversations.history", query=dict(query, channel=channel))).get("messages"))
+
+
+def slack_message(messages, ts):
+    return next((m for m in messages if eq(m.get("ts"), ts)), {})
+
+
+def slack_stamps(messages):
+    return [m.get("ts") for m in messages]
+
+
+def slack_steps(j):
+    # The contract has no route to edit or delete a message, to read a thread or to create
+    # a channel, so a reply's effect is read on its parent and the channel comes from the list.
+    j.headers["authorization"] = "Bearer xoxb-bench-placeholder"
+    who = obj(j.call("GET", "/auth.test"))
+    bot = who.get("user_id")
+    need(j, "auth names the bot", who.get("ok") is True and bot)
+    listed = obj(j.call("GET", "/conversations.list",
+                        query={"exclude_archived": "true", "types": "public_channel", "limit": 100}))
+    channels = dicts(listed.get("channels"))
+    channel = next((c for c in channels if c.get("is_member") is True), head(channels))
+    cid = channel.get("id")
+    need(j, "channel list offers a channel", cid)
+    j.check("channel list answers the filter",
+            all(c.get("is_private") is False and c.get("is_archived") is False for c in channels))
+    members = obj(j.call("GET", "/users.list", query={"limit": 100}))
+    member = by_id(members.get("members"), bot)
+    info = obj(obj(j.call("GET", "/users.info", query={"user": bot})).get("user"))
+    j.check("user info keeps the listed bot",
+            same(info, member, "id", "name", "real_name", "team_id") and info.get("is_bot") is True)
+
+    def post(**fields):
+        return obj(j.call("POST", "/chat.postMessage", body=dict(fields, channel=cid)))
+
+    text = f"Deploy {j.rng.randint(1000, 9999)} is rolling out."
+    made = post(text=text)
+    ts = made.get("ts")
+    need(j, "post returns a timestamp", made.get("ok") is True and ts)
+    message = obj(made.get("message"))
+    j.check("message keeps text and author",
+            eq(made.get("channel"), cid) and eq(message.get("text"), text) and eq(message.get("ts"), ts)
+            and eq(message.get("user"), bot))
+    j.check("history holds the new message", eq(slack_message(slack_history(j, cid), ts).get("text"), text))
+    later = post(text="Deploy finished.")
+    ts2 = later.get("ts")
+    stamps = slack_stamps(slack_history(j, cid))
+    j.check("history lists newest first",
+            ts2 is not None and ts2 in stamps and ts in stamps and stamps.index(ts2) < stamps.index(ts), stamps=stamps)
+    # Both bounds are exclusive unless inclusive is set.
+    newer = slack_stamps(slack_history(j, cid, oldest=ts))
+    j.check("oldest filter holds only the later message", ts2 in newer and ts not in newer, stamps=newer)
+    older = slack_stamps(slack_history(j, cid, latest=ts2))
+    j.check("latest filter holds only the earlier message", ts in older and ts2 not in older, stamps=older)
+    reply = post(text="Rollback plan is ready.", thread_ts=ts)
+    channel_view = slack_stamps(slack_history(j, cid))
+    j.check("reply names its thread and stays out of the channel",
+            eq(obj(reply.get("message")).get("thread_ts"), ts) and reply.get("ts") is not None
+            and reply["ts"] not in channel_view, stamps=channel_view)
+    # A client reads one message by bounding history to it.
+    parent = slack_message(slack_history(j, cid, latest=ts, inclusive="true", limit=1), ts)
+    j.check("parent counts the reply", eq(parent.get("reply_count"), 1) and eq(parent.get("thread_ts"), ts),
+            reply_count=parent.get("reply_count"))
+    react = {"channel": cid, "name": "eyes", "timestamp": ts}
+    reacted = obj(j.call("POST", "/reactions.add", body=react))
+    shown = slack_message(slack_history(j, cid, latest=ts, inclusive="true", limit=1), ts)
+    reaction = next((r for r in dicts(shown.get("reactions")) if r.get("name") == "eyes"), {})
+    j.check("reaction shows on the message",
+            reacted.get("ok") is True and eq(reaction.get("count"), 1) and bot in (reaction.get("users") or [])
+            and eq(shown.get("text"), text), reaction=reaction)
+    again = obj(j.call("POST", "/reactions.add", body=react))
+    j.check("a repeated reaction is refused", again.get("ok") is False and eq(again.get("error"), "already_reacted"),
+            slack_ok=again.get("ok"), slack_error=again.get("error"))
+
+
+BLIND_JOURNEYS = {"spotify": spotify_steps, "discord": discord_steps, "auth0": auth0_steps,
+                  "hubspot": hubspot_steps, "slack": slack_steps}
+
+
+def run_journeys_blind(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
+# ---------------------------------------------------------------- second blind journeys
+
+# The same rule as the blind journeys, over five more contracts: written from each
+# contract and from what its API promises a client, with no look at the engine or at
+# past results. No check gates the rest: a journey goes on with what it has, using an
+# id of its own when a call gave none. A check is left out only when its contract has
+# no route for it or its schema rules the answer out, and a comment says so. Do not
+# edit a check to suit results.
+BLIND2_CHECKS = {
+    "twilio": [
+        "message has a sid", "message keeps what was sent", "message is queued", "read matches the created message",
+        "list holds both, newest first", "To filter holds only that recipient", "From filter holds only that sender",
+        "page size caps the list", "redaction empties the body", "read shows the redaction and keeps the rest",
+        "deleted message is gone", "list drops the deleted message", "read matches the created call",
+        "call list answers the filter",
+    ],
+    "sendgrid": [
+        "template has an id", "template keeps its name and generation", "read matches the created template",
+        "generation defaults to legacy", "template list holds both", "generation filter holds only that generation",
+        "page size caps the template list", "mail using the template is accepted", "stats cover each day asked for",
+        "bounce read keeps the listed bounce", "email filter holds only that address", "removing a bounce answers 204",
+        "removed address has no bounce", "bounce list drops the address",
+    ],
+    "plaid": [
+        "public token is issued", "exchange returns an access token", "item reads back as exchanged",
+        "item keeps its webhook", "accounts name their item", "balances cover the same accounts",
+        "account filter holds only the asked account", "auth accounts belong to the item",
+        "auth numbers cover checking and savings", "identity accounts belong to the item", "count caps the sync",
+        "transactions name the item's accounts", "next sync repeats nothing", "institution answers the id asked for",
+    ],
+    "paypalpayments": [
+        "capture read names the capture asked for", "a second read repeats the capture", "refund has an id",
+        "refund keeps the amount asked for", "refund keeps the invoice and note", "read matches the created refund",
+        "capture shows the partial refund", "capture keeps its amount", "second refund has its own id",
+        "second refund keeps its amount", "capture shows the full refund", "first refund still reads as it was",
+        "a fully refunded capture refuses another", "authorization read names the authorization asked for",
+    ],
+    "openweathermap": [
+        "geocode finds the city asked for", "limit caps the geocode matches", "unknown place matches nothing",
+        "weather keeps the coordinates asked for", "city id read names the same city",
+        "zip lookup keeps the zip asked for", "zip lands near the city", "reverse lookup stays in the country",
+        "forecast holds the steps asked for", "forecast steps three hours apart",
+        "forecast names the same city as the weather", "one call keeps the coordinates",
+        "one call leaves out what was excluded", "air pollution keeps the coordinates",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND2_CHECKS)
+
+
+def matches(pattern, value):
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def near(a, b, tolerance):
+    return is_number(a) and is_number(b) and abs(a - b) <= tolerance
+
+
+def hex_id(j, prefix):
+    return prefix + "".join(j.rng.choice("0123456789abcdef") for _ in range(32))
+
+
+def by_key(items, key, wanted):
+    return next((i for i in dicts(items) if eq(i.get(key), wanted)), {})
+
+
+def twilio_steps(j):
+    # List schemas pin page_size to 50 and next_page_uri to null, so a page's own paging
+    # fields are not checked, only the rows PageSize asked for. Scheduling a message needs
+    # a messaging service nothing here creates, so canceling one is left out, and the
+    # contract has no route to change a call.
+    account = hex_id(j, "AC")
+    j.headers["authorization"] = "Basic " + base64.b64encode(f"{account}:bench-placeholder".encode()).decode()
+    messages, calls = f"/2010-04-01/Accounts/{account}/Messages", f"/2010-04-01/Accounts/{account}/Calls"
+    to_a, to_b, from_a, from_b = "+14155550101", "+14155550102", "+14155550103", "+14155550104"
+    text = "Your table for two is ready."
+
+    def page_of(**query):
+        return dicts(obj(j.call("GET", f"{messages}.json", query=query)).get("messages"))
+
+    def sids(rows):
+        return [m.get("sid") for m in rows]
+
+    first = obj(j.call("POST", f"{messages}.json", form={"To": to_a, "From": from_a, "Body": text}))
+    j.check("message has a sid", j.last["status"] == 201 and matches(r"SM[0-9a-f]{32}", first.get("sid")),
+            sid=first.get("sid"))
+    j.check("message keeps what was sent",
+            eq(first.get("to"), to_a) and eq(first.get("from"), from_a) and eq(first.get("body"), text))
+    j.check("message is queued", eq(first.get("status"), "queued"), message_status=first.get("status"))
+    sid_a = first.get("sid") or hex_id(j, "SM")
+    read = obj(j.call("GET", f"{messages}/{sid_a}.json"))
+    j.check("read matches the created message", same(read, first, "sid", "account_sid", "to", "from", "body"))
+    time.sleep(1.1)  # dates have whole seconds: "newest first" needs two different ones
+    second = obj(j.call("POST", f"{messages}.json", form={"To": to_b, "From": from_b, "Body": "A second message."}))
+    sid_b = second.get("sid") or hex_id(j, "SM")
+    listed = sids(page_of())
+    j.check("list holds both, newest first",
+            sid_a in listed and sid_b in listed and listed.index(sid_b) < listed.index(sid_a), listed=listed)
+    rows = page_of(To=to_a)
+    j.check("To filter holds only that recipient", sid_a in sids(rows) and all(eq(m.get("to"), to_a) for m in rows),
+            listed=sids(rows))
+    rows = page_of(From=from_b)
+    j.check("From filter holds only that sender", sid_b in sids(rows) and all(eq(m.get("from"), from_b) for m in rows),
+            listed=sids(rows))
+    rows = page_of(PageSize=1)
+    j.check("page size caps the list", len(rows) == 1, listed=sids(rows))
+    redacted = obj(j.call("POST", f"{messages}/{sid_a}.json", form={"Body": ""}))
+    j.check("redaction empties the body", j.last["status"] == 200 and redacted.get("body") == "")
+    read = obj(j.call("GET", f"{messages}/{sid_a}.json"))
+    j.check("read shows the redaction and keeps the rest",
+            read.get("body") == "" and same(read, first, "sid", "to", "from"))
+    j.call("DELETE", f"{messages}/{sid_a}.json")
+    deleted = j.last["status"]
+    j.call("GET", f"{messages}/{sid_a}.json")
+    j.check("deleted message is gone", j.last["status"] == 404, delete_status=deleted)
+    listed = sids(page_of())
+    j.check("list drops the deleted message", sid_b in listed and sid_a not in listed, listed=listed)
+    dialled = "+14155550105"
+    call = obj(j.call("POST", f"{calls}.json", form={"To": dialled, "From": from_a, "Url": "https://example.com/twiml"}))
+    call_sid = call.get("sid") or hex_id(j, "CA")
+    read = obj(j.call("GET", f"{calls}/{call_sid}.json"))
+    j.check("read matches the created call", eq(read.get("to"), dialled) and same(read, call, "sid", "to", "from"))
+    rows = dicts(obj(j.call("GET", f"{calls}.json", query={"To": dialled})).get("calls"))
+    j.check("call list answers the filter",
+            bool(by_key(rows, "sid", call_sid)) and all(eq(c.get("to"), dialled) for c in rows), listed=len(rows))
+
+
+def sendgrid_steps(j):
+    # No route updates or deletes a template, and none adds a bounce: the journey removes
+    # a bounce it finds listed. `_metadata.self` is pinned to one page size, so it is not
+    # checked. Stats are not tied to the mail sent: nothing says when a send is counted.
+    j.headers.update(HELDOUT_AUTH)
+    both = "legacy,dynamic"
+    tag = j.rng.randrange(10**6, 10**7)
+
+    def templates(**query):
+        return dicts(obj(j.call("GET", "/v3/templates", query=query)).get("result"))
+
+    name = f"Order receipt {tag}"
+    made = obj(j.call("POST", "/v3/templates", body={"name": name, "generation": "dynamic"}))
+    j.check("template has an id", j.last["status"] == 201 and matches(r"d-[0-9a-f]{32}", made.get("id")), id=made.get("id"))
+    j.check("template keeps its name and generation", eq(made.get("name"), name) and eq(made.get("generation"), "dynamic"))
+    tid = made.get("id") or hex_id(j, "d-")
+    read = obj(j.call("GET", f"/v3/templates/{tid}"))
+    j.check("read matches the created template", same(read, made, "id", "name", "generation"))
+    plain = obj(j.call("POST", "/v3/templates", body={"name": f"Password reset {tag}"}))
+    j.check("generation defaults to legacy", eq(plain.get("generation"), "legacy"), generation=plain.get("generation"))
+    plain_id = plain.get("id") or hex_id(j, "d-")
+    rows = templates(page_size=200, generations=both)  # the default generation is not stated, so both are asked for
+    j.check("template list holds both", bool(by_id(rows, tid)) and bool(by_id(rows, plain_id)), listed=len(rows))
+    rows = templates(page_size=200, generations="dynamic")
+    j.check("generation filter holds only that generation",
+            bool(by_id(rows, tid)) and all(eq(t.get("generation"), "dynamic") for t in rows), listed=len(rows))
+    rows = templates(page_size=1, generations=both)
+    j.check("page size caps the template list", len(rows) == 1, listed=len(rows))
+    j.call("POST", "/v3/mail/send", body={
+        "personalizations": [{"to": [{"email": "ada@example.com"}], "dynamic_template_data": {"order": tag}}],
+        "from": {"email": "shop@example.com"}, "template_id": tid})
+    j.check("mail using the template is accepted", j.last["status"] == 202)
+    days = [time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400 * back)) for back in (3, 2, 1)]
+    stats = dicts(j.call("GET", "/v3/stats", query={"start_date": days[0], "end_date": days[-1], "aggregated_by": "day"}))
+    answered = sorted(str(s.get("date")) for s in stats)
+    j.check("stats cover each day asked for", answered == days, dates=answered, asked=days)
+    listed = head(j.call("GET", "/v3/suppression/bounces"))
+    email = listed.get("email") or "nobody@example.com"
+    bounce_path = "/v3/suppression/bounces/" + urllib.parse.quote(str(email), safe="@")
+    one = dicts(j.call("GET", bounce_path))
+    j.check("bounce read keeps the listed bounce",
+            len(one) == 1 and same(one[0], listed, "email", "reason", "status", "created"))
+    rows = dicts(j.call("GET", "/v3/suppression/bounces", query={"email": email}))
+    j.check("email filter holds only that address", bool(rows) and all(eq(b.get("email"), email) for b in rows),
+            listed=len(rows))
+    j.call("DELETE", bounce_path)
+    j.check("removing a bounce answers 204", j.last["status"] == 204)
+    after = j.call("GET", bounce_path)
+    j.check("removed address has no bounce", j.last["status"] == 200 and after == [], answered=after)
+    after = j.call("GET", "/v3/suppression/bounces")
+    j.check("bounce list drops the address",
+            j.last["status"] == 200 and isinstance(after, list) and not by_key(after, "email", email))
+
+
+def plaid_ids(accounts):
+    return {a["account_id"] for a in dicts(accounts) if isinstance(a.get("account_id"), str)}
+
+
+def plaid_token(j, kind):
+    return f"{kind}-sandbox-{uuid.UUID(int=j.rng.getrandbits(128), version=4)}"
+
+
+def plaid_steps(j):
+    # Sandbox item to data. The contract has no route to update or remove an item. An
+    # item's institution id and name are optional, so they are not compared; sync does not
+    # promise any transaction exists yet, so its checks hold over what it did answer.
+    j.headers.update({"plaid-client-id": "bench-placeholder", "plaid-secret": "bench-placeholder"})
+    institution, hook = "ins_109508", "https://example.com/plaid-hook"
+    uuid4 = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+    public = obj(j.call("POST", "/sandbox/public_token/create", body={
+        "institution_id": institution, "initial_products": ["auth", "identity", "transactions"],
+        "options": {"webhook": hook}}))
+    j.check("public token is issued", matches(f"public-sandbox-{uuid4}", public.get("public_token")))
+    token = public.get("public_token") or plaid_token(j, "public")
+    exchanged = obj(j.call("POST", "/item/public_token/exchange", body={"public_token": token}))
+    j.check("exchange returns an access token",
+            matches(f"access-sandbox-{uuid4}", exchanged.get("access_token")) and exchanged.get("item_id"))
+    item_id = exchanged.get("item_id")
+    with_token = {"access_token": exchanged.get("access_token") or plaid_token(j, "access")}
+    item = obj(obj(j.call("POST", "/item/get", body=with_token)).get("item"))
+    j.check("item reads back as exchanged", eq(item.get("item_id"), item_id), item=item.get("item_id"), asked=item_id)
+    j.check("item keeps its webhook", eq(item.get("webhook"), hook), webhook=item.get("webhook"))
+    answer = obj(j.call("POST", "/accounts/get", body=with_token))
+    known = plaid_ids(answer.get("accounts"))
+    j.check("accounts name their item", eq(obj(answer.get("item")).get("item_id"), item_id))
+    balances = plaid_ids(obj(j.call("POST", "/accounts/balance/get", body=with_token)).get("accounts"))
+    j.check("balances cover the same accounts", bool(known) and balances == known,
+            accounts=sorted(known), balances=sorted(balances))
+    wanted = min(known) if known else "no-account-listed"
+    only = obj(j.call("POST", "/accounts/get", body=dict(with_token, options={"account_ids": [wanted]})))
+    only = plaid_ids(only.get("accounts"))
+    j.check("account filter holds only the asked account", bool(known) and only == {wanted}, answered=sorted(only))
+    auth = obj(j.call("POST", "/auth/get", body=with_token))
+    auth_accounts = dicts(auth.get("accounts"))
+    auth_ids = plaid_ids(auth_accounts)
+    j.check("auth accounts belong to the item", bool(auth_ids) and auth_ids <= known)
+    ach = {n.get("account_id") for n in dicts(obj(auth.get("numbers")).get("ach"))}
+    bank = {a.get("account_id") for a in auth_accounts if a.get("subtype") in ("checking", "savings")}
+    j.check("auth numbers cover checking and savings", bool(auth_ids) and bank <= ach <= auth_ids,
+            ach=sorted(map(str, ach)), bank=sorted(map(str, bank)))
+    owners = plaid_ids(obj(j.call("POST", "/identity/get", body=with_token)).get("accounts"))
+    j.check("identity accounts belong to the item", bool(owners) and owners <= known)
+    synced = obj(j.call("POST", "/transactions/sync", body=dict(with_token, count=2)))
+    added = dicts(synced.get("added"))
+    answered = j.last["status"] == 200 and isinstance(synced.get("added"), list)
+    j.check("count caps the sync", answered and len(added) <= 2, added=len(added))
+    j.check("transactions name the item's accounts", answered and all(t.get("account_id") in known for t in added))
+    cursor = synced.get("next_cursor")
+    later = obj(j.call("POST", "/transactions/sync", body=dict(with_token, **({"cursor": cursor} if cursor else {}))))
+    seen = {t.get("transaction_id") for t in added}
+    again = [t.get("transaction_id") for t in dicts(later.get("added")) if t.get("transaction_id") in seen]
+    j.check("next sync repeats nothing", j.last["status"] == 200 and bool(cursor) and not again, repeated=again)
+    found = obj(j.call("POST", "/institutions/get_by_id", body={"institution_id": institution, "country_codes": ["US"]}))
+    j.check("institution answers the id asked for", eq(obj(found.get("institution")).get("institution_id"), institution))
+
+
+def paypal_cents(money):
+    value = obj(money).get("value")
+    return int(value.replace(".", "")) if matches(r"[0-9]+\.[0-9]{2}", value) else None
+
+
+def paypalpayments_steps(j):
+    # Captures the client was given: the contract has no route to create one, or to list
+    # or change anything else. Only a completed capture of at least 2.00 can be refunded
+    # twice (the money schema starts at 1.00), and a mock may answer with any status for
+    # an id it was not told about, so the journey reads up to three ids to find one, and
+    # goes on with the last when none fits. No check asks about links: the schema names
+    # the relations but does not say which a refund carries.
+    j.headers.update(HELDOUT_AUTH)
+    j.headers["prefer"] = "return=representation"  # the journey reads the refund's fields from the answer
+
+    def paypal_id():
+        rest = "".join(j.rng.choice("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(16))
+        return j.rng.choice("0123456789") + rest
+
+    for _ in range(3):
+        cid = paypal_id()
+        capture = obj(j.call("GET", f"/captures/{cid}"))
+        if capture.get("status") == "COMPLETED" and (paypal_cents(capture.get("amount")) or 0) >= 200:
+            break
+    j.check("capture read names the capture asked for", eq(capture.get("id"), cid),
+            capture_status=capture.get("status"), amount=capture.get("amount"))
+    again = obj(j.call("GET", f"/captures/{cid}"))
+    j.check("a second read repeats the capture",
+            same(again, capture, "id", "status", "amount", "final_capture", "create_time"))
+    total = paypal_cents(capture.get("amount")) or 10000
+    currency = obj(capture.get("amount")).get("currency_code") or "USD"
+    part, remainder = max(total // 2, 100), max(total - max(total // 2, 100), 100)
+
+    def money(cents):
+        return {"currency_code": currency, "value": f"{cents // 100}.{cents % 100:02d}"}
+
+    asked = {"amount": money(part), "invoice_id": f"INV-{j.rng.randrange(10**6, 10**7)}", "note_to_payer": "Half of it back."}
+    refund = obj(j.call("POST", f"/captures/{cid}/refund", body=asked))
+    j.check("refund has an id", j.last["status"] == 201 and matches(r"[0-9][A-Z0-9]{16}", refund.get("id")),
+            id=refund.get("id"))
+    j.check("refund keeps the amount asked for", eq(refund.get("amount"), asked["amount"]), amount=refund.get("amount"))
+    j.check("refund keeps the invoice and note", same(refund, asked, "invoice_id", "note_to_payer"))
+    rid = refund.get("id") or paypal_id()
+    read = obj(j.call("GET", f"/refunds/{rid}"))
+    j.check("read matches the created refund", same(read, refund, "id", "amount", "invoice_id", "note_to_payer"))
+    after = obj(j.call("GET", f"/captures/{cid}"))
+    j.check("capture shows the partial refund", eq(after.get("status"), "PARTIALLY_REFUNDED"),
+            capture_status=after.get("status"))
+    j.check("capture keeps its amount", same(after, capture, "amount"))
+    rest = obj(j.call("POST", f"/captures/{cid}/refund", body={"amount": money(remainder)}))
+    j.check("second refund has its own id", rest.get("id") and rest.get("id") != refund.get("id"), id=rest.get("id"))
+    j.check("second refund keeps its amount", eq(rest.get("amount"), money(remainder)), amount=rest.get("amount"))
+    after = obj(j.call("GET", f"/captures/{cid}"))
+    j.check("capture shows the full refund", eq(after.get("status"), "REFUNDED"), capture_status=after.get("status"))
+    read = obj(j.call("GET", f"/refunds/{rid}"))
+    j.check("first refund still reads as it was", same(read, refund, "id", "amount", "invoice_id"))
+    j.call("POST", f"/captures/{cid}/refund", body={"amount": money(100)})
+    j.check("a fully refunded capture refuses another", j.last["status"] in (400, 409, 422))
+    aid = paypal_id()
+    authorization = obj(j.call("GET", f"/authorizations/{aid}"))
+    j.check("authorization read names the authorization asked for", eq(authorization.get("id"), aid))
+
+
+def openweathermap_steps(j):
+    # Reads only: the contract has no route that writes. Its schemas bound temperatures to
+    # the Kelvin range whatever `units` says, so a Celsius answer to units=metric would break
+    # them and unit conversion is left out. Its coordinates are bound to Germany and Austria,
+    # so the city is Munich. Coordinates are compared with room for rounding.
+    def get(path, **query):
+        return j.call("GET", path, query=dict(query, appid="bench-placeholder"))
+
+    def good():
+        return j.last["status"] == 200
+
+    city = "Munich,DE"
+    place = head(get("/geo/1.0/direct", q=city, limit=2))
+    j.check("geocode finds the city asked for",
+            any(n in str(place.get("name")).lower() for n in ("munich", "münchen")) and eq(place.get("country"), "DE"),
+            place=place.get("name"), country=place.get("country"))
+    capped = get("/geo/1.0/direct", q=city, limit=1)
+    j.check("limit caps the geocode matches", good() and isinstance(capped, list) and len(capped) <= 1, listed=len(capped))
+    nowhere = get("/geo/1.0/direct", q="Qqzxvyplk Wrtbnmg,DE")
+    j.check("unknown place matches nothing", good() and nowhere == [], listed=len(nowhere))
+    lat, lon = place.get("lat"), place.get("lon")
+    if not (is_number(lat) and is_number(lon)):
+        lat, lon = 48.1374, 11.5755
+    coord = obj(obj(get("/data/2.5/weather", lat=lat, lon=lon)).get("coord"))
+    j.check("weather keeps the coordinates asked for",
+            near(coord.get("lat"), lat, 0.05) and near(coord.get("lon"), lon, 0.05), coord=coord, asked=[lat, lon])
+    weather = obj(get("/data/2.5/weather", q=city))
+    by_city = obj(get("/data/2.5/weather", id=weather.get("id") or 2867714))
+    j.check("city id read names the same city", same(by_city, weather, "id", "name"),
+            answered=[by_city.get("id"), by_city.get("name")], asked=[weather.get("id"), weather.get("name")])
+    area = obj(get("/geo/1.0/zip", zip="80331,DE"))
+    j.check("zip lookup keeps the zip asked for", eq(area.get("zip"), "80331") and eq(area.get("country"), "DE"))
+    j.check("zip lands near the city", near(area.get("lat"), lat, 0.3) and near(area.get("lon"), lon, 0.3),
+            area=[area.get("lat"), area.get("lon")], city=[lat, lon])
+    nearby = dicts(get("/geo/1.0/reverse", lat=lat, lon=lon, limit=1))
+    j.check("reverse lookup stays in the country", len(nearby) == 1 and eq(nearby[0].get("country"), "DE"),
+            listed=len(nearby))
+    forecast = obj(get("/data/2.5/forecast", q=city, cnt=3))
+    steps = dicts(forecast.get("list"))
+    j.check("forecast holds the steps asked for", len(steps) == 3 and eq(forecast.get("cnt"), 3),
+            listed=len(steps), cnt=forecast.get("cnt"))
+    stamps = [s.get("dt") for s in steps]
+    j.check("forecast steps three hours apart",
+            len(stamps) >= 2 and all(is_number(a) and is_number(b) and b - a == 10800 for a, b in zip(stamps, stamps[1:])),
+            stamps=stamps)
+    j.check("forecast names the same city as the weather", eq(obj(forecast.get("city")).get("id"), weather.get("id")),
+            forecast_city=obj(forecast.get("city")).get("id"), weather_city=weather.get("id"))
+    onecall = obj(get("/data/3.0/onecall", lat=lat, lon=lon, exclude="minutely,hourly,alerts"))
+    j.check("one call keeps the coordinates", near(onecall.get("lat"), lat, 0.05) and near(onecall.get("lon"), lon, 0.05))
+    j.check("one call leaves out what was excluded",
+            good() and bool(onecall) and not {"minutely", "hourly", "alerts"} & set(onecall),
+            parts=sorted(onecall))
+    air = obj(obj(get("/data/2.5/air_pollution", lat=lat, lon=lon)).get("coord"))
+    j.check("air pollution keeps the coordinates", near(air.get("lat"), lat, 0.05) and near(air.get("lon"), lon, 0.05),
+            coord=air, asked=[lat, lon])
+
+
+BLIND2_JOURNEYS = {"twilio": twilio_steps, "sendgrid": sendgrid_steps, "plaid": plaid_steps,
+                   "paypalpayments": paypalpayments_steps, "openweathermap": openweathermap_steps}
+
+
+def run_journeys_blind2(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND2_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -1379,6 +2202,8 @@ RUNNERS = {
     "import": ({}, run_import),
     "journeys": (JOURNEY_MOCKS, run_journeys),
     "journeys_heldout": (HELDOUT_MOCKS, run_journeys_heldout),
+    "journeys_blind": (BLIND_MOCKS, run_journeys_blind),
+    "journeys_blind2": (BLIND2_MOCKS, run_journeys_blind2),
 }
 
 

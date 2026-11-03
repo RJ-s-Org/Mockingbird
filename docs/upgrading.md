@@ -45,6 +45,82 @@ No migration or configuration. With an LLM and `consistency: on`, on HTTP routes
 - **A 204 update with a valid body plus an undeclared member costs one extra LLM call** on the next read, as intended: the member cannot go in the stored copy, so the read is told of it. A remainder holding only redacted values, such as `password`, is not remembered and costs no call. A body that is only told, an action's or a child's to its parent, is redacted by every name rule, so `session_title` in an action's body shows as `[redacted]`.
 - **The path says whose a resource is**: a 204 update's member contradicting the owner in its path (`PUT /orgs/octo/teams/core {"organization":"acme"}`) is neither applied nor remembered.
 
+### Prompts show what a request refers to and who the caller is
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes ([what it does](concepts.md#sessions-and-state)):
+
+- **A write can be offered effects where it was not**: a body or query value equal to a held record's id puts that record among the related resources, so the call is asked for `{"effects": [...], "response": ...}`. Effects are checked as before and go on the stored copy, and nothing else changes a record. A value must be at least 6 bytes and hold a digit or a separator, or be a number of at least 100000, so a word-only id such as `closed` or `general` is not found this way. A date can still match, as can a word with a separator (`in-review`), and the model could then state a change to that record, if the change validates.
+- **More store reads per generated call**: at most 32 by value, 12 on Slack's `reactions.add`; one more for `<earlier_answers>` on a contract with a `GET` route with no parameters answering a single object, and one more on a list read whose route also takes a write. A served or cached answer pays none. On a contract with more types than that reaches, the types the session wrote through this node are looked up first, so a reference to a type written on another node can be missed.
+- **More prompt tokens when one applies**: about 100 for a typical remembered answer, up to 1,500 for three at the size cap. Slack's `reactions.add` with its message shown goes from 574 to 1,443 bytes, and the effects schema joins the response format. With nothing to show, a prompt is the same to the byte.
+- **These are advisory**: `<earlier_answers>` and `<earlier_writes>` say what may have changed, and no answer has to follow them. A route is told its own earlier answer too, so a `/me` keeps its identity after a write, and a `/status` tends to stay as it was. An indirect change, such as `PATCH /users/{id}` on the user `/me` answered, is not tracked.
+- **What a list read is told of a write**: its route and operation, and the members of its body that its request schema or the list's items declare, past the name and shape checks. Auth0's `roles` and Spotify's `uris` are told; an undeclared `pass`, `otp`, `code` or `value` is not, and neither is a declared `password`. A member the contract declares under an ordinary name (`code`) is told. A query is never kept.
+- **Wider checks on these only**: what they show leaves out more names than a request record does (`pass`, `pwd`, `passphrase`, `jwt`, `otp`, `hmac`, `signature`, `license_key`, `card_number`, `credit_card`, `ssn`, `salt`, `mfa`, `recovery_code`, `connection_string`, `dsn`, and as a last word `key` and `sid`), URLs with a password or a credential-named parameter, JWTs, `Bearer ` values and pairs labelled as a credential (`{"key": "X-Api-Key", "value": ...}`, whole), omitted and not shown as a marker. `key` or `sid` stays where it is the type's identity, unless the type is itself a credential (`api_keys`). Imports, headers, recordings and the older write memory go by the names they did.
+- **An earlier answer keeps only what its read's schema declares**: a route whose read names no members has nothing to keep.
+- **A record matched by value follows no references of its own**, so what it names is not shown unless the request names it too.
+- **An effect holding the redaction marker** leaves that member as stored and applies the rest, for every effect on a mock with an LLM. One setting only the marker is refused.
+- **Recorded prompts**: a snapshot or recording taken before this release may not replay where one of these applies.
+- **Not covered**: a deleted parent forgets its routes' writes only where the path below it has no other parameter, and a deleted child only the writes naming it. A caller's answer is kept per session, not per token. An answer of a `POST`-only route is not kept. A `GET` of such a route creates the session, with no resources, where a read did not.
+- **Rust API**: `GenerationContext` gains public fields, `earlier_answers` and `earlier_writes`, which breaks code constructing it in full; add `..Default::default()`.
+
+### The output budget keeps what a request asked for
+
+No migration or configuration. With `limits.output_budget_tokens` on, for a response whose estimated answer is over budget:
+
+- **More of an answer is the model's**: `type=track` now keeps `tracks`, and a page's items stay at the page size asked for while other members can go instead. What goes instead is required members of its items, which the faker fills.
+- **A page size counts in the estimate**: `limit=50` can shape an answer that fit at the default of about four items, and `limit=1` can leave one unshaped that did not.
+- **What counts as a page size**: an integer query parameter whose `maximum` is the `maxItems` of an array in the answer, and of that array. Otherwise, as a last resort, one whose name holds `limit`, `size`, `per_page`, `first` or `top` in any case or separator (`pageSize`, `$top`), which covers the array with the heaviest items in each object: an array of words, or a lighter list beside it, is capped as any other.
+- **Answers can be shorter**: shaping used to stop over budget when a member it left out held another it had counted. It now goes on until the estimate fits.
+- **Recorded prompts**: a snapshot taken before this release may not replay for such a call, as the schema sent differs.
+- **Rust API**: `budget::shape` takes the request's page size as a `budget::PageLimit`, as `budget::requested_limit` reads it from the query schema, the answer's schema and the call.
+
+### An update's answer settles on the stored copy by what the request named
+
+No migration or configuration. For an update (`PUT` or `PATCH`, not an action route) answered by an LLM with the schema of the resource's read, on a stored resource:
+
+- **The stored copy stands, except at a path the request names.** A member of the model's answer wins only if the request body names the same path: `{"properties": {"lifecyclestage": "opportunity"}}` names `properties.lifecyclestage`, and `{"name": "x"}` names `name` but not `owner.name`. The stored copy used to go over the whole answer, which discarded the new values of a nested request. A value the model changes unasked is still dropped.
+- **A request nested differently from its answer gets no benefit from this change.** `{"ticket": {"status": "solved"}}` on a response with a top-level `status`, or `{"status": "solved"}` on one with `ticket.status`, names neither: the stored copy stands, as before.
+- **What the stored copy lacks comes from the answer at the top level**, as before. Below it a member goes in only at a path the request names, so a model's invention, a new map key or a faker's value does not stick.
+- **Identity, path, `readOnly` and owner members never take the answer's value.** An answer showing another owner leaves the stored copy as it was and loses what it added, unless the schema requires that member: then the answer's value stays, as an answer must be valid.
+- **An array goes whole, only at a path the request names, and with the request's value**, as an output budget's cap or an empty answer can cut the answer's. An object or branch under a `oneOf` or `anyOf` goes whole at a path the request names, or not at all.
+- **A null in the answer is ignored unless the request names that path as null**: `{"properties": {"Due": null}}` clears it. A request's null on a member that cannot be null keeps the stored value.
+- **`PATCH` merges the request at any depth**, so `{"a": {"b": 1}}` keeps `a`'s other members. It used to replace `a` when that validated. When the merged object is invalid the request's member goes whole, as a switch of a union's branch needs. `PUT` still replaces `a`, and never removed members it does not name.
+- **An effect on the update's own target** applies when the merged resource validates, as before, and now without what the resource does not declare, a path member, a member the request names at the top level, or what would show another owner. It is how a model states what follows from an update, so it can state a `closed_at` the contract marks `readOnly`, which only the answer cannot change. It can also still set other members, such as a `created_at` or an array.
+
+An update whose answer has another schema, as an `Ack {status, count}` or Zendesk's `{ticket, audit}` has, behaves as before, and so do faker answers, offline mocks, GraphQL, action routes and a catch-up of an update told of earlier requests: the stored copy, then each member of the request whole.
+
+### Deleted records stay deleted
+
+No migration or configuration. With an LLM and `consistency: on`, except on GraphQL:
+
+- **A read of a deleted id is a 404 with no LLM call**, whatever `unknown_ids` says, where `generate` used to invent a replacement. As with `unknown_ids: 404`, it is the contract's 404 if declared, else `application/problem+json`, which such a contract does not describe.
+- **Deleting an id the session never held counts**: the read after it is a 404.
+- **A read naming a seed is a 404 too**: `X-Mockingbird-Seed` on a deleted id used to answer that seed's 200, and no longer does.
+- **A delete holds for its parent's path**: `DELETE /projects/1/tasks/5` says nothing of `/projects/2/tasks/5` or `/projects/2/tasks`, whatever the parameters are called, and removing a user from `/x/1/members/{user_id}` leaves their membership of `/x/2`. A read through another route to the same record, such as a flat `/tasks/5`, is another path and is not marked, so it generates as before.
+- **A mention from another route can bring it back, as before**: after `DELETE /projects/1/tasks/5`, an answer on `/digest` or under `/projects/2`, or a list in project 2, that holds task 5 stores it, and `GET /projects/1/tasks/5` then answers it from state. A mention under the same parent does not.
+- **A generated list drops a deleted id** when the answer stays valid, so a `minItems` can keep it in the answer, though it is not stored. A count beside the list goes down only when the contract declares it an integer and it is named `total`, `count`, `total_count`, `total_results`, `total_items`, `<list>_count` or `total_<list>`, with one such member to choose from.
+- **An update or a create storing that id brings it back**, including a `PATCH` of a deleted id, which generates and stores as it does for any unknown id.
+- **Reads can make extra store calls**: one or two for a read that would generate, and one per item or mention seeded from a generated answer. A served read makes none, and a delete adds a few writes.
+- **Rolling upgrades**: markers are documents of the reserved type `__mockingbird.earlier_requests`, with ids starting `#deleted`. A node of an older release exports and counts them as resources, as it does the write memory's, and does not honour them.
+
+The oldest markers go past 1024 per session, and then what they marked can come back. Offline mocks and `consistency: off` are as they were.
+
+### A member named for its type is its identity
+
+No migration or configuration. A contract whose routes already have an identity is as it was, with the same LLM calls and store calls.
+
+- **What changes:** with no other identity, a member named for the type becomes one: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one: `{id}`, `{userId}`, `{user_id}`. So `/users/{handle}` gets none, and `GET /users/alice` keeps the `user_id` it is answered. A compiled bundle can change, also for offline mocks.
+- **What follows:** the Auth0 example's user is now stored by `POST`, served by `GET`, updated by `PATCH` and marked by `DELETE`.
+- **`unknown_ids: 404` can answer 404 where it generated before**: `GET /accounts/7` over `account_id`, and Auth0's users, as a read now knows it is by id and that the session does not hold it.
+- **Not covered**: a route answering an envelope (`{"user": {...}}`) or an array has no such member, and any other name is not guessed. [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) sets the identity where the contract's names do not give it. Square's, Zendesk's and SendGrid's reads by path and Twilio's lookup are as they were.
+
+### A lookup reads as the type of its items
+
+No migration or configuration. A read whose path has no parameter, whose type has no other route, and every listed array of which holds what one type's `GET` by path answers, now has that type: Auth0's `/users-by-email` is `users`, Zendesk's `/search` is `tickets` and Notion's `/search` is `pages`.
+
+- **It is shown that type's stored records, and stores what it lists under them**, instead of nothing. A prompt can be longer, and a recorded prompt may not replay.
+- **Another shape beside them keeps the route's own type**: `{users: [Hit], tickets: [Ticket]}` would store a hit as a ticket. An array of strings does not count. Items with no declared members do, as they could be anything.
+- **A list under a path parameter (`/teams/{team}/members`) and a read of one record (`/me`) keep their types**, as does a read whose items two types' `GET`s answer. So does a type with another route, or one set by `x-mockingbird-resource`.
+
 ### Action routes act on their parent resource
 
 A `POST <static>/{param}/<verb>` the contract shows acting on its parent ([how that is read](import.md#how-a-post-under-a-resource-is-read)), such as `POST /v1/payment_intents/{intent}/confirm`, used to compile as a create on a resource type named after `<verb>`. It now acts on `<static>`: an update when it answers what `GET <static>/{param}` answers, otherwise a command that stores nothing. Operation ids and routes stay the same. These change:

@@ -28,6 +28,8 @@ use crate::{
     MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
 };
 
+mod deleted;
+mod world;
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -651,7 +653,7 @@ pub(crate) async fn generate_narrowed(
     match prepare(rt, plan, call, response_schema).await {
         Prepared::Answered(answer) => Ok(answer),
         Prepared::Pending(pending) => {
-            generate_pending(rt, plan, call, pending, response_schema).await
+            generate_pending(rt, plan, call, *pending, response_schema).await
         }
     }
 }
@@ -664,6 +666,16 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
+    let guard = pending
+        .target
+        .as_ref()
+        .filter(|_| response_schema.is_none())
+        .map(|held| write_memory::SettleGuard {
+            rt,
+            plan,
+            call,
+            held,
+        });
     let ctx = GenerationContext {
         related: &pending.related,
         target: pending.target.as_ref(),
@@ -672,6 +684,9 @@ pub(crate) async fn generate_pending(
         response_schema,
         earlier_requests: &pending.earlier.told,
         earlier_own_body: pending.earlier.own.as_ref(),
+        earlier_answers: &pending.earlier_answers,
+        earlier_writes: &pending.earlier_writes,
+        update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     if generated.source == Source::Fallback {
@@ -713,7 +728,7 @@ pub(crate) async fn generate_pending(
 /// state a generation must take into account.
 pub(crate) enum Prepared<'a> {
     Answered(GeneratedResponse),
-    Pending(Pending<'a>),
+    Pending(Box<Pending<'a>>),
 }
 
 /// A call to generate, then hand to [`complete`].
@@ -729,6 +744,10 @@ pub(crate) struct Pending<'a> {
     cache: Option<(CacheEpoch, String)>,
     /// The writes the target does not show yet.
     earlier: write_memory::Earlier,
+    /// What routes with no parameters answered earlier in the session.
+    earlier_answers: Vec<Value>,
+    /// What was written to this list read's own path earlier in the session.
+    earlier_writes: Vec<Value>,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -742,6 +761,13 @@ pub(crate) async fn prepare<'a>(
     let op = plan.op;
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
+    state.tracks_deleted = deleted::applies(rt, plan);
+    if state.tracks_deleted {
+        state.call_params = Some(Box::new(OperationCall {
+            path_params: call.path_params.clone(),
+            ..OperationCall::default()
+        }));
+    }
     let resource_type = op.resource_type.as_deref();
     let mut target_id = target_id(op, call);
     // Before any state is read: an answer generated from older state must
@@ -790,6 +816,25 @@ pub(crate) async fn prepare<'a>(
             .await)
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
+    }
+    // Whatever `unknown_ids` says: this one is known to be gone.
+    if matches!(op.kind, OperationKind::Query)
+        && plan.forced_status.is_none()
+        && target.is_none()
+        && state.tracks_deleted
+        && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+        && deleted::is_deleted(
+            &mut state,
+            session,
+            t,
+            deleted::scope(op, call).as_deref(),
+            id,
+        )
+        .await
+    {
+        let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
     }
@@ -888,7 +933,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    async {
+    let (earlier_answers, earlier_writes) = async {
         parents_by_name(
             &mut state,
             session,
@@ -896,6 +941,15 @@ pub(crate) async fn prepare<'a>(
             call,
             target.as_ref(),
             &mut followed,
+            &mut related,
+        )
+        .await;
+        world::named_by_value(
+            &mut state,
+            plan,
+            call,
+            target.as_ref(),
+            &followed,
             &mut related,
         )
         .await;
@@ -910,11 +964,15 @@ pub(crate) async fn prepare<'a>(
                 }
             }
         }
+        (
+            world::recall_answers(&mut state, plan).await,
+            write_memory::recall_route(&mut state, plan, call).await,
+        )
     }
     .instrument(state_span())
     .await;
 
-    Prepared::Pending(Pending {
+    Prepared::Pending(Box::new(Pending {
         state,
         target_id,
         target,
@@ -922,7 +980,9 @@ pub(crate) async fn prepare<'a>(
         foreign_key,
         cache: since.zip(key),
         earlier,
-    })
+        earlier_answers,
+        earlier_writes,
+    }))
 }
 
 /// Writes a generated answer's state (a 2xx command's resource, a list
@@ -957,6 +1017,18 @@ pub(crate) async fn complete(
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
+            if is_query && target_id.is_none() && state.tracks_deleted {
+                let scope = deleted::scope(op, call);
+                deleted::drop_from_list(
+                    &mut state,
+                    session,
+                    plan,
+                    t,
+                    scope.as_deref(),
+                    &mut generated,
+                )
+                .await;
+            }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
@@ -1002,9 +1074,17 @@ pub(crate) async fn complete(
                         request_body: call.body.as_ref(),
                         collection: collection.clone(),
                         origin,
+                        held: target.is_some() && !generated.new_record,
                     },
                 )
                 .await;
+                if op.kind == OperationKind::Command(Effect::Delete)
+                    && state.tracks_deleted
+                    && !foreign_key
+                    && let Some(id) = target_id.as_deref()
+                {
+                    deleted::mark(&mut state, session, op, call, t, id).await;
+                }
             }
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
@@ -1078,7 +1158,20 @@ pub(crate) async fn complete(
         }
         // Last: an effect on what this call just stored sees it.
         if rt.consistency && (200..300).contains(&generated.status) {
-            let outcomes = apply_effects(&mut state, session, rt, &generated.effects).await;
+            // An effect on an update's own target goes on what was just stored, under
+            // the protections the answer has.
+            let own = resource_type
+                .zip(acted_on.as_deref())
+                .filter(|_| op.kind == OperationKind::Command(Effect::Update) && !op.is_action());
+            let outcomes = apply_effects(
+                &mut state,
+                session,
+                rt,
+                &generated.effects,
+                own,
+                (plan, call),
+            )
+            .await;
             generated.effect_outcomes.extend(outcomes);
             if generated.dropped_effects > 0 {
                 metrics::counter!(
@@ -1105,6 +1198,16 @@ pub(crate) async fn complete(
             },
         )
         .await;
+        write_memory::after_route_write(
+            &mut state,
+            plan,
+            call,
+            &generated,
+            foreign_key || unstored,
+        )
+        .await;
+        world::after_answer(&mut state, plan, call, &generated).await;
+        world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
     }
     .instrument(state_span())
@@ -1189,16 +1292,20 @@ fn log_capped(text: &str) -> String {
 
 /// Applies what an answer says it changed in other resources, in this session
 /// only, and counts each effect. A rejected effect costs itself: the answer is
-/// served and the next effect still applies.
+/// served and the next effect still applies. One on `own`, the (type, id) an update
+/// just stored, keeps only what [`write_memory::own_effect_members`] allows.
 async fn apply_effects(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     effects: &[ResourceEffect],
+    own: Option<(&str, &str)>,
+    source: (&CallPlan<'_>, &OperationCall),
 ) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::with_capacity(effects.len());
     for effect in effects {
-        let result = apply_effect(state, session, rt, effect).await;
+        let on_own = own == Some((effect.resource_type.as_str(), effect.id.as_str()));
+        let result = apply_effect(state, session, rt, effect, on_own.then_some(source)).await;
         tracing::info!(
             mock = %rt.name,
             resource_type = %log_capped(&effect.resource_type),
@@ -1266,6 +1373,7 @@ async fn apply_effect(
     session: &SessionKey,
     rt: &MockRuntime,
     effect: &ResourceEffect,
+    own: Option<(&CallPlan<'_>, &OperationCall)>,
 ) -> Result<Value, &'static str> {
     let t = effect.resource_type.as_str();
     let index = rt.index();
@@ -1287,7 +1395,19 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
-    data.extend(effect.set.clone());
+    let requested = mb_engine::effect_without_redacted(&held.data, &effect.set);
+    if requested.is_empty() && !effect.set.is_empty() {
+        return Err("it sets only what was redacted");
+    }
+    if let Some((plan, call)) = own {
+        let set = write_memory::own_effect_members(rt, plan, call, &held, &requested);
+        if set.is_empty() {
+            return Err("it sets no member an effect on this update's target may");
+        }
+        data.extend(set);
+    } else {
+        data.extend(requested);
+    }
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
     }
@@ -1490,6 +1610,21 @@ pub(crate) struct BundleIndex {
     /// Per resource type, the types whose answers have a reference field of
     /// it (see [`reference_targets`]), sorted and deduplicated.
     referrers: HashMap<String, Vec<String>>,
+    /// The types an effect can name, those with a read to check against, sorted.
+    effect_types: Vec<String>,
+    /// Per path with no parameters whose `GET` answers a single object (see
+    /// [`answers_a_list`]), that operation's position.
+    single_reads: HashMap<String, usize>,
+    /// Per path a command and a list read by no path parameter share, that list.
+    written_lists: HashMap<String, WrittenList>,
+}
+
+/// A list read whose path also takes writes.
+#[derive(Debug, Clone)]
+struct WrittenList {
+    resource_type: String,
+    /// The schema of its items: all of a write's body that it is told.
+    items: Value,
 }
 
 impl BundleIndex {
@@ -1556,6 +1691,11 @@ impl BundleIndex {
         // `offers` of a flight search are offers.
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
+        let (single_reads, written_lists) = routes_of(bundle, &read_types, &list_members_of);
+        let mut effect_types: Vec<String> =
+            detail_reads.keys().chain(shapes.keys()).cloned().collect();
+        effect_types.sort_unstable();
+        effect_types.dedup();
         #[cfg(any(test, feature = "events"))]
         let mut channel_by_id = HashMap::with_capacity(bundle.channels.len());
         #[cfg(any(test, feature = "events"))]
@@ -1586,6 +1726,9 @@ impl BundleIndex {
                 .map(|(t, (_, i, schema))| (t, (i, schema)))
                 .collect(),
             referrers,
+            effect_types,
+            single_reads,
+            written_lists,
         }
     }
 
@@ -1619,6 +1762,73 @@ impl BundleIndex {
     fn referrers(&self, resource_type: &str) -> &[String] {
         self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
     }
+}
+
+/// What routes the contract's operations share: see [`BundleIndex::single_reads`] and
+/// [`BundleIndex::written_lists`].
+fn routes_of(
+    bundle: &mb_mcm::Bundle,
+    read_types: &HashSet<String>,
+    members_of: &[Vec<String>],
+) -> (HashMap<String, usize>, HashMap<String, WrittenList>) {
+    let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
+    let mut lists: HashMap<&str, WrittenList> = HashMap::new();
+    for (i, op) in bundle.operations.iter().enumerate() {
+        let Binding::Http { method, path } = &op.binding else {
+            continue;
+        };
+        if !matches!(op.kind, OperationKind::Query) || *method != mb_mcm::HttpMethod::Get {
+            continue;
+        }
+        let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
+        let items = listed_items(bundle, op, read_types, members);
+        if let (Some(items), Some(t), true) = (
+            &items,
+            op.resource_type.as_deref(),
+            op.identity.as_ref().is_none_or(|i| i.path_param.is_none()),
+        ) {
+            let list = WrittenList {
+                resource_type: t.to_string(),
+                items: items.clone(),
+            };
+            lists.insert(path.as_str(), list);
+        }
+        let parameters = path.contains('{') || op.input.path.is_some() || op.input.query.is_some();
+        if items.is_none() && !parameters && op.success_output().is_some_and(|o| o.schema.is_some())
+        {
+            single_reads.insert(path.clone(), i);
+        }
+    }
+    for op in &bundle.operations {
+        if let (OperationKind::Command(_), Binding::Http { path, .. }) = (&op.kind, &op.binding)
+            && let Some(list) = lists.get(path.as_str())
+        {
+            written_lists.insert(path.clone(), list.clone());
+        }
+    }
+    (single_reads, written_lists)
+}
+
+/// The item schema of `op`'s success answer when it is a list: an array, or an object
+/// holding one in an envelope's member or under a member that is itself a type read. An
+/// object that only has a list among its members (a profile's `images`) is a single object.
+fn listed_items(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    read_types: &HashSet<String>,
+    members: &[String],
+) -> Option<Value> {
+    list_item_schemas(bundle, op, members)
+        .into_iter()
+        .find(|(member, _)| {
+            member.as_deref().is_none_or(|m| {
+                ENVELOPE_KEYS.contains(&m)
+                    || op.resource_type.as_deref() == Some(m)
+                    || read_types.contains(m)
+                    || read_types.contains(&format!("{m}s"))
+            })
+        })
+        .map(|(_, items)| items)
 }
 
 /// Records in `referrers` the types the fields of `op`'s answers (as type
@@ -2057,6 +2267,44 @@ fn renumber_urls(value: &mut Value, old: &str, new: &str) {
     }
 }
 
+/// Sessions [`WrittenTypes`] holds at most; it is emptied when full.
+const MAX_WRITTEN_SESSIONS: usize = 1024;
+/// Types [`WrittenTypes`] holds per session at most, the latest.
+const MAX_WRITTEN_TYPES: usize = 32;
+
+/// Which types each session last wrote through this runtime, latest first. Only an
+/// order of looking (see [`world::named_by_value`]): a contract can have more types than
+/// a call may read, and what the session wrote is what it refers to. A session written
+/// to elsewhere (the Admin API, another node) is looked up in the contract's order.
+#[derive(Debug, Default)]
+pub(crate) struct WrittenTypes(std::sync::Mutex<HashMap<SessionKey, Vec<String>>>);
+
+impl WrittenTypes {
+    fn remember(&self, session: &SessionKey, t: &str) {
+        let Ok(mut written) = self.0.lock() else {
+            return;
+        };
+        if written.len() >= MAX_WRITTEN_SESSIONS && !written.contains_key(session) {
+            written.clear();
+        }
+        let types = written.entry(session.clone()).or_default();
+        if types.first().is_some_and(|first| first == t) {
+            return;
+        }
+        types.retain(|held| held != t);
+        types.insert(0, t.to_string());
+        types.truncate(MAX_WRITTEN_TYPES);
+    }
+
+    fn of(&self, session: &SessionKey) -> Vec<String> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|written| written.get(session).cloned())
+            .unwrap_or_default()
+    }
+}
+
 /// Fields that identify a wrapped created object, in order: Slack's
 /// message is keyed by `ts`, Twilio's resources by `sid`.
 const WRAPPED_IDS: [&str; 4] = ["id", "ts", "sid", "uuid"];
@@ -2101,9 +2349,12 @@ async fn store_wrapped(
         };
         if own {
             let stored = resource.clone();
-            if state.upsert(session, resource).await
-                && let Some(collection) = collection
-            {
+            let took = state.upsert(session, resource).await;
+            if took && state.tracks_deleted {
+                let scope = collection.map(|c| c.path.as_str());
+                deleted::clear(state, session, &stored.resource_type, scope, &stored.id).await;
+            }
+            if took && let Some(collection) = collection {
                 rt.collections()
                     .remember(session, &stored, collection.clone());
             }
@@ -2112,7 +2363,17 @@ async fn store_wrapped(
             && entity_fits(rt, &resource.resource_type, &resource.data)
         {
             if unkeyed {
-                state.upsert(session, resource).await;
+                let gone = state.tracks_deleted
+                    && deleted::mention_is_deleted(
+                        state,
+                        session,
+                        &resource.resource_type,
+                        &resource.id,
+                    )
+                    .await;
+                if !gone {
+                    state.upsert(session, resource).await;
+                }
             } else {
                 state.insert_seeded(session, resource).await;
             }
@@ -3362,6 +3623,10 @@ pub(crate) struct StateAccess<'a> {
     read: bool,
     /// A write succeeded; writes refresh the session themselves.
     wrote: bool,
+    /// This call keeps and honours deleted markers (see [`deleted`]).
+    tracks_deleted: bool,
+    /// The path parameters of the call, for the parent of what it mentions.
+    call_params: Option<Box<OperationCall>>,
 }
 
 /// Whether this call may use the store.
@@ -3381,6 +3646,8 @@ impl<'a> StateAccess<'a> {
             gate: Gate::Unasked,
             read: false,
             wrote: false,
+            tracks_deleted: false,
+            call_params: None,
         }
     }
 
@@ -3458,9 +3725,13 @@ impl<'a> StateAccess<'a> {
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let t = r.resource_type.clone();
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
+        if ok && t != mb_state::INTERNAL_TYPE {
+            rt.written_types().remember(s, &t);
+        }
         if ok && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }
@@ -3478,18 +3749,27 @@ impl<'a> StateAccess<'a> {
         ok
     }
 
-    /// Stores a seeded resource unless one is stored under its id; `true`
-    /// when stored.
+    /// Stores a seeded resource unless one is stored under its id or it was
+    /// deleted; `true` when stored.
     pub(crate) async fn insert_seeded(&mut self, s: &SessionKey, r: StoredResource) -> bool {
         if !self.open() {
+            return false;
+        }
+        if self.tracks_deleted
+            && deleted::mention_is_deleted(self, s, &r.resource_type, &r.id).await
+        {
             return false;
         }
         let rt = self.rt;
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+        let t = r.resource_type.clone();
         let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
         self.wrote |= stored;
+        if stored {
+            rt.written_types().remember(s, &t);
+        }
         if stored && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
         }
@@ -3907,6 +4187,8 @@ struct WriteRequest<'a> {
     /// Where the path puts what this writes (see [`collection_of`]).
     collection: Option<Collection>,
     origin: WriteOrigin,
+    /// The session held what this writes to, so it cannot be marked deleted.
+    held: bool,
 }
 
 /// Writes a 2xx answer to state: a call's create, update or delete, or
@@ -3922,6 +4204,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         request_body,
         collection,
         origin,
+        held: was_held,
     } = w;
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
@@ -3937,6 +4220,17 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             let Some(id) = item.get(&field).and_then(id_string) else {
                 continue;
             };
+            // Marked under this list's parent; a mention is seen to on insert.
+            if state.tracks_deleted {
+                let parent = state
+                    .call_params
+                    .as_ref()
+                    .and_then(|call| deleted::scope(op, call));
+                if deleted::is_deleted(state, session, resource_type, parent.as_deref(), &id).await
+                {
+                    continue;
+                }
+            }
             let resource = StoredResource {
                 resource_type: resource_type.into(),
                 id: id.clone(),
@@ -3997,6 +4291,10 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 _ => None,
             };
             if state.upsert(session, resource).await {
+                if state.tracks_deleted && !was_held {
+                    let scope = collection.as_ref().map(|c| c.path.as_str());
+                    deleted::clear(state, session, resource_type, scope, &stored.id).await;
+                }
                 match (collection, held) {
                     (Some(collection), _) => {
                         rt.collections().remember(session, &stored, collection)
