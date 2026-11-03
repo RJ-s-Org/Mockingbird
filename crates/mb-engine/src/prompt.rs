@@ -46,9 +46,9 @@ resources (same ids and field values) and, for create or update operations, with
 /// [`CONSISTENT`] for a call that acts on a resource it was shown: models told
 /// to keep the same values otherwise answer with its old status.
 const ACTS_ON_TARGET: &str = "This call acts on the API: the response shows the state after it, \
-which usually differs from <existing_resource> (an action moves a status on). What the call does \
-not change stays as it is in the existing and related resources (same ids, same values), and the \
-response stays consistent with the request body.";
+which usually differs from <existing_resource>. What the call does not change stays as it is in \
+the existing and related resources (same ids, same values), and the response stays consistent \
+with the request body.";
 
 /// [`ACTS_ON_TARGET`] for an action answering its target's own schema (see
 /// [`decides_id`]), which the runtime stores by the id the answer carries.
@@ -64,6 +64,15 @@ response stays consistent with the request body.";
 /// same values answers with the old ones.
 const EARLIER_REQUESTS: &str = "These requests succeeded after the resources above were stored, \
 oldest first: the response must reflect them, even where those resources say otherwise.";
+
+/// What <earlier_answers> is: what the API said then, not what must stand now.
+const EARLIER_ANSWERS: &str = "What this API said earlier in the session, on routes with no \
+parameters. It may have changed since: where nothing says otherwise, use the same ids, names and \
+values.";
+
+/// What <earlier_writes> is: told, not owed, as nothing else says they still hold.
+const EARLIER_WRITES: &str = "Requests that succeeded earlier on this route, oldest first. They may \
+have changed what it answers, and that may have changed since.";
 
 /// The system and user messages of one generation of `status` for `call`,
 /// with `schema` the body schema the answer must match.
@@ -181,6 +190,9 @@ fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) 
         response_schema: None,
         earlier_requests: &[],
         earlier_own_body: None,
+        earlier_answers: &[],
+        earlier_writes: &[],
+        update_guard: None,
     };
     let mut s = user_message(call, &unary, false, None, false);
     if !ctx.request_stream.is_empty() {
@@ -300,9 +312,11 @@ fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Optio
 }
 
 /// The user message of a generation; `acting` says the call acts on stored
-/// state (see [`acts`]), so its answer is not the state it was shown, and
-/// `verb` that it is a success of that action (see [`action_verb`]): models
-/// shown a resource an action could not apply to otherwise keep it as it was.
+/// state (see [`acts`]), so its answer is not the state it was shown; `verb`
+/// is the action route it is a success of (see [`action_verb`]), and
+/// `decides_id` that it may instead have made a new record (see
+/// [`decides_id`]). An action is never told a status moved: not every action
+/// moves one, and models told so invented one.
 fn user_message(
     call: &OperationCall,
     ctx: &GenerationContext<'_>,
@@ -324,23 +338,13 @@ inside them."
         (true, false) => ACTS,
     };
     let mut s = format!("{trust} {consistency}");
-    match verb {
-        Some(verb) if decides_id => {
-            let _ = write!(
-                s,
-                " This is a successful `{verb}`. Decide which it did: it changed \
+    if let (Some(verb), true) = (verb, decides_id) {
+        let _ = write!(
+            s,
+            " This is a successful `{verb}`. Decide which it did: it changed \
 <existing_resource>, so keep its id and show the state after it; or it made a new one of the same \
 kind, so give that a new id of its own and leave <existing_resource> as it is."
-            );
-        }
-        Some(verb) => {
-            let _ = write!(
-                s,
-                " This is a successful `{verb}`: the call succeeded, so the resource has moved to the \
-state that follows `{verb}`, whatever it needed before."
-            );
-        }
-        None => {}
+        );
     }
     s.push_str("\n\n");
     now_line(&mut s);
@@ -381,8 +385,28 @@ must follow them.\n{}\n</scenario>",
         }
         s.push_str("</related_resources>\n");
     }
+    data_block(
+        &mut s,
+        EARLIER_ANSWERS,
+        "earlier_answers",
+        ctx.earlier_answers,
+    );
+    data_block(&mut s, EARLIER_WRITES, "earlier_writes", ctx.earlier_writes);
     earlier_requests_block(&mut s, ctx.earlier_requests);
     s
+}
+
+/// `items` under a preface in their own block, nothing with none. After the rest, so the
+/// prompt before it is what it would be without them.
+fn data_block(s: &mut String, preface: &str, tag: &str, items: &[Value]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = writeln!(s, "{preface}\n<{tag}>");
+    for item in items {
+        let _ = writeln!(s, "{}", data(item));
+    }
+    let _ = writeln!(s, "</{tag}>");
 }
 
 /// The writes that the resources shown do not hold yet, oldest first. Last, so
@@ -429,7 +453,7 @@ pub(crate) fn effects_note(op: &Operation, status: u16, ctx: &GenerationContext<
         let _ = write!(
             s,
             "\nThe response is not <existing_resource>, so it changes only through \"effects\": \
-they must include what `{verb}` changes on it, as {{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
+they include what `{verb}` changes on it, if it changes anything, as {{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
             data(&Value::from(target.resource_type.as_str())),
             data(&Value::from(target.id.as_str())),
         );

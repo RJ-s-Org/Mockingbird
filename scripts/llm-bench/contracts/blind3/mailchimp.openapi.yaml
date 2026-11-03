@@ -1,0 +1,546 @@
+openapi: 3.0.3
+info:
+  title: Mailchimp Marketing API 3.0 (audiences, members, tags and search)
+  version: "3.0"
+  description: |
+    A subset of the Mailchimp Marketing API: audiences (called lists in the API),
+    their members, member tags, and member search. Requests use HTTP basic auth with
+    any user name and the API key as the password.
+
+    A member is addressed by its subscriber hash, the MD5 hash of the lowercase
+    email address, which is also the member's `id`. `PUT` on a member adds it when
+    the address is new (with `status_if_new`) and updates it otherwise. `DELETE`
+    archives a member: it stays readable with `status: archived`. The
+    `delete-permanent` action erases it for good; it can then no longer be read.
+
+    Collections take `count` (default 10, at most 1000) and `offset` and report
+    `total_items`, the number of items that match regardless of paging. Errors are
+    `application/problem+json`.
+servers:
+  - url: https://us21.api.mailchimp.com
+security:
+  - basicAuth: []
+tags:
+  - name: lists
+  - name: members
+  - name: search
+paths:
+  /3.0/lists:
+    get:
+      tags: [lists]
+      operationId: getLists
+      summary: Get lists info
+      parameters:
+        - $ref: '#/components/parameters/Fields'
+        - $ref: '#/components/parameters/Count'
+        - $ref: '#/components/parameters/Offset'
+        - name: email
+          in: query
+          description: Restrict results to lists that include a specific subscriber's email address.
+          schema: {type: string, format: email}
+      responses:
+        '200':
+          description: The audiences.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [lists, total_items]
+                properties:
+                  lists:
+                    type: array
+                    items: {$ref: '#/components/schemas/List'}
+                  total_items: {type: integer, minimum: 0}
+        default: {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [lists]
+      operationId: createList
+      summary: Add a list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ListRequest'}
+      responses:
+        '200':
+          description: The created audience.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/List'}
+        default: {$ref: '#/components/responses/Problem'}
+  /3.0/lists/{list_id}:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+    get:
+      tags: [lists]
+      operationId: getList
+      summary: Get list info
+      parameters:
+        - $ref: '#/components/parameters/Fields'
+      responses:
+        '200':
+          description: The audience.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/List'}
+        default: {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [lists]
+      operationId: updateList
+      summary: Update list settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ListRequest'}
+      responses:
+        '200':
+          description: The updated audience.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/List'}
+        default: {$ref: '#/components/responses/Problem'}
+    delete:
+      tags: [lists]
+      operationId: deleteList
+      summary: Delete list
+      responses:
+        '204': {description: The audience was deleted.}
+        default: {$ref: '#/components/responses/Problem'}
+  /3.0/lists/{list_id}/members:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+    get:
+      tags: [members]
+      operationId: getListMembers
+      summary: List members info
+      parameters:
+        - $ref: '#/components/parameters/Fields'
+        - $ref: '#/components/parameters/Count'
+        - $ref: '#/components/parameters/Offset'
+        - name: status
+          in: query
+          description: The subscriber's status.
+          schema: {$ref: '#/components/schemas/MemberStatus'}
+        - name: email_type
+          in: query
+          schema: {type: string, enum: [html, text]}
+        - name: since_last_changed
+          in: query
+          schema: {type: string, format: date-time}
+        - name: vip_only
+          in: query
+          schema: {type: boolean}
+      responses:
+        '200':
+          description: The members that match, one page of them.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members, list_id, total_items]
+                properties:
+                  members:
+                    type: array
+                    items: {$ref: '#/components/schemas/Member'}
+                  list_id: {type: string}
+                  total_items: {type: integer, minimum: 0}
+        default: {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [members]
+      operationId: addListMember
+      summary: Add member to list
+      parameters:
+        - name: skip_merge_validation
+          in: query
+          schema: {type: boolean}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/MemberFields'
+                - type: object
+                  required: [email_address, status]
+                  properties:
+                    email_address: {type: string, format: email}
+                    status: {$ref: '#/components/schemas/MemberStatusWrite'}
+      responses:
+        '200':
+          description: The added member.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Member'}
+        default: {$ref: '#/components/responses/Problem'}
+  /3.0/lists/{list_id}/members/{subscriber_hash}:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+      - $ref: '#/components/parameters/SubscriberHash'
+    get:
+      tags: [members]
+      operationId: getListMember
+      summary: Get member info
+      parameters:
+        - $ref: '#/components/parameters/Fields'
+      responses:
+        '200':
+          description: The member.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Member'}
+        default: {$ref: '#/components/responses/Problem'}
+    patch:
+      tags: [members]
+      operationId: updateListMember
+      summary: Update list member
+      description: Changes only the fields given; `merge_fields` changes only the merge fields given.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/MemberFields'
+                - type: object
+                  properties:
+                    status: {$ref: '#/components/schemas/MemberStatusWrite'}
+      responses:
+        '200':
+          description: The updated member.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Member'}
+        default: {$ref: '#/components/responses/Problem'}
+    put:
+      tags: [members]
+      operationId: setListMember
+      summary: Add or update list member
+      description: Adds the member with `status_if_new` when the address is not in the audience yet, else updates it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/MemberFields'
+                - type: object
+                  required: [email_address, status_if_new]
+                  properties:
+                    email_address: {type: string, format: email}
+                    status_if_new: {$ref: '#/components/schemas/MemberStatusWrite'}
+                    status: {$ref: '#/components/schemas/MemberStatusWrite'}
+      responses:
+        '200':
+          description: The added or updated member.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Member'}
+        default: {$ref: '#/components/responses/Problem'}
+    delete:
+      tags: [members]
+      operationId: archiveListMember
+      summary: Archive list member
+      responses:
+        '204': {description: The member was archived.}
+        default: {$ref: '#/components/responses/Problem'}
+  /3.0/lists/{list_id}/members/{subscriber_hash}/actions/delete-permanent:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+      - $ref: '#/components/parameters/SubscriberHash'
+    post:
+      tags: [members]
+      operationId: deleteListMemberPermanent
+      summary: Delete list member
+      description: Erases the member and its data for good. The address cannot be re-imported.
+      responses:
+        '204': {description: The member was erased.}
+        default: {$ref: '#/components/responses/Problem'}
+  /3.0/lists/{list_id}/members/{subscriber_hash}/tags:
+    parameters:
+      - $ref: '#/components/parameters/ListId'
+      - $ref: '#/components/parameters/SubscriberHash'
+    get:
+      tags: [members]
+      operationId: getListMemberTags
+      summary: List member tags
+      parameters:
+        - $ref: '#/components/parameters/Fields'
+        - $ref: '#/components/parameters/Count'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: The member's tags.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tags, total_items]
+                properties:
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, date_added]
+                      properties:
+                        id: {type: integer}
+                        name: {type: string}
+                        date_added: {type: string, format: date-time}
+                  total_items: {type: integer, minimum: 0}
+        default: {$ref: '#/components/responses/Problem'}
+    post:
+      tags: [members]
+      operationId: updateListMemberTags
+      summary: Add or remove member tags
+      description: A tag with status `active` is added to the member, one with `inactive` removed. A new tag name creates the tag.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags]
+              properties:
+                tags:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, status]
+                    properties:
+                      name: {type: string, minLength: 1, maxLength: 100}
+                      status: {type: string, enum: [active, inactive]}
+                is_syncing: {type: boolean}
+      responses:
+        '204': {description: The tags were changed.}
+        default: {$ref: '#/components/responses/Problem'}
+  /3.0/search-members:
+    get:
+      tags: [search]
+      operationId: searchMembers
+      summary: Search members
+      description: Members whose email or name match the query, in all audiences or in the one given.
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: The search query used to filter results. A full email address gives exact matches.
+          schema: {type: string, minLength: 1}
+        - name: list_id
+          in: query
+          description: The unique id for the list.
+          schema: {type: string}
+        - $ref: '#/components/parameters/Fields'
+      responses:
+        '200':
+          description: Exact and partial matches.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [exact_matches, full_search]
+                properties:
+                  exact_matches:
+                    type: object
+                    required: [members, total_items]
+                    properties:
+                      members:
+                        type: array
+                        items: {$ref: '#/components/schemas/Member'}
+                      total_items: {type: integer, minimum: 0}
+                  full_search:
+                    type: object
+                    required: [members, total_items]
+                    properties:
+                      members:
+                        type: array
+                        items: {$ref: '#/components/schemas/Member'}
+                      total_items: {type: integer, minimum: 0}
+        default: {$ref: '#/components/responses/Problem'}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+  parameters:
+    ListId:
+      name: list_id
+      in: path
+      required: true
+      description: The unique id for the list.
+      schema: {type: string}
+    SubscriberHash:
+      name: subscriber_hash
+      in: path
+      required: true
+      description: The MD5 hash of the lowercase version of the member's email address.
+      schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+    Fields:
+      name: fields
+      in: query
+      description: A comma-separated list of fields to return. Dot notation for sub-objects.
+      schema: {type: string}
+    Count:
+      name: count
+      in: query
+      description: The number of records to return.
+      schema: {type: integer, minimum: 1, maximum: 1000, default: 10}
+    Offset:
+      name: offset
+      in: query
+      description: The number of records to skip.
+      schema: {type: integer, minimum: 0, default: 0}
+  responses:
+    Problem:
+      description: An error.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, detail, instance]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string, example: Resource Not Found}
+        status: {type: integer, example: 404}
+        detail: {type: string}
+        instance: {type: string}
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: {type: string}
+              message: {type: string}
+    MemberStatusWrite:
+      type: string
+      enum: [subscribed, unsubscribed, cleaned, pending, transactional]
+    MemberStatus:
+      type: string
+      enum: [subscribed, unsubscribed, cleaned, pending, transactional, archived]
+    Contact:
+      type: object
+      required: [company, address1, city, state, zip, country]
+      properties:
+        company: {type: string}
+        address1: {type: string}
+        address2: {type: string}
+        city: {type: string}
+        state: {type: string}
+        zip: {type: string}
+        country: {type: string, description: A two-letter ISO 3166 country code.}
+        phone: {type: string}
+    CampaignDefaults:
+      type: object
+      required: [from_name, from_email, subject, language]
+      properties:
+        from_name: {type: string}
+        from_email: {type: string, format: email}
+        subject: {type: string}
+        language: {type: string}
+    ListRequest:
+      type: object
+      required: [name, contact, permission_reminder, campaign_defaults, email_type_option]
+      properties:
+        name: {type: string, minLength: 1}
+        contact: {$ref: '#/components/schemas/Contact'}
+        permission_reminder: {type: string}
+        use_archive_bar: {type: boolean}
+        campaign_defaults: {$ref: '#/components/schemas/CampaignDefaults'}
+        notify_on_subscribe: {type: string, format: email}
+        notify_on_unsubscribe: {type: string, format: email}
+        email_type_option: {type: boolean, description: Whether members may pick HTML or plain-text email.}
+        double_optin: {type: boolean, default: false}
+        marketing_permissions: {type: boolean}
+    List:
+      type: object
+      required: [id, web_id, name, contact, permission_reminder, campaign_defaults, email_type_option,
+                 date_created, double_optin, stats]
+      properties:
+        id: {type: string}
+        web_id: {type: integer}
+        name: {type: string}
+        contact: {$ref: '#/components/schemas/Contact'}
+        permission_reminder: {type: string}
+        use_archive_bar: {type: boolean}
+        campaign_defaults: {$ref: '#/components/schemas/CampaignDefaults'}
+        email_type_option: {type: boolean}
+        double_optin: {type: boolean}
+        date_created: {type: string, format: date-time}
+        list_rating: {type: integer, minimum: 0, maximum: 5}
+        subscribe_url_short: {type: string, format: uri}
+        visibility: {type: string, enum: [pub, prv]}
+        stats:
+          type: object
+          properties:
+            member_count: {type: integer, minimum: 0}
+            unsubscribe_count: {type: integer, minimum: 0}
+            cleaned_count: {type: integer, minimum: 0}
+            last_sub_date: {type: string}
+    MemberFields:
+      type: object
+      properties:
+        email_address: {type: string, format: email}
+        email_type: {type: string, enum: [html, text]}
+        merge_fields:
+          type: object
+          description: Values of the audience's merge fields, keyed by tag, such as FNAME and LNAME.
+          additionalProperties: true
+        interests:
+          type: object
+          additionalProperties: {type: boolean}
+        language: {type: string}
+        vip: {type: boolean}
+        location:
+          type: object
+          properties:
+            latitude: {type: number}
+            longitude: {type: number}
+        tags:
+          type: array
+          description: Tag names to add, on create only.
+          items: {type: string}
+    Member:
+      type: object
+      required: [id, email_address, unique_email_id, contact_id, full_name, web_id, email_type, status,
+                 merge_fields, vip, list_id, timestamp_opt, last_changed, tags_count, tags]
+      properties:
+        id: {type: string, pattern: '^[0-9a-f]{32}$', description: The MD5 hash of the lowercase email address.}
+        email_address: {type: string, format: email}
+        unique_email_id: {type: string}
+        contact_id: {type: string}
+        full_name: {type: string}
+        web_id: {type: integer}
+        email_type: {type: string, enum: [html, text]}
+        status: {$ref: '#/components/schemas/MemberStatus'}
+        merge_fields:
+          type: object
+          additionalProperties: true
+        interests:
+          type: object
+          additionalProperties: {type: boolean}
+        stats:
+          type: object
+          properties:
+            avg_open_rate: {type: number, minimum: 0, maximum: 1}
+            avg_click_rate: {type: number, minimum: 0, maximum: 1}
+        ip_signup: {type: string}
+        timestamp_signup: {type: string}
+        ip_opt: {type: string}
+        timestamp_opt: {type: string}
+        member_rating: {type: integer, minimum: 0, maximum: 5}
+        last_changed: {type: string, format: date-time}
+        language: {type: string}
+        vip: {type: boolean}
+        email_client: {type: string}
+        source: {type: string}
+        tags_count: {type: integer, minimum: 0}
+        tags:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: {type: integer}
+              name: {type: string}
+        list_id: {type: string}

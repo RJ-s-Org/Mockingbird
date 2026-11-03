@@ -527,6 +527,14 @@ async fn read(api: &Actions, uri: &str) -> (String, Value) {
     (source, body)
 }
 
+/// A read of something deleted answers 404, with no LLM call.
+async fn assert_gone(api: &Actions, uri: &str) {
+    let calls = api.provider.requests().len();
+    let (status, _, body) = api.call("GET", uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+    assert_eq!(api.provider.requests().len(), calls, "{uri} asked the LLM");
+}
+
 /// A customer an order's answer mentions is read back as it was answered,
 /// with no further LLM call.
 #[tokio::test]
@@ -575,14 +583,12 @@ async fn a_delete_answer_does_not_seed_what_it_deleted() {
         vec![
             order("o1", json!({"id": "c1", "name": "Ana"})),
             Ok(json!({"customer": {"id": "c1", "name": "Ana"}}).to_string()),
-            Ok(json!({"id": "c1", "name": "Generated"}).to_string()),
         ],
     );
     read(&api, "/orders/o1").await;
     let (status, _, _) = api.call("DELETE", "/customers/c1", None).await;
     assert_eq!(status, StatusCode::OK);
-    let (source, _) = read(&api, "/customers/c1").await;
-    assert_eq!(source, "llm");
+    assert_gone(&api, "/customers/c1").await;
 }
 
 /// A create mentioning a stored customer leaves that customer as it was.
@@ -737,6 +743,7 @@ paths:
   /deep:
     get:
       operationId: deep
+      parameters: [{name: view, in: query, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {type: object}}}}
 components:
@@ -1204,16 +1211,13 @@ async fn a_deleted_issue_stays_gone_after_a_read_and_a_list() {
             Ok(issue.to_string()),
             Ok(json!([issue]).to_string()),
             Ok(issue.to_string()),
-            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
         ],
     );
     read(&api, "/issues/5").await;
     read(&api, "/issues").await;
     let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
     assert!(status.is_success(), "{status}");
-    let (source, body) = read(&api, "/issues/5").await;
-    assert_ne!(source, "state", "deleted issue read back: {body}");
-    assert_eq!(body["title"], "regenerated");
+    assert_gone(&api, "/issues/5").await;
 }
 
 /// A read by number is not stored: its answer's `id` cannot make it another
@@ -1243,14 +1247,12 @@ async fn a_read_by_number_leaves_nothing_after_a_delete() {
         vec![
             Ok(issue.to_string()),
             Ok(json!({"id": 999, "deleted": true}).to_string()),
-            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
         ],
     );
     read(&api, "/issues/5").await;
     let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
     assert!(status.is_success(), "{status}");
-    let (source, body) = read(&api, "/issues/5").await;
-    assert_ne!(source, "state", "deleted issue read back: {body}");
+    assert_gone(&api, "/issues/5").await;
 }
 
 /// An action's record takes the path value in the member named for its
@@ -3405,27 +3407,19 @@ ids and field values) and, for create or update operations, with the request bod
         instructions(&h, 1),
         format!(
             "{TRUST} This call acts on the API: the response shows the state after it, which \
-usually differs from <existing_resource> (an action moves a status on). What the call does not \
-change stays as it is in the existing and related resources (same ids, same values), and the \
-response stays consistent with the request body. This is a successful `cancel`: the call \
-succeeded, so the resource has moved to the state that follows `cancel`, whatever it needed \
-before."
+usually differs from <existing_resource>. What the call does not change stays as it is in the \
+existing and related resources (same ids, same values), and the response stays consistent with \
+the request body."
         )
     );
-    assert_eq!(
-        instructions(&h, 2),
-        format!(
-            "{consistent} This is a successful `confirm`: the call succeeded, so the resource \
-has moved to the state that follows `confirm`, whatever it needed before."
-        )
-    );
+    assert_eq!(instructions(&h, 2), consistent);
     assert_eq!(instructions(&h, 3), consistent);
     let cancel = prompt_of(&h, 1);
     assert!(
         cancel.ends_with(
             "</shown_resources>\nThe response is not <existing_resource>, so it changes only \
-through \"effects\": they must include what `cancel` changes on it, as {\"type\": \
-\"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
+through \"effects\": they include what `cancel` changes on it, if it changes anything, as \
+{\"type\": \"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
         ),
         "{cancel}"
     );
@@ -4247,7 +4241,6 @@ async fn a_listed_issue_stays_gone_when_the_delete_does_not_declare_its_number()
         vec![
             Ok(json!([{"id": 999, "number": 5, "title": "a"}]).to_string()),
             Ok(json!({"id": 999, "deleted": true}).to_string()),
-            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
         ],
     );
     read(&api, "/issues").await;
@@ -4255,9 +4248,7 @@ async fn a_listed_issue_stays_gone_when_the_delete_does_not_declare_its_number()
     assert_eq!(source, "state");
     let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
     assert!(status.is_success(), "{status}");
-    let (source, body) = read(&api, "/issues/5").await;
-    assert_ne!(source, "state", "deleted issue read back: {body}");
-    assert_eq!(body["title"], "regenerated");
+    assert_gone(&api, "/issues/5").await;
 }
 
 /// A real string id under an earlier parameter is no name, as Stripe's nested
@@ -4747,15 +4738,13 @@ components:
             Ok(json!({"id": "f1", "airport": airport}).to_string()),
             Ok(json!([airport]).to_string()),
             Ok(airport.to_string()),
-            Ok(json!({"id": 8, "code": "SFO"}).to_string()),
         ],
     );
     read(&api, "/flights/f1").await;
     read(&api, "/airports").await;
     let (status, _, _) = api.call("DELETE", "/airports/SFO", None).await;
     assert!(status.is_success(), "{status}");
-    let (source, body) = read(&api, "/airports/SFO").await;
-    assert_ne!(source, "state", "deleted airport read back: {body}");
+    assert_gone(&api, "/airports/SFO").await;
 }
 
 /// Another organisation's read with the same small id replaces the summary, and
@@ -4964,14 +4953,12 @@ async fn a_listed_issue_stays_gone_when_the_delete_answers_no_identity() {
         vec![
             Ok(json!([{"id": 999, "number": 5, "title": "a"}]).to_string()),
             Ok(json!({"deleted": true}).to_string()),
-            Ok(json!({"id": 1000, "number": 5, "title": "regenerated"}).to_string()),
         ],
     );
     read(&api, "/issues").await;
     let (status, _, _) = api.call("DELETE", "/issues/5", None).await;
     assert!(status.is_success(), "{status}");
-    let (source, body) = read(&api, "/issues/5").await;
-    assert_ne!(source, "state", "deleted issue read back: {body}");
+    assert_gone(&api, "/issues/5").await;
 }
 
 /// An effect on a listed team keeps it the org's.
