@@ -209,9 +209,10 @@ impl SchemaValidator {
     /// [`SchemaValidator::patch`], keeping every value that breaks a format
     /// where `keep` (given its JSON pointer and the value) says so: a value
     /// the request sent (a path id echoed into a `format: uuid` field) is
-    /// not overwritten. An integer `keep` accepts that breaks a numeric
+    /// not overwritten. An integer `keep` accepts that breaks only a numeric
     /// range is moved to the nearest value the range allows instead of
-    /// being redrawn; when none fits, nothing is patched.
+    /// being redrawn; when none fits, nothing is patched. One that breaks
+    /// an `enum` or `const` is mended like any other value.
     pub fn patch_keeping(
         &self,
         instance: &Value,
@@ -269,9 +270,11 @@ impl SchemaValidator {
         let mut replaced = Vec::new();
         for (pointer, expected) in &refills {
             let bad = out.pointer(pointer)?.clone();
-            // An integer the request sent is brought within the bounds it
-            // breaks, or the patch fails: never swapped for a fresh draw.
-            *out.pointer_mut(pointer)? = if bad.is_i64() && keep(pointer, &bad) {
+            // An integer the request sent that breaks only its bounds is
+            // brought within them, or the patch fails: never swapped for a
+            // fresh draw. One breaking an `enum` or `const` is mended.
+            *out.pointer_mut(pointer)? = if keep(pointer, &bad) && breaks_only_range(&bad, expected)
+            {
                 clamp(&bad, expected)?
             } else {
                 mend(&bad, expected, &mut replaced, &mut fill)
@@ -355,8 +358,10 @@ impl SchemaValidator {
 
     /// `instance` with `property` moved from the one child object of the
     /// object at `parent` that holds it into that object; `None` unless
-    /// exactly one child holds it and that child's schema is known and does
-    /// not declare it.
+    /// exactly one child holds it and that child's schema is known, declares
+    /// `properties` but not this one, and admits no other members it could
+    /// own (no `additionalProperties` other than `false`, no
+    /// `patternProperties` or `unevaluatedProperties`).
     fn lift(&self, instance: &Value, parent: &str, property: &str) -> Option<Value> {
         let Value::Object(map) = instance.pointer(parent)? else {
             return None;
@@ -372,7 +377,18 @@ impl SchemaValidator {
         };
         let child_pointer = format!("{parent}/{}", escape(child));
         let schemas = self.nodes_at(&child_pointer);
+        // A map (`additionalProperties`, `patternProperties`,
+        // `unevaluatedProperties`) or a free-form object may hold any
+        // member as its own.
+        let open = |node: &&Value| {
+            node.get("additionalProperties")
+                .is_some_and(|a| *a != Value::Bool(false))
+                || node.get("patternProperties").is_some()
+                || node.get("unevaluatedProperties").is_some()
+        };
         if schemas.is_empty()
+            || !schemas.iter().any(|node| node.get("properties").is_some())
+            || schemas.iter().any(open)
             || schemas.iter().any(|node| {
                 node.get("properties")
                     .and_then(|p| p.get(property))
@@ -879,32 +895,40 @@ fn required_properties(e: &jsonschema::ValidationError<'_>, out: &mut Vec<(Strin
 /// (`minimum`, `maximum`, their exclusive forms, `multipleOf`) allows,
 /// when it also meets the rest of `node`'s leaf keywords; `None` otherwise.
 fn clamp(value: &Value, node: &Value) -> Option<Value> {
-    let n = value.as_i64()?;
-    let bound = |key: &str| node.get(key).and_then(Value::as_f64);
-    let mut low = i64::MIN as f64;
-    let mut high = i64::MAX as f64;
-    if let Some(min) = bound("minimum") {
-        low = low.max(min.ceil());
+    let n = whole(value)?;
+    // Integer bounds stay exact; a fractional one is rounded inwards.
+    let bound = |key: &str, round: fn(f64) -> f64| {
+        let b = node.get(key)?;
+        whole(b).or_else(|| b.as_f64().map(|f| round(f) as i128))
+    };
+    let mut low = i128::from(i64::MIN);
+    let mut high = i128::from(u64::MAX);
+    if let Some(min) = bound("minimum", f64::ceil) {
+        low = low.max(min);
     }
-    if let Some(min) = bound("exclusiveMinimum") {
-        low = low.max(min.floor() + 1.0);
+    if let Some(min) = bound("exclusiveMinimum", f64::floor) {
+        low = low.max(min + 1);
     }
-    if let Some(max) = bound("maximum") {
-        high = high.min(max.floor());
+    if let Some(max) = bound("maximum", f64::floor) {
+        high = high.min(max);
     }
-    if let Some(max) = bound("exclusiveMaximum") {
-        high = high.min(max.ceil() - 1.0);
+    if let Some(max) = bound("exclusiveMaximum", f64::ceil) {
+        high = high.min(max - 1);
     }
     if low > high {
         return None;
     }
-    let mut near = (n as f64).clamp(low, high);
-    if let Some(step) = node
-        .get("multipleOf")
-        .and_then(Value::as_f64)
-        .filter(|s| *s > 0.0)
-    {
-        let below = (near / step).floor() * step;
+    let mut near = n.clamp(low, high);
+    if let Some(step) = node.get("multipleOf") {
+        // Only a whole step can be met by an integer moved in whole steps.
+        let step = whole(step)
+            .or_else(|| {
+                step.as_f64()
+                    .filter(|s| s.fract() == 0.0)
+                    .map(|s| s as i128)
+            })
+            .filter(|s| *s > 0)?;
+        let below = near.div_euclid(step) * step;
         let above = below + step;
         near = if below >= low && (near - below <= above - near || above > high) {
             below
@@ -912,19 +936,39 @@ fn clamp(value: &Value, node: &Value) -> Option<Value> {
             above
         };
     }
-    let near = Value::from(near as i64);
+    let near = i64::try_from(near)
+        .map(Value::from)
+        .or_else(|_| u64::try_from(near).map(Value::from))
+        .ok()?;
+    leaf_valid(&near, node, NUMERIC_KEYWORDS).then_some(near)
+}
+
+/// `value` as a whole number, when it is one held as an integer.
+fn whole(value: &Value) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+/// Whether `value` breaks only the numeric range of `node` (`minimum`,
+/// `maximum`, their exclusive forms, `multipleOf`): its `type`, `enum` and
+/// `const` hold, so [`clamp`] may bring it within bounds.
+fn breaks_only_range(value: &Value, node: &Value) -> bool {
+    whole(value).is_some() && leaf_valid(value, node, &["type", "enum", "const"])
+}
+
+/// Whether `value` meets the `keys` of the schema `node`.
+fn leaf_valid(value: &Value, node: &Value, keys: &[&str]) -> bool {
     let Value::Object(keywords) = node else {
-        return Some(near);
+        return true;
     };
     let leaf: serde_json::Map<String, Value> = keywords
         .iter()
-        .filter(|(k, _)| NUMERIC_KEYWORDS.contains(&k.as_str()))
+        .filter(|(k, _)| keys.contains(&k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    jsonschema::draft202012::new(&Value::Object(leaf))
-        .ok()?
-        .is_valid(&near)
-        .then_some(near)
+    jsonschema::draft202012::new(&Value::Object(leaf)).is_ok_and(|v| v.is_valid(value))
 }
 
 /// The keywords [`clamp`] checks a moved integer against.
@@ -1749,13 +1793,43 @@ mod tests {
             "required": ["type"],
             "properties": {
                 "type": {"type": "string"},
-                "a": {"type": "object"},
-                "b": {"type": "object"}
+                "a": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "b": {"type": "object", "properties": {"name": {"type": "string"}}}
             }
         }))
         .unwrap();
         let answer = json!({"a": {"type": "x"}, "b": {"type": "y"}});
         assert_eq!(v.patch(&answer, fill), None);
+        // Held by one of them alone, it is moved.
+        let answer = json!({"a": {"type": "x"}, "b": {"name": "y"}});
+        assert_eq!(
+            v.patch(&answer, fill),
+            Some(json!({"type": "x", "a": {}, "b": {"name": "y"}}))
+        );
+    }
+
+    #[test]
+    fn a_member_a_map_or_free_form_child_may_hold_is_not_moved() {
+        for child in [
+            // A map of strings: `type` is one of its entries.
+            json!({"type": "object", "properties": {"source": {"type": "string"}},
+                   "additionalProperties": {"type": "string"}}),
+            json!({"type": "object", "properties": {"source": {"type": "string"}},
+                   "patternProperties": {"^t": {"type": "string"}}}),
+            json!({"type": "object", "properties": {"source": {"type": "string"}},
+                   "unevaluatedProperties": {"type": "string"}}),
+            // Free-form: declares nothing, so anything may be its own.
+            json!({"type": "object"}),
+        ] {
+            let v = SchemaValidator::new(&json!({
+                "type": "object",
+                "required": ["type"],
+                "properties": {"type": {"type": "string"}, "metadata": child}
+            }))
+            .unwrap();
+            let answer = json!({"metadata": {"type": "x"}});
+            assert_eq!(v.patch(&answer, fill), None, "{child}");
+        }
     }
 
     #[test]
@@ -1797,6 +1871,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, json!({"id": 300_000, "n": 2}));
+        // Beyond 2^53 the bound is met exactly, with no float rounding.
+        let big = json!({"type": "integer", "maximum": 9_007_199_254_740_993_i64});
+        assert_eq!(
+            clamp(&json!(9_007_199_254_740_999_i64), &big),
+            Some(json!(9_007_199_254_740_993_i64))
+        );
+        let unsigned = json!({"type": "integer", "minimum": 18_446_744_073_709_551_000_u64});
+        assert_eq!(
+            clamp(&json!(18_446_744_073_709_550_001_u64), &unsigned),
+            Some(json!(18_446_744_073_709_551_000_u64))
+        );
+        assert_eq!(
+            clamp(
+                &json!(9_007_199_254_740_995_i64),
+                &json!({"maximum": 9_007_199_254_740_999_i64, "multipleOf": 2})
+            ),
+            Some(json!(9_007_199_254_740_994_i64))
+        );
+    }
+
+    #[test]
+    fn a_kept_integer_breaking_more_than_a_range_is_mended() {
+        // `enum` and `const` are not bounds: the echo is refilled as any
+        // other value would be, and the patch still succeeds.
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "integer", "enum": [1, 2, 3]},
+                "version": {"const": 2},
+                "page": {"type": "integer", "maximum": 2}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch_keeping(
+                &json!({"status": 5, "version": 5, "page": 5}),
+                |_, value| *value == json!(5),
+                |schema| schema.get("const").cloned().unwrap_or_else(|| json!(1)),
+            )
+            .unwrap();
+        assert_eq!(out, json!({"status": 1, "version": 2, "page": 2}));
     }
 
     #[test]
