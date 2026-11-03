@@ -3392,7 +3392,13 @@ impl Collections {
         self.record(session, r, collection, false);
     }
 
-    fn record(&self, session: &SessionKey, r: &StoredResource, collection: Collection, created: bool) {
+    fn record(
+        &self,
+        session: &SessionKey,
+        r: &StoredResource,
+        collection: Collection,
+        created: bool,
+    ) {
         let Ok(mut held) = self.0.lock() else {
             return;
         };

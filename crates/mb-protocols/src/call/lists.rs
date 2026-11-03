@@ -5,8 +5,11 @@
 //! [`mb_mcm::stem`]) asks for the items whose member equals its value. The model is
 //! told so and does not always listen, so after generation an item whose member holds
 //! another value goes. Only where the contract is clear: the parameter and the member
-//! declare the same type, the value is one the member's `enum` and `format` allow, and
-//! a comma-separated value is a set only when every part is in that `enum`. So
+//! declare the same one type, text, an integer or a boolean (a real number, such as a
+//! coordinate, is matched within a margin if at all), the member is no `const`, the
+//! parameter is no bare `id` (which names what the route is about), the value is one the
+//! member's `enum` and `format` allow, and a comma-separated value is a set only when
+//! every part is in that `enum`. So
 //! `state=all` beside an `enum` without `all`, a search's `q` (no member is named so),
 //! a `labels` text beside a `labels` array and a range (`DateSent<`) change nothing. An
 //! item that does not hold the member, or holds something of another shape, stays. The
@@ -50,6 +53,10 @@ impl<'a> Member<'a> {
         self.parts
             .iter()
             .find_map(|p| p.get("enum").and_then(Value::as_array))
+    }
+
+    fn constant(&self) -> Option<&'a Value> {
+        self.parts.iter().find_map(|p| p.get("const"))
     }
 
     fn format(&self) -> Option<&'a str> {
@@ -122,11 +129,18 @@ pub(super) fn filtered_member<'a>(
     item_parts: &[&'a Value],
     param: &str,
 ) -> Option<Member<'a>> {
+    // A bare `id` names what the route is about (OpenWeatherMap's city), not an item.
+    if mb_mcm::is_generic_id(param) {
+        return None;
+    }
     let declared = query?.get("properties")?.get(param)?;
     let member = named_member(bundle, item_parts, param)?;
     let (param_parts, _) = schema_parts(bundle, Some(declared));
     let types = member.types();
-    (types.len() == 1 && types == types_of(&param_parts)).then_some(member)
+    // A real number (a coordinate) is matched within a margin, if at all, and a
+    // constant member (Jira's `expand`) is no filter.
+    let single = types.len() == 1 && !types.contains("number");
+    (single && types == types_of(&param_parts) && member.constant().is_none()).then_some(member)
 }
 
 /// `raw` as a value of `member`'s one type, when it is one its `enum` and `format`
@@ -135,8 +149,6 @@ fn typed(member: &Member<'_>, raw: &str) -> Option<Value> {
     let value = match member.types().first().copied()? {
         "string" => Value::String(raw.to_string()),
         "integer" => Value::from(raw.trim().parse::<i64>().ok()?),
-        "number" => serde_json::Number::from_f64(raw.trim().parse::<f64>().ok()?)
-            .map(Value::Number)?,
         "boolean" => Value::Bool(raw.trim().parse::<bool>().ok()?),
         _ => return None,
     };
@@ -191,10 +203,13 @@ fn contradicts(item: &Value, member: &str, wanted: &[Value]) -> bool {
     let Some(held) = item.get(member) else {
         return false;
     };
-    let comparable = wanted.iter().any(|w| match (held, w) {
-        (Value::String(_), Value::String(_)) | (Value::Bool(_), Value::Bool(_)) => true,
-        (Value::Number(_), Value::Number(_)) => true,
-        _ => false,
+    let comparable = wanted.iter().any(|w| {
+        matches!(
+            (held, w),
+            (Value::String(_), Value::String(_))
+                | (Value::Bool(_), Value::Bool(_))
+                | (Value::Number(_), Value::Number(_))
+        )
     });
     comparable && !is_wanted(held, wanted)
 }
@@ -230,7 +245,12 @@ fn declared_count(parts: &[&Value], keyword: &str) -> Option<u64> {
 
 /// Applies a list read's equality filters and page size to its generated answer (see
 /// the module's doc).
-pub(super) fn narrow(rt: &MockRuntime, plan: &CallPlan<'_>, call: &OperationCall, body: &mut Value) {
+pub(super) fn narrow(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    body: &mut Value,
+) {
     if call.query.is_empty() {
         return;
     }

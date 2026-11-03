@@ -104,6 +104,19 @@ No migration or configuration. With an LLM and `consistency: on`, except on Grap
 
 The oldest markers go past 1024 per session, and then what they marked can come back. Offline mocks and `consistency: off` are as they were.
 
+### Lists and lookups agree with the session
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes except GraphQL:
+
+- **A list answer can hold fewer items than the model wrote.** An item goes when a query parameter names one of its members and the item holds another value there, so `GET /Messages.json?To=+1555` answers only that recipient's messages. The parameter and the member must declare the same one type (text, integer or boolean), and the value must be one the member's `enum` and `format` allow: `state=all` beside `enum: [open, closed]` filters nothing. A comma-separated value is a set only when every part is in the `enum`. A real number (`lat`), a `const` member, a bare `id`, a search's `q`, a range and an item without the member are left alone.
+- **A page size caps the list's main array**, by the signal the output budget already reads (a parameter whose `maximum` is the array's `maxItems`, else one named for a page size).
+- **Neither goes below `minItems` or leaves an invalid answer**: then the answer stays as it was. A count clearly the list's own goes down by what a filter took out; a page size leaves it, as a total counts every page.
+- **A lookup does not bring a deleted record back under a new id.** A delete of a stored record also marks, by hash, the text of its identity and of the members a list read of its type filters by. A generated item of that type the session does not hold, carrying a marked value the request names, is dropped. Storing a record with that value again clears the mark, so a recreated user is found by email. A record the session never held marks only its id, as before.
+- **A create or a read under a parent path is shown what was created there**: the newest 4 records creates put under the same path, scrubbed as other related resources are. Prompts can be longer, and a recorded prompt may not replay. Which creates went where is kept per node, as the owner hint is: on another node or after a restart, the prompt is as before.
+- **Rolling upgrades**: the new markers are documents of the reserved type, as the deleted markers are, and an older node ignores them.
+
+Offline mocks and `consistency: off` are as they were.
+
 ### A member named for its type is its identity
 
 No migration or configuration. A contract whose routes already have an identity is as it was, with the same LLM calls and store calls.
