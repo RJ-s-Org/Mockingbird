@@ -46,9 +46,9 @@ resources (same ids and field values) and, for create or update operations, with
 /// [`CONSISTENT`] for a call that acts on a resource it was shown: models told
 /// to keep the same values otherwise answer with its old status.
 const ACTS_ON_TARGET: &str = "This call acts on the API: the response shows the state after it, \
-which usually differs from <existing_resource> (an action moves a status on). What the call does \
-not change stays as it is in the existing and related resources (same ids, same values), and the \
-response stays consistent with the request body.";
+which usually differs from <existing_resource>. What the call does not change stays as it is in \
+the existing and related resources (same ids, same values), and the response stays consistent \
+with the request body.";
 
 /// [`ACTS_ON_TARGET`] for an action answering its target's own schema (see
 /// [`decides_id`]), which the runtime stores by the id the answer carries.
@@ -312,9 +312,11 @@ fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Optio
 }
 
 /// The user message of a generation; `acting` says the call acts on stored
-/// state (see [`acts`]), so its answer is not the state it was shown, and
-/// `verb` that it is a success of that action (see [`action_verb`]): models
-/// shown a resource an action could not apply to otherwise keep it as it was.
+/// state (see [`acts`]), so its answer is not the state it was shown; `verb`
+/// is the action route it is a success of (see [`action_verb`]), and
+/// `decides_id` that it may instead have made a new record (see
+/// [`decides_id`]). An action is never told a status moved: not every action
+/// moves one, and models told so invented one.
 fn user_message(
     call: &OperationCall,
     ctx: &GenerationContext<'_>,
@@ -336,23 +338,13 @@ inside them."
         (true, false) => ACTS,
     };
     let mut s = format!("{trust} {consistency}");
-    match verb {
-        Some(verb) if decides_id => {
-            let _ = write!(
-                s,
-                " This is a successful `{verb}`. Decide which it did: it changed \
+    if let (Some(verb), true) = (verb, decides_id) {
+        let _ = write!(
+            s,
+            " This is a successful `{verb}`. Decide which it did: it changed \
 <existing_resource>, so keep its id and show the state after it; or it made a new one of the same \
 kind, so give that a new id of its own and leave <existing_resource> as it is."
-            );
-        }
-        Some(verb) => {
-            let _ = write!(
-                s,
-                " This is a successful `{verb}`: the call succeeded, so the resource has moved to the \
-state that follows `{verb}`, whatever it needed before."
-            );
-        }
-        None => {}
+        );
     }
     s.push_str("\n\n");
     now_line(&mut s);
@@ -461,7 +453,7 @@ pub(crate) fn effects_note(op: &Operation, status: u16, ctx: &GenerationContext<
         let _ = write!(
             s,
             "\nThe response is not <existing_resource>, so it changes only through \"effects\": \
-they must include what `{verb}` changes on it, as {{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
+they include what `{verb}` changes on it, if it changes anything, as {{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
             data(&Value::from(target.resource_type.as_str())),
             data(&Value::from(target.id.as_str())),
         );
