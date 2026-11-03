@@ -183,6 +183,63 @@ pub fn is_credential_value(text: &str) -> bool {
             .any(|word| is_jwt(word) || is_secret_url(word))
 }
 
+/// Whether a bare word of prose (quotes and punctuation around it ignored) is shaped
+/// like a generated token, by its shape alone and with no list of vendors:
+///
+/// - 20 or more ASCII letters and digits, both present, at least 10 distinct, that
+///   either switch between letters and digits at least 4 times or have no lowercase
+///   letter (`AKIAIOSFODNN7EXAMPLE`); a camelCase name (`createOrderRequestV2Body`)
+///   is not;
+/// - a short letter prefix (2 to 8) and `_` or `-`, with a later run of 12 or more
+///   letters and digits that mixes them, or of 20 or more that mixes cases
+///   (`sk_live_51HxYzAbCdEf`, `ghp_…`, `xoxb-…`); a snake_case name is not.
+///
+/// Example ids of that shape count too: in prose shown to a model that costs little.
+#[must_use]
+pub fn is_token_shaped(word: &str) -> bool {
+    let word = word.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    is_long_token(word) || is_prefixed_token(word)
+}
+
+fn is_long_token(word: &str) -> bool {
+    if word.len() < 20 || !word.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let letters = word.bytes().any(|b| b.is_ascii_alphabetic());
+    let digits = word.bytes().any(|b| b.is_ascii_digit());
+    let distinct = word
+        .bytes()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let switches = word
+        .as_bytes()
+        .windows(2)
+        .filter(|w| w[0].is_ascii_digit() != w[1].is_ascii_digit())
+        .count();
+    let lower = word.bytes().any(|b| b.is_ascii_lowercase());
+    letters && digits && distinct >= 10 && (switches >= 4 || !lower)
+}
+
+fn is_prefixed_token(word: &str) -> bool {
+    let Some(at) = word.find(['_', '-']) else {
+        return false;
+    };
+    let prefix = &word[..at];
+    if !(2..=8).contains(&prefix.len()) || !prefix.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    let rest = &word[at + 1..];
+    rest.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && rest.split(['_', '-']).any(|run| {
+            let mixed = run.bytes().any(|b| b.is_ascii_digit())
+                && run.bytes().any(|b| b.is_ascii_alphabetic());
+            let cased = run.bytes().any(|b| b.is_ascii_uppercase())
+                && run.bytes().any(|b| b.is_ascii_lowercase());
+            (run.len() >= 12 && mixed) || (run.len() >= 20 && cased)
+        })
+}
+
 /// `eyJ…`, base64url JSON, then at least two more dot-separated parts.
 fn is_jwt(word: &str) -> bool {
     let mut parts = word.split('.');
@@ -531,6 +588,39 @@ mod tests {
             "1790000000.000100",
         ] {
             assert!(!is_credential_value(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn words_shaped_like_tokens() {
+        for word in [
+            "sk_live_51HxYzAbCdEf",
+            // Split so secret scanners do not take these test shapes for real tokens.
+            concat!("sk_", "test_4eC39HqLyjWDarjtT1zdp7dc"),
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "AKIAIOSFODNN7EXAMPLE",
+            concat!("xo", "xb-1234567890-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"),
+            "9f8e7d6c5b4a32109f8e",
+            "\"sk_live_51HxYzAbCdEf\",",
+            "(AKIAIOSFODNN7EXAMPLE).",
+        ] {
+            assert!(is_token_shaped(word), "{word}");
+        }
+        for word in [
+            "order_created_notification_v2",
+            "internationalization",
+            "createOrderRequestV2Body",
+            "ORDER_STATUS_PENDING",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "token:read",
+            "session_id=123",
+            "PROJ-1",
+            "1790000000.000100",
+            "https://example.com/path",
+            "unique",
+            "",
+        ] {
+            assert!(!is_token_shaped(word), "{word}");
         }
     }
 
