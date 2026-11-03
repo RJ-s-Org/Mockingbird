@@ -1330,6 +1330,7 @@ mod tests {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         }
     }
 

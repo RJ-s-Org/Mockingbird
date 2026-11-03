@@ -161,6 +161,80 @@ pub(crate) fn deref<'a>(bundle: &'a Bundle, mut schema: &'a Value) -> &'a Value 
     schema
 }
 
+/// The members object `schema` requires, looking through `$ref`s and `allOf`
+/// members (which all apply), in order and once each.
+pub fn required_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
+    fn collect(bundle: &Bundle, schema: &Value, depth: usize, out: &mut Vec<String>) {
+        if depth > 8 {
+            return;
+        }
+        let schema = deref(bundle, schema);
+        let names = schema.get("required").and_then(Value::as_array);
+        for name in names.into_iter().flatten().filter_map(Value::as_str) {
+            if !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+        for member in schema
+            .get("allOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            collect(bundle, member, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    collect(bundle, schema, 0, &mut out);
+    out
+}
+
+/// The value `schema` fixes, through `$ref`s: its `const`, its one `enum` value, else
+/// its `default`. `None` when it fixes none: the first of several `enum` values, or an
+/// example, is a guess.
+pub(crate) fn fixed_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let schema = deref(bundle, schema);
+    let only = enum_values(bundle, schema)
+        .filter(|v| v.len() == 1)
+        .and_then(|v| v.first());
+    schema
+        .get("const")
+        .or(only)
+        .or_else(|| schema.get("default"))
+        .cloned()
+}
+
+/// The example `schema` gives, through `$ref`s: its `example`, else its first
+/// `examples`. Not of a boolean, whose example says nothing of which it is.
+pub(crate) fn example_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let schema = deref(bundle, schema);
+    let boolean = |t: &Value| t == "boolean";
+    let declared_boolean = match schema.get("type") {
+        Some(Value::Array(types)) => types.iter().any(boolean),
+        Some(t) => boolean(t),
+        None => false,
+    };
+    let example = schema.get("example").or_else(|| {
+        schema
+            .get("examples")
+            .and_then(Value::as_array)
+            .and_then(|v| v.first())
+    })?;
+    (!declared_boolean && !example.is_boolean()).then(|| example.clone())
+}
+
+/// The values `schema` allows, through `$ref`s, when it is an `enum`.
+fn enum_values<'a>(bundle: &'a Bundle, schema: &'a Value) -> Option<&'a Vec<Value>> {
+    deref(bundle, schema).get("enum").and_then(Value::as_array)
+}
+
+/// Whether `schema`, through `$ref`s, names `value` itself: its `const`, or one of its
+/// `enum` values.
+pub fn enumerates(bundle: &Bundle, schema: &Value, value: &Value) -> bool {
+    deref(bundle, schema).get("const") == Some(value)
+        || enum_values(bundle, schema).is_some_and(|values| values.contains(value))
+}
+
 /// The schema of `field` in object `schema`, looking through `$ref`s and
 /// `allOf`/`oneOf`/`anyOf` members.
 pub fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<Value> {

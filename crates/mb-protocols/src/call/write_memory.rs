@@ -773,7 +773,7 @@ fn schema_hides(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
 /// otherwise is one the API returns, so only a credential word in its name hides it
 /// (see [`mb_mcm::credentials::hides_a_returned_member`]). Otherwise, as the last
 /// resort, a name holding one does, or a `{"name": "Authorization", "value": ...}` pair.
-fn redact_credentials(
+pub(super) fn redact_credentials(
     rt: &MockRuntime,
     value: &mut Value,
     schema: Option<&Value>,

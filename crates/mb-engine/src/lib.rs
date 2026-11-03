@@ -329,6 +329,54 @@ pub struct GeneratedResponse {
     /// not the target (see `reflect`): it is stored under its own
     /// identity and the target is left as it is.
     pub new_record: bool,
+    /// For a [`Source::Patched`] answer, the top-level members its local patch
+    /// touched, when the model's own answer could be read to tell; `None` otherwise.
+    pub patched: Option<PatchedMembers>,
+}
+
+/// The top-level members of an answer a local patch touched, against the model's own
+/// answer (see [`GeneratedResponse::patched`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PatchedMembers {
+    /// Members the patch filled, removed or replaced whole: one the model left out or
+    /// that held something else than an object.
+    pub replaced: Vec<String>,
+    /// Object members the patch changed inside: a record whose timestamp broke its
+    /// format.
+    pub changed_inside: Vec<String>,
+}
+
+impl PatchedMembers {
+    /// What a local patch made of `answer`, the model's own answer `raw` (its
+    /// `response` when the model answered in the effects envelope). `None` when either
+    /// is no object.
+    #[must_use]
+    pub fn between(raw: &Value, answer: &Value) -> Option<Self> {
+        let raw = match (raw, answer) {
+            (Value::Object(r), Value::Object(a))
+                if r.contains_key("response") && !a.contains_key("response") =>
+            {
+                r.get("response")?
+            }
+            _ => raw,
+        };
+        let (Value::Object(raw), Value::Object(answer)) = (raw, answer) else {
+            return None;
+        };
+        let mut out = Self::default();
+        for (name, value) in answer {
+            match raw.get(name) {
+                Some(was) if was == value => {}
+                Some(was) if was.is_object() && value.is_object() => {
+                    out.changed_inside.push(name.clone());
+                }
+                _ => out.replaced.push(name.clone()),
+            }
+        }
+        out.replaced
+            .extend(raw.keys().filter(|k| !answer.contains_key(*k)).cloned());
+        Some(out)
+    }
 }
 
 /// How an [`Engine`] generates; [`Default`] gives the documented defaults.
@@ -725,6 +773,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -847,6 +896,7 @@ impl Engine {
                         effect_outcomes: Vec::new(),
                         dropped_effects: answer.effects.dropped,
                         new_record: false,
+                        patched: answer.patched,
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -990,6 +1040,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             };
             let schema = part
                 .ctx
@@ -1033,6 +1084,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -1117,7 +1169,57 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         })
+    }
+
+    /// Stored `record` as `op` answers it: in the envelope or the one-item array its
+    /// identity says the answer holds it in, else as it is. An envelope also gets the
+    /// other members its schema (the narrowed `response_schema` when given) requires,
+    /// as Cal.com's `{status, data}` does its `status`: the value `kept` holds for it
+    /// (what the API answered in an envelope of this shape before), else the value the
+    /// member's schema fixes (a `const`, a one-value `enum`, a `default`), else its
+    /// example when that suits it and is not a boolean's. `None` when a required member
+    /// has none of these: a guess is no answer, and the read is generated instead. The
+    /// record is not changed; whether the answer suits its schema is for
+    /// [`Engine::serve_stored`] to say.
+    #[must_use]
+    pub fn held_answer(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        record: &Value,
+        kept: Option<&Map<String, Value>>,
+        response_schema: Option<&Value>,
+    ) -> Option<Value> {
+        let Some(identity) = op.identity.as_ref().filter(|i| i.record.is_some()) else {
+            return Some(record.clone());
+        };
+        let mut answer = identity.answer_holding(record.clone(), None);
+        let (Some(mb_mcm::RecordAt::Member(member)), Some(envelope), Some(schema)) = (
+            identity.record.as_ref(),
+            answer.as_object_mut(),
+            response_schema.or_else(|| op.success_output()?.schema.as_ref()),
+        ) else {
+            return Some(answer);
+        };
+        for name in consistency::required_members(bundle, schema) {
+            if &name == member || envelope.contains_key(&name) {
+                continue;
+            }
+            let member_schema = consistency::property_schema(bundle, schema, &name)?;
+            let value = kept
+                .and_then(|k| k.get(&name))
+                .cloned()
+                .or_else(|| consistency::fixed_value(bundle, &member_schema))
+                .or_else(|| {
+                    let example = consistency::example_value(bundle, &member_schema)?;
+                    let validator = self.schema_validator(bundle, &member_schema).ok()?;
+                    validator.is_valid(&example).then_some(example)
+                })?;
+            envelope.insert(name, value);
+        }
+        Some(answer)
     }
 
     /// A `404` for a resource the session does not hold: the operation's
@@ -1153,6 +1255,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1191,6 +1294,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             },
         };
         tracing::info!(operation = %op.id, status = code, "the LLM refused the call with a declared error");
@@ -1441,6 +1545,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         }
     }
 
@@ -1489,6 +1594,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         }
     }
 
@@ -1733,13 +1839,17 @@ impl Engine {
                     value,
                     source: Source::Llm,
                     effects,
+                    patched: None,
                 });
             }
             Checked::Patched(value) => {
+                let patched = extract::extract_json(&first.text)
+                    .and_then(|raw| PatchedMembers::between(&raw, &value));
                 return Ok(LlmAnswer {
                     value,
                     source: Source::Patched,
                     effects,
+                    patched,
                 });
             }
             Checked::Rejected(reason) => return Err(with_cause(truncated.as_deref(), reason)),
@@ -1780,6 +1890,7 @@ impl Engine {
                     value,
                     source: Source::Repaired,
                     effects,
+                    patched: None,
                 }),
                 Checked::Rejected(reason) => Err(with_cause(cause.as_deref(), reason)),
                 Checked::Invalid(errors) => Err(with_cause(
@@ -1873,6 +1984,8 @@ struct LlmAnswer {
     value: Value,
     source: Source,
     effects: guards::AnswerEffects,
+    /// For a `Patched` answer, what its patch touched (see [`PatchedMembers`]).
+    patched: Option<PatchedMembers>,
 }
 
 /// An LLM reply: its text, and, when the provider stopped it at
@@ -2978,5 +3091,126 @@ mod tests {
         // All at once when that validates.
         let out = overlay(&v, json!({"a": "x"}), Some(&json!({"b": 3})));
         assert_eq!(out, json!({"a": "x", "b": 3}));
+    }
+
+    /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.
+    fn enveloped(required: &str, properties: &str) -> Bundle {
+        let contract = format!(
+            r##"
+openapi: 3.1.0
+info: {{title: T, version: "1"}}
+paths:
+  /deals:
+    get:
+      operationId: listDeals
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, required: [data], properties: {{data: {{type: array, items: {{$ref: "#/components/schemas/Deal"}}}}}}}}}}}}}}}}
+  /deals/{{id}}:
+    parameters: [{{name: id, in: path, required: true, schema: {{type: integer}}}}]
+    get:
+      operationId: getDeal
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Out"}}}}}}}}}}
+components:
+  schemas:
+    Deal: {{type: object, required: [id], properties: {{id: {{type: integer}}}}}}
+    Out:
+      allOf:
+        - {{type: object, required: [data], properties: {{data: {{$ref: "#/components/schemas/Deal"}}}}}}
+        - {{type: object, required: [{required}], properties: {{{properties}}}}}
+"##
+        );
+        mb_import::compile(contract.as_bytes()).unwrap()
+    }
+
+    fn held(bundle: &Bundle, kept: Option<&Map<String, Value>>) -> Option<Value> {
+        let engine = Engine::new(None, EngineConfig::default());
+        let op = bundle.operation("getDeal").unwrap();
+        assert!(
+            matches!(
+                op.identity.as_ref().and_then(|i| i.record.as_ref()),
+                Some(mb_mcm::RecordAt::Member(m)) if m == "data"
+            ),
+            "{:?}",
+            op.identity
+        );
+        engine.held_answer(bundle, op, &json!({"id": 7}), kept, None)
+    }
+
+    #[test]
+    fn patched_members_tell_a_patch_inside_from_one_of_a_member() {
+        let raw = json!({"response": {"ok": "yes", "data": {"at": "now"}, "gone": 1}});
+        let answer = json!({"ok": true, "data": {"at": "2026-01-01T00:00:00Z"}, "new": 2});
+        let patched = PatchedMembers::between(&raw, &answer).unwrap();
+        assert_eq!(patched.changed_inside, ["data"]);
+        let mut replaced = patched.replaced.clone();
+        replaced.sort();
+        assert_eq!(replaced, ["gone", "new", "ok"]);
+        let same = json!({"ok": true, "data": {}});
+        assert_eq!(
+            PatchedMembers::between(&same, &same),
+            Some(PatchedMembers::default())
+        );
+        assert_eq!(PatchedMembers::between(&json!([1]), &answer), None);
+    }
+
+    #[test]
+    fn required_members_look_through_refs_and_all_of() {
+        let bundle = enveloped("status", "status: {type: string}");
+        let schema = json!({"$ref": "#/$defs/Out"});
+        assert_eq!(
+            consistency::required_members(&bundle, &schema),
+            ["data", "status"]
+        );
+        assert!(consistency::required_members(&bundle, &json!({"type": "object"})).is_empty());
+    }
+
+    #[test]
+    fn a_fixed_value_is_what_the_schema_says_and_no_guess() {
+        let bundle = enveloped("s", "s: {type: string}");
+        let fixed = |schema: Value| consistency::fixed_value(&bundle, &schema);
+        assert_eq!(fixed(json!({"const": "ok"})), Some(json!("ok")));
+        assert_eq!(fixed(json!({"enum": ["ok"]})), Some(json!("ok")));
+        assert_eq!(
+            fixed(json!({"enum": ["ok", "error"], "default": "error"})),
+            Some(json!("error"))
+        );
+        // The first of several values, or an example, is a guess.
+        assert_eq!(fixed(json!({"enum": ["ok", "error"]})), None);
+        assert_eq!(fixed(json!({"type": "string", "example": "ok"})), None);
+        assert_eq!(fixed(json!({"type": "boolean"})), None);
+    }
+
+    #[test]
+    fn held_answer_fills_what_is_fixed_or_kept_and_gives_up_on_the_rest() {
+        let record = json!({"id": 7});
+        // What the schema fixes.
+        let bundle = enveloped(
+            "status, ok",
+            "status: {type: string, enum: [success]}, ok: {type: boolean, default: true}",
+        );
+        assert_eq!(
+            held(&bundle, None),
+            Some(json!({"status": "success", "ok": true, "data": record}))
+        );
+        // A free boolean: what was kept, else nothing.
+        let bundle = enveloped("success", "success: {type: boolean}");
+        assert_eq!(held(&bundle, None), None);
+        let kept: Map<String, Value> = json!({"success": true}).as_object().unwrap().clone();
+        assert_eq!(
+            held(&bundle, Some(&kept)),
+            Some(json!({"success": true, "data": record}))
+        );
+        // The first of several enum values is no answer.
+        let bundle = enveloped("status", "status: {type: string, enum: [success, error]}");
+        assert_eq!(held(&bundle, None), None);
+        // A string's example that suits it stands; a boolean's never does.
+        let bundle = enveloped("message", "message: {type: string, examples: [Done]}");
+        assert_eq!(
+            held(&bundle, None),
+            Some(json!({"message": "Done", "data": record}))
+        );
+        let bundle = enveloped("success", "success: {type: boolean, examples: [true]}");
+        assert_eq!(held(&bundle, None), None);
+        let bundle = enveloped("count", "count: {type: integer, examples: [not-a-number]}");
+        assert_eq!(held(&bundle, None), None);
     }
 }
