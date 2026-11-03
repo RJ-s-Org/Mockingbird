@@ -3,7 +3,7 @@
 
 use crate::ImportError;
 use crate::openapi3::deref;
-use mb_mcm::{ApiKeyLocation, SecurityRequirement, SecurityScheme};
+use mb_mcm::{ApiKeyLocation, ApiKeyName, SecurityRequirement, SecurityScheme};
 use serde_json::Value;
 
 /// The prefix of the header name of the requirement that stands in for
@@ -78,6 +78,28 @@ pub(crate) fn compile_security(
         });
     }
     Ok(out)
+}
+
+/// Every name an `apiKey` scheme under `schemes_pointer` declares, in a header, the
+/// query or a cookie, whether or not a requirement references it or
+/// [`compile_security`] kept the requirement it is in: what the engine keeps out of a
+/// prompt (see [`mb_mcm::Bundle::api_key_names`]). A scheme that does not resolve is
+/// left out.
+pub(crate) fn api_key_names(doc: &Value, schemes_pointer: &str) -> Vec<ApiKeyName> {
+    let Some(definitions) = doc.pointer(schemes_pointer).and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out: Vec<ApiKeyName> = definitions
+        .iter()
+        .filter_map(|(name, def)| deref(doc, def, &format!("{schemes_pointer}/{name}")).ok())
+        .filter_map(|def| match map_scheme(def, &Value::Null)? {
+            SecurityScheme::ApiKey { location, name } => Some(ApiKeyName { location, name }),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup();
+    out
 }
 
 /// The scheme names the stand-in requirement of `security` (see

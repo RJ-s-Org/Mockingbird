@@ -1,0 +1,594 @@
+openapi: 3.0.3
+info:
+  title: Atlassian Statuspage Manage API (components, incidents, incident updates, subscribers)
+  version: "1.0.0"
+  description: |
+    A subset of the Statuspage Manage API, written from its public documentation.
+    Everything lives under a page: components at `/pages/{page_id}/components`,
+    incidents at `/pages/{page_id}/incidents`, and each incident's updates and
+    subscribers under the incident. Ids are 12 lowercase letters and digits. Request
+    bodies wrap the resource in a key named after it: `{"component": {...}}`,
+    `{"incident": {...}}`, `{"subscriber": {...}}`.
+
+    An incident's `status` is investigating, identified, monitoring or resolved
+    (scheduled maintenance uses scheduled, in_progress, verifying and completed).
+    Creating an incident, and every change of its status, adds an incident update
+    holding the new `status` and the `body` sent with it; `incident_updates` lists
+    them newest first, and an update's own `body` can be corrected afterwards. When
+    the status becomes resolved, `resolved_at` is set (it is null until then) and the
+    incident is no longer among the unresolved incidents.
+
+    `components` on an incident maps component ids to the status each is in because
+    of the incident (operational, degraded_performance, partial_outage,
+    major_outage, under_maintenance). Sending it sets those components' own
+    `status`, which the component then reads with. `component_ids` names the
+    components the incident affects.
+
+    Lists page by number with `page` (from 1) and `per_page` (default 100), and
+    answer a bare array. `q` matches incidents whose name or updates contain the
+    text. A property that is not valid, such as a status outside the enum, is
+    refused with 422 and `error` naming what is wrong. An unknown id answers 404.
+servers:
+  - url: https://api.statuspage.io
+security:
+  - apiKey: []
+tags:
+  - name: Pages
+  - name: Components
+  - name: Incidents
+  - name: Incident updates
+  - name: Incident subscribers
+paths:
+  /v1/pages:
+    get:
+      tags: [Pages]
+      operationId: getPages
+      summary: Get the pages the key can manage
+      responses:
+        "200":
+          description: The pages.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Page"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /v1/pages/{page_id}:
+    get:
+      tags: [Pages]
+      operationId: getPage
+      summary: Get a page
+      parameters:
+        - $ref: "#/components/parameters/page_id"
+      responses:
+        "200":
+          description: The page.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Page"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v1/pages/{page_id}/components:
+    parameters:
+      - $ref: "#/components/parameters/page_id"
+    get:
+      tags: [Components]
+      operationId: getComponents
+      summary: Get a page's components
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of components, in display order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Component"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Components]
+      operationId: postComponent
+      summary: Create a component
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [component]
+              properties:
+                component:
+                  allOf:
+                    - $ref: "#/components/schemas/ComponentInput"
+                    - type: object
+                      required: [name]
+      responses:
+        "201":
+          description: The created component.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Component"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v1/pages/{page_id}/components/{component_id}:
+    parameters:
+      - $ref: "#/components/parameters/page_id"
+      - $ref: "#/components/parameters/component_id"
+    get:
+      tags: [Components]
+      operationId: getComponent
+      summary: Get a component
+      responses:
+        "200":
+          description: The component, with its current status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Component"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Components]
+      operationId: patchComponent
+      summary: Update a component
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [component]
+              properties:
+                component: {$ref: "#/components/schemas/ComponentInput"}
+      responses:
+        "200":
+          description: The updated component.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Component"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+    delete:
+      tags: [Components]
+      operationId: deleteComponent
+      summary: Delete a component
+      responses:
+        "204":
+          description: The component is deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v1/pages/{page_id}/incidents:
+    parameters:
+      - $ref: "#/components/parameters/page_id"
+    get:
+      tags: [Incidents]
+      operationId: getIncidents
+      summary: Get a page's incidents
+      parameters:
+        - name: q
+          in: query
+          description: Only incidents whose name or updates contain the text.
+          schema: {type: string}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of incidents, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Incident"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Incidents]
+      operationId: postIncident
+      summary: Create an incident
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident]
+              properties:
+                incident:
+                  allOf:
+                    - $ref: "#/components/schemas/IncidentInput"
+                    - type: object
+                      required: [name]
+      responses:
+        "201":
+          description: The created incident, whose one incident update holds its status and body.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Incident"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v1/pages/{page_id}/incidents/unresolved:
+    get:
+      tags: [Incidents]
+      operationId: getUnresolvedIncidents
+      summary: Get the incidents that are not resolved
+      description: Realtime incidents whose status is investigating, identified or monitoring.
+      parameters:
+        - $ref: "#/components/parameters/page_id"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: The unresolved incidents, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Incident"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v1/pages/{page_id}/incidents/{incident_id}:
+    parameters:
+      - $ref: "#/components/parameters/page_id"
+      - $ref: "#/components/parameters/incident_id"
+    get:
+      tags: [Incidents]
+      operationId: getIncident
+      summary: Get an incident
+      responses:
+        "200":
+          description: The incident with all its updates.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Incident"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Incidents]
+      operationId: patchIncident
+      summary: Update an incident
+      description: |
+        Only the properties sent change. Sending a `status` adds an incident update with
+        that status and the `body` sent; resolved also sets `resolved_at`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident]
+              properties:
+                incident: {$ref: "#/components/schemas/IncidentInput"}
+      responses:
+        "200":
+          description: The whole updated incident.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Incident"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+    delete:
+      tags: [Incidents]
+      operationId: deleteIncident
+      summary: Delete an incident
+      responses:
+        "200":
+          description: The incident as it was.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Incident"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v1/pages/{page_id}/incidents/{incident_id}/incident_updates/{incident_update_id}:
+    patch:
+      tags: [Incident updates]
+      operationId: patchIncidentUpdate
+      summary: Correct a previous incident update
+      description: Changes the update's body or display time; its status stays.
+      parameters:
+        - $ref: "#/components/parameters/page_id"
+        - $ref: "#/components/parameters/incident_id"
+        - name: incident_update_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident_update]
+              properties:
+                incident_update:
+                  type: object
+                  properties:
+                    body: {type: string}
+                    display_at: {type: string, format: date-time}
+                    deliver_notifications: {type: boolean}
+      responses:
+        "200":
+          description: The corrected incident update.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IncidentUpdate"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v1/pages/{page_id}/incidents/{incident_id}/subscribers:
+    parameters:
+      - $ref: "#/components/parameters/page_id"
+      - $ref: "#/components/parameters/incident_id"
+    get:
+      tags: [Incident subscribers]
+      operationId: getIncidentSubscribers
+      summary: Get an incident's subscribers
+      responses:
+        "200":
+          description: The people notified of this incident's updates.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Subscriber"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Incident subscribers]
+      operationId: postIncidentSubscriber
+      summary: Subscribe someone to an incident
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscriber]
+              properties:
+                subscriber:
+                  type: object
+                  properties:
+                    email: {type: string, format: email}
+                    phone_country: {type: string}
+                    phone_number: {type: string}
+                    skip_confirmation_notification: {type: boolean, default: false}
+      responses:
+        "201":
+          description: The subscriber.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Subscriber"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v1/pages/{page_id}/incidents/{incident_id}/subscribers/{subscriber_id}:
+    parameters:
+      - $ref: "#/components/parameters/page_id"
+      - $ref: "#/components/parameters/incident_id"
+      - name: subscriber_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Incident subscribers]
+      operationId: getIncidentSubscriber
+      summary: Get an incident subscriber
+      responses:
+        "200":
+          description: The subscriber.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Subscriber"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Incident subscribers]
+      operationId: deleteIncidentSubscriber
+      summary: Unsubscribe someone from an incident
+      responses:
+        "200":
+          description: The subscriber as it was, now unsubscribed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Subscriber"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: '"OAuth {api key}".'
+  parameters:
+    page_id:
+      name: page_id
+      in: path
+      required: true
+      schema: {type: string}
+    component_id:
+      name: component_id
+      in: path
+      required: true
+      schema: {type: string}
+    incident_id:
+      name: incident_id
+      in: path
+      required: true
+      schema: {type: string}
+    page:
+      name: page
+      in: query
+      description: The page number, from 1.
+      schema: {type: integer, minimum: 1, default: 1}
+    per_page:
+      name: per_page
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 100}
+  responses:
+    Unauthorized:
+      description: The key is missing or not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No page, component, incident or subscriber has the id.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unprocessable:
+      description: A property is missing or not valid, such as a status outside its enum.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          description: A message, or the list of what is wrong.
+          oneOf:
+            - type: string
+            - type: array
+              items: {type: string}
+    ComponentStatus:
+      type: string
+      enum: [operational, under_maintenance, degraded_performance, partial_outage, major_outage]
+    Page:
+      type: object
+      required: [id, name, subdomain, created_at, updated_at]
+      properties:
+        id: {type: string, pattern: "^[a-z0-9]{12}$"}
+        name: {type: string}
+        subdomain: {type: string}
+        domain: {type: string, nullable: true}
+        url: {type: string, format: uri}
+        time_zone: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ComponentInput:
+      type: object
+      properties:
+        name: {type: string}
+        description: {type: string, nullable: true}
+        status: {$ref: "#/components/schemas/ComponentStatus"}
+        only_show_if_degraded: {type: boolean}
+        group_id: {type: string, nullable: true}
+        showcase: {type: boolean}
+        start_date: {type: string, format: date, nullable: true}
+    Component:
+      type: object
+      required: [id, page_id, name, status, position, created_at, updated_at]
+      properties:
+        id: {type: string, pattern: "^[a-z0-9]{12}$"}
+        page_id: {type: string}
+        group_id: {type: string, nullable: true}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        status: {$ref: "#/components/schemas/ComponentStatus"}
+        position: {type: integer}
+        showcase: {type: boolean}
+        only_show_if_degraded: {type: boolean}
+        group: {type: boolean}
+        automation_email: {type: string}
+        start_date: {type: string, format: date, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    IncidentStatus:
+      type: string
+      enum: [investigating, identified, monitoring, resolved, scheduled, in_progress, verifying, completed]
+    IncidentInput:
+      type: object
+      properties:
+        name: {type: string}
+        status: {$ref: "#/components/schemas/IncidentStatus"}
+        impact_override: {type: string, enum: [none, maintenance, minor, major, critical]}
+        body:
+          type: string
+          description: The message of the incident update this change adds.
+        component_ids:
+          type: array
+          items: {type: string}
+        components:
+          type: object
+          description: Component ids mapped to the status the incident puts each in.
+          additionalProperties: {$ref: "#/components/schemas/ComponentStatus"}
+        deliver_notifications: {type: boolean, default: true}
+        scheduled_for: {type: string, format: date-time}
+        scheduled_until: {type: string, format: date-time}
+        metadata: {type: object, additionalProperties: true}
+    AffectedComponent:
+      type: object
+      properties:
+        code: {type: string, description: The component's id.}
+        name: {type: string}
+        old_status: {$ref: "#/components/schemas/ComponentStatus"}
+        new_status: {$ref: "#/components/schemas/ComponentStatus"}
+    IncidentUpdate:
+      type: object
+      required: [id, incident_id, status, body, created_at, updated_at, display_at]
+      properties:
+        id: {type: string, pattern: "^[a-z0-9]{12}$"}
+        incident_id: {type: string}
+        status: {$ref: "#/components/schemas/IncidentStatus"}
+        body: {type: string}
+        affected_components:
+          type: array
+          nullable: true
+          items: {$ref: "#/components/schemas/AffectedComponent"}
+        deliver_notifications: {type: boolean}
+        display_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Incident:
+      type: object
+      required: [id, page_id, name, status, impact, shortlink, created_at, updated_at, resolved_at,
+                 incident_updates, components]
+      properties:
+        id: {type: string, pattern: "^[a-z0-9]{12}$"}
+        page_id: {type: string}
+        name: {type: string}
+        status: {$ref: "#/components/schemas/IncidentStatus"}
+        impact: {type: string, enum: [none, maintenance, minor, major, critical]}
+        impact_override: {type: string, nullable: true}
+        shortlink: {type: string, format: uri}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        monitoring_at: {type: string, format: date-time, nullable: true}
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the incident was resolved; null until then.
+        started_at: {type: string, format: date-time}
+        scheduled_for: {type: string, format: date-time, nullable: true}
+        scheduled_until: {type: string, format: date-time, nullable: true}
+        postmortem_body: {type: string, nullable: true}
+        incident_updates:
+          type: array
+          description: Newest first.
+          items: {$ref: "#/components/schemas/IncidentUpdate"}
+        components:
+          type: array
+          description: The components the incident affects.
+          items: {$ref: "#/components/schemas/Component"}
+        metadata: {type: object, additionalProperties: true}
+    Subscriber:
+      type: object
+      required: [id, mode, created_at]
+      properties:
+        id: {type: string, pattern: "^[a-z0-9]{12}$"}
+        mode: {type: string, enum: [email, sms, webhook, slack, teams]}
+        email: {type: string, format: email, nullable: true}
+        phone_number: {type: string, nullable: true}
+        phone_country: {type: string, nullable: true}
+        skip_confirmation_notification: {type: boolean}
+        quarantined_at: {type: string, format: date-time, nullable: true}
+        purge_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}

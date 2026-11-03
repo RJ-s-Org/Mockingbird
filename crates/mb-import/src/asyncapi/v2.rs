@@ -199,5 +199,6 @@ pub(crate) fn compile_v2(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportErro
         protocol_payload: None,
         channels,
         webhooks: Vec::new(),
+        api_key_names: None,
     })
 }

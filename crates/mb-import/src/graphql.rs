@@ -716,6 +716,7 @@ fn compile_text(sdl: &str, bytes: &[u8], title: Option<String>) -> Result<Bundle
         }),
         channels: Vec::new(),
         webhooks: Vec::new(),
+        api_key_names: None,
     })
 }
 

@@ -1,0 +1,732 @@
+openapi: 3.0.3
+info:
+  title: Zoho Books API (contacts, invoices, invoice status, customer payments)
+  version: "3"
+  description: |
+    A subset of the Zoho Books API v3, written from its public documentation. Every
+    call names the organization in the `organization_id` query parameter. Every
+    answer is an envelope: `code` (0 for success), `message`, and the resource under
+    its name (`contact`, `invoice`, `payment`, `comment`) or a list under the plural
+    (`invoices`, `comments`) with `page_context`. Ids are strings of digits.
+
+    An invoice's `status` follows a state machine, and changes only through the
+    status endpoints and payments:
+
+    - a new invoice is `draft`
+    - `/status/sent` (from draft): `sent`
+    - a customer payment applied to a sent invoice lowers its `balance` by the
+      amount applied and raises `payment_made`; the invoice is `partially_paid`
+      while the balance is above zero and `paid` when it reaches zero
+    - `/status/void` (from any status but draft and void): `void`; payments applied
+      to it are unapplied
+    - `/status/draft` (from void only): `draft` again
+
+    A status change from a status it does not apply to is refused with 400. A line's
+    `item_total` is its `rate` times its `quantity`; `sub_total` is the sum of the
+    lines; `total` is `sub_total` plus `tax_total`, and a line without a `tax_id`
+    adds no tax. `balance` is `total` less `payment_made`.
+
+    `invoice_number` is unique in the organization. Invoices are numbered
+    automatically unless `ignore_auto_number_generation=true` is sent with an
+    `invoice_number`; a number another invoice has is refused with 400 and code
+    1001. PUT changes only the properties sent, and `line_items`, when sent,
+    replaces the lines. An unknown id answers 404 with code 1002.
+
+    Lists page by number: `page` (from 1) and `per_page` (default 200).
+    `page_context.has_more_page` is true while later pages hold more.
+servers:
+  - url: https://www.zohoapis.com
+security:
+  - oauth: []
+tags:
+  - name: Contacts
+  - name: Invoices
+  - name: Invoice status
+  - name: Invoice comments
+  - name: Customer payments
+paths:
+  /books/v3/contacts:
+    parameters:
+      - $ref: "#/components/parameters/organization_id"
+    get:
+      tags: [Contacts]
+      operationId: listContacts
+      summary: List contacts
+      parameters:
+        - name: contact_name
+          in: query
+          schema: {type: string}
+        - name: email
+          in: query
+          schema: {type: string}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of contacts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, contacts, page_context]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  contacts:
+                    type: array
+                    items: {$ref: "#/components/schemas/Contact"}
+                  page_context: {$ref: "#/components/schemas/PageContext"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Contacts]
+      operationId: createContact
+      summary: Create a contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contact_name]
+              properties:
+                contact_name: {type: string, description: Unique in the organization.}
+                company_name: {type: string}
+                contact_type: {type: string, enum: [customer, vendor], default: customer}
+                currency_id: {type: string}
+                payment_terms: {type: integer, description: Days until an invoice is due.}
+                contact_persons:
+                  type: array
+                  items: {$ref: "#/components/schemas/ContactPerson"}
+      responses:
+        "201":
+          description: The created contact.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, contact]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  contact: {$ref: "#/components/schemas/Contact"}
+        "400":
+          description: Code 3062 when another contact has the name.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /books/v3/contacts/{contact_id}:
+    get:
+      tags: [Contacts]
+      operationId: getContact
+      summary: Get a contact
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+        - name: contact_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: The contact, with what it owes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, contact]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  contact: {$ref: "#/components/schemas/Contact"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/invoices:
+    parameters:
+      - $ref: "#/components/parameters/organization_id"
+    get:
+      tags: [Invoices]
+      operationId: listInvoices
+      summary: List invoices
+      parameters:
+        - name: customer_id
+          in: query
+          schema: {type: string}
+        - name: status
+          in: query
+          schema: {type: string, enum: [sent, draft, overdue, paid, void, unpaid, partially_paid, viewed]}
+        - name: invoice_number
+          in: query
+          schema: {type: string}
+        - name: reference_number
+          in: query
+          schema: {type: string}
+        - name: date_start
+          in: query
+          schema: {type: string, format: date}
+        - name: date_end
+          in: query
+          schema: {type: string, format: date}
+        - name: sort_column
+          in: query
+          schema: {type: string, enum: [customer_name, invoice_number, date, due_date, total, balance, created_time]}
+        - name: sort_order
+          in: query
+          schema: {type: string, enum: [A, D]}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of invoices, without their lines.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, invoices, page_context]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  invoices:
+                    type: array
+                    items: {$ref: "#/components/schemas/InvoiceSummary"}
+                  page_context: {$ref: "#/components/schemas/PageContext"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Invoices]
+      operationId: createInvoice
+      summary: Create an invoice
+      parameters:
+        - name: ignore_auto_number_generation
+          in: query
+          description: Use the invoice_number sent instead of the next automatic one.
+          schema: {type: boolean, default: false}
+        - name: send
+          in: query
+          description: Email the invoice to the contact persons, which also marks it sent.
+          schema: {type: boolean, default: false}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/InvoiceInput"
+                - type: object
+                  required: [customer_id, line_items]
+      responses:
+        "201":
+          description: The created invoice, in draft.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/InvoiceResponse"}
+        "400":
+          description: Code 1001 when another invoice has the invoice_number; other codes for a property that is not valid.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /books/v3/invoices/{invoice_id}:
+    parameters:
+      - $ref: "#/components/parameters/organization_id"
+      - $ref: "#/components/parameters/invoice_id"
+    get:
+      tags: [Invoices]
+      operationId: getInvoice
+      summary: Get an invoice
+      responses:
+        "200":
+          description: The invoice with its lines.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/InvoiceResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Invoices]
+      operationId: updateInvoice
+      summary: Update an invoice
+      description: Only the properties sent change; `line_items`, when sent, replaces the lines.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/InvoiceInput"}
+      responses:
+        "200":
+          description: The whole updated invoice.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/InvoiceResponse"}
+        "400":
+          description: A property that is not valid, or code 1001 for a taken invoice_number.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Invoices]
+      operationId: deleteInvoice
+      summary: Delete an invoice
+      description: Refused with 400 while payments are applied to it.
+      responses:
+        "200":
+          description: The invoice is deleted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Message"}
+        "400":
+          description: The invoice has payments applied.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/invoices/{invoice_id}/status/sent:
+    post:
+      tags: [Invoice status]
+      operationId: markInvoiceSent
+      summary: Mark a draft invoice as sent
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+        - $ref: "#/components/parameters/invoice_id"
+      responses:
+        "200":
+          description: The invoice is sent.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Message"}
+        "400":
+          description: The invoice is not a draft.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/invoices/{invoice_id}/status/void:
+    post:
+      tags: [Invoice status]
+      operationId: markInvoiceVoid
+      summary: Void an invoice
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+        - $ref: "#/components/parameters/invoice_id"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string}
+      responses:
+        "200":
+          description: The invoice is void.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Message"}
+        "400":
+          description: The invoice is a draft or already void.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/invoices/{invoice_id}/status/draft:
+    post:
+      tags: [Invoice status]
+      operationId: markInvoiceDraft
+      summary: Return a void invoice to draft
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+        - $ref: "#/components/parameters/invoice_id"
+      responses:
+        "200":
+          description: The invoice is a draft again.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Message"}
+        "400":
+          description: The invoice is not void.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/invoices/{invoice_id}/comments:
+    parameters:
+      - $ref: "#/components/parameters/organization_id"
+      - $ref: "#/components/parameters/invoice_id"
+    get:
+      tags: [Invoice comments]
+      operationId: listInvoiceComments
+      summary: List an invoice's comments and history
+      responses:
+        "200":
+          description: The comments, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, comments]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  comments:
+                    type: array
+                    items: {$ref: "#/components/schemas/Comment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Invoice comments]
+      operationId: addInvoiceComment
+      summary: Add a comment to an invoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description]
+              properties:
+                description: {type: string}
+                show_comment_to_clients: {type: boolean, default: false}
+      responses:
+        "201":
+          description: The comment.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, comment]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  comment: {$ref: "#/components/schemas/Comment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/invoices/{invoice_id}/payments:
+    get:
+      tags: [Invoices]
+      operationId: listInvoicePayments
+      summary: List the payments applied to an invoice
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+        - $ref: "#/components/parameters/invoice_id"
+      responses:
+        "200":
+          description: The payments applied to the invoice.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, payments]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  payments:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        payment_id: {type: string}
+                        invoice_id: {type: string}
+                        amount: {type: number, description: The amount applied to this invoice.}
+                        date: {type: string, format: date}
+                        payment_mode: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /books/v3/customerpayments:
+    post:
+      tags: [Customer payments]
+      operationId: createCustomerPayment
+      summary: Record a payment from a customer
+      description: Each entry of `invoices` applies part of the amount to one of the customer's invoices.
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, payment_mode, amount, date]
+              properties:
+                customer_id: {type: string}
+                payment_mode: {type: string, description: Such as cash, check, creditcard or banktransfer.}
+                amount: {type: number, exclusiveMinimum: true, minimum: 0}
+                date: {type: string, format: date}
+                reference_number: {type: string}
+                description: {type: string}
+                invoices:
+                  type: array
+                  items:
+                    type: object
+                    required: [invoice_id, amount_applied]
+                    properties:
+                      invoice_id: {type: string}
+                      amount_applied: {type: number}
+      responses:
+        "201":
+          description: The payment and where it was applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, payment]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  payment: {$ref: "#/components/schemas/CustomerPayment"}
+        "400":
+          description: An amount applied above the invoice's balance, or to an invoice that is a draft or void.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /books/v3/customerpayments/{payment_id}:
+    get:
+      tags: [Customer payments]
+      operationId: getCustomerPayment
+      summary: Get a customer payment
+      parameters:
+        - $ref: "#/components/parameters/organization_id"
+        - name: payment_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: The payment.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, payment]
+                properties:
+                  code: {type: integer}
+                  message: {type: string}
+                  payment: {$ref: "#/components/schemas/CustomerPayment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    oauth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: '"Zoho-oauthtoken {access token}".'
+  parameters:
+    organization_id:
+      name: organization_id
+      in: query
+      required: true
+      schema: {type: string}
+    invoice_id:
+      name: invoice_id
+      in: path
+      required: true
+      schema: {type: string}
+    page:
+      name: page
+      in: query
+      description: The page number, from 1.
+      schema: {type: integer, minimum: 1, default: 1}
+    per_page:
+      name: per_page
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 200}
+  responses:
+    Unauthorized:
+      description: Code 57, the token is not valid for the organization.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: Code 1002, no resource has the id.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: integer, description: Not 0.}
+        message: {type: string}
+    Message:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+    PageContext:
+      type: object
+      required: [page, per_page, has_more_page]
+      properties:
+        page: {type: integer}
+        per_page: {type: integer}
+        has_more_page: {type: boolean}
+        report_name: {type: string}
+        sort_column: {type: string}
+        sort_order: {type: string, enum: [A, D]}
+    ContactPerson:
+      type: object
+      properties:
+        first_name: {type: string}
+        last_name: {type: string}
+        email: {type: string, format: email}
+        phone: {type: string}
+        is_primary_contact: {type: boolean}
+    Contact:
+      type: object
+      required: [contact_id, contact_name, contact_type, status, created_time]
+      properties:
+        contact_id: {type: string, pattern: "^[0-9]+$"}
+        contact_name: {type: string}
+        company_name: {type: string}
+        contact_type: {type: string, enum: [customer, vendor]}
+        status: {type: string, enum: [active, inactive]}
+        currency_code: {type: string}
+        payment_terms: {type: integer}
+        outstanding_receivable_amount: {type: number, description: What the customer still owes on its invoices.}
+        unused_credits_receivable_amount: {type: number}
+        contact_persons:
+          type: array
+          items: {$ref: "#/components/schemas/ContactPerson"}
+        created_time: {type: string, format: date-time}
+        last_modified_time: {type: string, format: date-time}
+    LineItemInput:
+      type: object
+      required: [name, rate, quantity]
+      properties:
+        item_id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        rate: {type: number}
+        quantity: {type: number}
+        unit: {type: string}
+        discount: {type: number, default: 0}
+        tax_id: {type: string}
+    LineItem:
+      type: object
+      required: [line_item_id, name, rate, quantity, item_total]
+      properties:
+        line_item_id: {type: string}
+        item_id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        rate: {type: number}
+        quantity: {type: number}
+        unit: {type: string}
+        discount: {type: number}
+        tax_id: {type: string}
+        tax_percentage: {type: number}
+        item_total: {type: number, description: rate times quantity, less the discount.}
+    InvoiceInput:
+      type: object
+      properties:
+        customer_id: {type: string}
+        invoice_number: {type: string, description: Used only with ignore_auto_number_generation=true.}
+        reference_number: {type: string}
+        date: {type: string, format: date}
+        due_date: {type: string, format: date}
+        payment_terms: {type: integer}
+        currency_id: {type: string}
+        notes: {type: string}
+        terms: {type: string}
+        line_items:
+          type: array
+          minItems: 1
+          items: {$ref: "#/components/schemas/LineItemInput"}
+    InvoiceStatus:
+      type: string
+      enum: [draft, sent, overdue, paid, void, unpaid, partially_paid, viewed]
+    Invoice:
+      type: object
+      required: [invoice_id, invoice_number, status, customer_id, customer_name, date, due_date, currency_code,
+                 line_items, sub_total, tax_total, total, payment_made, balance, created_time, last_modified_time]
+      properties:
+        invoice_id: {type: string, pattern: "^[0-9]+$"}
+        invoice_number: {type: string}
+        status: {$ref: "#/components/schemas/InvoiceStatus"}
+        customer_id: {type: string}
+        customer_name: {type: string}
+        reference_number: {type: string}
+        date: {type: string, format: date}
+        due_date: {type: string, format: date}
+        payment_terms: {type: integer}
+        currency_code: {type: string}
+        line_items:
+          type: array
+          items: {$ref: "#/components/schemas/LineItem"}
+        sub_total: {type: number}
+        tax_total: {type: number}
+        total: {type: number}
+        payment_made: {type: number}
+        balance: {type: number, description: total less payment_made.}
+        notes: {type: string}
+        terms: {type: string}
+        invoice_url: {type: string, format: uri}
+        created_time: {type: string, format: date-time}
+        last_modified_time: {type: string, format: date-time}
+    InvoiceSummary:
+      type: object
+      required: [invoice_id, invoice_number, status, customer_id, customer_name, date, due_date, total, balance]
+      properties:
+        invoice_id: {type: string}
+        invoice_number: {type: string}
+        status: {$ref: "#/components/schemas/InvoiceStatus"}
+        customer_id: {type: string}
+        customer_name: {type: string}
+        reference_number: {type: string}
+        date: {type: string, format: date}
+        due_date: {type: string, format: date}
+        currency_code: {type: string}
+        total: {type: number}
+        balance: {type: number}
+        created_time: {type: string, format: date-time}
+    InvoiceResponse:
+      type: object
+      required: [code, message, invoice]
+      properties:
+        code: {type: integer}
+        message: {type: string}
+        invoice: {$ref: "#/components/schemas/Invoice"}
+    Comment:
+      type: object
+      required: [comment_id, invoice_id, description, date]
+      properties:
+        comment_id: {type: string}
+        invoice_id: {type: string}
+        description: {type: string}
+        commented_by_id: {type: string}
+        commented_by: {type: string}
+        comment_type: {type: string, enum: [internal, system]}
+        date: {type: string, format: date}
+        operation_type: {type: string}
+        transaction_type: {type: string}
+    CustomerPayment:
+      type: object
+      required: [payment_id, customer_id, payment_mode, amount, date, invoices]
+      properties:
+        payment_id: {type: string, pattern: "^[0-9]+$"}
+        payment_number: {type: string}
+        customer_id: {type: string}
+        customer_name: {type: string}
+        payment_mode: {type: string}
+        amount: {type: number}
+        unused_amount: {type: number, description: The part of the amount not applied to an invoice.}
+        date: {type: string, format: date}
+        reference_number: {type: string}
+        description: {type: string}
+        invoices:
+          type: array
+          items:
+            type: object
+            required: [invoice_id, amount_applied]
+            properties:
+              invoice_id: {type: string}
+              invoice_number: {type: string}
+              amount_applied: {type: number}
+              balance_amount: {type: number, description: The invoice's balance after this payment.}
+              total: {type: number}

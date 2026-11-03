@@ -166,6 +166,11 @@ pub struct GenerationContext<'a> {
     /// was stored, so that what counts them has moved: shown as new, not among
     /// [`Self::related`]. Scrubbed by whoever found them. For the prompt only.
     pub created_since: &'a [StoredResource],
+    /// The type and id of those of [`Self::related`] that creates put in the very
+    /// collection this create runs in (`/posts/p1/comments`): what a create can
+    /// conflict with by being of their type. A record of that type that only the
+    /// request names by value is not among them.
+    pub alongside: &'a [(String, String)],
     /// A read's target changes only through the effects its answer lists: it is behind
     /// writes that only referred to it, so the answer is the stored copy, and the read is
     /// offered the effects envelope to say what those writes changed on it.
@@ -738,7 +743,8 @@ impl Engine {
                     )
                 });
                 let effects_envelope = guards::effects_envelope(op, status, &ctx, &validator);
-                let refusals = guards::refusals(op, status, &ctx, &validator, effects_envelope);
+                let refusals =
+                    guards::refusals(op, status, &ctx, call, &validator, effects_envelope);
                 // The effects envelope's root is an object already.
                 let items_envelope = !effects_envelope
                     && guards::items_envelope(provider.capabilities(), validator.schema());
@@ -748,7 +754,7 @@ impl Engine {
                         user.content
                             .push_str(&prompt::effects_note(op, status, &ctx));
                         if !refusals.is_empty() {
-                            user.content.push_str(&guards::refusal_note(&refusals));
+                            user.content.push_str(&guards::refusal_note(op, &refusals));
                         }
                     } else if items_envelope {
                         user.content.push_str("\n\n");

@@ -72,7 +72,14 @@ pub(crate) fn sse_response(
         tenancy: Some(plan.tenancy.clone()),
         request: if rt.recorder.is_some() {
             json!({
-                "query": call.query,
+                // The contract's API keys stay out of the record (see
+                // [`call::recorded_public_query`]).
+                "query": call
+                    .query
+                    .iter()
+                    .filter(|(name, _)| !rt.bundle.declares_api_key(name))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<serde_json::Map<String, Value>>(),
                 "headers": recorded_headers(&rt, &headers),
                 "body": call.body,
             })

@@ -1,0 +1,642 @@
+openapi: 3.0.3
+info:
+  title: Dropbox API v2 (files, folders, tags, shared links)
+  version: "2.0"
+  description: |
+    A subset of the Dropbox API v2, written from its public documentation. Every
+    endpoint is an RPC call: a POST whose JSON body holds the arguments and whose
+    JSON answer holds the result. Nothing is addressed in the URL.
+
+    Items are addressed by path, such as `/Reports/2026`, or by id, as `id:` followed
+    by the item's id (`id:a4ayc_80_OEAAAAAAAAAXw`). Paths are case-insensitive:
+    `path_display` keeps the case the item was created with and `path_lower` is the
+    same path in lower case. A folder's children are the items whose path starts with
+    the folder's path and a slash.
+
+    Moving an item changes its path and keeps its id. Deleting a folder deletes
+    everything inside it.
+
+    Errors that an endpoint declares answer 409 with a tagged union: `error` holds a
+    `.tag` naming the error, and `error_summary` spells the tags out as a path, such
+    as `path/not_found/..` for an item that does not exist and
+    `path/conflict/folder/..` for creating a folder where one already is. Calls that
+    are not valid (a malformed argument) answer 400 with plain text; a bad token
+    answers 401.
+
+    `list_folder` answers one page of entries and a `cursor`. While `has_more` is
+    true, `list_folder/continue` with that cursor answers the next page. `limit` is an
+    upper bound on the entries in a page.
+servers:
+  - url: https://api.dropboxapi.com
+security:
+  - bearer: []
+tags:
+  - name: Files
+  - name: Tags
+  - name: Sharing
+paths:
+  /2/files/create_folder_v2:
+    post:
+      tags: [Files]
+      operationId: createFolder
+      summary: Create a folder at a path
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {$ref: "#/components/schemas/WritePath"}
+                autorename:
+                  type: boolean
+                  default: false
+                  description: On a conflict, pick a free name instead of failing.
+      responses:
+        "200":
+          description: The created folder.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [metadata]
+                properties:
+                  metadata: {$ref: "#/components/schemas/FolderMetadata"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: |
+            CreateFolderError. `path/conflict/folder` or `path/conflict/file` when an
+            item already has the path; `path/insufficient_space`; `path/malformed_path`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PathError"}
+  /2/files/get_metadata:
+    post:
+      tags: [Files]
+      operationId: getMetadata
+      summary: Get the metadata of a file or folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {$ref: "#/components/schemas/ReadPath"}
+                include_deleted:
+                  type: boolean
+                  default: false
+                  description: Answer DeletedMetadata for an item that was deleted.
+                include_media_info: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The item's metadata; `.tag` says whether it is a file or a folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Metadata"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: GetMetadataError. `path/not_found` when no item has the path or id.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PathError"}
+  /2/files/list_folder:
+    post:
+      tags: [Files]
+      operationId: listFolder
+      summary: List the contents of a folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                  description: The folder's path or id; the empty string is the root.
+                recursive:
+                  type: boolean
+                  default: false
+                  description: Also list the contents of every subfolder.
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 2000
+                  description: The most entries a page holds.
+                include_deleted: {type: boolean, default: false}
+      responses:
+        "200":
+          description: A page of the folder's entries.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ListFolderResult"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: ListFolderError. `path/not_found` for a folder that does not exist.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PathError"}
+  /2/files/list_folder/continue:
+    post:
+      tags: [Files]
+      operationId: listFolderContinue
+      summary: Answer the page after a cursor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cursor]
+              properties:
+                cursor:
+                  type: string
+                  minLength: 1
+                  description: The cursor of the previous page.
+      responses:
+        "200":
+          description: The next page of entries, without those of earlier pages.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ListFolderResult"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: ListFolderContinueError. `reset` when the cursor is no longer valid.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+  /2/files/move_v2:
+    post:
+      tags: [Files]
+      operationId: move
+      summary: Move a file or folder to a new path
+      description: The item keeps its id; a folder moves with everything inside it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RelocationArg"}
+      responses:
+        "200":
+          description: The item at its new path.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RelocationResult"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: |
+            RelocationError. `from_lookup/not_found` when nothing is at from_path;
+            `to/conflict/folder` when to_path is taken; `cant_move_folder_into_itself`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+  /2/files/copy_v2:
+    post:
+      tags: [Files]
+      operationId: copy
+      summary: Copy a file or folder to a new path
+      description: The copy gets a new id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RelocationArg"}
+      responses:
+        "200":
+          description: The copy.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RelocationResult"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: RelocationError, as for move_v2.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+  /2/files/delete_v2:
+    post:
+      tags: [Files]
+      operationId: delete
+      summary: Delete a file or folder
+      description: Deleting a folder deletes everything inside it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {$ref: "#/components/schemas/WritePath"}
+                parent_rev:
+                  type: string
+                  description: Delete a file only while this is its revision.
+      responses:
+        "200":
+          description: The metadata the item had before it was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [metadata]
+                properties:
+                  metadata: {$ref: "#/components/schemas/Metadata"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: DeleteError. `path_lookup/not_found` when nothing is at the path.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+  /2/files/search_v2:
+    post:
+      tags: [Files]
+      operationId: search
+      summary: Search for files and folders by name or content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: {type: string, maxLength: 1000}
+                options:
+                  type: object
+                  properties:
+                    path: {type: string, description: Search only below this folder.}
+                    max_results: {type: integer, minimum: 1, maximum: 1000, default: 100}
+                    file_status: {type: string, enum: [active, deleted], default: active}
+                    filename_only: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The matching items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matches, has_more]
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        metadata:
+                          type: object
+                          properties:
+                            .tag: {type: string, enum: [metadata]}
+                            metadata: {$ref: "#/components/schemas/Metadata"}
+                  has_more: {type: boolean}
+                  cursor: {type: string}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: SearchError.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+  /2/files/tags/add:
+    post:
+      tags: [Tags]
+      operationId: addTag
+      summary: Add a tag to an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TagArg"}
+      responses:
+        "200":
+          description: The item has the tag. The answer has no content.
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: AddTagError. `path/not_found`; `too_many_tags`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PathError"}
+  /2/files/tags/remove:
+    post:
+      tags: [Tags]
+      operationId: removeTag
+      summary: Remove a tag from an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TagArg"}
+      responses:
+        "200":
+          description: The item no longer has the tag. The answer has no content.
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: RemoveTagError. `path/not_found`; `tag_not_present`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PathError"}
+  /2/files/tags/get:
+    post:
+      tags: [Tags]
+      operationId: getTags
+      summary: Get the tags of items
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paths]
+              properties:
+                paths:
+                  type: array
+                  minItems: 1
+                  items: {type: string}
+      responses:
+        "200":
+          description: Each path asked for, with every tag it has now.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paths_to_tags]
+                properties:
+                  paths_to_tags:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, tags]
+                      properties:
+                        path: {type: string}
+                        tags:
+                          type: array
+                          items: {$ref: "#/components/schemas/Tag"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: BaseTagError. `path/not_found`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PathError"}
+  /2/sharing/create_shared_link_with_settings:
+    post:
+      tags: [Sharing]
+      operationId: createSharedLink
+      summary: Create a shared link to an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {type: string}
+                settings:
+                  type: object
+                  properties:
+                    requested_visibility: {type: string, enum: [public, team_only, password]}
+                    audience: {type: string, enum: [public, team, no_one]}
+                    access: {type: string, enum: [viewer, editor]}
+                    allow_download: {type: boolean}
+                    expires: {type: string, format: date-time}
+      responses:
+        "200":
+          description: The shared link.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SharedLinkMetadata"}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: |
+            CreateSharedLinkWithSettingsError. `shared_link_already_exists` when the item
+            has a link; `path/not_found`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+  /2/sharing/list_shared_links:
+    post:
+      tags: [Sharing]
+      operationId: listSharedLinks
+      summary: List shared links, all of them or those of one item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string}
+                cursor: {type: string}
+                direct_only: {type: boolean}
+      responses:
+        "200":
+          description: The links.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [links, has_more]
+                properties:
+                  links:
+                    type: array
+                    items: {$ref: "#/components/schemas/SharedLinkMetadata"}
+                  has_more: {type: boolean}
+                  cursor: {type: string}
+        "400": {$ref: "#/components/responses/BadInput"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: ListSharedLinksError. `path/not_found`; `reset`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaggedError"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  responses:
+    BadInput:
+      description: The arguments are not valid; the answer is plain text naming the problem.
+      content:
+        text/plain:
+          schema: {type: string}
+    Unauthorized:
+      description: The token is missing, expired or revoked.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/TaggedError"}
+  schemas:
+    WritePath:
+      type: string
+      pattern: "(/(.|[\\r\\n])*)|(ns:[0-9]+(/.*)?)"
+      description: A path starting with a slash.
+    ReadPath:
+      type: string
+      pattern: "(/(.|[\\r\\n])*|id:.*)|(rev:[0-9a-f]{9,})|(ns:[0-9]+(/.*)?)"
+      description: A path starting with a slash, or `id:` and an item's id.
+    TaggedError:
+      type: object
+      required: [error_summary, error]
+      properties:
+        error_summary:
+          type: string
+          description: The error's tags joined by slashes, ending in `/..` and a suffix.
+        error:
+          type: object
+          required: [.tag]
+          properties:
+            .tag: {type: string}
+          additionalProperties: true
+    PathError:
+      type: object
+      required: [error_summary, error]
+      description: An error about the path argument; the `.tag` inside `error.path` says what went wrong.
+      properties:
+        error_summary:
+          type: string
+          description: Such as `path/not_found/..` or `path/conflict/folder/..`.
+        error:
+          type: object
+          required: [.tag]
+          properties:
+            .tag: {type: string, enum: [path, other]}
+            path:
+              type: object
+              required: [.tag]
+              properties:
+                .tag:
+                  type: string
+                  enum: [not_found, conflict, malformed_path, not_file, not_folder, restricted_content,
+                         insufficient_space, disallowed_name, no_write_permission]
+                conflict:
+                  type: object
+                  properties:
+                    .tag: {type: string, enum: [file, folder, file_ancestor]}
+    FolderMetadata:
+      type: object
+      required: [name, id, path_lower, path_display]
+      properties:
+        name: {type: string, description: The last part of the path, in its displayed case.}
+        id: {type: string, pattern: "^id:.+", description: Stays the same when the folder moves.}
+        path_lower: {type: string}
+        path_display: {type: string}
+        parent_shared_folder_id: {type: string}
+        shared_folder_id: {type: string}
+        sharing_info:
+          type: object
+          properties:
+            read_only: {type: boolean}
+            parent_shared_folder_id: {type: string}
+            traverse_only: {type: boolean}
+            no_access: {type: boolean}
+    FileMetadata:
+      type: object
+      required: [name, id, path_lower, path_display, client_modified, server_modified, rev, size]
+      properties:
+        name: {type: string}
+        id: {type: string, pattern: "^id:.+"}
+        path_lower: {type: string}
+        path_display: {type: string}
+        client_modified: {type: string, format: date-time}
+        server_modified: {type: string, format: date-time}
+        rev: {type: string, pattern: "[0-9a-f]+"}
+        size: {type: integer, minimum: 0}
+        content_hash: {type: string}
+        is_downloadable: {type: boolean}
+    Metadata:
+      type: object
+      required: [.tag, name]
+      description: A file, folder or deleted item, told apart by `.tag`.
+      properties:
+        .tag: {type: string, enum: [file, folder, deleted]}
+        name: {type: string}
+        id: {type: string, pattern: "^id:.+", description: Absent for a deleted item.}
+        path_lower: {type: string}
+        path_display: {type: string}
+        client_modified: {type: string, format: date-time, description: Files only.}
+        server_modified: {type: string, format: date-time, description: Files only.}
+        rev: {type: string, description: Files only.}
+        size: {type: integer, minimum: 0, description: Files only.}
+        content_hash: {type: string, description: Files only.}
+        shared_folder_id: {type: string, description: Folders only.}
+        sharing_info:
+          type: object
+          properties:
+            read_only: {type: boolean}
+            parent_shared_folder_id: {type: string}
+    ListFolderResult:
+      type: object
+      required: [entries, cursor, has_more]
+      properties:
+        entries:
+          type: array
+          items: {$ref: "#/components/schemas/Metadata"}
+        cursor:
+          type: string
+          description: Pass to list_folder/continue for the next page, or later for changes.
+        has_more:
+          type: boolean
+          description: True while there are entries the pages so far have not held.
+    RelocationArg:
+      type: object
+      required: [from_path, to_path]
+      properties:
+        from_path: {$ref: "#/components/schemas/ReadPath"}
+        to_path: {$ref: "#/components/schemas/WritePath"}
+        autorename: {type: boolean, default: false}
+        allow_ownership_transfer: {type: boolean, default: false}
+    RelocationResult:
+      type: object
+      required: [metadata]
+      properties:
+        metadata: {$ref: "#/components/schemas/Metadata"}
+    TagArg:
+      type: object
+      required: [path, tag_text]
+      properties:
+        path: {type: string}
+        tag_text:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: "[\\w]+"
+          description: Stored in lower case.
+    Tag:
+      type: object
+      required: [.tag, tag_text]
+      properties:
+        .tag: {type: string, enum: [user_generated_tag]}
+        tag_text: {type: string}
+    SharedLinkMetadata:
+      type: object
+      required: [.tag, url, name, link_permissions]
+      properties:
+        .tag: {type: string, enum: [file, folder]}
+        url: {type: string, format: uri}
+        name: {type: string}
+        id: {type: string}
+        path_lower: {type: string}
+        expires: {type: string, format: date-time}
+        link_permissions:
+          type: object
+          properties:
+            can_revoke: {type: boolean}
+            resolved_visibility:
+              type: object
+              properties:
+                .tag: {type: string, enum: [public, team_only, password, team_and_password, shared_folder_only]}
+            allow_download: {type: boolean}
