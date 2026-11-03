@@ -48,6 +48,8 @@ fn ctx() -> GenerationContext<'static> {
         earlier_answers: &[],
         earlier_writes: &[],
         earlier_origins: &[],
+        created_since: &[],
+        changes_by_effects: false,
         update_guard: None,
     }
 }
@@ -277,6 +279,8 @@ async fn prompt_contains_request_and_state_as_data() {
                     earlier_answers: &[],
                     earlier_writes: &[],
                     earlier_origins: &[],
+                    created_since: &[],
+                    changes_by_effects: false,
                     update_guard: None,
                 },
             )
@@ -3888,4 +3892,268 @@ async fn a_read_told_of_earlier_requests_keeps_its_answer() {
         .unwrap();
     assert_eq!(out.source, Source::Fallback);
     assert_eq!(out.body.as_ref().unwrap()["status"], target.data["status"]);
+}
+
+/// Errors whose problem schemas declare a `status` member: an integer allowing
+/// any HTTP status, one whose bounds do not allow it, and a string.
+const PROBLEMS: &str = r##"
+openapi: 3.0.0
+info: {title: Problems, version: "1"}
+paths:
+  /things/{thing_id}:
+    get:
+      operationId: getThing
+      parameters: [{name: thing_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+        "404": {description: gone, content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+        "409": {description: odd, content: {application/json: {schema: {$ref: "#/components/schemas/Small"}}}}
+        "422": {description: worded, content: {application/json: {schema: {$ref: "#/components/schemas/Worded"}}}}
+        "410": {description: gone, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: number}}}}}}
+    put:
+      operationId: putThing
+      parameters: [{name: thing_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: integer}}
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer, minimum: 100, maximum: 599}
+        detail: {type: string}
+    Small:
+      type: object
+      required: [status]
+      properties: {status: {type: integer, minimum: 1, maximum: 99}}
+    Worded:
+      type: object
+      required: [status]
+      properties: {status: {type: string, enum: [failed, rejected]}}
+"##;
+
+fn problem_call() -> OperationCall {
+    OperationCall {
+        operation_id: "getThing".into(),
+        path_params: Map::from_iter([("thing_id".to_string(), json!("t1"))]),
+        ..OperationCall::default()
+    }
+}
+
+/// A problem body's integer `status` is the HTTP status, from the faker or the LLM,
+/// where the schema allows it. One whose bounds exclude it, or a string, is left alone,
+/// and so is a success's.
+#[tokio::test]
+async fn a_problem_bodys_status_is_the_http_status() {
+    let bundle = compile(PROBLEMS.as_bytes()).unwrap();
+    let op = bundle.operation("getThing").unwrap();
+    let offline = Engine::new(None, EngineConfig::default());
+    let forced = |code| GenerationContext {
+        forced_status: Some(code),
+        ..ctx()
+    };
+    let out = offline
+        .generate(&bundle, op, &problem_call(), forced(404))
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["status"], 404);
+    let gone = offline.not_found(&bundle, op, &problem_call(), "no t1");
+    assert_eq!(gone.body.unwrap()["status"], 404);
+
+    let (_, engine) = scripted(vec![Ok(json!(
+        {"type": "about:blank", "title": "Not Found", "status": 500}
+    )
+    .to_string())]);
+    let out = engine
+        .generate(&bundle, op, &problem_call(), forced(404))
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    assert_eq!(out.body.unwrap()["status"], 404);
+
+    let (_, engine) = scripted(vec![Ok(json!({"status": 17}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &problem_call(), forced(409))
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["status"], 17, "409 is out of its bounds");
+
+    let (_, engine) = scripted(vec![Ok(json!({"status": "failed"}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &problem_call(), forced(422))
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["status"], "failed");
+
+    let (_, engine) = scripted(vec![Ok(json!({"status": 3.5}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &problem_call(), forced(410))
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["status"], 410, "a number is patched too");
+
+    let (_, engine) = scripted(vec![Ok(json!({"id": "t1", "status": 3}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &problem_call(), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["status"], 3, "a success's is its own");
+}
+
+/// Records created after the target was stored are shown as new, after the rest,
+/// so the prompt before them is what it would be without them.
+#[tokio::test]
+async fn records_created_since_are_shown_as_new() {
+    let bundle = effects_bundle();
+    let target = stored_booking();
+    let earlier = [json!({"operation": "createCharge", "path": "/charges"})];
+    let created = [StoredResource {
+        resource_type: "charges".into(),
+        id: "ch_200001".into(),
+        data: json!({"id": "ch_200001", "booking": "b1"}),
+    }];
+    let run = |created_since| {
+        let (provider, engine) = scripted(vec![Ok(cancelled().to_string())]);
+        let (bundle, target, earlier) = (&bundle, &target, &earlier);
+        async move {
+            let ctx = GenerationContext {
+                target: Some(target),
+                earlier_requests: earlier,
+                created_since,
+                ..GenerationContext::default()
+            };
+            engine
+                .generate(
+                    bundle,
+                    bundle.operation("getBooking").unwrap(),
+                    &booking_call("getBooking"),
+                    ctx,
+                )
+                .await
+                .unwrap();
+            provider.requests()[0].messages[1].content.clone()
+        }
+    };
+    let (without, shown) = (run(&[]).await, run(&created).await);
+    assert!(!without.contains("new_resources"), "{without}");
+    assert!(shown.contains("<new_resources>"), "{shown}");
+    assert!(shown.contains("ch_200001"), "{shown}");
+    let now = |s: &str| {
+        s.lines()
+            .find(|l| l.starts_with("<now>"))
+            .unwrap()
+            .to_string()
+    };
+    let shown = shown.replace(&now(&shown), &now(&without));
+    let cut = without.find("These requests succeeded").unwrap();
+    assert!(shown.starts_with(&without[..cut]), "{shown}");
+    assert!(
+        shown.find("<new_resources>").unwrap() < shown.find("<earlier_requests>").unwrap(),
+        "{shown}"
+    );
+}
+
+/// A read whose target changes only by effects is offered the effects envelope and
+/// answers the stored copy, whatever its answer says; its effects are handed back.
+#[tokio::test]
+async fn a_read_changing_by_effects_answers_the_stored_copy() {
+    let bundle = effects_bundle();
+    let target = stored_booking();
+    let earlier = [json!({"operation": "createCharge", "path": "/charges"})];
+    let answer = json!({
+        "effects": [{"type": "bookings", "id": "b1", "set": {"note": "charged"}}],
+        "response": cancelled(),
+    });
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let ctx = GenerationContext {
+        target: Some(&target),
+        earlier_requests: &earlier,
+        changes_by_effects: true,
+        ..GenerationContext::default()
+    };
+    let out = engine
+        .generate(
+            &bundle,
+            bundle.operation("getBooking").unwrap(),
+            &booking_call("getBooking"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.body.as_ref().unwrap()["status"], target.data["status"]);
+    assert_eq!(out.effects.len(), 1);
+    let prompt = &provider.requests()[0].messages[1].content;
+    assert!(
+        prompt.contains("changes only through \"effects\""),
+        "{prompt}"
+    );
+}
+
+/// An update whose answer settles on its stored target is told that what it changes
+/// beyond the request is kept only as an effect. A read, an action and a create are not.
+#[tokio::test]
+async fn a_settling_update_is_told_the_rule() {
+    #[derive(Debug)]
+    struct Settles;
+    impl mb_engine::UpdateGuard for Settles {
+        fn settles(&self, _status: u16) -> bool {
+            true
+        }
+        fn keep_identity(&self, candidate: Value) -> Value {
+            candidate
+        }
+        fn keeps_owner(&self, _candidate: &Value) -> bool {
+            true
+        }
+    }
+    let prompt = |op: &'static str, target: Option<StoredResource>, guarded: bool| async move {
+        let (contract, answer) = if op == "putThing" {
+            (PROBLEMS, json!({"id": "t1", "status": 2}))
+        } else {
+            (ACTIONS_PROMPT, json!({"id": "pi_1", "status": "s"}))
+        };
+        let bundle = compile(contract.as_bytes()).unwrap();
+        let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+        let call = OperationCall {
+            operation_id: op.into(),
+            ..OperationCall::default()
+        };
+        let ctx = GenerationContext {
+            target: target.as_ref(),
+            update_guard: guarded.then_some(&Settles as &dyn mb_engine::UpdateGuard),
+            ..GenerationContext::default()
+        };
+        engine
+            .generate(&bundle, bundle.operation(op).unwrap(), &call, ctx)
+            .await
+            .unwrap();
+        provider.requests()[0].messages[1].content.clone()
+    };
+    let thing = StoredResource {
+        resource_type: "things".into(),
+        id: "t1".into(),
+        data: json!({"id": "t1", "status": 1}),
+    };
+    let told = prompt("putThing", Some(thing.clone()), true).await;
+    assert!(
+        told.contains(
+            "What the response changes beyond what the request names is kept only when listed \
+             as effects."
+        ),
+        "{told}"
+    );
+    for untold in [
+        prompt("putThing", Some(thing), false).await,
+        prompt("getIntent", Some(unpaid_intent()), true).await,
+        prompt("confirmIntent", Some(unpaid_intent()), true).await,
+    ] {
+        assert!(!untold.contains("listed as effects"), "{untold}");
+    }
 }

@@ -43,6 +43,19 @@ No migration or configuration. A compiled bundle can change, also for offline mo
 - **A version segment is never a type**, when another static segment follows it: Mailchimp's `searchMembers` is `search-members` (was `3.0`), and Spotify's `search` is `search` (was `v1`). A version-shaped segment the path ends in or a parameter follows (`/v2/{id}/cancel`) is a type as before.
 - **Not covered**: a parameter whose words name nothing in the record (`/users/{handle}` over `login`), and a create beside two lists of other types listing its record, which keeps its type.
 
+### Related writes bring their records up to date
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes:
+
+- **A create referring to a held record makes that record's next read generate once.** A value of the create's request body, or of its path beyond the parent, that holds a digit or a separator (or is a whole number of at least 100000) and is a held record's stored id (or a path field known to hold it) marks that record: `POST /refunds {"payment_id": "pay_1…"}` for the payment, a reply naming its message under any member. Values only the generated answer holds mark nothing. Where that read answered `state` before, it now costs one LLM call, once. It is offered the effects envelope; only the effects its answer lists on that record apply, and it answers the stored copy as it then stands, so nothing else of the record changes. A parent under the create's path keeps its catch-up, as before. A create-then-read-parent flow under the parent's path costs what it did; one that refers to the record by value costs one call more per affected read (five refunds by `payment_id`, each followed by a read of the payment: 11 calls, 6 before). At most 4 records per create are marked; not one an applied effect of the answer changed. A booking naming the offer it books, for instance, now makes the offer's next read generate once, and the offer stays as stored unless that answer lists an effect on it.
+- **More store reads**: at most 8 per create, for the values of its request that could be an id, and one per request a catch-up is told of that created a record. A create whose request holds no such value pays none.
+- **The catch-up shows what was created**: the records those creates made come in a `<new_resources>` block after the rest, before `<earlier_requests>`, with a one-line preface (about 30 tokens beside the records), and are taken out of `<related_resources>`. Kept requests gain an internal `created` member, which no prompt shows. A prompt with nothing created to show is the same to the byte.
+- **A settling update is told the rule**: the user message of an update whose answer settles on its stored target (an LLM's, with the read's schema, not an action, told of no earlier requests) gains one sentence, about 20 tokens: what it changes beyond what the request names is kept only when listed as effects. Other prompts are unchanged.
+- **Query members are named**: such an update's query members count as named, as its body's do, and the query's value of each is applied after settling, so `?idList=list_1` is stored whatever the answer says; a body member of the same name wins. Updates sent only as JSON or form bodies settle as before.
+- **Error bodies say their status**: a 4xx or 5xx body whose schema declares an integer or number `status` allowing that status carries it, from the faker and the LLM alike.
+- **Recorded prompts**: a recording of a settling update, or of a read after a create that refers to a record, may not replay.
+- **Rust API**: `GenerationContext` gains public fields `created_since` and `changes_by_effects`, which break code constructing it in full; add `..Default::default()`.
+
 ### Prompts show where a minted value came from, and a write can be refused
 
 No migration or configuration. With an LLM and `consistency: on`, on HTTP routes:

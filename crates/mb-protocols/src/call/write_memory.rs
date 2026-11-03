@@ -11,6 +11,13 @@
 //! of its target, for replicas, feeds and triggers; telling a parent changes nothing
 //! it holds, and its read looks in the shared store before it serves, on any node.
 //!
+//! A create also tells the held records its request refers to by value, by the
+//! matching [`world`] shows a request's references with: a reply the message it
+//! answers, a refund its payment. Those change only by the effects their next read's
+//! answer lists, and that read answers the stored copy (see [`Earlier::by_effects`]). A
+//! parent and those keep, with the request, the record it created, which the read
+//! catching up is shown as new (see [`created_since`]).
+//!
 //! The next generation for that resource is shown the requests; a read, which could
 //! otherwise answer from state and never see them, must generate. Its validated
 //! answer replaces the stored copy and the memory goes.
@@ -69,6 +76,9 @@ pub(super) struct Earlier {
     /// a create's own body: all an answer has to keep. Last write wins, so any later
     /// write replaces or clears it, and older bodies are only told.
     pub(super) own: Option<Value>,
+    /// Every request kept only referred to the resource (see [`after_write`]): it
+    /// changes only by the effects a read's answer lists, and the stored copy stands.
+    pub(super) by_effects: bool,
     /// Catch-ups that failed since the last write.
     attempts: u64,
     /// This call's catch-up failed, so its answer is not one to repeat.
@@ -146,13 +156,21 @@ pub(super) async fn recall(
         .map(|request| {
             let mut told = request.clone();
             if let Value::Object(members) = &mut told {
-                members.remove("at");
+                for untold in UNTOLD {
+                    members.remove(untold);
+                }
             }
             told
         })
         .collect();
+    let by_effects = !memory.requests.is_empty()
+        && memory
+            .requests
+            .iter()
+            .all(|r| r.get(REFERENCED) == Some(&Value::Bool(true)));
     Earlier {
         key: Some(key),
+        by_effects,
         shown: memory.requests,
         told,
         own: memory.own,
@@ -1379,32 +1397,93 @@ pub(super) async fn after_write(
     } else {
         None
     };
-    if target.is_none() && parent.is_none() {
+    // The record a create stored, which what it was made under or refers to may count.
+    let created = match effect {
+        Effect::Create => generated
+            .body
+            .as_ref()
+            .or(request.as_ref())
+            .and_then(|stored| created_id(op, stored)),
+        _ => None,
+    };
+    let referenced = match created.as_deref() {
+        Some(id) => {
+            let told_already = |kind: &str, other: &str| {
+                (kind == t && other == id)
+                    || parent
+                        .as_ref()
+                        .is_some_and(|p| p.resource_type == kind && p.id == other)
+            };
+            world::referenced_by_value(state, plan, w.call, told_already)
+                .await
+                .into_iter()
+                .filter(|r| !effect_applied(generated, &r.resource_type, &r.id))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    if target.is_none() && parent.is_none() && referenced.is_empty() {
         return;
     }
-    let entry = |body: Option<Value>| memory_entry(op, body);
+    let created = created.as_deref().map(|id| (t, id));
     if let Some(tell) = target {
         let key = memory_key(t, &tell.id, tell.stored);
-        remember(state, session, &key, &entry(tell.body), tell.own).await;
+        remember(
+            state,
+            session,
+            &key,
+            &memory_entry(op, tell.body, None),
+            tell.own,
+        )
+        .await;
         if tell.publish
             && let Some(held) = w.held
         {
             state.upsert(session, held.clone()).await;
         }
     }
-    if let Some(parent) = parent {
+    // Told as a child is to what it is made under: last write wins.
+    let mut entry = memory_entry(op, told, created);
+    if let Some(parent) = &parent {
         let key = memory_key(&parent.resource_type, &parent.id, true);
-        remember(state, session, &key, &entry(told), None).await;
+        remember(state, session, &key, &entry, None).await;
+    }
+    // What it only refers to is told so, and changes by effects alone (see
+    // [`Earlier::by_effects`]): what an older body says of it still stands.
+    if let Value::Object(members) = &mut entry {
+        members.insert(REFERENCED.to_string(), Value::Bool(true));
+    }
+    for related in &referenced {
+        let key = memory_key(&related.resource_type, &related.id, true);
+        let own = read_memory(state, session, &key).await.own;
+        remember(state, session, &key, &entry, own).await;
     }
 }
 
-/// One remembered request, as a prompt is told it but for `at`.
-fn memory_entry(op: &Operation, body: Option<Value>) -> Value {
+/// What a kept request says beside what a prompt is told of it (see [`recall`]): when it
+/// was made, and the record it created, if any.
+const UNTOLD: [&str; 3] = ["at", CREATED, REFERENCED];
+
+/// The member of a kept request saying it only referred to the record it is kept for.
+const REFERENCED: &str = "referenced";
+
+/// The member of a kept request naming the record it created, as `{type, id}`.
+const CREATED: &str = "created";
+
+/// One remembered request, as a prompt is told it but for what is [`UNTOLD`]: with
+/// `created`, the record it created, which the read it is told to is shown as new.
+fn memory_entry(op: &Operation, body: Option<Value>, created: Option<(&str, &str)>) -> Value {
     let mut entry = Map::new();
     entry.insert("operation".to_string(), Value::from(op.id.as_str()));
     entry.insert("path".to_string(), Value::from(route(op)));
     if let Some(body) = body {
         entry.insert("body".to_string(), within_cap(body));
+    }
+    if let Some((t, id)) = created {
+        entry.insert(
+            CREATED.to_string(),
+            serde_json::json!({"type": t, "id": id}),
+        );
     }
     entry.insert(
         "at".to_string(),
@@ -1444,6 +1523,49 @@ pub(super) async fn recall_route(
         }
     }
     requests
+}
+
+/// The records the requests a read is told of created (see [`memory_entry`]), oldest
+/// first, as a record matched by value is shown ([`matched_for_context`]): what was made
+/// under or refers to the target since it was stored, so that what counts them moves.
+/// Taken out of `related`, where they would be told to stay unchanged. One gone since is
+/// not shown. A read pays at most one store read per request it is told of, and none with
+/// no record created.
+pub(super) async fn created_since(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    earlier: &Earlier,
+    target: Option<&StoredResource>,
+    related: &mut Vec<StoredResource>,
+) -> Vec<StoredResource> {
+    let rt = state.rt;
+    let mut out: Vec<StoredResource> = Vec::new();
+    for entry in &earlier.shown {
+        let Some(created) = entry.get(CREATED) else {
+            continue;
+        };
+        let (Some(t), Some(id)) = (
+            created.get("type").and_then(Value::as_str),
+            created.get("id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let is = |r: &StoredResource| r.resource_type == t && r.id == id;
+        if target.is_some_and(is) || out.iter().any(is) {
+            continue;
+        }
+        if let Some(at) = related.iter().position(is) {
+            out.push(related.remove(at));
+            continue;
+        }
+        let Some(held) = state.get(&plan.session, t, id).await else {
+            continue;
+        };
+        if let Some(data) = matched_for_context(rt, plan, t, &held.data) {
+            out.push(StoredResource { data, ..held });
+        }
+    }
+    out
 }
 
 /// Whether two path templates' segments are the same route: parameters may be named
@@ -1557,7 +1679,7 @@ pub(super) async fn after_route_write(
         .body
         .as_ref()
         .and_then(|body| told_to_list(rt, plan, list, body));
-    let entry = memory_entry(op, body);
+    let entry = memory_entry(op, body, None);
     remember(state, &plan.session, &key, &entry, None).await;
 }
 
@@ -1757,7 +1879,8 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 /// What of an effect's `set` may go on the target its update just stored: what the read
 /// schema declares at the top level (all of it where the schema names no members or a
 /// union may hold others), and of that not a path member, not what the request names at
-/// the top level, and not what would show another owner. A `readOnly` member may go on:
+/// the top level (in its body or its query, as the answer settles), and not what would
+/// show another owner. A `readOnly` member may go on:
 /// a client cannot set it, and an effect is the server saying what followed. The check on
 /// identity comes before this, as for any effect.
 pub(super) fn own_effect_members(
@@ -1775,7 +1898,9 @@ pub(super) fn own_effect_members(
     let index = rt.index();
     let paths = index.path_fields(t);
     let body = call.body.as_ref().and_then(Value::as_object);
-    let named = |key: &str| body.is_some_and(|members| members.contains_key(key));
+    let named = |key: &str| {
+        body.is_some_and(|members| members.contains_key(key)) || call.query.contains_key(key)
+    };
     // A member named for a parameter of this call's path, and holding its value.
     let shows_path = |key: &str| {
         held.data.get(key).and_then(id_string).is_some_and(|value| {
@@ -1827,6 +1952,50 @@ fn keeps_owner(
         && !known_foreign(rt, &plan.session, &candidate, &owner)
 }
 
+/// Whether this read of `held` changes it only by its answer's effects (see
+/// [`Earlier::by_effects`]), so that only those on it may apply.
+pub(super) fn by_effects(earlier: &Earlier, held: Option<&StoredResource>) -> bool {
+    earlier.by_effects && held.is_some() && !earlier.shown.is_empty()
+}
+
+/// The effects a read changing `held` by effects alone may apply: only those on `held`,
+/// as the requests it was told of only referred to it.
+pub(super) fn effects_on_target(
+    earlier: &Earlier,
+    held: Option<&StoredResource>,
+    effects: &mut Vec<ResourceEffect>,
+) {
+    if let (true, Some(held)) = (by_effects(earlier, held), held) {
+        effects.retain(|e| e.resource_type == held.resource_type && e.id == held.id);
+    }
+}
+
+/// After a generated 2xx read of `held` that changes by effects alone, once those applied:
+/// it answers the stored copy as it now stands, whatever else the answer said, and the
+/// requests it was told of are done. A failed generation never gets here (the stored
+/// copy answers and the next read tries again, up to the cap).
+pub(super) async fn settle_by_effects(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    earlier: &Earlier,
+    held: Option<&StoredResource>,
+    generated: &mut GeneratedResponse,
+) {
+    let (true, Some(held), Some(key)) = (by_effects(earlier, held), held, earlier.key.as_deref())
+    else {
+        return;
+    };
+    if !(200..300).contains(&generated.status) || transient_fallback(generated) {
+        return;
+    }
+    let session = &plan.session;
+    let current = state.get(session, &held.resource_type, &held.id).await;
+    if let Some(current) = current {
+        generated.body = Some(current.data);
+    }
+    forget_shown(state, session, key, &earlier.shown).await;
+}
+
 /// After a generated read that was told of remembered requests: when it is the
 /// whole resource, its answer takes the stored copy's place and those requests
 /// are done. A write landing during the generation leaves them: this answer did not
@@ -1869,6 +2038,10 @@ pub(super) async fn settle_read(
         }
         return;
     };
+    // Settled by its effects instead (see [`settle_by_effects`]).
+    if earlier.by_effects {
+        return;
+    }
     let Some(answer) = generated.body.as_ref() else {
         return;
     };
