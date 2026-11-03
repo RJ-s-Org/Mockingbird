@@ -207,22 +207,26 @@ async fn run_inner(
         Some(_) => ("https", "TLS"),
         None => ("http", "h2c"),
     };
+    // The bound addresses, which differ from the configured ones for port 0.
     match &data {
-        Some(_) => tracing::info!("data plane on {scheme}://{data_addr}"),
+        Some(l) => tracing::info!("data plane on {scheme}://{}", bound(l, data_addr)),
         None => tracing::info!("no data plane"),
     }
     match &admin {
-        Some(_) if role == Role::Data => tracing::info!("ops endpoints on {scheme}://{admin_addr}"),
-        Some(_) => tracing::info!("admin API on {scheme}://{admin_addr}"),
+        Some(l) if role == Role::Data => {
+            tracing::info!("ops endpoints on {scheme}://{}", bound(l, admin_addr));
+        }
+        Some(l) => tracing::info!("admin API on {scheme}://{}", bound(l, admin_addr)),
         None => tracing::info!("no admin API"),
     }
     match &grpc {
-        Some(_) => tracing::info!("gRPC ({grpc_mode}) on {grpc_addr}"),
+        Some(l) => tracing::info!("gRPC ({grpc_mode}) on {}", bound(l, grpc_addr)),
         None => tracing::info!("no gRPC listener"),
     }
-    if let (Some(_), Some(state)) = (&proxy, &app.proxy) {
+    if let (Some(l), Some(state)) = (&proxy, &app.proxy) {
         tracing::info!(
-            "proxy on http://{proxy_addr} (CA {})",
+            "proxy on http://{} (CA {})",
+            bound(l, proxy_addr),
             state.ca_cert_path().display()
         );
     }
@@ -249,6 +253,11 @@ async fn run_inner(
     )
     .await?;
     Ok(())
+}
+
+/// The address `listener` is bound to; `configured` if the OS cannot say.
+fn bound(listener: &TcpListener, configured: SocketAddr) -> SocketAddr {
+    listener.local_addr().unwrap_or(configured)
 }
 
 /// Serves `app` on `listeners` (the data plane, the admin port with the

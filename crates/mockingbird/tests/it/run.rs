@@ -3,7 +3,7 @@
 //! server again.
 #![cfg(test)]
 
-use crate::support::{fixture, free_port};
+use crate::support::{fixture, free_port, on_free_ports, port_was_busy};
 use std::path::Path;
 
 /// A config serving `orders` for `api.orders.test` on free ports; returns
@@ -22,6 +22,24 @@ fn write_config(dir: &Path) -> u16 {
     )
     .unwrap();
     admin
+}
+
+/// Writes a config on fresh ports and runs `go`, a `mockingbird run` that
+/// starts its server; again on other ports while one was taken before the
+/// server bound it. Returns the output and the admin port.
+fn on_fresh_config(
+    dir: &Path,
+    go: impl Fn() -> std::process::Output,
+) -> (std::process::Output, u16) {
+    on_free_ports(|| {
+        let admin = write_config(dir);
+        let out = go();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match port_was_busy(&stderr) {
+            true => Err(stderr.into_owned()),
+            false => Ok((out, admin)),
+        }
+    })
 }
 
 fn run(dir: &Path, command: &[&str]) -> std::process::Output {
@@ -49,18 +67,18 @@ fn admin_answers(port: u16) -> bool {
 #[test]
 fn run_routes_the_command_and_propagates_its_exit_code() {
     let dir = tempfile::tempdir().unwrap();
-    let admin = write_config(dir.path());
-
     // curl reaches the mock by its real host through the proxy, trusting
     // the CA from the environment.
-    let out = run(
-        dir.path(),
-        &[
-            "sh",
-            "-c",
-            "curl -sSf -o /dev/null -w '%{http_code}' https://api.orders.test/orders",
-        ],
-    );
+    let (out, admin) = on_fresh_config(dir.path(), || {
+        run(
+            dir.path(),
+            &[
+                "sh",
+                "-c",
+                "curl -sSf -o /dev/null -w '%{http_code}' https://api.orders.test/orders",
+            ],
+        )
+    });
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -71,14 +89,18 @@ fn run_routes_the_command_and_propagates_its_exit_code() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "200");
     assert!(!admin_answers(admin), "the server run started is stopped");
 
-    let out = run(
-        dir.path(),
-        &["sh", "-c", "test -n \"$NODE_OPTIONS\" && exit 7"],
-    );
+    let (out, admin) = on_fresh_config(dir.path(), || {
+        run(
+            dir.path(),
+            &["sh", "-c", "test -n \"$NODE_OPTIONS\" && exit 7"],
+        )
+    });
     assert_eq!(out.status.code(), Some(7));
     assert!(!admin_answers(admin));
 
-    let out = run(dir.path(), &["mockingbird-no-such-command"]);
+    let (out, _) = on_fresh_config(dir.path(), || {
+        run(dir.path(), &["mockingbird-no-such-command"])
+    });
     assert_eq!(out.status.code(), Some(127));
 }
 
@@ -100,17 +122,18 @@ fn run_needs_a_config() {
 #[test]
 fn run_warns_when_its_server_flags_do_not_apply() {
     let dir = tempfile::tempdir().unwrap();
-    let admin = write_config(dir.path());
-    let first = assert_cmd::Command::cargo_bin("mockingbird")
-        .unwrap()
-        .current_dir(dir.path())
-        .env("MB_CA_DIR", dir.path().join("ca"))
-        .args(["run", "--keep", "--state-dir"])
-        .arg(dir.path().join("state"))
-        .args(["--", "true"])
-        .timeout(std::time::Duration::from_secs(90))
-        .output()
-        .unwrap();
+    let (first, admin) = on_fresh_config(dir.path(), || {
+        assert_cmd::Command::cargo_bin("mockingbird")
+            .unwrap()
+            .current_dir(dir.path())
+            .env("MB_CA_DIR", dir.path().join("ca"))
+            .args(["run", "--keep", "--state-dir"])
+            .arg(dir.path().join("state"))
+            .args(["--", "true"])
+            .timeout(std::time::Duration::from_secs(90))
+            .output()
+            .unwrap()
+    });
     let stop = || {
         let _ = assert_cmd::Command::cargo_bin("mockingbird")
             .unwrap()

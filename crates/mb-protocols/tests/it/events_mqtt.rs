@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -395,33 +396,27 @@ async fn non_plain_sasl_rejected() {
 }
 
 /// A TCP proxy in front of the broker that the test can cut and restore.
+/// It keeps its listener throughout (releasing the port and binding it
+/// again could lose it to another process): while cut, it closes every
+/// connection it accepts.
 struct Proxy {
     port: u16,
-    upstream: u16,
-    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    cut: Arc<AtomicBool>,
+    conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl Proxy {
     async fn start(upstream: u16) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let proxy = Self {
-            port,
-            upstream,
-            tasks: Arc::default(),
-        };
-        proxy.serve(listener);
-        proxy
-    }
-
-    fn serve(&self, listener: tokio::net::TcpListener) {
-        let upstream = self.upstream;
-        let tasks = Arc::clone(&self.tasks);
-        let accept = tokio::spawn(async move {
-            loop {
-                let Ok((mut inbound, _)) = listener.accept().await else {
-                    return;
-                };
+        let cut = Arc::new(AtomicBool::new(false));
+        let conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+        let (down, tasks) = (Arc::clone(&cut), Arc::clone(&conns));
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                if down.load(Ordering::SeqCst) {
+                    continue;
+                }
                 let conn = tokio::spawn(async move {
                     if let Ok(mut outbound) =
                         tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await
@@ -432,22 +427,20 @@ impl Proxy {
                 tasks.lock().unwrap().push(conn);
             }
         });
-        self.tasks.lock().unwrap().push(accept);
+        Self { port, cut, conns }
     }
 
-    /// Close the listener and every proxied connection.
+    /// Close every proxied connection and each new one.
     fn cut(&self) {
-        for task in self.tasks.lock().unwrap().drain(..) {
-            task.abort();
+        self.cut.store(true, Ordering::SeqCst);
+        for conn in self.conns.lock().unwrap().drain(..) {
+            conn.abort();
         }
     }
 
-    /// Listen again on the same port.
-    async fn restore(&self) {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", self.port))
-            .await
-            .unwrap();
-        self.serve(listener);
+    /// Forward new connections again.
+    fn restore(&self) {
+        self.cut.store(false, Ordering::SeqCst);
     }
 }
 
@@ -485,7 +478,7 @@ async fn broker_lost_after_connect_reaches_issues() {
         Err(BrokerError::Publish(_))
     ));
 
-    proxy.restore().await;
+    proxy.restore();
     wait_until(
         Duration::from_secs(10),
         Duration::from_millis(10),

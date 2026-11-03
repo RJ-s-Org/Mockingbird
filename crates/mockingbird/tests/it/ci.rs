@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use crate::support::free_port;
+use crate::support::{free_port, on_free_ports, spawn_serve};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -76,6 +76,19 @@ fn start(state: &Path, ports: &Ports, extra: &[&str], env: &[(&str, &str)]) -> O
     mockingbird(&args, env)
 }
 
+/// [`start`] on fresh ports, which it returns once the server runs; again on
+/// other ports while one was taken before the server bound it.
+fn start_on_free_ports(state: &Path, extra: &[&str], env: &[(&str, &str)]) -> Ports {
+    on_free_ports(|| {
+        let ports = Ports::new();
+        let out = start(state, &ports, extra, env);
+        match out.status.success() {
+            true => Ok(ports),
+            false => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
+        }
+    })
+}
+
 /// Stops the background server of `state` when dropped.
 struct Server(PathBuf);
 
@@ -119,7 +132,6 @@ async fn record_then_replay_answers_without_an_llm() {
     let http = reqwest::Client::new();
 
     // Record.
-    let ports = Ports::new();
     let state = tmp.path().join("record");
     let uri = llm.uri();
     let env = [
@@ -127,12 +139,7 @@ async fn record_then_replay_answers_without_an_llm() {
         ("MB_LLM_API_KEY", "k"),
         ("MB_LLM_MODEL", "m"),
     ];
-    let out = start(&state, &ports, &["--record", snap_s], &env);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let ports = start_on_free_ports(&state, &["--record", snap_s], &env);
     let server = Server(state);
     let created = http
         .post(ports.data_url("/orders"))
@@ -175,14 +182,8 @@ async fn record_then_replay_answers_without_an_llm() {
     assert!(snap.join("contracts/orders-3-0.yaml").exists());
 
     // Replay: no key, and the stub LLM is never called again.
-    let ports = Ports::new();
     let state = tmp.path().join("replay");
-    let out = start(&state, &ports, &["--replay", snap_s], &[]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let ports = start_on_free_ports(&state, &["--replay", snap_s], &[]);
     let _server = Server(state);
     let stored = http.get(ports.data_url("/orders/o1")).send().await.unwrap();
     assert_eq!(stored.status(), 200, "the seeded session holds o1");
@@ -352,33 +353,26 @@ fn replay_and_record_must_share_a_directory() {
 async fn the_stop_file_shuts_the_server_down_gracefully() {
     let tmp = tempfile::tempdir().unwrap();
     let stop_file = tmp.path().join("server.stop");
-    let ports = Ports::new();
-    let (data, admin, grpc) = (
-        ports.data.to_string(),
-        ports.admin.to_string(),
-        ports.grpc.to_string(),
-    );
     let contract = fixture();
-    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
-        .args([
-            "serve",
-            "--offline",
-            "--port",
-            &data,
-            "--admin-port",
-            &admin,
-            "--grpc-port",
-            &grpc,
-            contract.to_str().unwrap(),
-        ])
-        .env("MB_STOP_FILE", &stop_file)
-        .env_remove("MB_LLM_API_KEY")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let (mut child, bound) = spawn_serve(
+        std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
+            .args([
+                "serve",
+                "--offline",
+                "--port",
+                "0",
+                "--admin-port",
+                "0",
+                "--grpc-port",
+                "0",
+                contract.to_str().unwrap(),
+            ])
+            .env("MB_STOP_FILE", &stop_file)
+            .env_remove("MB_LLM_API_KEY")
+            .stdout(std::process::Stdio::null()),
+    );
     let http = reqwest::Client::new();
-    let readyz = format!("{}/readyz", ports.admin_url());
+    let readyz = format!("{}/readyz", bound.admin_url());
     let mut ready = false;
     for _ in 0..200 {
         if let Ok(r) = http.get(&readyz).send().await

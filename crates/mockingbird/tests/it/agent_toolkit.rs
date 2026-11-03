@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
-use crate::support::{free_port, read, repo};
+use crate::support::{free_port, on_free_ports, read, repo};
 use assert_cmd::cargo::CommandCargoExt;
 use mockingbird::agents::SKILLS;
 use serde_json::{Value, json};
@@ -391,9 +391,7 @@ struct McpClient {
 
 impl McpClient {
     fn start(dir: &Path, admin_url: &str) -> Self {
-        Self::start_with(dir, admin_url, |cmd| {
-            cmd.env("MB_NO_SHELL_ENV", "1");
-        })
+        Self::start_with(dir, admin_url, mcp_env)
     }
 
     /// Starts the server after `setup` adjusts its command (environment).
@@ -467,6 +465,46 @@ impl Drop for McpClient {
     }
 }
 
+/// The environment [`McpClient::start`] gives the MCP server.
+fn mcp_env(cmd: &mut std::process::Command) {
+    cmd.env("MB_NO_SHELL_ENV", "1");
+}
+
+/// Starts an MCP client in `cwd` (`setup` adjusts its command) and through
+/// it a background server with `args` on fresh ports, again on other ports
+/// while one was taken before the server bound it. `prepare` runs before
+/// each attempt. Returns the client, its admin URL and the answer of
+/// `start_server`.
+fn start_server_on_free_ports(
+    cwd: &Path,
+    args: &Value,
+    setup: impl Fn(&mut std::process::Command),
+    mut prepare: impl FnMut(),
+) -> (McpClient, String, Value) {
+    on_free_ports(|| {
+        prepare();
+        let admin = free_port();
+        let admin_url = format!("http://127.0.0.1:{admin}");
+        let mut mcp = McpClient::start_with(cwd, &admin_url, &setup);
+        let mut args = args.clone();
+        args["port"] = json!(free_port());
+        args["admin_port"] = json!(admin);
+        args["grpc_port"] = json!(free_port());
+        let r = mcp.rpc(
+            "tools/call",
+            json!({ "name": "start_server", "arguments": args }),
+        );
+        let text = r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        match r["result"]["isError"] == true {
+            true => Err(text),
+            false => Ok((mcp, admin_url, serde_json::from_str(&text).unwrap())),
+        }
+    })
+}
+
 #[test]
 fn mcp_drives_a_background_server() {
     let dir = tempdir();
@@ -475,9 +513,13 @@ fn mcp_drives_a_background_server() {
         dir.path(),
         &["init", "--offline", "--contract", "orders.yaml"],
     );
-    let (port, admin, grpc) = (free_port(), free_port(), free_port());
-    let admin_url = format!("http://127.0.0.1:{admin}");
-    let mut mcp = McpClient::start(dir.path(), &admin_url);
+    let (mut mcp, _, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml" }),
+        mcp_env,
+        || {},
+    );
+    assert_eq!(started["ready"], true, "{started}");
 
     let init = mcp.rpc(
         "initialize",
@@ -487,12 +529,6 @@ fn mcp_drives_a_background_server() {
     mcp.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
     let tools = mcp.rpc("tools/list", json!({}));
     assert!(tools["result"]["tools"].as_array().unwrap().len() > 30);
-
-    let started = mcp.tool(
-        "start_server",
-        json!({ "config": "mockingbird.yaml", "port": port, "admin_port": admin, "grpc_port": grpc }),
-    );
-    assert_eq!(started["ready"], true, "{started}");
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mocks = mcp.tool("list_mocks", json!({}));
@@ -608,13 +644,8 @@ fn server_tools_find_the_server_from_another_folder() {
     let config = project.path().join("mockingbird.yaml");
     let config = config.to_str().unwrap();
     let other = tempdir();
-    let (port, admin, grpc) = (free_port(), free_port(), free_port());
-    let admin_url = format!("http://127.0.0.1:{admin}");
-    let mut mcp = McpClient::start(other.path(), &admin_url);
-    let started = mcp.tool(
-        "start_server",
-        json!({ "config": config, "port": port, "admin_port": admin, "grpc_port": grpc }),
-    );
+    let (mut mcp, admin_url, started) =
+        start_server_on_free_ports(other.path(), &json!({ "config": config }), mcp_env, || {});
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_eq!(started["ready"], true, "{started}");
         let logs = mcp.tool("server_logs", json!({}));
@@ -651,22 +682,22 @@ fn start_server_with_the_proxy_returns_its_variables() {
         &["init", "--offline", "--contract", "orders.yaml"],
     );
     let ca = dir.path().join("ca");
-    let (port, admin, grpc, proxy) = (free_port(), free_port(), free_port(), free_port());
-    std::fs::write(
-        dir.path().join("mockingbird.yaml"),
-        format!(
-            "{}\nproxy:\n  port: {proxy}\n",
-            read(&dir.path().join("mockingbird.yaml"))
-        ),
-    )
-    .unwrap();
-    let admin_url = format!("http://127.0.0.1:{admin}");
-    let mut mcp = McpClient::start_with(dir.path(), &admin_url, |cmd| {
-        cmd.env("MB_NO_SHELL_ENV", "1").env("MB_CA_DIR", &ca);
-    });
-    let started = mcp.tool(
-        "start_server",
-        json!({ "config": "mockingbird.yaml", "proxy": true, "port": port, "admin_port": admin, "grpc_port": grpc }),
+    let config = read(&dir.path().join("mockingbird.yaml"));
+    let mut proxy = 0;
+    let (mut mcp, _, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml", "proxy": true }),
+        |cmd| {
+            cmd.env("MB_NO_SHELL_ENV", "1").env("MB_CA_DIR", &ca);
+        },
+        || {
+            proxy = free_port();
+            std::fs::write(
+                dir.path().join("mockingbird.yaml"),
+                format!("{config}\nproxy:\n  port: {proxy}\n"),
+            )
+            .unwrap();
+        },
     );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_eq!(started["ready"], true, "{started}");

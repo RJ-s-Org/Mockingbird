@@ -1,7 +1,7 @@
 #![cfg(test)]
 use std::path::PathBuf;
 
-use crate::support::{free_port, serve};
+use crate::support::{serve, spawn_serve};
 use assert_cmd::Command;
 use mockingbird::config::{LlmEnv, ServeArgs, build_app};
 use serde_json::{Value, json};
@@ -217,28 +217,22 @@ impl Drop for Child {
 
 #[tokio::test]
 async fn serve_binds_data_and_admin_ports() {
-    let (port, admin_port) = (free_port(), free_port());
-    let _child = Child(
+    let (child, bound) = spawn_serve(
         std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
             .env_remove("MB_LLM_API_KEY")
-            .args(["serve", "--offline", "--port"])
-            .arg(port.to_string())
-            .arg("--admin-port")
-            .arg(admin_port.to_string())
-            .arg(fixture())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
+            .args(["serve", "--offline", "--port", "0", "--admin-port", "0"])
+            .arg(fixture()),
     );
+    let _child = Child(child);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let data = format!("http://127.0.0.1:{port}/orders");
+    let data = bound.data_url("/orders");
     while reqwest::get(&data).await.is_err() {
         assert!(std::time::Instant::now() < deadline, "server did not start");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(reqwest::get(&data).await.unwrap().status(), 200);
     for p in ["/healthz", "/api/v1/mocks"] {
-        let r = reqwest::get(format!("http://127.0.0.1:{admin_port}{p}"))
+        let r = reqwest::get(format!("{}{p}", bound.admin_url()))
             .await
             .unwrap();
         assert_eq!(r.status(), 200, "{p}");
@@ -440,20 +434,16 @@ async fn admin_rejects_foreign_host_on_loopback() {
 async fn busy_default_admin_port_still_serves_data_plane() {
     // Hold 9090 (or find it already held by someone else).
     let _held = std::net::TcpListener::bind("127.0.0.1:9090").ok();
-    let port = free_port();
-    let _child = Child(
+    let (child, bound) = spawn_serve(
         std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
             .env_remove("MB_LLM_API_KEY")
             .env_remove("MB_ADMIN_PORT")
-            .args(["serve", "--offline", "--port"])
-            .arg(port.to_string())
-            .arg(fixture())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
+            .args(["serve", "--offline", "--port", "0"])
+            .arg(fixture()),
     );
+    let _child = Child(child);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let data = format!("http://127.0.0.1:{port}/orders");
+    let data = bound.data_url("/orders");
     while reqwest::get(&data).await.is_err() {
         assert!(std::time::Instant::now() < deadline, "server did not start");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -463,9 +453,7 @@ async fn busy_default_admin_port_still_serves_data_plane() {
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let busy = held.local_addr().unwrap().port();
     bin()
-        .args(["serve", "--offline", "--port"])
-        .arg(free_port().to_string())
-        .arg("--admin-port")
+        .args(["serve", "--offline", "--port", "0", "--admin-port"])
         .arg(busy.to_string())
         .arg(fixture())
         .timeout(std::time::Duration::from_secs(10))
@@ -486,22 +474,15 @@ async fn sigterm_ends_open_sse_streams() {
         &contract,
     )
     .unwrap();
-    let (port, admin_port, grpc_port) = (free_port(), free_port(), free_port());
-    let mut child = Child(
+    let (child, bound) = spawn_serve(
         std::process::Command::new(assert_cmd::cargo::cargo_bin("mockingbird"))
             .env_remove("MB_LLM_API_KEY")
-            .args(["serve", "--offline", "--port"])
-            .arg(port.to_string())
-            .arg("--admin-port")
-            .arg(admin_port.to_string())
-            .arg("--grpc-port")
-            .arg(grpc_port.to_string())
-            .arg(&contract)
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
+            .args(["serve", "--offline", "--port", "0", "--admin-port", "0"])
+            .args(["--grpc-port", "0"])
+            .arg(&contract),
     );
-    let url = format!("http://127.0.0.1:{port}/ticks");
+    let mut child = Child(child);
+    let url = bound.data_url("/ticks");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut resp = loop {
         if let Ok(resp) = reqwest::get(&url).await {
