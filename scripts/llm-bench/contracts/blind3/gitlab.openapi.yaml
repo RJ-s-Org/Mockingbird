@@ -1,0 +1,581 @@
+openapi: 3.0.3
+info:
+  title: GitLab REST API v4 (project issues, notes, labels and milestones)
+  version: "4"
+  description: |
+    A subset of the GitLab REST API v4 for the issues of one project. The project is
+    named by its numeric id or by its URL-encoded path.
+
+    An issue has a global `id` and an `iid`, its number within the project; every
+    issue route takes the `iid`. `labels` is a list of label names. Closing an issue
+    (`state_event: close`) sets `state` to `closed` and `closed_at`; reopening sets
+    them back. A note is a comment on an issue.
+
+    Lists are paginated with `page` and `per_page` (default 20, at most 100) and
+    answer with `X-Page`, `X-Per-Page`, `X-Next-Page`, `X-Total` headers. Errors have
+    a `message` (or `error`) member.
+servers:
+  - url: https://gitlab.com
+security:
+  - privateToken: []
+tags:
+  - name: issues
+  - name: notes
+  - name: labels
+  - name: milestones
+paths:
+  /api/v4/projects/{id}/issues:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [issues]
+      operationId: listProjectIssues
+      summary: List project issues
+      parameters:
+        - name: state
+          in: query
+          description: Return all issues or only those that are `opened` or `closed`.
+          schema: {type: string, enum: [opened, closed, all], default: all}
+        - name: labels
+          in: query
+          description: Comma-separated list of label names; issues must have all of them.
+          schema: {type: string}
+        - name: milestone
+          in: query
+          description: The milestone title.
+          schema: {type: string}
+        - name: search
+          in: query
+          description: Search issues against their `title` and `description`.
+          schema: {type: string}
+        - name: in
+          in: query
+          description: Which fields `search` looks in.
+          schema: {type: string, enum: [title, description, 'title,description'], default: 'title,description'}
+        - name: iids[]
+          in: query
+          description: Return only the issues having the given `iid`.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: {type: integer}
+        - name: assignee_id
+          in: query
+          schema: {type: integer}
+        - name: author_id
+          in: query
+          schema: {type: integer}
+        - name: confidential
+          in: query
+          schema: {type: boolean}
+        - name: order_by
+          in: query
+          schema: {type: string, enum: [created_at, updated_at, priority, due_date, relative_position, label_priority, milestone_due, popularity, weight, title], default: created_at}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The issues that match, one page of them.
+          headers:
+            X-Total: {$ref: '#/components/headers/XTotal'}
+            X-Next-Page: {$ref: '#/components/headers/XNextPage'}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Issue'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [issues]
+      operationId: createIssue
+      summary: Create an issue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: {type: string, minLength: 1, maxLength: 255}
+                description: {type: string, maxLength: 1048576}
+                labels: {type: string, description: Comma-separated label names.}
+                assignee_ids:
+                  type: array
+                  items: {type: integer}
+                milestone_id: {type: integer, description: The global id of a milestone of the project.}
+                due_date: {type: string, format: date}
+                confidential: {type: boolean, default: false}
+                issue_type: {type: string, enum: [issue, incident, test_case, task], default: issue}
+                weight: {type: integer, minimum: 0}
+      responses:
+        '201':
+          description: The created issue.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Issue'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v4/projects/{id}/issues/{issue_iid}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IssueIid'
+    get:
+      tags: [issues]
+      operationId: getProjectIssue
+      summary: Get a single project issue
+      responses:
+        '200':
+          description: The issue.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Issue'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [issues]
+      operationId: editIssue
+      summary: Edit an issue
+      description: Changes only the attributes given. `labels` replaces the labels; `add_labels` and `remove_labels` change some of them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                title: {type: string, minLength: 1, maxLength: 255}
+                description: {type: string}
+                labels: {type: string}
+                add_labels: {type: string}
+                remove_labels: {type: string}
+                assignee_ids:
+                  type: array
+                  items: {type: integer}
+                milestone_id: {type: integer, nullable: true}
+                due_date: {type: string, format: date, nullable: true}
+                confidential: {type: boolean}
+                state_event: {type: string, enum: [close, reopen]}
+      responses:
+        '200':
+          description: The updated issue.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Issue'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [issues]
+      operationId: deleteIssue
+      summary: Delete an issue
+      description: Deletes the issue for good. Later reads of it answer 404.
+      responses:
+        '204': {description: The issue was deleted.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v4/projects/{id}/issues/{issue_iid}/notes:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IssueIid'
+    get:
+      tags: [notes]
+      operationId: listIssueNotes
+      summary: List the notes of an issue
+      description: Includes system notes, such as the one GitLab writes when an issue is closed.
+      parameters:
+        - name: sort
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - name: order_by
+          in: query
+          schema: {type: string, enum: [created_at, updated_at], default: created_at}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The issue's notes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Note'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [notes]
+      operationId: createIssueNote
+      summary: Comment on an issue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: {type: string, minLength: 1, maxLength: 1000000}
+                confidential: {type: boolean, default: false}
+                internal: {type: boolean, default: false}
+                created_at: {type: string, format: date-time}
+      responses:
+        '201':
+          description: The created note.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Note'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v4/projects/{id}/issues/{issue_iid}/notes/{note_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IssueIid'
+      - name: note_id
+        in: path
+        required: true
+        schema: {type: integer}
+    put:
+      tags: [notes]
+      operationId: modifyIssueNote
+      summary: Edit a note of an issue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: {type: string, minLength: 1, maxLength: 1000000}
+      responses:
+        '200':
+          description: The updated note.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Note'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [notes]
+      operationId: deleteIssueNote
+      summary: Delete a note of an issue
+      responses:
+        '204': {description: The note was deleted.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v4/projects/{id}/labels:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [labels]
+      operationId: listLabels
+      summary: List the labels of a project
+      parameters:
+        - name: with_counts
+          in: query
+          description: Whether to include issue and merge request counts.
+          schema: {type: boolean, default: false}
+        - name: search
+          in: query
+          description: Keyword to filter labels by.
+          schema: {type: string}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The project's labels.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Label'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [labels]
+      operationId: createLabel
+      summary: Create a label
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, color]
+              properties:
+                name: {type: string, minLength: 1}
+                color:
+                  type: string
+                  description: A hex color such as `#FFAABB`, or a CSS color name.
+                  example: '#D9534F'
+                description: {type: string}
+                priority: {type: integer, minimum: 0, nullable: true}
+      responses:
+        '201':
+          description: The created label.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Label'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409':
+          description: A label with that name already exists.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /api/v4/projects/{id}/milestones:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [milestones]
+      operationId: listMilestones
+      summary: List the milestones of a project
+      parameters:
+        - name: state
+          in: query
+          schema: {type: string, enum: [active, closed]}
+        - name: title
+          in: query
+          description: Return only the milestone with this title.
+          schema: {type: string}
+        - name: search
+          in: query
+          schema: {type: string}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The project's milestones.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Milestone'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [milestones]
+      operationId: createMilestone
+      summary: Create a milestone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: {type: string, minLength: 1}
+                description: {type: string}
+                due_date: {type: string, format: date}
+                start_date: {type: string, format: date}
+      responses:
+        '201':
+          description: The created milestone. A new milestone is `active`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Milestone'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v4/projects/{id}/milestones/{milestone_id}/issues:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: milestone_id
+        in: path
+        required: true
+        description: The global id of the milestone.
+        schema: {type: integer}
+    get:
+      tags: [milestones, issues]
+      operationId: listMilestoneIssues
+      summary: Get all issues assigned to a milestone
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The issues whose milestone is this one.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Issue'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+components:
+  securitySchemes:
+    privateToken:
+      type: apiKey
+      in: header
+      name: PRIVATE-TOKEN
+  parameters:
+    ProjectId:
+      name: id
+      in: path
+      required: true
+      description: The id or URL-encoded path of the project.
+      schema: {type: string}
+    IssueIid:
+      name: issue_iid
+      in: path
+      required: true
+      description: The internal id of the issue within its project.
+      schema: {type: integer, minimum: 1}
+    Page:
+      name: page
+      in: query
+      schema: {type: integer, minimum: 1, default: 1}
+    PerPage:
+      name: per_page
+      in: query
+      description: Items per page.
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+  headers:
+    XTotal:
+      description: The total number of items.
+      schema: {type: integer}
+    XNextPage:
+      description: The index of the next page, empty on the last page.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: A required attribute is missing or one is invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: The token is missing or invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: The user may not do this.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: The project or resource was not found.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    Error:
+      type: object
+      properties:
+        message:
+          oneOf:
+            - {type: string}
+            - type: object
+              additionalProperties:
+                type: array
+                items: {type: string}
+          example: 404 Not found
+        error: {type: string}
+    UserBasic:
+      type: object
+      required: [id, username, name, state, web_url]
+      properties:
+        id: {type: integer}
+        username: {type: string}
+        name: {type: string}
+        state: {type: string, enum: [active, blocked, deactivated]}
+        avatar_url: {type: string, format: uri, nullable: true}
+        web_url: {type: string, format: uri}
+    Milestone:
+      type: object
+      required: [id, iid, project_id, title, state, created_at, updated_at, web_url]
+      properties:
+        id: {type: integer}
+        iid: {type: integer}
+        project_id: {type: integer}
+        title: {type: string}
+        description: {type: string, nullable: true}
+        state: {type: string, enum: [active, closed]}
+        due_date: {type: string, format: date, nullable: true}
+        start_date: {type: string, format: date, nullable: true}
+        expired: {type: boolean, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        web_url: {type: string, format: uri}
+    Label:
+      type: object
+      required: [id, name, color, text_color]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        color: {type: string, example: '#D9534F'}
+        text_color: {type: string, example: '#FFFFFF'}
+        description: {type: string, nullable: true}
+        priority: {type: integer, nullable: true}
+        open_issues_count: {type: integer}
+        closed_issues_count: {type: integer}
+        is_project_label: {type: boolean}
+    Issue:
+      type: object
+      required: [id, iid, project_id, title, description, state, created_at, updated_at, closed_at, labels,
+                 milestone, author, assignees, user_notes_count, due_date, confidential, issue_type, web_url, references]
+      properties:
+        id: {type: integer}
+        iid: {type: integer, minimum: 1}
+        project_id: {type: integer}
+        title: {type: string}
+        description: {type: string, nullable: true}
+        state: {type: string, enum: [opened, closed]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        closed_at: {type: string, format: date-time, nullable: true}
+        closed_by:
+          allOf: [{$ref: '#/components/schemas/UserBasic'}]
+          nullable: true
+        labels:
+          type: array
+          items: {type: string}
+        milestone:
+          allOf: [{$ref: '#/components/schemas/Milestone'}]
+          nullable: true
+        author: {$ref: '#/components/schemas/UserBasic'}
+        assignees:
+          type: array
+          items: {$ref: '#/components/schemas/UserBasic'}
+        user_notes_count: {type: integer, minimum: 0}
+        upvotes: {type: integer, minimum: 0}
+        downvotes: {type: integer, minimum: 0}
+        due_date: {type: string, format: date, nullable: true}
+        confidential: {type: boolean}
+        issue_type: {type: string, enum: [issue, incident, test_case, task]}
+        weight: {type: integer, nullable: true}
+        web_url: {type: string, format: uri}
+        references:
+          type: object
+          required: [short, relative, full]
+          properties:
+            short: {type: string, example: '#7'}
+            relative: {type: string, example: '#7'}
+            full: {type: string, example: 'acme/shop#7'}
+    Note:
+      type: object
+      required: [id, body, author, created_at, updated_at, system, noteable_id, noteable_type, noteable_iid, project_id]
+      properties:
+        id: {type: integer}
+        type: {type: string, nullable: true}
+        body: {type: string}
+        author: {$ref: '#/components/schemas/UserBasic'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        system: {type: boolean, description: True for notes GitLab writes itself.}
+        noteable_id: {type: integer, description: The global id of the issue.}
+        noteable_type: {type: string, enum: [Issue, MergeRequest, Snippet, Epic]}
+        noteable_iid: {type: integer, description: The iid of the issue.}
+        project_id: {type: integer}
+        resolvable: {type: boolean}
+        confidential: {type: boolean}
+        internal: {type: boolean}

@@ -1634,8 +1634,10 @@ async fn busy_default_admin_port_is_skipped() {
     assert!(bind_admin(addr, false).await.unwrap().is_none());
     let err = bind_admin(addr, true).await.unwrap_err();
     assert!(format!("{err:#}").contains(&addr.to_string()), "{err:#}");
-    drop(held);
-    assert!(bind_admin(addr, false).await.unwrap().is_some());
+    // A free default port binds. Not `addr` again: once released, another
+    // process may take that ephemeral port before it is rebound.
+    let free = "127.0.0.1:0".parse().unwrap();
+    assert!(bind_admin(free, false).await.unwrap().is_some());
 }
 
 #[test]
@@ -2145,8 +2147,10 @@ async fn busy_default_grpc_port_is_skipped() {
     assert!(bind_grpc(addr, false).await.unwrap().is_none());
     let err = bind_grpc(addr, true).await.unwrap_err();
     assert!(format!("{err:#}").contains(&addr.to_string()), "{err:#}");
-    drop(held);
-    assert!(bind_grpc(addr, false).await.unwrap().is_some());
+    // A free default port binds. Not `addr` again: once released, another
+    // process may take that ephemeral port before it is rebound.
+    let free = "127.0.0.1:0".parse().unwrap();
+    assert!(bind_grpc(free, false).await.unwrap().is_some());
 }
 
 #[test]
@@ -3442,6 +3446,41 @@ fn a_non_loopback_proxy_must_block_unmapped_hosts() {
     ws.write("proxy:\n  host: 0.0.0.0\n  unmapped: block\n");
     file_config::load(&ws.config_path()).unwrap();
     assert_eq!(FileConfig::default().proxy.host.to_string(), "127.0.0.1");
+}
+
+/// An edit made after the config was last applied but before the watch is
+/// armed (a new leader reconciles, then starts watching) raises no event;
+/// the watch's first read applies it with no further edit.
+#[tokio::test]
+async fn watch_applies_an_edit_made_before_it_started() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let state = no_state();
+    reconcile(store.as_ref(), state.as_ref(), &ws.load("mocks: {}\n"))
+        .await
+        .unwrap();
+    ws.write("mocks:\n  orders:\n    contract: orders.yaml\n");
+    let _watch = mockingbird::watch::spawn_with(
+        ws.config_path(),
+        store.clone(),
+        state,
+        Arc::new(|_: &mut FileConfig| Ok(())),
+    )
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the edit made before the watch started was not applied"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// A config with no `mocks:` at startup, then a `mocks:` block added while
