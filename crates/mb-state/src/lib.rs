@@ -82,6 +82,13 @@ pub enum StateError {
 /// fixture. A contract cannot be expected to name it.
 pub const INTERNAL_TYPE: &str = "__mockingbird.earlier_requests";
 
+/// The id of an [`INTERNAL_TYPE`] document marking a session only a read has written to:
+/// while it holds the marker and no resource, [`StateStore::sessions`] and
+/// [`StateStore::session_count`] leave it out, so a `GET` adds no session anyone sees.
+/// A resource lists it again, as does deleting the marker. It reads, expires and resets
+/// like any other session.
+pub const UNLISTED_ID: &str = "#unlisted";
+
 /// Identifies one session of one mock: the scope every stored resource
 /// belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -214,7 +221,8 @@ pub trait StateStore: Send + Sync {
         self.touch(s).await?;
         Ok(true)
     }
-    /// Live sessions of a mock, most recently touched first.
+    /// Live sessions of a mock, most recently touched first, but for one holding only
+    /// [`INTERNAL_TYPE`] documents among which [`UNLISTED_ID`].
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError>;
     /// How many live sessions a mock has (the `mb_state_sessions` gauge):
     /// always the length of [`StateStore::sessions`]. Backends may count

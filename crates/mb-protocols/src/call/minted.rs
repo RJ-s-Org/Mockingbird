@@ -127,9 +127,72 @@ fn sent(call: &OperationCall, max: usize) -> Vec<&str> {
     out
 }
 
+/// The hash of the token an `Authorization: Bearer` header sends, when it could be a
+/// minted value: what [`recall`] also looks up, and what tells a client's own token from
+/// one the mock minted. The header itself is neither kept nor logged.
+pub(crate) fn bearer_hash(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .trim();
+    let scheme = value.get(..7)?;
+    let token = value.get(7..)?.trim();
+    (scheme.eq_ignore_ascii_case("bearer ") && could_be_minted(token)).then(|| hash(token))
+}
+
+/// The strings `call` sends under a member named as a credential, which a client may
+/// hold as its own secret.
+fn sent_secrets(call: &OperationCall) -> Vec<&str> {
+    fn visit<'a>(value: &'a Value, name: &str, depth: usize, out: &mut Vec<&'a str>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        match value {
+            Value::String(text)
+                if text.len() >= MIN_VALUE_LEN && mb_mcm::credentials::hides_in_context(name) =>
+            {
+                out.push(text);
+            }
+            Value::Array(items) => items.iter().for_each(|v| visit(v, name, depth + 1, out)),
+            Value::Object(members) => members
+                .iter()
+                .for_each(|(key, v)| visit(v, key, depth + 1, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for (name, value) in call.query.iter().chain(&call.path_params) {
+        visit(value, name, 0, &mut out);
+    }
+    if let Some(body) = &call.body {
+        visit(body, "", 0, &mut out);
+    }
+    out
+}
+
+/// `value` without every string holding one of `hidden` anywhere in it, at any depth
+/// (see [`mb_engine::without_redacted`]): a note saying `issued <token>` is the token.
+fn without_any(value: &Value, hidden: &[&str]) -> Option<Value> {
+    fn hide(value: &mut Value, hidden: &[&str]) {
+        match value {
+            Value::String(text) if hidden.iter().any(|h| text.contains(h)) => {
+                *value = Value::from(mb_engine::REDACTED);
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| hide(v, hidden)),
+            Value::Object(members) => members.values_mut().for_each(|v| hide(v, hidden)),
+            _ => {}
+        }
+    }
+    let mut kept = value.clone();
+    hide(&mut kept, hidden);
+    mb_engine::without_redacted(&kept)
+}
+
 /// The values `answer` mints (see the module's doc): under a member [`mints_by_name`],
-/// or shaped like a credential, of a minted value's length, and not sent by `call`.
-fn minted_values(answer: &Value, call: &OperationCall) -> Vec<String> {
+/// or shaped like a credential, of a minted value's length, and not sent by `call`, in
+/// its body, query, path, headers or bearer token (`bearer`, its hash).
+fn minted_values(answer: &Value, call: &OperationCall, bearer: Option<&str>) -> Vec<String> {
     fn visit(answer: &Value, name: &str, depth: usize, out: &mut Vec<String>) {
         if depth > MAX_DEPTH || out.len() >= MAX_VALUES {
             return;
@@ -153,7 +216,7 @@ fn minted_values(answer: &Value, call: &OperationCall) -> Vec<String> {
     let mut out = Vec::new();
     visit(answer, "", 0, &mut out);
     let given = sent(call, usize::MAX);
-    out.retain(|value| !given.contains(&value.as_str()));
+    out.retain(|value| !given.contains(&value.as_str()) && bearer != Some(hash(value).as_str()));
     out
 }
 
@@ -181,22 +244,27 @@ pub(super) async fn after_answer(
     let Some(answer) = generated.body.as_ref().filter(|_| usable) else {
         return;
     };
-    let values = minted_values(answer, call);
+    let values = minted_values(answer, call, plan.bearer.as_deref());
     if values.is_empty() {
         return;
     }
+    // Nothing kept holds a minted value or a client's secret, whatever string it is in.
+    let mut hidden: Vec<&str> = values.iter().map(String::as_str).collect();
+    hidden.extend(sent_secrets(call));
     let t = op.resource_type.as_deref().unwrap_or_default();
     let schema = op
         .output_for_status(generated.status)
         .and_then(|o| o.schema.as_ref());
     let request_schema = op.input.body.as_ref();
     let shown_answer = write_memory::declared_plainly(rt, t, (schema, None), answer, 0)
-        .and_then(|a| write_memory::for_context(rt, plan, t, &a, schema, schema));
+        .and_then(|a| write_memory::for_context(rt, plan, t, &a, schema, schema))
+        .and_then(|a| without_any(&a, &hidden));
     let shown_request = call
         .body
         .as_ref()
         .and_then(|b| write_memory::declared_plainly(rt, t, (None, request_schema), b, 0))
-        .and_then(|b| write_memory::for_context(rt, plan, t, &b, request_schema, None));
+        .and_then(|b| write_memory::for_context(rt, plan, t, &b, request_schema, None))
+        .and_then(|b| without_any(&b, &hidden));
     if shown_answer.is_none() && shown_request.is_none() {
         return;
     }
@@ -245,7 +313,8 @@ pub(super) async fn recall(
     if !write_memory::applies(rt, plan) || !rt.index().mints {
         return Vec::new();
     }
-    let mut carried: Vec<String> = Vec::new();
+    let mut carried: Vec<(String, Option<&str>)> =
+        plan.bearer.iter().map(|h| (h.clone(), None)).collect();
     for text in sent(call, MAX_LOOKED_UP * 4) {
         if carried.len() >= MAX_LOOKED_UP {
             break;
@@ -254,8 +323,8 @@ pub(super) async fn recall(
             continue;
         }
         let hashed = hash(text);
-        if !carried.contains(&hashed) {
-            carried.push(hashed);
+        if !carried.iter().any(|(c, _)| *c == hashed) {
+            carried.push((hashed, Some(text)));
         }
     }
     if carried.is_empty() {
@@ -264,22 +333,28 @@ pub(super) async fn recall(
     let entries = read_entries(state, &plan.session).await;
     let mut shown: Vec<Value> = entries
         .into_iter()
-        .filter(|entry| {
-            entry
+        .filter_map(|mut entry| {
+            let values: Vec<&str> = entry
                 .get("values")
                 .and_then(Value::as_array)
-                .is_some_and(|values| {
-                    values
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(|v| carried.iter().any(|c| c == v))
-                })
-        })
-        .map(|mut entry| {
+                .map(|values| values.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let matched: Vec<&str> = carried
+                .iter()
+                .filter(|(c, _)| values.contains(&c.as_str()))
+                .filter_map(|(_, text)| *text)
+                .collect();
+            let bearer = carried
+                .iter()
+                .any(|(c, text)| text.is_none() && values.contains(&c.as_str()));
+            if matched.is_empty() && !bearer {
+                return None;
+            }
             if let Value::Object(members) = &mut entry {
                 members.remove("values");
             }
-            entry
+            // The value this request carries is in no other string shown either.
+            without_any(&entry, &matched)
         })
         .collect();
     let excess = shown.len().saturating_sub(MAX_SHOWN);

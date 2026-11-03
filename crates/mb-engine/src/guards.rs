@@ -712,7 +712,7 @@ pub(crate) fn effects_envelope(
 }
 
 /// The declared error statuses an answer to `op` with status `status` may refuse with,
-/// in its effects envelope (see [`effects_envelope`]): a write on what it was shown, on
+/// in its effects envelope (see [`effects_envelope`]): a write, not a create, on the target it was shown, on
 /// an HTTP route, refused as the API would refuse it. Those of [`REFUSAL_STATUSES`] the
 /// operation declares by code, in order, and none with a forced status or a scenario,
 /// which decide the answer, or when the answer itself has a member of that name. Empty
@@ -724,7 +724,10 @@ pub(crate) fn refusals(
     validator: &SchemaValidator,
     effects_envelope: bool,
 ) -> Vec<u16> {
+    // What a create would be refused on is not its own target.
     let usable = effects_envelope
+        && ctx.target.is_some()
+        && op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create)
         && ctx.forced_status.is_none()
         && ctx.scenario.is_none()
         && (200..300).contains(&status)

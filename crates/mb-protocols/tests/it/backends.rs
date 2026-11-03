@@ -24,6 +24,11 @@ const ITEMS: &str = r##"
 openapi: 3.0.0
 info: {title: Items, version: "1"}
 paths:
+  /me:
+    get:
+      operationId: getMe
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Me"}}}}
   /items:
     post:
       operationId: createItem
@@ -61,6 +66,10 @@ paths:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Inspection"}}}}
 components:
   schemas:
+    Me:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
     Created:
       type: object
       required: [id]
@@ -99,6 +108,11 @@ struct Harness {
 }
 
 fn harness(store: Arc<dyn StateStore>, script: Vec<Value>) -> Harness {
+    harness_in(store, script, &workspace())
+}
+
+/// [`harness`] in `ws`: another node of the same mock, over its own store client.
+fn harness_in(store: Arc<dyn StateStore>, script: Vec<Value>, ws: &str) -> Harness {
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
     let state = CachingStateStore::wrap(store, LONG_TTL, mb_state::DEFAULT_CACHE_ENTRIES);
@@ -111,7 +125,7 @@ fn harness(store: Arc<dyn StateStore>, script: Vec<Value>) -> Harness {
         )),
         Arc::clone(&state),
     );
-    rt.workspace = workspace();
+    rt.workspace = ws.to_string();
     let session = SessionKey {
         workspace: rt.workspace.clone(),
         mock: "m".into(),
@@ -269,7 +283,33 @@ async fn minted_values(store: Arc<dyn StateStore>) {
     assert!(h.kept().await.is_empty());
 }
 
-async fn run_all(url: &str) {
+/// A caller's answer read before the session held anything is kept in the shared store,
+/// so the first write on another node, through its own store client, is told of it. The
+/// read lists no session on either.
+async fn answers_reach_another_node(one: Arc<dyn StateStore>, other: Arc<dyn StateStore>) {
+    let ws = workspace();
+    let a = harness_in(one, vec![json!({"id": "user-4711", "name": "Ann"})], &ws);
+    let b = harness_in(other, vec![json!({"id": "i1", "title": "A title"})], &ws);
+    let (status, _) = a.call("GET", "/me", None).await;
+    assert_eq!(status, StatusCode::OK);
+    for h in [&a, &b] {
+        let sessions = h.state.sessions(&ws, "m").await.unwrap();
+        assert!(sessions.is_empty(), "{sessions:?}");
+        assert_eq!(h.state.session_count(&ws, "m").await.unwrap(), 0);
+    }
+    b.call("POST", "/items", Some(json!({"title": "A title"})))
+        .await;
+    let prompt = b.prompt(0);
+    assert!(prompt.contains("user-4711"), "{prompt}");
+    let sessions = a.state.sessions(&ws, "m").await.unwrap();
+    assert_eq!(sessions.len(), 1, "the write lists it: {sessions:?}");
+    a.state.reset(&a.session).await.unwrap();
+    assert!(a.kept().await.is_empty());
+}
+
+/// Each check on a fresh client of `url`; with `shared`, two clients of one store stand
+/// for two nodes (an in-memory store cannot be reached twice).
+async fn run_all(url: &str, shared: bool) {
     for check in 0..3 {
         let store = mb_state::connect(url, LONG_TTL).await.expect("connect");
         match check {
@@ -278,11 +318,18 @@ async fn run_all(url: &str) {
             _ => minted_values(store).await,
         }
     }
+    let one = mb_state::connect(url, LONG_TTL).await.expect("connect");
+    let other = if shared {
+        Arc::clone(&one)
+    } else {
+        mb_state::connect(url, LONG_TTL).await.expect("connect")
+    };
+    answers_reach_another_node(one, other).await;
 }
 
 #[tokio::test]
 async fn memory_keeps_what_a_mock_keeps_for_itself() {
-    run_all("memory").await;
+    run_all("memory", true).await;
 }
 
 #[tokio::test]
@@ -291,7 +338,7 @@ async fn postgres_keeps_what_a_mock_keeps_for_itself() {
         println!("skipped: MB_TEST_POSTGRES_URL not set");
         return;
     };
-    run_all(&url).await;
+    run_all(&url, false).await;
 }
 
 #[tokio::test]
@@ -300,10 +347,10 @@ async fn redis_keeps_what_a_mock_keeps_for_itself() {
         println!("skipped: MB_TEST_REDIS_URL not set");
         return;
     };
-    run_all(&url).await;
+    run_all(&url, false).await;
 }
 
 #[tokio::test]
 async fn sqlite_keeps_what_a_mock_keeps_for_itself() {
-    run_all("sqlite::memory:").await;
+    run_all("sqlite::memory:", true).await;
 }

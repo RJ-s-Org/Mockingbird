@@ -176,6 +176,9 @@ pub(crate) struct CallPlan<'a> {
     /// to the declared error status it uses; with `forced_status` unset,
     /// the adapter answers its protocol-native error.
     pub chaos: ChaosDecision,
+    /// A hash of the token an `Authorization: Bearer` header sent, never the token (see
+    /// [`minted::bearer_hash`]).
+    pub bearer: Option<String>,
 }
 
 impl CallPlan<'_> {
@@ -469,6 +472,7 @@ pub(crate) async fn plan<'a>(
         tenancy,
         engine,
         chaos,
+        bearer: minted::bearer_hash(headers),
     })
 }
 
@@ -748,8 +752,8 @@ pub(crate) struct Pending<'a> {
     earlier: write_memory::Earlier,
     /// What routes with no parameters answered earlier in the session.
     earlier_answers: Vec<Value>,
-    /// Of those, the ones only the response cache holds, for a write to keep.
-    unkept_answers: Vec<Value>,
+    /// Whether only a read has written to the session (see [`world::list_session`]).
+    unlisted: bool,
     /// The answers that minted values this call carries, with their requests.
     earlier_origins: Vec<Value>,
     /// What was written to this list read's own path earlier in the session.
@@ -939,7 +943,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    let ((earlier_answers, unkept_answers), earlier_writes, earlier_origins) = async {
+    let ((earlier_answers, unlisted), earlier_writes, earlier_origins) = async {
         parents_by_name(
             &mut state,
             session,
@@ -988,7 +992,7 @@ pub(crate) async fn prepare<'a>(
         cache: since.zip(key),
         earlier,
         earlier_answers,
-        unkept_answers,
+        unlisted,
         earlier_writes,
         earlier_origins,
     }))
@@ -1011,7 +1015,7 @@ pub(crate) async fn complete(
         foreign_key,
         cache,
         mut earlier,
-        unkept_answers,
+        unlisted,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1216,7 +1220,7 @@ pub(crate) async fn complete(
             foreign_key || unstored,
         )
         .await;
-        world::keep_unkept(&mut state, plan, &unkept_answers, &generated).await;
+        world::list_session(&mut state, plan, unlisted, &generated).await;
         minted::after_answer(&mut state, plan, call, &generated).await;
         world::after_answer(&mut state, plan, call, &generated).await;
         world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;

@@ -96,6 +96,15 @@ impl SessionData {
             .sum()
     }
 
+    /// Whether only a read wrote here (see [`crate::UNLISTED_ID`]).
+    fn unlisted(&self) -> bool {
+        self.len() == 0
+            && self
+                .resources
+                .get(INTERNAL_TYPE)
+                .is_some_and(|d| d.by_id.contains_key(crate::UNLISTED_ID))
+    }
+
     /// Up to `limit` resources of `resource_type`, most recent first.
     fn list(&self, resource_type: &str, limit: usize) -> Vec<StoredResource> {
         let Some(data) = self.resources.get(resource_type) else {
@@ -339,7 +348,10 @@ impl StateStore for MemoryStore {
             .iter()
             .filter(|e| {
                 let k = e.key();
-                k.workspace == workspace && k.mock == mock && !self.inner.expired(e.value(), now)
+                k.workspace == workspace
+                    && k.mock == mock
+                    && !self.inner.expired(e.value(), now)
+                    && !e.value().unlisted()
             })
             .count())
     }
@@ -352,7 +364,10 @@ impl StateStore for MemoryStore {
             .iter()
             .filter(|e| {
                 let k = e.key();
-                k.workspace == workspace && k.mock == mock && !self.inner.expired(e.value(), now)
+                k.workspace == workspace
+                    && k.mock == mock
+                    && !self.inner.expired(e.value(), now)
+                    && !e.value().unlisted()
             })
             .map(|e| {
                 let d = e.value();

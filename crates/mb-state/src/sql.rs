@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 
 use crate::{
     CHANGE_CHANNEL_CAPACITY, ChangeKind, INTERNAL_TYPE, SWEEP_INTERVAL, SessionInfo, SessionKey,
-    StateChanged, StateError, StateStore, StoredResource,
+    StateChanged, StateError, StateStore, StoredResource, UNLISTED_ID,
 };
 
 /// Migrations table name, distinct from other crates' migrators that may share
@@ -306,6 +306,15 @@ fn spawn_sweeper(weak: Weak<Inner>) {
     });
 }
 
+/// Whether session `s` is listed: it holds a resource, or no [`UNLISTED_ID`] marker.
+/// Binds `$4` to [`INTERNAL_TYPE`] and `$5` to [`UNLISTED_ID`].
+const LISTED: &str = "(EXISTS (SELECT 1 FROM state_resources x \
+     WHERE x.workspace = s.workspace AND x.mock = s.mock AND x.session = s.session \
+     AND x.resource_type <> $4) \
+     OR NOT EXISTS (SELECT 1 FROM state_resources u \
+     WHERE u.workspace = s.workspace AND u.mock = s.mock AND u.session = s.session \
+     AND u.resource_type = $4 AND u.id = $5))";
+
 #[async_trait]
 impl StateStore for SqlStateStore {
     async fn get(
@@ -529,13 +538,18 @@ impl StateStore for SqlStateStore {
 
     async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
         let cutoff = self.inner.cutoff(now_ms());
+        let sql = format!(
+            "SELECT COUNT(*) FROM state_sessions s \
+             WHERE s.workspace = $1 AND s.mock = $2 AND s.last_touched > $3 AND {LISTED}"
+        );
         let n: i64 = on_pool!(&self.inner.pool, |p| sqlx::query_scalar(
-            "SELECT COUNT(*) FROM state_sessions \
-             WHERE workspace = $1 AND mock = $2 AND last_touched > $3"
+            sqlx::AssertSqlSafe(sql.as_str())
         )
         .bind(workspace)
         .bind(mock)
         .bind(cutoff)
+        .bind(INTERNAL_TYPE)
+        .bind(UNLISTED_ID)
         .fetch_one(p)
         .await?);
         usize::try_from(n)
@@ -544,20 +558,23 @@ impl StateStore for SqlStateStore {
 
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         let cutoff = self.inner.cutoff(now_ms());
-        let sql = "SELECT s.session AS session, s.last_touched AS last_touched, \
-                   COUNT(r.id) AS resources \
-                   FROM state_sessions s LEFT JOIN state_resources r \
-                   ON r.workspace = s.workspace AND r.mock = s.mock AND r.session = s.session \
-                   AND r.resource_type <> $4 \
-                   WHERE s.workspace = $1 AND s.mock = $2 AND s.last_touched > $3 \
-                   GROUP BY s.session, s.last_touched \
-                   ORDER BY s.last_touched DESC, s.session";
+        let sql = format!(
+            "SELECT s.session AS session, s.last_touched AS last_touched, \
+             COUNT(r.id) AS resources \
+             FROM state_sessions s LEFT JOIN state_resources r \
+             ON r.workspace = s.workspace AND r.mock = s.mock AND r.session = s.session \
+             AND r.resource_type <> $4 \
+             WHERE s.workspace = $1 AND s.mock = $2 AND s.last_touched > $3 AND {LISTED} \
+             GROUP BY s.session, s.last_touched \
+             ORDER BY s.last_touched DESC, s.session"
+        );
         let raw: Vec<(String, i64, i64)> = on_pool!(&self.inner.pool, |p| {
-            let rows = sqlx::query(sql)
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(workspace)
                 .bind(mock)
                 .bind(cutoff)
                 .bind(INTERNAL_TYPE)
+                .bind(UNLISTED_ID)
                 .fetch_all(p)
                 .await?;
             let mut out = Vec::with_capacity(rows.len());

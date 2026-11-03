@@ -184,69 +184,28 @@ pub(super) async fn named_by_value(
 }
 
 /// What routes with no parameters answered earlier in this session, oldest first, and
-/// of those the ones only the response cache holds: answered before the session had
-/// anything stored, they were not kept, as a read creates no session (see
-/// [`keep_unkept`]).
+/// whether only a read has written to the session so far (see [`list_session`]).
 pub(super) async fn recall_answers(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
-) -> (Vec<Value>, Vec<Value>) {
+) -> (Vec<Value>, bool) {
     let rt = state.rt;
     if !write_memory::applies(rt, plan) || rt.index().single_reads.is_empty() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), false);
     }
-    let mut answers = read_answers(state, &plan.session).await;
-    let unkept = cached_answers(rt, plan, &answers);
-    answers.extend(unkept.iter().cloned());
-    let excess = answers.len().saturating_sub(MAX_ANSWERS);
-    answers.drain(..excess);
-    (answers, unkept)
+    let held = read_answers(state, &plan.session).await;
+    (held.answers, held.unlisted)
 }
 
-/// The answers of routes with no parameters that the response cache holds for this
-/// session and the kept answers do not, as they would be kept (see [`kept_answer`]).
-fn cached_answers(rt: &MockRuntime, plan: &CallPlan<'_>, held: &[Value]) -> Vec<Value> {
-    let Some(cache) = rt.state.response_cache() else {
-        return Vec::new();
-    };
-    let mut paths: Vec<(&String, &usize)> = rt.index().single_reads.iter().collect();
-    paths.sort_unstable();
-    paths
-        .into_iter()
-        .filter(|(path, _)| !held.iter().any(|e| of_path(e, path)))
-        .filter_map(|(path, i)| {
-            let read = rt.bundle().operations.get(*i)?;
-            let call = OperationCall {
-                operation_id: read.id.clone(),
-                ..OperationCall::default()
-            };
-            let key = format!(
-                "{}:{}",
-                rt.bundle.source_digest,
-                cache_key(read, &call, None)
-            );
-            let hit = cache.get(&plan.session, &key)?;
-            if hit.fallback_reason.is_some() || !(200..300).contains(&hit.status) {
-                return None;
-            }
-            let schema = read
-                .output_for_status(hit.status)
-                .and_then(|o| o.schema.as_ref());
-            let answer = kept_answer(rt, plan, read, schema, hit.body.as_ref()?)?;
-            Some(serde_json::json!({"path": path, "answer": answer}))
-        })
-        .collect()
-}
-
-/// After a 2xx command: keeps the answers [`recall_answers`] found only in the response
-/// cache, which the command has cleared, as the session now holds what it wrote.
-pub(super) async fn keep_unkept(
+/// After a 2xx command: a session only a read had written to, which its listing left out
+/// (see [`mb_state::UNLISTED_ID`]), is now written to, so it is listed as on any write.
+pub(super) async fn list_session(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
-    unkept: &[Value],
+    unlisted: bool,
     generated: &GeneratedResponse,
 ) {
-    if unkept.is_empty()
+    if !unlisted
         || !matches!(plan.op.kind, OperationKind::Command(_))
         || !(200..300).contains(&generated.status)
     {
@@ -254,19 +213,14 @@ pub(super) async fn keep_unkept(
     }
     let session = &plan.session;
     let held = read_answers(state, session).await;
-    let mut answers = held.clone();
-    for entry in unkept {
-        let path = entry
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !answers.iter().any(|e| of_path(e, path)) {
-            answers.push(entry.clone());
-        }
-    }
-    let excess = answers.len().saturating_sub(MAX_ANSWERS);
-    answers.drain(..excess);
-    write_answers(state, session, &held, answers).await;
+    let listed = Kept {
+        answers: held.answers.clone(),
+        unlisted: false,
+    };
+    write_answers(state, session, &held, listed).await;
+    state
+        .delete(session, INTERNAL_TYPE, mb_state::UNLISTED_ID)
+        .await;
 }
 
 /// What is kept of `body`, an answer of `schema` from `read`'s route: what that schema
@@ -330,23 +284,39 @@ pub(super) async fn after_delete(
             .iter()
             .any(|f| answer.get(*f).and_then(id_string).as_deref() == Some(deleted))
     };
-    let answers: Vec<Value> = held.iter().filter(|e| !about_it(e)).cloned().collect();
-    write_answers(state, session, &held, answers).await;
+    let answers: Vec<Value> = held
+        .answers
+        .iter()
+        .filter(|e| !about_it(e))
+        .cloned()
+        .collect();
+    let kept = Kept {
+        answers,
+        unlisted: held.unlisted,
+    };
+    write_answers(state, session, &held, kept).await;
+}
+
+/// The answers kept for a session, and whether they are all it has been written, by a
+/// read, so that it is not listed (see [`mb_state::UNLISTED_ID`]).
+#[derive(PartialEq)]
+struct Kept {
+    answers: Vec<Value>,
+    unlisted: bool,
 }
 
 /// Replaces what is kept, when it changed.
-async fn write_answers(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    held: &[Value],
-    answers: Vec<Value>,
-) {
-    if answers == held {
+async fn write_answers(state: &mut StateAccess<'_>, session: &SessionKey, held: &Kept, kept: Kept) {
+    if kept == *held {
         return;
     }
-    if answers.is_empty() {
+    if kept.answers.is_empty() {
         state.delete(session, INTERNAL_TYPE, ANSWERS_KEY).await;
         return;
+    }
+    let mut data = serde_json::json!({ "answers": kept.answers });
+    if kept.unlisted {
+        data["unlisted"] = Value::Bool(true);
     }
     state
         .upsert(
@@ -354,16 +324,23 @@ async fn write_answers(
             StoredResource {
                 resource_type: INTERNAL_TYPE.to_string(),
                 id: ANSWERS_KEY.to_string(),
-                data: serde_json::json!({ "answers": answers }),
+                data,
             },
         )
         .await;
 }
 
-async fn read_answers(state: &mut StateAccess<'_>, session: &SessionKey) -> Vec<Value> {
+async fn read_answers(state: &mut StateAccess<'_>, session: &SessionKey) -> Kept {
     let doc = state.get(session, INTERNAL_TYPE, ANSWERS_KEY).await;
-    doc.and_then(|doc| doc.data.get("answers")?.as_array().cloned())
-        .unwrap_or_default()
+    let answers = doc
+        .as_ref()
+        .and_then(|doc| doc.data.get("answers")?.as_array().cloned())
+        .unwrap_or_default();
+    let unlisted = doc
+        .as_ref()
+        .and_then(|doc| doc.data.get("unlisted")?.as_bool())
+        .unwrap_or(false);
+    Kept { answers, unlisted }
 }
 
 /// After a generated answer on a route with a single read: keeps an answer of that read's
@@ -414,16 +391,30 @@ pub(super) async fn after_answer(
     }
     let session = &plan.session;
     let held = read_answers(state, session).await;
-    // A read creates no session: what only it would store waits in the response cache
-    // for the session's first write (see [`keep_unkept`]).
-    if !command && held.is_empty() && !state.live(session).await {
-        return;
-    }
-    let mut answers: Vec<Value> = held.iter().filter(|e| !of_path(e, path)).cloned().collect();
+    let mut answers: Vec<Value> = held
+        .answers
+        .iter()
+        .filter(|e| !of_path(e, path))
+        .cloned()
+        .collect();
     if let Some(answer) = kept {
         answers.push(serde_json::json!({"path": path, "answer": answer}));
     }
     let excess = answers.len().saturating_sub(MAX_ANSWERS);
     answers.drain(..excess);
-    write_answers(state, session, &held, answers).await;
+    // A read lists no session: one with nothing yet is marked first, so that it is not
+    // listed until a write (see [`list_session`]).
+    let mut unlisted = held.unlisted;
+    if !command && held.answers.is_empty() && !answers.is_empty() && !state.live(session).await {
+        let marker = StoredResource {
+            resource_type: INTERNAL_TYPE.to_string(),
+            id: mb_state::UNLISTED_ID.to_string(),
+            data: serde_json::json!({}),
+        };
+        if !state.upsert(session, marker).await {
+            return;
+        }
+        unlisted = true;
+    }
+    write_answers(state, session, &held, Kept { answers, unlisted }).await;
 }

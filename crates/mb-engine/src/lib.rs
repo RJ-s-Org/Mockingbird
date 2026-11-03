@@ -1113,8 +1113,9 @@ impl Engine {
 
     /// The declared error `code` an LLM refused a call with (see [`guards::refusals`]),
     /// rendered as a forced status's is offline: the contract's response for that
-    /// status, faker-filled and valid. Tagged with the LLM's `source`, as the LLM chose
-    /// it, and with no effects.
+    /// status, faker-filled. Tagged with the LLM's `source`, as the LLM chose it, and
+    /// with no effects; a body the faker could not make valid is tagged `Fallback`, with
+    /// its reason.
     fn refused(
         &self,
         bundle: &Bundle,
@@ -1145,9 +1146,13 @@ impl Engine {
             },
         };
         tracing::info!(operation = %op.id, status = code, "the LLM refused the call with a declared error");
-        response.source = source;
+        // A body the faker could not make valid says so, as a fallback's does.
+        if response.fallback_reason.is_none() {
+            response.source = source;
+        } else {
+            response.source = Source::Fallback;
+        }
         response.usage = usage;
-        response.fallback_reason = None;
         response
     }
 
