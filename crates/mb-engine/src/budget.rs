@@ -698,9 +698,18 @@ impl From<u64> for PageLimit {
     }
 }
 
-/// What a query parameter's name holds, normalized (see [`normalized`]), when it asks
-/// for a page size, as a last resort. Earlier words go first.
-const PAGE_SIZE_WORDS: [&str; 5] = ["limit", "perpage", "size", "first", "top"];
+/// What a query parameter's whole name is, normalized (see [`normalized`]), when it
+/// asks for a page size, as a last resort: never a part of a name, so `topic_id`,
+/// `desktop`, `first_seen` and `image_size` are none. Earlier words go first.
+const PAGE_SIZE_WORDS: [&str; 7] = [
+    "limit",
+    "perpage",
+    "pagesize",
+    "maxresults",
+    "size",
+    "first",
+    "top",
+];
 
 /// Lower case, with only letters and digits.
 fn normalized(name: &str) -> String {
@@ -722,7 +731,8 @@ fn may_be_integer(param: Option<&Value>) -> bool {
 
 /// The page size a request asks for: an integer query parameter whose `maximum` is the
 /// `maxItems` of an array `doc()` holds outside any array, as the contract says so; or
-/// else, as a last resort, one whose name holds `limit`, `per_page`, `size`, `first` or `top`. Zero, or a
+/// else, as a last resort, one named `limit`, `per_page`, `page_size`, `max_results`,
+/// `size`, `first` or `top`, in any case and with any separators. Zero, or a
 /// value that is no number, asks for nothing the budget can keep.
 #[must_use]
 pub fn requested_limit<'a>(
@@ -771,7 +781,7 @@ pub fn requested_page<'a, 'c>(
     PAGE_SIZE_WORDS.iter().find_map(|word| {
         sizes
             .iter()
-            .find(|(name, ..)| normalized(name).contains(word))
+            .find(|(name, ..)| normalized(name) == *word)
             .map(|(name, items, _)| (name.as_str(), PageLimit::from(*items)))
     })
 }

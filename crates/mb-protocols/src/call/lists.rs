@@ -9,9 +9,13 @@
 //! coordinate, is matched within a margin if at all), the member is no `const`, the
 //! parameter is no bare `id` (which names what the route is about), the value is one the
 //! member's `enum` and `format` allow, and a comma-separated value is a set only when
-//! every part is in that `enum`. So
-//! `state=all` beside an `enum` without `all`, a search's `q` (no member is named so),
-//! a `labels` text beside a `labels` array and a range (`DateSent<`) change nothing. An
+//! every part is in that `enum`. A parameter with an `enum` of its own needs one on the
+//! member too, as its words (`all`) may be no item's. So `state=all` beside an `enum`
+//! without `all`, or beside plain text, a search's `q` (no member is named so), a
+//! `labels` text beside a `labels` array and a range (`DateSent<`) change nothing. Text
+//! the contract says nothing more of (no `enum`, `format` or `pattern`) is often
+//! searched by part, so it keeps an item whose value contains the requested one,
+//! ignoring case: `name=Ann` keeps `Anna`. An
 //! item that does not hold the member, or holds something of another shape, stays. The
 //! list's main array is then cut to the page size a parameter asks for, by the signal
 //! [`mb_engine::budget::requested_limit`] goes by.
@@ -63,6 +67,15 @@ impl<'a> Member<'a> {
         self.parts
             .iter()
             .find_map(|p| p.get("format").and_then(Value::as_str))
+    }
+
+    /// Whether the member is text the contract says nothing more of: no `enum`,
+    /// `format` or `pattern`. Such a filter is often a search by part (`name=Ann`).
+    fn is_free_text(&self) -> bool {
+        self.is_text()
+            && self.enumerated().is_none()
+            && self.format().is_none()
+            && !self.parts.iter().any(|p| p.get("pattern").is_some())
     }
 }
 
@@ -140,7 +153,14 @@ pub(super) fn filtered_member<'a>(
     // A real number (a coordinate) is matched within a margin, if at all, and a
     // constant member (Jira's `expand`) is no filter.
     let single = types.len() == 1 && !types.contains("number");
-    (single && types == types_of(&param_parts) && member.constant().is_none()).then_some(member)
+    // A parameter's own `enum` beside a member with none may hold words of its own
+    // (`state=all`) that no item holds.
+    let own_words = param_parts.iter().any(|p| p.get("enum").is_some());
+    let fits = single
+        && types == types_of(&param_parts)
+        && member.constant().is_none()
+        && !(own_words && member.enumerated().is_none());
+    fits.then_some(member)
 }
 
 /// `raw` as a value of `member`'s one type, when it is one its `enum` and `format`
@@ -179,6 +199,9 @@ fn wanted(member: &Member<'_>, raw: &Value) -> Option<Vec<Value>> {
         Value::Bool(b) => b.to_string(),
         _ => return None,
     };
+    if raw.trim().is_empty() {
+        return None;
+    }
     if raw.contains(',') && member.enumerated().is_some() {
         let parts: Option<Vec<Value>> = raw.split(',').map(|p| typed(member, p.trim())).collect();
         if let Some(parts) = parts {
@@ -188,18 +211,31 @@ fn wanted(member: &Member<'_>, raw: &Value) -> Option<Vec<Value>> {
     typed(member, &raw).map(|v| vec![v])
 }
 
-/// Whether `held` is one of `wanted`: text ignoring case, numbers by value.
-fn is_wanted(held: &Value, wanted: &[Value]) -> bool {
+/// Whether `held` is one of `wanted`: text ignoring case, and holding it when `loose`,
+/// numbers by value.
+fn is_wanted(held: &Value, wanted: &[Value], loose: bool) -> bool {
     wanted.iter().any(|w| match (held, w) {
+        (Value::String(a), Value::String(b)) if loose => {
+            a.to_lowercase().contains(&b.to_lowercase())
+        }
         (Value::String(a), Value::String(b)) => a.to_lowercase() == b.to_lowercase(),
         (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
         (a, b) => a == b,
     })
 }
 
-/// Whether `item` holds another value than `wanted` under `member`: one of the same
-/// shape, so a missing member, `null` or another shape says nothing.
-fn contradicts(item: &Value, member: &str, wanted: &[Value]) -> bool {
+/// A filter: the member, the values it may hold, and whether holding one as part of
+/// its text is enough (see [`Member::is_free_text`]).
+struct Filter<'a> {
+    member: &'a str,
+    values: Vec<Value>,
+    loose: bool,
+}
+
+/// Whether `item` holds another value than the filter's under its member: one of the
+/// same shape, so a missing member, `null` or another shape says nothing.
+fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
+    let (member, wanted) = (filter.member, &filter.values);
     let Some(held) = item.get(member) else {
         return false;
     };
@@ -211,7 +247,7 @@ fn contradicts(item: &Value, member: &str, wanted: &[Value]) -> bool {
                 | (Value::Number(_), Value::Number(_))
         )
     });
-    comparable && !is_wanted(held, wanted)
+    comparable && !is_wanted(held, wanted, filter.loose)
 }
 
 /// The schema parts of `op`'s list answer `body`'s main array, and of its items.
@@ -271,7 +307,7 @@ pub(super) fn narrow(
         || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
         call,
     );
-    let mut filters: Vec<(&str, Vec<Value>)> = Vec::new();
+    let mut filters: Vec<Filter<'_>> = Vec::new();
     for (param, raw) in &call.query {
         if page.is_some_and(|(name, _)| name == param) {
             continue;
@@ -279,7 +315,11 @@ pub(super) fn narrow(
         if let Some(member) = filtered_member(bundle, query, &item_parts, param)
             && let Some(values) = wanted(&member, raw)
         {
-            filters.push((member.name, values));
+            filters.push(Filter {
+                member: member.name,
+                values,
+                loose: member.is_free_text(),
+            });
         }
     }
     let valid = |candidate: &Value| {
@@ -291,11 +331,7 @@ pub(super) fn narrow(
         let mut kept = body.clone();
         if let Some(items) = list_items_mut(&mut kept) {
             let was = items.len();
-            items.retain(|item| {
-                !filters
-                    .iter()
-                    .any(|(member, values)| contradicts(item, member, values))
-            });
+            items.retain(|item| !filters.iter().any(|filter| contradicts(item, filter)));
             let removed = was - items.len();
             if removed > 0 && items.len() as u64 >= fewest && valid(&kept) {
                 if let Some(counted) =

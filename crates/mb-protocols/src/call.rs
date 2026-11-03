@@ -1628,9 +1628,10 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
-    /// Per resource type, the string members of its items that a list read's query
-    /// parameter filters by (see [`lists::filtered_member`]), sorted: Auth0's `email`,
-    /// which `/users-by-email?email=` looks a user up by.
+    /// Per resource type, the string members of its items that a lookup keys on: a
+    /// list read whose required query parameter names the member (see
+    /// [`lists::filtered_member`]), sorted. Auth0's `email`, which
+    /// `/users-by-email?email=` requires; never an optional filter such as `state`.
     lookup_members: HashMap<String, Vec<String>>,
 }
 
@@ -1800,8 +1801,8 @@ impl BundleIndex {
     }
 }
 
-/// Per resource type, the string members of its items the query parameters of list
-/// reads filter by (see [`BundleIndex::lookup_members`]).
+/// Per resource type, the string members of its items a list read's required query
+/// parameter keys on (see [`BundleIndex::lookup_members`]).
 fn lookup_members(
     bundle: &mb_mcm::Bundle,
     types_by_def: &HashMap<String, String>,
@@ -1823,7 +1824,15 @@ fn lookup_members(
                 .or_else(|| op.resource_type.clone());
             let Some(t) = t else { continue };
             let (item_parts, _) = schema_parts(bundle, Some(&items));
-            for param in params.keys() {
+            // Only a parameter the route requires keys a lookup; an optional one
+            // (`state`, `status`) narrows a list of many.
+            let required = query
+                .and_then(|q| q.get("required"))
+                .and_then(Value::as_array);
+            let keys = params.keys().filter(|param| {
+                required.is_some_and(|names| names.iter().any(|n| n.as_str() == Some(param)))
+            });
+            for param in keys {
                 if let Some(member) = lists::filtered_member(bundle, query, &item_parts, param)
                     && member.is_text()
                 {

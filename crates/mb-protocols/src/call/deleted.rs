@@ -21,8 +21,11 @@
 //! A lookup by value can bring a record back under a new id: after a delete, Auth0's
 //! `/users-by-email?email=` answered a user the model made up, holding the deleted
 //! user's email. So a delete of a stored record also marks, by hash, the text of its
-//! identifying members: its identity, and the members a list read of its type filters by
-//! (see [`BundleIndex::lookup_members`]), not every text it holds. A generated list item
+//! identifying members: its identity, and the members a lookup of its type keys on, a
+//! list read whose required query parameter names the member (see
+//! [`BundleIndex::lookup_members`]). An optional filter (`state`, `status`) is no key,
+//! as many records share its value. Value markers have a bound of their own,
+//! [`MAX_DELETED_VALUES`], so they never push an id's marker out. A generated list item
 //! of that type that the session does not hold, whose such member holds a marked value
 //! that the request names too, goes as a marked id does. A create storing a record with
 //! that value clears its marker, so a record made again with the same email stays.
@@ -42,6 +45,10 @@ const MAX_DELETED: usize = 1024;
 /// The document listing them, oldest first, and the prefix of their ids. No memory
 /// key starts so: those start with a resource type, and a type comes from a path.
 const INDEX: &str = "#deleted";
+/// Value markers kept per session, the newest, apart from the ids'.
+const MAX_DELETED_VALUES: usize = 1024;
+/// The document listing them, oldest first.
+const VALUES_INDEX: &str = "#deleted-values";
 
 /// The members that count a list when they stand beside it, lower case with no `_`.
 const COUNT_NAMES: [&str; 5] = ["total", "count", "totalcount", "totalresults", "totalitems"];
@@ -79,8 +86,8 @@ fn value_key(t: &str, scope: Option<&str>, member: &str, value: &str) -> String 
 /// Members whose text a delete of a `t` marks, at most.
 const MAX_MARKED_VALUES: usize = 8;
 
-/// The members of a `t` that identify it: its identity, and those a list read of its
-/// type filters by.
+/// The members of a `t` that identify it: its identity, and those a lookup of its type
+/// keys on.
 fn identifying(rt: &MockRuntime, t: &str) -> Vec<String> {
     let index = rt.index();
     let mut members: Vec<String> = index.identity_fields(t).to_vec();
@@ -214,13 +221,31 @@ pub(super) async fn mark(
     if named != id {
         keys.push(marker_key(t, parent.as_deref(), id));
     }
+    let mut values = Vec::new();
     if let Some(held) = held.filter(|h| h.resource_type == t) {
         for (member, value) in identifying_values(rt, t, &held.data) {
             let key = value_key(t, parent.as_deref(), &member, value);
-            if !keys.contains(&key) {
-                keys.push(key);
+            if !values.contains(&key) {
+                values.push(key);
             }
         }
+    }
+    // Each kind under its own bound: values never push an id's marker out.
+    write_markers(state, session, INDEX, keys, MAX_DELETED).await;
+    write_markers(state, session, VALUES_INDEX, values, MAX_DELETED_VALUES).await;
+}
+
+/// Writes the markers `keys` and lists them in the index document `index`, which keeps
+/// the newest `max` and ends the markers past it.
+async fn write_markers(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    index: &str,
+    keys: Vec<String>,
+    max: usize,
+) {
+    if keys.is_empty() {
+        return;
     }
     for key in &keys {
         let marker = StoredResource {
@@ -230,22 +255,22 @@ pub(super) async fn mark(
         };
         state.upsert(session, marker).await;
     }
-    let mut listed: Vec<String> = match state.get(session, INTERNAL_TYPE, INDEX).await {
+    let mut listed: Vec<String> = match state.get(session, INTERNAL_TYPE, index).await {
         Some(doc) => serde_json::from_value(doc.data).unwrap_or_default(),
         None => Vec::new(),
     };
     listed.retain(|held| !keys.contains(held));
     listed.extend(keys);
-    let excess = listed.len().saturating_sub(MAX_DELETED);
+    let excess = listed.len().saturating_sub(max);
     for oldest in listed.drain(..excess) {
         state.delete(session, INTERNAL_TYPE, &oldest).await;
     }
-    let index = StoredResource {
+    let document = StoredResource {
         resource_type: INTERNAL_TYPE.to_string(),
-        id: INDEX.to_string(),
+        id: index.to_string(),
         data: Value::from(listed),
     };
-    state.upsert(session, index).await;
+    state.upsert(session, document).await;
 }
 
 /// Whether `id` of type `t` is marked under `scope`.
