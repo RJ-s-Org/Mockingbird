@@ -1186,6 +1186,7 @@ paths:
       parameters:
         - {name: page_size, in: query, schema: {type: integer}}
         - {name: next_page_token, in: query, schema: {type: string}}
+        - {name: name, in: query, schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -1199,11 +1200,54 @@ paths:
                   next_page_token: {type: string}
                   total_records: {type: integer}
   /users/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     get:
       operationId: getUser
-      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+    patch:
+      operationId: updateUser
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+    delete:
+      operationId: deleteUser
+      responses:
+        "204": {description: gone}
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: status, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  data: {type: array, items: {$ref: "#/components/schemas/Order"}}
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: query, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: {type: string}
+                  results: {type: array, items: {$ref: "#/components/schemas/User"}}
   /deals:
     get:
       operationId: listDeals
@@ -1261,6 +1305,10 @@ components:
       type: object
       required: [id]
       properties: {id: {type: string}, name: {type: string}}
+    Order:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, status: {type: string}}
 "##;
 
 fn users(n: usize) -> Vec<Value> {
@@ -1389,4 +1437,108 @@ async fn consistency_off_mints_nothing() {
     let answer = json!({"users": users(3), "next_page_token": "model-token"});
     let api = api_of(PAGES, false, vec![Ok(answer.to_string())]);
     assert_eq!(api.get("/users?page_size=2").await, answer);
+}
+
+/// The first page of five users, two to a page, and its token.
+async fn first_of_five(api: &Api, query: &str) -> String {
+    let first = api.get(&format!("/users?page_size=2{query}")).await;
+    assert_eq!(ids_in(&first, "users"), ["u1", "u2"], "{first}");
+    first["next_page_token"].as_str().unwrap().to_string()
+}
+
+fn five() -> Result<String, LlmError> {
+    Ok(json!({"users": users(5)}).to_string())
+}
+
+/// A record deleted after the cut leaves the page it would be served on, and one
+/// deleted before is not kept for a later page at all.
+#[tokio::test]
+async fn a_deleted_item_leaves_a_served_page() {
+    let api = api_of(PAGES, true, vec![five(), Ok(String::new())]);
+    let token = first_of_five(&api, "").await;
+    let (status, _) = api.call("DELETE", "/users/u3", None).await;
+    assert!(status.is_success(), "{status}");
+    let second = api
+        .get(&format!("/users?page_size=2&next_page_token={token}"))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u4"], "{second}");
+
+    let api = api_of(PAGES, true, vec![Ok(String::new()), five()]);
+    let (status, _) = api.call("DELETE", "/users/u4", None).await;
+    assert!(status.is_success(), "{status}");
+    let token = first_of_five(&api, "").await;
+    let second = api
+        .get(&format!("/users?page_size=2&next_page_token={token}"))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u3", "u5"], "{second}");
+}
+
+/// A served page shows what the session wrote since, and the first request's filters
+/// apply to it: `u3` renamed is no `name=N` user.
+#[tokio::test]
+async fn a_served_page_is_overlaid_and_filtered() {
+    let renamed = json!({"id": "u3", "name": "Z"});
+    let api = api_of(PAGES, true, vec![five(), Ok(renamed.to_string())]);
+    let token = first_of_five(&api, "&name=N").await;
+    let (status, _) = api
+        .call("PATCH", "/users/u3", Some(json!({"name": "Z"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = api
+        .get(&format!(
+            "/users?page_size=2&name=N&next_page_token={token}"
+        ))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u4"], "{second}");
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A token is bound to the first request's filters: with others it is the model's.
+#[tokio::test]
+async fn a_token_with_other_filters_is_generated() {
+    let other = json!({"users": [{"id": "x1", "name": "X"}]});
+    let api = api_of(PAGES, true, vec![five(), Ok(other.to_string())]);
+    let token = first_of_five(&api, "&name=N").await;
+    let body = api
+        .get(&format!(
+            "/users?page_size=2&name=X&next_page_token={token}"
+        ))
+        .await;
+    assert_eq!(ids_in(&body, "users"), ["x1"], "{body}");
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// The same token twice serves the same page, with the same next token.
+#[tokio::test]
+async fn a_retried_token_serves_the_same_page() {
+    let api = api_of(PAGES, true, vec![five()]);
+    let token = first_of_five(&api, "").await;
+    let uri = format!("/users?page_size=2&next_page_token={token}");
+    let once = api.get(&uri).await;
+    let twice = api.get(&uri).await;
+    assert_eq!(once, twice);
+    assert_eq!(ids_in(&once, "users"), ["u3", "u4"]);
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A member named as a filter of the items (`status`) is no cursor, nor is one that
+/// echoes the request (`query`): neither gets a token, and the list is only cut.
+#[tokio::test]
+async fn a_filter_or_an_echo_is_no_cursor() {
+    let orders = json!({
+        "status": "ok",
+        "data": [{"id": "o1", "status": "paid"}, {"id": "o2", "status": "paid"}],
+    });
+    let found = json!({"query": "ann", "results": users(3)});
+    let api = api_of(
+        PAGES,
+        true,
+        vec![Ok(orders.to_string()), Ok(found.to_string())],
+    );
+    let body = api.get("/orders?limit=1").await;
+    assert_eq!(body["status"], "ok", "{body}");
+    assert_eq!(ids_in(&body, "data"), ["o1"]);
+    let body = api.get("/search?limit=1&query=ann").await;
+    assert_eq!(body["query"], "ann", "{body}");
+    assert_eq!(ids_in(&body, "results"), ["u1"]);
 }
