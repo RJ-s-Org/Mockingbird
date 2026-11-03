@@ -2805,7 +2805,8 @@ const MAX_ENTITIES: usize = 100;
 
 /// Stores what a 2xx answer mentions so that a later read returns it: each
 /// object below the answer's root with a known type (see
-/// [`entity_type`]), an `id`, a `number` or a field that type is identified by,
+/// [`entity_type`]), keyed by the field its type's read by path goes by, else an
+/// `id`, a `number` or another field that type is identified by,
 /// and a value its type's read would serve or a shorter form
 /// of one (see [`entity_fits`], [`is_summary`]). What the session already
 /// holds is left as it is.
@@ -2889,10 +2890,17 @@ impl<'a> EntityWalk<'a> {
         let Some(resource_type) = entity_type(index, def, member) else {
             return;
         };
-        // As a list keys it, then what else the contract identifies the type by.
+        // As the type's routes key it, so a record is stored once, else as a list
+        // with no identity of its type keys one.
+        let own = index
+            .detail_reads
+            .get(&resource_type)
+            .and_then(|i| self.rt.bundle().operations.get(*i)?.identity.as_ref())
+            .map(|identity| identity.field.as_str());
         let identity = index.identity_fields(&resource_type).iter();
-        let Some(id) = ["id", "number"]
+        let Some(id) = own
             .into_iter()
+            .chain(["id", "number"])
             .chain(identity.map(String::as_str))
             .find_map(|f| value.get(f).and_then(id_string))
         else {
