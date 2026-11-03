@@ -11,6 +11,11 @@
 //! of its target, for replicas, feeds and triggers; telling a parent changes nothing
 //! it holds, and its read looks in the shared store before it serves, on any node.
 //!
+//! A create also tells the held records its new record refers to by value, by the
+//! matching [`world`] shows a request's references with: a reply the message it
+//! answers, a refund its payment. A parent and those keep, with the request, the record
+//! it created, which the read catching up is shown as new (see [`created_since`]).
+//!
 //! The next generation for that resource is shown the requests; a read, which could
 //! otherwise answer from state and never see them, must generate. Its validated
 //! answer replaces the stored copy and the memory goes.
@@ -146,7 +151,9 @@ pub(super) async fn recall(
         .map(|request| {
             let mut told = request.clone();
             if let Value::Object(members) = &mut told {
-                members.remove("at");
+                for untold in UNTOLD {
+                    members.remove(untold);
+                }
             }
             told
         })
@@ -1379,32 +1386,81 @@ pub(super) async fn after_write(
     } else {
         None
     };
-    if target.is_none() && parent.is_none() {
+    // The record a create stored, which what it was made under or refers to may count.
+    let created = match effect {
+        Effect::Create => generated
+            .body
+            .as_ref()
+            .or(request.as_ref())
+            .and_then(|stored| created_id(op, stored)),
+        _ => None,
+    };
+    let referenced = match created.as_deref() {
+        Some(id) => {
+            let told_already = |kind: &str, other: &str| {
+                (kind == t && other == id)
+                    || parent
+                        .as_ref()
+                        .is_some_and(|p| p.resource_type == kind && p.id == other)
+            };
+            let record = generated.body.as_ref();
+            world::referenced_by_value(state, plan, (record, w.call.body.as_ref()), told_already)
+                .await
+                .into_iter()
+                .filter(|r| !effect_applied(generated, &r.resource_type, &r.id))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    if target.is_none() && parent.is_none() && referenced.is_empty() {
         return;
     }
-    let entry = |body: Option<Value>| memory_entry(op, body);
+    let created = created.as_deref().map(|id| (t, id));
     if let Some(tell) = target {
         let key = memory_key(t, &tell.id, tell.stored);
-        remember(state, session, &key, &entry(tell.body), tell.own).await;
+        remember(
+            state,
+            session,
+            &key,
+            &memory_entry(op, tell.body, None),
+            tell.own,
+        )
+        .await;
         if tell.publish
             && let Some(held) = w.held
         {
             state.upsert(session, held.clone()).await;
         }
     }
-    if let Some(parent) = parent {
-        let key = memory_key(&parent.resource_type, &parent.id, true);
-        remember(state, session, &key, &entry(told), None).await;
+    // Told as a child is, as what it is made under or refers to: last write wins.
+    let entry = memory_entry(op, told, created);
+    for related in parent.iter().chain(&referenced) {
+        let key = memory_key(&related.resource_type, &related.id, true);
+        remember(state, session, &key, &entry, None).await;
     }
 }
 
-/// One remembered request, as a prompt is told it but for `at`.
-fn memory_entry(op: &Operation, body: Option<Value>) -> Value {
+/// What a kept request says beside what a prompt is told of it (see [`recall`]): when it
+/// was made, and the record it created, if any.
+const UNTOLD: [&str; 2] = ["at", CREATED];
+
+/// The member of a kept request naming the record it created, as `{type, id}`.
+const CREATED: &str = "created";
+
+/// One remembered request, as a prompt is told it but for what is [`UNTOLD`]: with
+/// `created`, the record it created, which the read it is told to is shown as new.
+fn memory_entry(op: &Operation, body: Option<Value>, created: Option<(&str, &str)>) -> Value {
     let mut entry = Map::new();
     entry.insert("operation".to_string(), Value::from(op.id.as_str()));
     entry.insert("path".to_string(), Value::from(route(op)));
     if let Some(body) = body {
         entry.insert("body".to_string(), within_cap(body));
+    }
+    if let Some((t, id)) = created {
+        entry.insert(
+            CREATED.to_string(),
+            serde_json::json!({"type": t, "id": id}),
+        );
     }
     entry.insert(
         "at".to_string(),
@@ -1444,6 +1500,49 @@ pub(super) async fn recall_route(
         }
     }
     requests
+}
+
+/// The records the requests a read is told of created (see [`memory_entry`]), oldest
+/// first, as a record matched by value is shown ([`matched_for_context`]): what was made
+/// under or refers to the target since it was stored, so that what counts them moves.
+/// Taken out of `related`, where they would be told to stay unchanged. One gone since is
+/// not shown. A read pays at most one store read per request it is told of, and none with
+/// no record created.
+pub(super) async fn created_since(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    earlier: &Earlier,
+    target: Option<&StoredResource>,
+    related: &mut Vec<StoredResource>,
+) -> Vec<StoredResource> {
+    let rt = state.rt;
+    let mut out: Vec<StoredResource> = Vec::new();
+    for entry in &earlier.shown {
+        let Some(created) = entry.get(CREATED) else {
+            continue;
+        };
+        let (Some(t), Some(id)) = (
+            created.get("type").and_then(Value::as_str),
+            created.get("id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let is = |r: &StoredResource| r.resource_type == t && r.id == id;
+        if target.is_some_and(is) || out.iter().any(is) {
+            continue;
+        }
+        if let Some(at) = related.iter().position(is) {
+            out.push(related.remove(at));
+            continue;
+        }
+        let Some(held) = state.get(&plan.session, t, id).await else {
+            continue;
+        };
+        if let Some(data) = matched_for_context(rt, plan, t, &held.data) {
+            out.push(StoredResource { data, ..held });
+        }
+    }
+    out
 }
 
 /// Whether two path templates' segments are the same route: parameters may be named
@@ -1557,7 +1656,7 @@ pub(super) async fn after_route_write(
         .body
         .as_ref()
         .and_then(|body| told_to_list(rt, plan, list, body));
-    let entry = memory_entry(op, body);
+    let entry = memory_entry(op, body, None);
     remember(state, &plan.session, &key, &entry, None).await;
 }
 
@@ -1757,7 +1856,8 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 /// What of an effect's `set` may go on the target its update just stored: what the read
 /// schema declares at the top level (all of it where the schema names no members or a
 /// union may hold others), and of that not a path member, not what the request names at
-/// the top level, and not what would show another owner. A `readOnly` member may go on:
+/// the top level (in its body or its query, as the answer settles), and not what would
+/// show another owner. A `readOnly` member may go on:
 /// a client cannot set it, and an effect is the server saying what followed. The check on
 /// identity comes before this, as for any effect.
 pub(super) fn own_effect_members(
@@ -1775,7 +1875,9 @@ pub(super) fn own_effect_members(
     let index = rt.index();
     let paths = index.path_fields(t);
     let body = call.body.as_ref().and_then(Value::as_object);
-    let named = |key: &str| body.is_some_and(|members| members.contains_key(key));
+    let named = |key: &str| {
+        body.is_some_and(|members| members.contains_key(key)) || call.query.contains_key(key)
+    };
     // A member named for a parameter of this call's path, and holding its value.
     let shows_path = |key: &str| {
         held.data.get(key).and_then(id_string).is_some_and(|value| {

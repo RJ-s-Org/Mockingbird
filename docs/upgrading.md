@@ -30,6 +30,19 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Related writes bring their records up to date
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes:
+
+- **A create referring to a held record makes that record's next read generate once.** A value of the new record, or of the create's request body, that is a held record's stored id (or a path field known to hold it) marks that record as behind, as a create under a parent's path already marked the parent: `POST /refunds {"payment_id": "pay_1…"}` for the payment, a reply naming its message under any member. Where that read answered `state` before, it now costs one LLM call, once, then answers `state` again. A create-then-read-parent flow under the parent's path costs what it did (one call for the create, one for the read); one that refers to the parent by value costs one call more. At most 4 records per create are marked; not one an applied effect of the answer changed. The catch-up's cap, owner checks and last-write rules are unchanged, and it may replace the stored copy as any catch-up does. A booking naming the offer it books, for instance, now makes the offer's next read catch up.
+- **More store reads**: a create's value lookups, as a request's references are looked up for its prompt, at most 32, and one per request a catch-up is told of that created a record. A create with no value that could be an id pays none.
+- **The catch-up shows what was created**: the records those creates made come in a `<new_resources>` block after the rest, before `<earlier_requests>`, with a one-line preface (about 30 tokens beside the records), and are taken out of `<related_resources>`. Kept requests gain an internal `created` member, which no prompt shows. A prompt with nothing created to show is the same to the byte.
+- **A settling update is told the rule**: the user message of an update whose answer settles on its stored target (an LLM's, with the read's schema, not an action, told of no earlier requests) gains one sentence, about 20 tokens: what it changes beyond what the request names is kept only when listed as effects. Other prompts are unchanged.
+- **Query members are named**: such an update's query members count as named, as its body's do, so the answer's values for them stick; a body member of the same name wins over the query's. Updates sent only as JSON or form bodies settle as before.
+- **Error bodies say their status**: a 4xx or 5xx body whose schema declares an integer `status` allowing that status carries it, from the faker and the LLM alike.
+- **Recorded prompts**: a recording of a settling update, or of a read after a create that refers to a record, may not replay.
+- **Rust API**: `GenerationContext` gains a public field, `created_since`, which breaks code constructing it in full; add `..Default::default()`.
+
 ### Prompts show where a minted value came from, and a write can be refused
 
 No migration or configuration. With an LLM and `consistency: on`, on HTTP routes:

@@ -162,6 +162,10 @@ pub struct GenerationContext<'a> {
     /// with the request that got it, oldest first, which may have changed since. Scrubbed
     /// by whoever kept them, the values themselves included. For the prompt only.
     pub earlier_origins: &'a [Value],
+    /// Related records that writes of [`Self::earlier_requests`] created after the target
+    /// was stored, so that what counts them has moved: shown as new, not among
+    /// [`Self::related`]. Scrubbed by whoever found them. For the prompt only.
+    pub created_since: &'a [StoredResource],
     /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
     /// With none it does not.
     pub update_guard: Option<&'a dyn UpdateGuard>,
@@ -1197,6 +1201,7 @@ impl Engine {
         } else {
             response
         };
+        let response = with_http_status(validator, bundle, schema, response);
         apply_scenario(validator, op, call, ctx, response)
     }
 
@@ -2004,6 +2009,64 @@ fn encode_base64(
     response
 }
 
+/// An error body whose schema declares an integer `status` member that may hold the HTTP
+/// status, with that member set to it: a problem body (RFC 9457) says its own status, and
+/// a faker's or a model's otherwise says another. Kept only if the body still validates.
+/// The schema decides, not the name alone: a string `status`, or one whose bounds or enum
+/// leave the HTTP status out, is the API's own.
+fn with_http_status(
+    validator: &SchemaValidator,
+    bundle: &Bundle,
+    schema: &Value,
+    mut response: GeneratedResponse,
+) -> GeneratedResponse {
+    const MEMBER: &str = "status";
+    let status = response.status;
+    let Some(Value::Object(members)) = &response.body else {
+        return response;
+    };
+    if status < 400 || members.get(MEMBER).and_then(Value::as_u64) == Some(u64::from(status)) {
+        return response;
+    }
+    let allowed = consistency::property_schema(bundle, schema, MEMBER)
+        .is_some_and(|member| allows_integer(consistency::deref(bundle, &member), status));
+    if !allowed {
+        return response;
+    }
+    let mut patched = members.clone();
+    patched.insert(MEMBER.to_string(), Value::from(status));
+    let patched = Value::Object(patched);
+    if validator.is_valid(&patched) {
+        response.body = Some(patched);
+    }
+    response
+}
+
+/// Whether `schema` is an integer's that allows `n`: by its type, bounds, `enum`,
+/// `const` and `multipleOf`.
+fn allows_integer(schema: &Value, n: u16) -> bool {
+    let n = f64::from(n);
+    let integer = match schema.get("type") {
+        Some(Value::String(t)) => t == "integer",
+        Some(Value::Array(types)) => types.iter().any(|t| t == "integer"),
+        _ => false,
+    };
+    let bound = |key: &str| schema.get(key).and_then(Value::as_f64);
+    let listed = |key: &str| match schema.get(key) {
+        Some(Value::Array(values)) => values.iter().any(|v| v.as_f64() == Some(n)),
+        Some(value) if key == "const" => value.as_f64() == Some(n),
+        _ => true,
+    };
+    integer
+        && bound("minimum").is_none_or(|min| n >= min)
+        && bound("maximum").is_none_or(|max| n <= max)
+        && bound("exclusiveMinimum").is_none_or(|min| n > min)
+        && bound("exclusiveMaximum").is_none_or(|max| n < max)
+        && bound("multipleOf").is_none_or(|step| step > 0.0 && (n / step).fract() == 0.0)
+        && listed("enum")
+        && listed("const")
+}
+
 /// Make a 2xx body consistent with the request and state (spec §1.2,
 /// criterion 4): queries reflect the stored target, creates reflect the
 /// request body, updates reflect the target then the request body, and the
@@ -2048,8 +2111,8 @@ fn reflect(
             } else {
                 match (ctx.target, settling_guard(op, ctx, &response)) {
                     (Some(target), Some(guard)) => {
-                        let body =
-                            settled_update(validator, guard, body, target, call.body.as_ref());
+                        let named = named_inputs(call);
+                        let body = settled_update(validator, guard, body, target, named.as_deref());
                         apply_request(validator, op, body, call.body.as_ref())
                     }
                     (target, _) => {
@@ -2079,6 +2142,25 @@ fn reflect(
         force_identity(validator, op, call, body)
     });
     response
+}
+
+/// What an update names of its resource, for its answer to settle on ([`settled_update`]):
+/// its body's members, and its query's where the body has none of that name. A query or
+/// a form carries an update's members as a JSON body does (Trello's `PUT
+/// /cards/{id}?idList=…`); a form body is decoded into the body already. With no query,
+/// the body as it is.
+fn named_inputs(call: &OperationCall) -> Option<std::borrow::Cow<'_, Value>> {
+    use std::borrow::Cow;
+    match &call.body {
+        _ if call.query.is_empty() => call.body.as_ref().map(Cow::Borrowed),
+        Some(Value::Object(body)) => {
+            let mut named = call.query.clone();
+            named.extend(body.iter().map(|(k, v)| (k.clone(), v.clone())));
+            Some(Cow::Owned(Value::Object(named)))
+        }
+        None => Some(Cow::Owned(Value::Object(call.query.clone()))),
+        Some(other) => Some(Cow::Borrowed(other)),
+    }
 }
 
 /// What lets this update's answer settle on its target ([`settled_update`]): an LLM's

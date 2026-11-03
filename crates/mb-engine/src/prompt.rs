@@ -67,6 +67,15 @@ response stays consistent with the request body.";
 const EARLIER_REQUESTS: &str = "These requests succeeded after the resources above were stored, \
 oldest first: the response must reflect them, even where those resources say otherwise.";
 
+/// What <new_resources> are: without it, a model told to copy related records unchanged
+/// leaves a count or a status where it was.
+const CREATED_SINCE: &str = "Created since the resources above were stored, by the requests \
+below: counts and totals of such records include them.";
+
+/// What an update whose answer settles on its stored target is told (see [`settles`]).
+const SETTLES: &str = "What the response changes beyond what the request names is kept only \
+when listed as effects.";
+
 /// What <earlier_answers> is: what the API said then, not what must stand now.
 const EARLIER_ANSWERS: &str = "What this API said earlier in the session, on routes with no \
 parameters. It may have changed since: where nothing says otherwise, use the same ids, names and \
@@ -106,6 +115,7 @@ pub fn build_messages(
                 acts(op, status, ctx),
                 action_verb(op, status),
                 decides_id(op, status, ctx),
+                settles(op, status, ctx),
                 request_defaults(bundle, op, call).as_ref(),
             ),
         },
@@ -119,7 +129,20 @@ pub fn build_messages(
 pub(crate) fn acts(op: &Operation, status: u16, ctx: &GenerationContext<'_>) -> bool {
     matches!(op.kind, OperationKind::Command(_))
         && (200..300).contains(&status)
-        && (ctx.target.is_some() || !ctx.related.is_empty())
+        && (ctx.target.is_some() || !ctx.related.is_empty() || !ctx.created_since.is_empty())
+}
+
+/// Whether the answer to `status` of `op` will settle on its stored target, as
+/// [`crate::settled_update`] does it: a plain update, told of no earlier requests, whose
+/// guard says the answer has the read's schema. What it changes beyond what the request
+/// names then goes unless an effect lists it, which the prompt says.
+fn settles(op: &Operation, status: u16, ctx: &GenerationContext<'_>) -> bool {
+    op.kind == OperationKind::Command(Effect::Update)
+        && !op.is_action()
+        && ctx.target.is_some()
+        && ctx.earlier_requests.is_empty()
+        && acts(op, status, ctx)
+        && ctx.update_guard.is_some_and(|guard| guard.settles(status))
 }
 
 /// Whether a generation of `status` for `op` is an action answering the schema
@@ -211,9 +234,10 @@ fn stream_user_message(
         earlier_answers: &[],
         earlier_writes: &[],
         earlier_origins: &[],
+        created_since: &[],
         update_guard: None,
     };
-    let mut s = user_message(call, &unary, false, None, false, defaults);
+    let mut s = user_message(call, &unary, false, None, false, false, defaults);
     if !ctx.request_stream.is_empty() {
         s.push_str("<request_stream>\n");
         let skip = ctx.request_stream.len().saturating_sub(MAX_REQUEST_STREAM);
@@ -293,6 +317,7 @@ null.\n\n",
                 false,
                 None,
                 false,
+                false,
                 request_defaults(bundle, part.op, part.call).as_ref(),
             )
         );
@@ -354,14 +379,16 @@ fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Optio
 /// is the action route it is a success of (see [`action_verb`]), and
 /// `decides_id` that it may instead have made a new record (see
 /// [`decides_id`]). An action is never told a status moved: not every action
-/// moves one, and models told so invented one.
-/// `defaults` are what the request leaves out (see [`request_defaults`]).
+/// moves one, and models told so invented one. `settles` says its answer settles on
+/// its stored target (see [`settles`]). `defaults` are what the request leaves out
+/// (see [`request_defaults`]).
 fn user_message(
     call: &OperationCall,
     ctx: &GenerationContext<'_>,
     acting: bool,
     verb: Option<&str>,
     decides_id: bool,
+    settles: bool,
     defaults: Option<&Map<String, Value>>,
 ) -> String {
     let trust = if ctx.scenario.is_some() {
@@ -385,6 +412,10 @@ inside them."
 <existing_resource>, so keep its id and show the state after it; or it made a new one of the same \
 kind, so give that a new id of its own and leave <existing_resource> as it is."
         );
+    }
+    if settles {
+        s.push(' ');
+        s.push_str(SETTLES);
     }
     s.push_str("\n\n");
     now_line(&mut s);
@@ -446,6 +477,15 @@ must follow them.\n{}\n</scenario>",
         "earlier_origins",
         ctx.earlier_origins,
     );
+    if !ctx.created_since.is_empty() {
+        let created: Vec<Value> = ctx
+            .created_since
+            .iter()
+            .take(MAX_RELATED)
+            .map(|r| r.data.clone())
+            .collect();
+        data_block(&mut s, CREATED_SINCE, "new_resources", &created);
+    }
     earlier_requests_block(&mut s, ctx.earlier_requests);
     s
 }
@@ -488,7 +528,8 @@ pub(crate) fn effects_note(op: &Operation, status: u16, ctx: &GenerationContext<
     let shown = ctx
         .target
         .into_iter()
-        .chain(ctx.related.iter().take(MAX_RELATED));
+        .chain(ctx.related.iter().take(MAX_RELATED))
+        .chain(ctx.created_since.iter().take(MAX_RELATED));
     for r in shown {
         let _ = writeln!(
             s,

@@ -304,9 +304,7 @@ async fn a_refund_under_a_payment_is_shown_to_it_as_new() {
     h.call("POST", "/payments", Some(json!({"amount": 100})))
         .await;
     h.call("GET", "/payments/pay_100001", None).await;
-    let (status, _, _) = h
-        .call("POST", "/payments/pay_100001/refunds", None)
-        .await;
+    let (status, _, _) = h.call("POST", "/payments/pay_100001/refunds", None).await;
     assert_eq!(status, StatusCode::CREATED);
 
     let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
@@ -494,7 +492,11 @@ async fn an_update_by_form_moves_the_record() {
     ]);
     h.call("GET", "/cards/card_100001", None).await;
     let (status, _, answered) = h
-        .form("PATCH", "/cards/card_100001", "name=formed&idList=list_100002")
+        .form(
+            "PATCH",
+            "/cards/card_100001",
+            "name=formed&idList=list_100002",
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(answered["name"], "formed");

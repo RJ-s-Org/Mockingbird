@@ -48,6 +48,7 @@ fn ctx() -> GenerationContext<'static> {
         earlier_answers: &[],
         earlier_writes: &[],
         earlier_origins: &[],
+        created_since: &[],
         update_guard: None,
     }
 }
@@ -277,6 +278,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     earlier_answers: &[],
                     earlier_writes: &[],
                     earlier_origins: &[],
+                    created_since: &[],
                     update_guard: None,
                 },
             )
@@ -3905,6 +3907,11 @@ paths:
         "404": {description: gone, content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
         "409": {description: odd, content: {application/json: {schema: {$ref: "#/components/schemas/Small"}}}}
         "422": {description: worded, content: {application/json: {schema: {$ref: "#/components/schemas/Worded"}}}}
+    put:
+      operationId: putThing
+      parameters: [{name: thing_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
 components:
   schemas:
     Thing:
@@ -3929,7 +3936,7 @@ components:
       properties: {status: {type: string, enum: [failed, rejected]}}
 "##;
 
-fn thing_call() -> OperationCall {
+fn problem_call() -> OperationCall {
     OperationCall {
         operation_id: "getThing".into(),
         path_params: Map::from_iter([("thing_id".to_string(), json!("t1"))]),
@@ -3950,19 +3957,19 @@ async fn a_problem_bodys_status_is_the_http_status() {
         ..ctx()
     };
     let out = offline
-        .generate(&bundle, op, &thing_call(), forced(404))
+        .generate(&bundle, op, &problem_call(), forced(404))
         .await
         .unwrap();
     assert_eq!(out.body.unwrap()["status"], 404);
-    let gone = offline.not_found(&bundle, op, &thing_call(), "no t1");
+    let gone = offline.not_found(&bundle, op, &problem_call(), "no t1");
     assert_eq!(gone.body.unwrap()["status"], 404);
 
     let (_, engine) = scripted(vec![Ok(json!(
-        {"type": "about:blank", "title": "Not Found", "status": 46}
+        {"type": "about:blank", "title": "Not Found", "status": 500}
     )
     .to_string())]);
     let out = engine
-        .generate(&bundle, op, &thing_call(), forced(404))
+        .generate(&bundle, op, &problem_call(), forced(404))
         .await
         .unwrap();
     assert_eq!(out.source, Source::Llm);
@@ -3970,21 +3977,21 @@ async fn a_problem_bodys_status_is_the_http_status() {
 
     let (_, engine) = scripted(vec![Ok(json!({"status": 17}).to_string())]);
     let out = engine
-        .generate(&bundle, op, &thing_call(), forced(409))
+        .generate(&bundle, op, &problem_call(), forced(409))
         .await
         .unwrap();
     assert_eq!(out.body.unwrap()["status"], 17, "409 is out of its bounds");
 
     let (_, engine) = scripted(vec![Ok(json!({"status": "failed"}).to_string())]);
     let out = engine
-        .generate(&bundle, op, &thing_call(), forced(422))
+        .generate(&bundle, op, &problem_call(), forced(422))
         .await
         .unwrap();
     assert_eq!(out.body.unwrap()["status"], "failed");
 
     let (_, engine) = scripted(vec![Ok(json!({"id": "t1", "status": 3}).to_string())]);
     let out = engine
-        .generate(&bundle, op, &thing_call(), ctx())
+        .generate(&bundle, op, &problem_call(), ctx())
         .await
         .unwrap();
     assert_eq!(out.body.unwrap()["status"], 3, "a success's is its own");
@@ -4061,9 +4068,13 @@ async fn a_settling_update_is_told_the_rule() {
         }
     }
     let prompt = |op: &'static str, target: Option<StoredResource>, guarded: bool| async move {
-        let bundle = compile(ACTIONS_PROMPT.as_bytes()).unwrap();
-        let (provider, engine) =
-            scripted(vec![Ok(json!({"id": "pi_1", "status": "s"}).to_string())]);
+        let (contract, answer) = if op == "putThing" {
+            (PROBLEMS, json!({"id": "t1", "status": 2}))
+        } else {
+            (ACTIONS_PROMPT, json!({"id": "pi_1", "status": "s"}))
+        };
+        let bundle = compile(contract.as_bytes()).unwrap();
+        let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
         let call = OperationCall {
             operation_id: op.into(),
             ..OperationCall::default()
@@ -4079,7 +4090,12 @@ async fn a_settling_update_is_told_the_rule() {
             .unwrap();
         provider.requests()[0].messages[1].content.clone()
     };
-    let told = prompt("updateIntent", Some(unpaid_intent()), true).await;
+    let thing = StoredResource {
+        resource_type: "things".into(),
+        id: "t1".into(),
+        data: json!({"id": "t1", "status": 1}),
+    };
+    let told = prompt("putThing", Some(thing.clone()), true).await;
     assert!(
         told.contains(
             "What the response changes beyond what the request names is kept only when listed \
@@ -4088,7 +4104,7 @@ async fn a_settling_update_is_told_the_rule() {
         "{told}"
     );
     for untold in [
-        prompt("updateIntent", Some(unpaid_intent()), false).await,
+        prompt("putThing", Some(thing), false).await,
         prompt("getIntent", Some(unpaid_intent()), true).await,
         prompt("confirmIntent", Some(unpaid_intent()), true).await,
     ] {

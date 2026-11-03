@@ -11,7 +11,8 @@
 //! A hit is scrubbed for the prompt, an effect goes on the stored copy, and it follows
 //! none of its own references, which could name what no scrub went over. A call pays at
 //! most [`MAX_LOOKUPS`] reads, and none when no value could be an id or when its answer
-//! needs no generation.
+//! needs no generation. A create's new record is matched the same way, for the write
+//! memory to tell what it refers to (see [`referenced_by_value`]).
 //!
 //! An answer of a `GET` route with no parameters that returns a single object
 //! (`/users/@me`, Slack's `auth.test`) says who the caller is, and is shown to later
@@ -162,17 +163,42 @@ pub(super) async fn named_by_value(
     if values.is_empty() {
         return;
     }
-    let session = &plan.session;
+    let named = &out[..followed.named];
+    let known = |t: &str, id: &str| {
+        let shown = |r: &StoredResource| r.resource_type == t && r.id == id;
+        target.is_some_and(shown) || named.iter().any(shown)
+    };
+    let shown = |hit: StoredResource| {
+        let shown = write_memory::matched_for_context(rt, plan, &hit.resource_type, &hit.data);
+        shown.map(|data| StoredResource { data, ..hit })
+    };
+    let found = held_under(state, &plan.session, &values, MAX_MATCHES, known, shown).await;
+    // Listed already, they move up among what the request names.
+    out.retain(|r| !holds(&found, r));
+    out.splice(followed.named..followed.named, found);
+}
+
+/// The records `values` are the identity of (see the module's doc), as `keep` keeps them,
+/// at most `max` and within [`MAX_LOOKUPS`] reads: each type a value is found in, but none
+/// `known(type, id)` says is already in hand, by the value before a read or by its id after.
+async fn held_under(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    values: &[String],
+    max: usize,
+    known: impl Fn(&str, &str) -> bool,
+    mut keep: impl FnMut(StoredResource) -> Option<StoredResource>,
+) -> Vec<StoredResource> {
+    let rt = state.rt;
     let index = rt.index();
     let mut lookups = 0;
     let mut found: Vec<StoredResource> = Vec::new();
     'types: for t in types_to_search(rt, session) {
-        for value in &values {
-            if lookups >= MAX_LOOKUPS || found.len() >= MAX_MATCHES {
+        for value in values {
+            if lookups >= MAX_LOOKUPS || found.len() >= max {
                 break 'types;
             }
-            let shown = |r: &StoredResource| r.resource_type == t && r.id == *value;
-            if target.is_some_and(shown) || out[..followed.named].iter().any(shown) {
+            if known(&t, value) {
                 continue;
             }
             lookups += 1;
@@ -192,18 +218,43 @@ pub(super) async fn named_by_value(
                     .filter(|r| r.data.get(field).and_then(id_string).as_ref() == Some(value));
             }
             if let Some(hit) = hit
-                && !target.is_some_and(|r| r.resource_type == t && r.id == hit.id)
-                && !holds(&out[..followed.named], &hit)
+                && !known(&t, &hit.id)
                 && !holds(&found, &hit)
             {
-                let shown = write_memory::matched_for_context(rt, plan, &t, &hit.data);
-                found.extend(shown.map(|data| StoredResource { data, ..hit }));
+                found.extend(keep(hit));
             }
         }
     }
-    // Listed already, they move up among what the request names.
-    out.retain(|r| !holds(&found, r));
-    out.splice(followed.named..followed.named, found);
+    found
+}
+
+/// Records a create marks as behind, at most: each costs its next read one catch-up.
+const MAX_REFERENCED: usize = 4;
+
+/// The held records a create's new record refers to by value, as stored: what a value of
+/// `record` (what the create stored) or of its `request` body is the identity of, by the
+/// matching [`named_by_value`] shows a generation (only a stored id, or a path field
+/// known to hold it), other than what `skip(type, id)` names (the new record itself, and
+/// what is told already). A reply naming the message it answers, a refund its payment:
+/// what counts them is behind. At most [`MAX_REFERENCED`], within [`MAX_LOOKUPS`] reads.
+pub(super) async fn referenced_by_value(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    (record, request): (Option<&Value>, Option<&Value>),
+    skip: impl Fn(&str, &str) -> bool,
+) -> Vec<StoredResource> {
+    let rt = state.rt;
+    if !write_memory::applies(rt, plan) {
+        return Vec::new();
+    }
+    let mut values = Vec::new();
+    for value in [record, request].into_iter().flatten() {
+        id_values(rt, "", value, 0, &mut values);
+    }
+    if values.is_empty() {
+        return Vec::new();
+    }
+    held_under(state, &plan.session, &values, MAX_REFERENCED, skip, Some).await
 }
 
 /// What routes with no parameters answered earlier in this session, oldest first, and
