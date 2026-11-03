@@ -2616,3 +2616,30 @@ fn a_list_is_typed_by_its_items_when_they_are_exactly_a_types_record() {
     assert_eq!(type_of("mixed").as_deref(), Some("mixed"));
     assert_eq!(type_of("getSource").as_deref(), Some("sources"));
 }
+
+/// An item with an `id` beside the member the path names still goes by that member,
+/// on the `GET` and the `DELETE` alike.
+#[test]
+fn an_items_id_does_not_take_the_place_of_the_member_the_path_names() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /bounces/{email}:
+    parameters: [{name: email, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: read
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/B"}}}}}}
+    delete:
+      operationId: remove
+      responses: {"204": {description: gone}}
+components:
+  schemas:
+    B: {type: object, required: [email], properties: {id: {type: integer}, email: {type: string}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let read = op(&bundle, "read").identity.clone().unwrap();
+    assert_eq!((read.field.as_str(), read.path_field), ("email", None));
+    let remove = op(&bundle, "remove").identity.clone().unwrap();
+    assert_eq!((remove.field.as_str(), remove.path_field), ("email", None));
+}

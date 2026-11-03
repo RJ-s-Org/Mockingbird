@@ -582,7 +582,7 @@ paths:
     parameters: [{name: playlist_id, in: path, required: true, schema: {type: string}}]
     get:
       operationId: getItems
-      parameters: [{name: limit, in: query, schema: {type: integer}}]
+      parameters: [{name: limit, in: query, schema: {type: integer}}, {name: offset, in: query, schema: {type: integer}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/PagingTracks"}}}}}
     post:
       operationId: addItems
@@ -682,7 +682,8 @@ async fn an_unknown_playlists_items_are_generated() {
 }
 
 /// A contract whose `id` already works answers as it did, with the same calls. The
-/// lines an order holds are no orders: main stored `l1` as one.
+/// lists an order holds are stored only under a type whose record they exactly are:
+/// its buyers as customers, and its lines not at all (main stored `l1` as an order).
 #[tokio::test]
 async fn a_contract_with_an_id_answers_as_it_did() {
     let contract = r##"
@@ -702,6 +703,11 @@ paths:
     get:
       operationId: getOrder
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+  /customers/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getCustomer
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}}
   /orders/{id}/events:
     parameters: [{name: id, in: path, required: true, schema: {type: string}}]
     get:
@@ -714,6 +720,12 @@ components:
       properties:
         id: {type: string}
         lines: {type: array, items: {$ref: "#/components/schemas/Line"}}
+        buyers: {type: array, items: {$ref: "#/components/schemas/Customer"}}
+    Customer:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
     Line:
       type: object
       properties:
@@ -725,7 +737,11 @@ components:
         id: {type: string}
         kind: {type: string}
 "##;
-    let order = json!({"id": "o1", "lines": [{"id": "l1", "sku": "A"}]});
+    let order = json!({
+        "id": "o1",
+        "lines": [{"id": "l1", "sku": "A"}],
+        "buyers": [{"id": "c1", "name": "Ann"}]
+    });
     let h = harness(
         contract,
         vec![order.clone(), json!([{"id": "e1", "kind": "paid"}])],
@@ -740,9 +756,238 @@ components:
     assert_eq!(
         h.exported().await,
         [
+            ("customers".to_owned(), "c1".to_owned()),
             ("events".to_owned(), "e1".to_owned()),
-            ("lines".to_owned(), "l1".to_owned()),
             ("orders".to_owned(), "o1".to_owned())
         ]
     );
+}
+
+/// A read of another page of the items is no read of the member the playlist holds.
+#[tokio::test]
+async fn a_page_of_a_playlists_items_is_generated() {
+    let playlist = json!({"id": "pl1", "name": "Road trip", "tracks": tracks(&["Drive", "Roam"])});
+    let h = harness(PLAYLISTS, vec![playlist, tracks(&["Later"])]);
+    h.call("GET", "/playlists/pl1", None).await;
+    let (status, source, items) = h
+        .call("GET", "/playlists/pl1/items?offset=50&limit=1", None)
+        .await;
+    assert_eq!(
+        (status, source.as_str()),
+        (StatusCode::OK, "llm"),
+        "{items}"
+    );
+    assert_eq!(h.calls(), 2);
+}
+
+/// A bounce answered for an address holds that address, and is stored under it.
+#[tokio::test]
+async fn a_bounce_takes_the_paths_address() {
+    let h = harness(BOUNCES, vec![json!([bounce("other@example.com")])]);
+    let (_, _, read) = h.call("GET", "/bounces/bob@example.com", None).await;
+    assert_eq!(read, json!([bounce("bob@example.com")]));
+    assert_eq!(
+        h.exported().await,
+        [("bounces".to_owned(), "bob@example.com".to_owned())]
+    );
+}
+
+/// A record a route below another names by the path's id is no type of its own: TMDB's
+/// credits, and the cast they list, are not stored.
+#[tokio::test]
+async fn credits_below_a_movie_are_not_a_type() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /movies/{movie_id}:
+    parameters: [{name: movie_id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: getMovie
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Movie"}}}}}
+  /movies/{movie_id}/credits:
+    parameters: [{name: movie_id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: getCredits
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Credits"}}}}}
+components:
+  schemas:
+    Movie: {type: object, properties: {id: {type: integer}, title: {type: string}}}
+    Credits:
+      type: object
+      properties:
+        id: {type: integer}
+        cast: {type: array, items: {type: object, properties: {id: {type: integer}, name: {type: string}}}}
+"##;
+    let h = harness(
+        contract,
+        vec![json!({"id": 550, "cast": [{"id": 819, "name": "Edward Norton"}]})],
+    );
+    let (status, _, _) = h.call("GET", "/movies/550/credits", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(h.exported().await.is_empty(), "{:?}", h.exported().await);
+}
+
+/// Zendesk's shape as its contract has it: every envelope requires its ticket.
+const STRICT_TICKETS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody: {content: {application/json: {schema: {type: object, properties: {ticket: {type: object}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TicketResponse"}}}}}
+  /tickets/{ticket_id}:
+    parameters: [{name: ticket_id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: showTicket
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, required: [ticket], properties: {ticket: {$ref: "#/components/schemas/Ticket"}}}}}}}
+    put:
+      operationId: updateTicket
+      requestBody: {content: {application/json: {schema: {type: object, properties: {ticket: {type: object}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TicketResponse"}}}}}
+  /tickets/{ticket_id}/tags:
+    parameters: [{name: ticket_id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: addTags
+      requestBody: {content: {application/json: {schema: {type: object, properties: {tags: {type: array, items: {type: string}}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, required: [tags], properties: {tags: {type: array, items: {type: string}}}}}}}}
+components:
+  schemas:
+    Ticket:
+      type: object
+      required: [id, subject]
+      properties:
+        id: {type: integer}
+        subject: {type: string}
+        tags: {type: array, items: {type: string}}
+    TicketResponse:
+      type: object
+      required: [ticket, audit]
+      properties:
+        ticket: {$ref: "#/components/schemas/Ticket"}
+        audit: {type: object, required: [id], properties: {id: {type: integer}}}
+"##;
+
+fn ticket(subject: &str, tags: &[&str]) -> Value {
+    json!({"id": 35, "subject": subject, "tags": tags})
+}
+
+async fn created_ticket(h: &Harness) {
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/tickets",
+            Some(json!({"ticket": {"subject": "Printer"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+}
+
+/// An update answering the ticket beside its audit is what the next read answers.
+#[tokio::test]
+async fn an_updated_ticket_is_read_in_one_envelope() {
+    let h = harness(
+        STRICT_TICKETS,
+        vec![
+            json!({"ticket": ticket("Printer", &[]), "audit": {"id": 1}}),
+            json!({"ticket": ticket("Printer on fire", &[]), "audit": {"id": 2}}),
+        ],
+    );
+    created_ticket(&h).await;
+    h.call(
+        "PUT",
+        "/tickets/35",
+        Some(json!({"ticket": {"subject": "Printer on fire"}})),
+    )
+    .await;
+    let (_, source, read) = h.call("GET", "/tickets/35", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, json!({"ticket": ticket("Printer on fire", &[])}));
+    assert_eq!(h.calls(), 2);
+}
+
+/// An action the ticket does not show is caught up with on the next read, once, and
+/// that read is in one envelope.
+#[tokio::test]
+async fn a_tag_reaches_the_ticket_on_the_next_reads() {
+    let h = harness(
+        STRICT_TICKETS,
+        vec![
+            json!({"ticket": ticket("Printer", &[]), "audit": {"id": 1}}),
+            json!({"tags": ["urgent"]}),
+            json!({"ticket": ticket("Printer", &["urgent"])}),
+        ],
+    );
+    created_ticket(&h).await;
+    let (status, _, _) = h
+        .call(
+            "POST",
+            "/tickets/35/tags",
+            Some(json!({"tags": ["urgent"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..2 {
+        let (_, _, read) = h.call("GET", "/tickets/35", None).await;
+        assert_eq!(read, json!({"ticket": ticket("Printer", &["urgent"])}));
+    }
+    let (_, source, _) = h.call("GET", "/tickets/35", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(h.calls(), 3);
+}
+
+/// An effect on an enveloped record goes on the stored record.
+#[tokio::test]
+async fn an_effect_on_an_enveloped_ticket_applies() {
+    let h = harness(
+        STRICT_TICKETS,
+        vec![
+            json!({"ticket": ticket("Printer", &[]), "audit": {"id": 1}}),
+            json!({
+                "response": {"tags": ["urgent"]},
+                "effects": [{"type": "tickets", "id": "35", "set": {"tags": ["urgent"]}}]
+            }),
+        ],
+    );
+    created_ticket(&h).await;
+    h.call(
+        "POST",
+        "/tickets/35/tags",
+        Some(json!({"tags": ["urgent"]})),
+    )
+    .await;
+    let (_, source, read) = h.call("GET", "/tickets/35", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, json!({"ticket": ticket("Printer", &["urgent"])}));
+    assert_eq!(h.calls(), 2);
+}
+
+/// A bounce mentioned in another answer is stored as the bounce record it is, though
+/// its read answers it in an array.
+#[tokio::test]
+async fn a_mentioned_bounce_fits_its_type() {
+    let contract = BOUNCES.replace(
+        "components:\n",
+        r##"  /reports/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getReport
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}, latest: {$ref: "#/components/schemas/Bounce"}}}}}}}
+components:
+"##,
+    );
+    let h = harness(
+        &contract,
+        vec![json!({"id": "r1", "latest": bounce("cy@example.com")})],
+    );
+    let (status, _, _) = h.call("GET", "/reports/r1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let stored = h.exported().await;
+    let bounce_key = ("bounces".to_owned(), "cy@example.com".to_owned());
+    assert!(stored.contains(&bounce_key), "{stored:?}");
+    let (_, source, read) = h.call("GET", "/bounces/cy@example.com", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(h.calls(), 1);
 }
