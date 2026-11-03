@@ -1913,9 +1913,14 @@ pub(super) fn own_effect_members(
         .filter(|(key, _)| !declaring || declared(key).is_some())
         .filter(|(key, _)| !paths.contains(*key) && !shows_path(key) && !named(key))
         .filter(|(key, value)| {
+            // The member as it would merge (see [`merge_at`]), not as written.
             let mut alone = held.data.clone();
             if let Value::Object(members) = &mut alone {
-                members.insert((*key).clone(), (*value).clone());
+                let merged = merge_at(rt, members.get(*key), value, declared(key));
+                match merged {
+                    Some(merged) => members.insert((*key).clone(), merged),
+                    None => return false,
+                };
             }
             keeps_owner(rt, plan, call, held, &alone)
         })
@@ -1934,7 +1939,7 @@ fn named_for_param(member: &str, param: &str) -> bool {
 
 /// Whether `answer` is still `held`'s owner's: by the check a later read makes (see
 /// [`key_fits`]), and not linking elsewhere (see [`known_foreign`]).
-fn keeps_owner(
+pub(super) fn keeps_owner(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
