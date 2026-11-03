@@ -1313,7 +1313,6 @@ async fn a_partly_rejected_effect_shows_only_what_applied() {
 
 /// An effect naming part of a nested object keeps the rest of it, served and stored.
 #[tokio::test]
-#[ignore = "needs the deep effect merge of #198 (claude/effects-type-and-merge); un-ignore once it merges"]
 async fn a_nested_effect_on_its_own_target_keeps_its_siblings() {
     let mut answer = widget();
     answer["meta"]["a"] = json!("Z");
