@@ -270,6 +270,7 @@ fn operation(id: String, service: &ServiceDescriptor, method: &MethodDescriptor)
             content_type: Some("application/grpc".into()),
             schema: Some(def_ref(output.full_name())),
             headers: Default::default(),
+            description: None,
         }],
         identity: identity(method, resource_type.as_deref()),
         resource_type,

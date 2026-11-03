@@ -1,0 +1,746 @@
+openapi: 3.0.3
+info:
+  title: Asana API (projects, sections, tasks, subtasks and stories)
+  version: "1.0"
+  description: |
+    A subset of the Asana REST API. Every resource has a `gid`, a globally unique
+    identifier made of digits and sent as a string, and a `resource_type`. Request
+    bodies and successful responses wrap the object in a `data` member; errors are an
+    `errors` array.
+
+    A task can belong to several projects (`projects`) and is placed in a section of
+    each (`memberships`). A subtask is a task whose `parent` is another task. A story
+    is an entry in a task's activity feed; a comment is a story of type `comment`.
+
+    Lists are paginated: `limit` (1 to 100) sets the page size, and when more results
+    exist `next_page.offset` is the token that fetches the next page; on the last
+    page `next_page` is null.
+servers:
+  - url: https://app.asana.com
+security:
+  - personalAccessToken: []
+tags:
+  - name: Projects
+  - name: Sections
+  - name: Tasks
+  - name: Stories
+paths:
+  /api/1.0/projects:
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Create a project
+      description: Creates a project in the workspace (or team) given in the body.
+      parameters:
+        - $ref: '#/components/parameters/OptFields'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data: {$ref: '#/components/schemas/ProjectRequest'}
+      responses:
+        '201':
+          description: The created project.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Project'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/1.0/projects/{project_gid}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectGid'
+    get:
+      tags: [Projects]
+      operationId: getProject
+      summary: Get a project
+      parameters:
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The project.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Project'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/1.0/projects/{project_gid}/sections:
+    parameters:
+      - $ref: '#/components/parameters/ProjectGid'
+    get:
+      tags: [Sections]
+      operationId: getSectionsForProject
+      summary: Get the sections in a project
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The project's sections, in order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/SectionCompact'}
+                  next_page: {$ref: '#/components/schemas/NextPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Sections]
+      operationId: createSectionForProject
+      summary: Create a section in a project
+      description: The new section goes at the end of the project unless `insert_before` or `insert_after` says otherwise.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: {type: string, minLength: 1}
+                    insert_before: {type: string, description: gid of a section in the project}
+                    insert_after: {type: string, description: gid of a section in the project}
+      responses:
+        '201':
+          description: The created section.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Section'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/1.0/sections/{section_gid}/addTask:
+    parameters:
+      - $ref: '#/components/parameters/SectionGid'
+    post:
+      tags: [Sections]
+      operationId: addTaskForSection
+      summary: Add a task to a section
+      description: |
+        Moves the task into this section of the section's project, and adds the task
+        to that project if it is not there yet. A task is in at most one section of a
+        project, so it leaves any other section of the same project.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: object
+                  required: [task]
+                  properties:
+                    task: {type: string, description: The gid of the task.}
+                    insert_before: {type: string}
+                    insert_after: {type: string}
+      responses:
+        '200':
+          description: The task was added. The body is an empty `data` object.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmptyResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/1.0/sections/{section_gid}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/SectionGid'
+    get:
+      tags: [Sections, Tasks]
+      operationId: getTasksForSection
+      summary: Get the tasks in a section
+      parameters:
+        - $ref: '#/components/parameters/CompletedSince'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The tasks in the section.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/TaskCompact'}
+                  next_page: {$ref: '#/components/schemas/NextPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/1.0/tasks:
+    get:
+      tags: [Tasks]
+      operationId: getTasks
+      summary: Get multiple tasks
+      description: |
+        Returns the compact records of the tasks that match. One of `project`,
+        `section`, or `assignee` with `workspace` must be given.
+      parameters:
+        - name: project
+          in: query
+          description: The project to filter tasks on.
+          schema: {type: string}
+        - name: section
+          in: query
+          description: The section to filter tasks on.
+          schema: {type: string}
+        - name: assignee
+          in: query
+          description: A user gid, email, or `me`. Needs `workspace`.
+          schema: {type: string}
+        - name: workspace
+          in: query
+          description: The workspace to filter tasks on. Needs `assignee`.
+          schema: {type: string}
+        - $ref: '#/components/parameters/CompletedSince'
+        - name: modified_since
+          in: query
+          description: Only return tasks that have been modified since the given time.
+          schema: {type: string, format: date-time}
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The tasks that match.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/TaskCompact'}
+                  next_page: {$ref: '#/components/schemas/NextPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Create a task
+      description: |
+        Creates a task in the given workspace, or in the projects given (their
+        workspace is then the task's). A task created in a project without a section
+        goes into the project's first section.
+      parameters:
+        - $ref: '#/components/parameters/OptFields'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data: {$ref: '#/components/schemas/TaskRequest'}
+      responses:
+        '201':
+          description: The created task.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Task'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/1.0/tasks/{task_gid}:
+    parameters:
+      - $ref: '#/components/parameters/TaskGid'
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Get a task
+      parameters:
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The full task record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Task'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Tasks]
+      operationId: updateTask
+      summary: Update a task
+      description: Only the fields in the body change; the others keep their values.
+      parameters:
+        - $ref: '#/components/parameters/OptFields'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data: {$ref: '#/components/schemas/TaskUpdate'}
+      responses:
+        '200':
+          description: The updated task.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Task'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [Tasks]
+      operationId: deleteTask
+      summary: Delete a task
+      description: Deletes the task. Later reads of it answer 404.
+      responses:
+        '200':
+          description: The task was deleted. The body is an empty `data` object.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmptyResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/1.0/tasks/{task_gid}/subtasks:
+    parameters:
+      - $ref: '#/components/parameters/TaskGid'
+    get:
+      tags: [Tasks]
+      operationId: getSubtasksForTask
+      summary: Get the subtasks of a task
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The task's subtasks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/TaskCompact'}
+                  next_page: {$ref: '#/components/schemas/NextPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Tasks]
+      operationId: createSubtaskForTask
+      summary: Create a subtask
+      description: Creates a task whose `parent` is the task in the path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data: {$ref: '#/components/schemas/TaskRequest'}
+      responses:
+        '201':
+          description: The created subtask.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Task'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/1.0/tasks/{task_gid}/stories:
+    parameters:
+      - $ref: '#/components/parameters/TaskGid'
+    get:
+      tags: [Stories]
+      operationId: getStoriesForTask
+      summary: Get the stories of a task
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/OptFields'
+      responses:
+        '200':
+          description: The task's stories, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/Story'}
+                  next_page: {$ref: '#/components/schemas/NextPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Stories]
+      operationId: createStoryForTask
+      summary: Comment on a task
+      description: Adds a comment story to the task, written by the authenticated user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: object
+                  properties:
+                    text: {type: string, description: The plain text of the comment.}
+                    html_text: {type: string}
+                    is_pinned: {type: boolean}
+      responses:
+        '201':
+          description: The created story.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: '#/components/schemas/Story'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+components:
+  securitySchemes:
+    personalAccessToken:
+      type: http
+      scheme: bearer
+  parameters:
+    ProjectGid:
+      name: project_gid
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Gid'}
+    SectionGid:
+      name: section_gid
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Gid'}
+    TaskGid:
+      name: task_gid
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/Gid'}
+    Limit:
+      name: limit
+      in: query
+      description: Results per page, between 1 and 100.
+      schema: {type: integer, minimum: 1, maximum: 100}
+    Offset:
+      name: offset
+      in: query
+      description: An offset token returned in `next_page.offset` by a previous call.
+      schema: {type: string}
+    OptFields:
+      name: opt_fields
+      in: query
+      description: Comma-separated list of optional properties to include.
+      schema: {type: string}
+    CompletedSince:
+      name: completed_since
+      in: query
+      description: |
+        Only return tasks that are either incomplete or that have been completed since
+        this time. The value `now` returns incomplete tasks only.
+      schema: {type: string, example: now}
+  responses:
+    BadRequest:
+      description: The request was invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Unauthorized:
+      description: The token is missing or invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Forbidden:
+      description: The user may not do this.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    NotFound:
+      description: Nothing has that gid, or the user cannot see it.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+  schemas:
+    Gid:
+      type: string
+      pattern: '^[0-9]+$'
+      example: "1204567890123456"
+    NextPage:
+      type: object
+      nullable: true
+      required: [offset, path, uri]
+      properties:
+        offset: {type: string}
+        path: {type: string}
+        uri: {type: string, format: uri}
+    EmptyResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          maxProperties: 0
+    ErrorResponse:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [message]
+            properties:
+              message: {type: string}
+              help: {type: string}
+              phrase: {type: string}
+    Compact:
+      type: object
+      required: [gid, resource_type, name]
+      properties:
+        gid: {$ref: '#/components/schemas/Gid'}
+        resource_type: {type: string}
+        name: {type: string}
+    UserCompact:
+      allOf:
+        - $ref: '#/components/schemas/Compact'
+        - type: object
+          properties:
+            resource_type: {type: string, enum: [user]}
+    ProjectCompact:
+      allOf:
+        - $ref: '#/components/schemas/Compact'
+        - type: object
+          properties:
+            resource_type: {type: string, enum: [project]}
+    SectionCompact:
+      allOf:
+        - $ref: '#/components/schemas/Compact'
+        - type: object
+          properties:
+            resource_type: {type: string, enum: [section]}
+    TaskCompact:
+      allOf:
+        - $ref: '#/components/schemas/Compact'
+        - type: object
+          properties:
+            resource_type: {type: string, enum: [task]}
+            resource_subtype: {type: string, enum: [default_task, milestone, approval]}
+    ProjectRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1}
+        notes: {type: string}
+        workspace: {$ref: '#/components/schemas/Gid'}
+        team: {$ref: '#/components/schemas/Gid'}
+        color:
+          type: string
+          enum: [dark-pink, dark-green, dark-blue, dark-red, dark-teal, dark-brown, dark-orange, dark-purple, dark-warm-gray, light-pink, light-green, light-blue, light-red, light-teal, light-brown, light-orange, light-purple, light-warm-gray, none]
+        default_view: {type: string, enum: [list, board, calendar, timeline]}
+        due_on: {type: string, format: date, nullable: true}
+        public: {type: boolean}
+    Project:
+      type: object
+      required: [gid, resource_type, name, notes, archived, workspace, created_at]
+      properties:
+        gid: {$ref: '#/components/schemas/Gid'}
+        resource_type: {type: string, enum: [project]}
+        name: {type: string}
+        notes: {type: string}
+        archived: {type: boolean}
+        color: {type: string, nullable: true}
+        default_view: {type: string, enum: [list, board, calendar, timeline]}
+        due_on: {type: string, format: date, nullable: true}
+        public: {type: boolean}
+        created_at: {type: string, format: date-time}
+        modified_at: {type: string, format: date-time}
+        owner:
+          allOf: [{$ref: '#/components/schemas/UserCompact'}]
+          nullable: true
+        workspace:
+          allOf:
+            - $ref: '#/components/schemas/Compact'
+            - type: object
+              properties:
+                resource_type: {type: string, enum: [workspace]}
+        team:
+          allOf: [{$ref: '#/components/schemas/Compact'}]
+          nullable: true
+        permalink_url: {type: string, format: uri}
+    Section:
+      type: object
+      required: [gid, resource_type, name, project, created_at]
+      properties:
+        gid: {$ref: '#/components/schemas/Gid'}
+        resource_type: {type: string, enum: [section]}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+        project: {$ref: '#/components/schemas/ProjectCompact'}
+    TaskRequest:
+      type: object
+      properties:
+        name: {type: string}
+        notes: {type: string}
+        resource_subtype: {type: string, enum: [default_task, milestone, approval]}
+        assignee:
+          type: string
+          nullable: true
+          description: A user gid, email, or `me`.
+        completed: {type: boolean}
+        due_on: {type: string, format: date, nullable: true}
+        due_at: {type: string, format: date-time, nullable: true}
+        start_on: {type: string, format: date, nullable: true}
+        projects:
+          type: array
+          items: {$ref: '#/components/schemas/Gid'}
+        memberships:
+          type: array
+          items:
+            type: object
+            required: [project, section]
+            properties:
+              project: {$ref: '#/components/schemas/Gid'}
+              section: {$ref: '#/components/schemas/Gid'}
+        parent:
+          allOf: [{$ref: '#/components/schemas/Gid'}]
+          nullable: true
+        workspace: {$ref: '#/components/schemas/Gid'}
+        followers:
+          type: array
+          items: {type: string}
+    TaskUpdate:
+      type: object
+      properties:
+        name: {type: string}
+        notes: {type: string}
+        assignee: {type: string, nullable: true}
+        completed: {type: boolean}
+        due_on: {type: string, format: date, nullable: true}
+        due_at: {type: string, format: date-time, nullable: true}
+        start_on: {type: string, format: date, nullable: true}
+    Task:
+      type: object
+      required: [gid, resource_type, name, notes, completed, completed_at, created_at, modified_at, due_on,
+                 projects, memberships, parent, workspace, assignee, num_subtasks]
+      properties:
+        gid: {$ref: '#/components/schemas/Gid'}
+        resource_type: {type: string, enum: [task]}
+        resource_subtype: {type: string, enum: [default_task, milestone, approval]}
+        name: {type: string}
+        notes: {type: string}
+        completed: {type: boolean}
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: The time the task was completed, or null if it is incomplete.
+        created_at: {type: string, format: date-time}
+        modified_at: {type: string, format: date-time}
+        due_on: {type: string, format: date, nullable: true}
+        due_at: {type: string, format: date-time, nullable: true}
+        start_on: {type: string, format: date, nullable: true}
+        assignee:
+          allOf: [{$ref: '#/components/schemas/UserCompact'}]
+          nullable: true
+        projects:
+          type: array
+          items: {$ref: '#/components/schemas/ProjectCompact'}
+        memberships:
+          type: array
+          description: The task's place in each of its projects.
+          items:
+            type: object
+            required: [project, section]
+            properties:
+              project: {$ref: '#/components/schemas/ProjectCompact'}
+              section: {$ref: '#/components/schemas/SectionCompact'}
+        parent:
+          allOf: [{$ref: '#/components/schemas/TaskCompact'}]
+          nullable: true
+          description: The parent of a subtask, or null for a top-level task.
+        num_subtasks: {type: integer, minimum: 0}
+        workspace:
+          allOf:
+            - $ref: '#/components/schemas/Compact'
+            - type: object
+              properties:
+                resource_type: {type: string, enum: [workspace]}
+        followers:
+          type: array
+          items: {$ref: '#/components/schemas/UserCompact'}
+        permalink_url: {type: string, format: uri}
+    Story:
+      type: object
+      required: [gid, resource_type, created_at, type, resource_subtype, text, target]
+      properties:
+        gid: {$ref: '#/components/schemas/Gid'}
+        resource_type: {type: string, enum: [story]}
+        created_at: {type: string, format: date-time}
+        created_by:
+          allOf: [{$ref: '#/components/schemas/UserCompact'}]
+          nullable: true
+        type: {type: string, enum: [comment, system]}
+        resource_subtype:
+          type: string
+          description: The kind of story, such as `comment_added` for a comment.
+          enum: [comment_added, added_to_project, section_changed, marked_complete, marked_incomplete, assigned, due_date_changed, name_changed, notes_changed]
+        text: {type: string}
+        html_text: {type: string}
+        is_pinned: {type: boolean}
+        target: {$ref: '#/components/schemas/TaskCompact'}

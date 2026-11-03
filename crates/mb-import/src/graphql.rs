@@ -668,6 +668,7 @@ fn operation(
             content_type: Some("application/json".into()),
             schema: Some(output_type_schema(schema, &f.ty)),
             headers: Default::default(),
+            description: None,
         }],
         resource_type,
         identity,

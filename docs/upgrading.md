@@ -73,6 +73,19 @@ No migration or configuration. With `limits.output_budget_tokens` on, for a resp
 - **Recorded prompts**: a snapshot taken before this release may not replay for such a call, as the schema sent differs.
 - **Rust API**: `budget::shape` takes the request's page size as a `budget::PageLimit`, as `budget::requested_limit` reads it from the query schema, the answer's schema and the call.
 
+### Prompts carry response descriptions and request defaults
+
+No migration or configuration.
+
+- **Recompile to show descriptions**: a bundle stored before this release has no response descriptions, so its prompts stay as they were until the contract is imported again.
+- **More prompt tokens**: the system message's array rule is about 20 tokens longer on every call. A response description adds a `<response_description>` block of about 25 tokens plus up to 160 characters to the system message, and request defaults a `<request_defaults>` block of about 20 tokens plus the values to the user message. Page sizes and what the credential checks hide are never shown as defaults.
+- **A create can answer differently**: a body member it leaves out that declares a `default` now answers the default, where the model or the faker picked any value. An update's body is never defaulted.
+- **Lists can be empty**: a search that nothing matches can now answer an empty array where the model gave 3 to 5 invented items.
+- **The output budget can fill different members**: deeper required members go first, and an array item's only object member with a required `id` or `uri` stays in the schema while anything else can go, so a shaped answer may keep more of each item and fill more of what lies below it. The estimate fits the budget wherever it did before.
+- **New ids avoid the held records a request names**: a create's id equal to a value of its path or body that is the id of a record of another type the session holds is redrawn, so an answer that reused its channel's id is stored under a fresh one. Such a create can cost up to 32 more store reads with `consistency: on`. An id that the request does not carry, or that no held record has, is kept.
+- **Recorded prompts**: the system message changed for every call, so a snapshot or recording keyed on the exact prompt and taken before this release no longer replays.
+- **Rust API**: `mb_mcm::OutputVariant` gains `description`, which breaks code constructing it in full.
+
 ### An update's answer settles on the stored copy by what the request named
 
 No migration or configuration. For an update (`PUT` or `PATCH`, not an action route) answered by an LLM with the schema of the resource's read, on a stored resource:
@@ -103,6 +116,20 @@ No migration or configuration. With an LLM and `consistency: on`, except on Grap
 - **Rolling upgrades**: markers are documents of the reserved type `__mockingbird.earlier_requests`, with ids starting `#deleted`. A node of an older release exports and counts them as resources, as it does the write memory's, and does not honour them.
 
 The oldest markers go past 1024 per session, and then what they marked can come back. Offline mocks and `consistency: off` are as they were.
+
+### Lists and lookups agree with the session
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes except GraphQL:
+
+- **A list answer can hold fewer items than the model wrote.** An item goes when a query parameter names one of its members and the item holds another value there, so `GET /Messages.json?To=+1555` answers only that recipient's messages. The parameter and the member must declare the same one type (text, integer or boolean), and the value must be one the member's `enum` and `format` allow: `state=all` beside `enum: [open, closed]` filters nothing. A comma-separated value is a set only when every part is in the `enum`. A real number (`lat`), a `const` member, a bare `id`, a parameter whose own `enum` has no member `enum` beside it (`state=all` against a plain-text `state`), a search's `q`, a range and an item without the member are left alone. A text member with no `enum`, `format` or `pattern` keeps the items whose value contains the requested one, ignoring case: `name=Ann` keeps `Anna`. A value holding a digit matches whole, ignoring case, so `owner_id=u1` does not keep `u10`. Values are trimmed first, and one left empty filters nothing. An unencoded `to=+1555` arrives as ` 1555`, so a value with a leading space and a digit also matches `+1555`.
+- **A page size caps the list's main array**, by the signal the output budget already reads (a parameter whose `maximum` is the array's `maxItems`, else one named for a page size).
+- **A page size goes by a whole name**: without a `maximum`, a parameter counts only when its normalized name is exactly `limit`, `per_page`, `page_size`, `max_results`, `size`, `first` or `top`. A word inside a name used to count, so `topic_id`, `desktop`, `first_seen` and `image_size` no longer shape the output budget, and `maxResults` now does.
+- **Neither goes below `minItems` or leaves an invalid answer**: then the answer stays as it was. A count clearly the list's own goes down by what a filter took out; a page size leaves it, as a total counts every page.
+- **A lookup does not bring a deleted record back under a new id.** A delete of a stored record also marks, by hash, the text of its identity and of the members a lookup of its type keys on: those a list read's required query parameter names (`/users-by-email` requires `email`). An optional filter such as `state` or `status` never marks. Value markers keep the newest 1024 under their own bound, so id markers keep theirs. A generated item of that type the session does not hold, carrying a marked value the request names, is dropped. Storing a record with that value again clears the mark, so a recreated user is found by email. A record the session never held marks only its id, as before.
+- **A create or a read under a parent path is shown what was created there**: the newest 4 records creates put under the same path, scrubbed as other related resources are. A generated read of the parent record itself (`GET /captures/C1`, a catch-up included) is shown the newest 4 created under its path (`/captures/C1/refund`) the same way. Nothing it is shown is stored or changed by being shown. Prompts can be longer, and a recorded prompt may not replay. Which creates went where is kept per node, as the owner hint is: on another node or after a restart, the prompt is as before.
+- **Rolling upgrades**: the new markers are documents of the reserved type, as the deleted markers are, and an older node ignores them.
+
+Offline mocks and `consistency: off` are as they were.
 
 ### A member named for its type is its identity
 

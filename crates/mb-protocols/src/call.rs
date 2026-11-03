@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::http::HeaderMap;
 use mb_engine::consistency::{
-    ENVELOPE_KEYS, item_identity, list_items, list_members, property_schema,
+    ENVELOPE_KEYS, item_identity, item_schema, list_items, list_members, property_schema,
 };
 use mb_engine::{
     EffectOutcome, EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext,
@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod deleted;
+mod lists;
 mod world;
 mod write_memory;
 
@@ -975,6 +976,7 @@ pub(crate) async fn prepare<'a>(
                 }
             }
         }
+        created_alongside(&mut state, plan, call, target.as_ref(), &mut related).await;
         (
             world::recall_answers(&mut state, plan).await,
             write_memory::recall_route(&mut state, plan, call).await,
@@ -1118,15 +1120,26 @@ pub(crate) async fn complete(
     };
     let state_call = record_call.as_ref().unwrap_or(call);
     async {
+        // What the list's query asks for, before its items are seeded or cached. An
+        // answer holding one record (`/users/me` answering `{user}`) is no list.
+        if is_query
+            && target_id.is_none()
+            && answered.is_none()
+            && (200..300).contains(&generated.status)
+            && deleted::applies(rt, plan)
+            && let Some(body) = generated.body.as_mut()
+        {
+            lists::narrow(rt, plan, call, body);
+        }
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
         {
-            if is_query && target_id.is_none() && state.tracks_deleted {
+            if is_query && target_id.is_none() && answered.is_none() && state.tracks_deleted {
                 let scope = deleted::scope(op, call);
                 deleted::drop_from_list(
                     &mut state,
                     session,
-                    plan,
+                    (plan, call),
                     t,
                     scope.as_deref(),
                     &mut generated,
@@ -1137,7 +1150,7 @@ pub(crate) async fn complete(
                 unique_create_id(
                     rt,
                     &mut state,
-                    (session, op, t, call),
+                    (session, op, t, state_call),
                     &mut generated,
                     answered.as_ref(),
                 )
@@ -1149,7 +1162,7 @@ pub(crate) async fn complete(
                 unstored = !place_new_record(
                     rt,
                     &mut state,
-                    (session, op, t, call),
+                    (session, op, t, state_call),
                     &mut generated,
                     answered.as_ref(),
                 )
@@ -1228,7 +1241,7 @@ pub(crate) async fn complete(
                     && !foreign_key
                     && let Some(id) = target_id.as_deref()
                 {
-                    deleted::mark(&mut state, session, op, call, t, id).await;
+                    deleted::mark(&mut state, session, (op, call), t, id, target.as_ref()).await;
                 }
             }
         }
@@ -1595,8 +1608,12 @@ pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
             .is_some_and(|r| !r.starts_with(OFFLINE_REASON) && r != FAKER_INVALID_REASON)
 }
 
-/// The id of `generated`'s answer, when the session already holds a resource
-/// under it and the request did not ask for it.
+/// The id of `generated`'s answer, when the request did not ask for it and the
+/// session already holds a resource of this type under it, or the request carries it
+/// (see [`request_values`]) as the id of a record of another type the session holds
+/// (see [`world::held_elsewhere`]): a new message is not the channel it names. Another
+/// type's id the request does not carry says nothing, and neither does a value the
+/// request carries that is no held record's (`{"name": "my-bucket"}`).
 async fn taken_id(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1612,9 +1629,16 @@ async fn taken_id(
         .as_ref()
         .and_then(|b| b.get(field))
         .and_then(id_string);
-    (requested.as_deref() != Some(id.as_str())
-        && state.get(session, resource_type, &id).await.is_some())
-    .then_some(id)
+    if requested.as_deref() == Some(id.as_str()) {
+        return None;
+    }
+    if state.get(session, resource_type, &id).await.is_some()
+        || (request_values(op, call).contains(&id)
+            && world::held_elsewhere(state, session, resource_type, &id).await)
+    {
+        return Some(id);
+    }
+    None
 }
 
 /// A different identity for `record`, the record a create's answer holds (in
@@ -1644,8 +1668,50 @@ fn fresh_record(
     identity.record_in(&fresh).cloned()
 }
 
-/// Gives a create's answer a fresh identity when the session already holds
-/// a resource under the generated one and the request did not ask for it.
+/// The values a request carries in its path and, as strings, anywhere in its body. A
+/// create's path value naming the record itself, and a body member named as the
+/// identity at any depth (`{"book": {"id": ..}}`, or `@id` for an XML attribute), are
+/// its request for an id, and left out.
+fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
+    fn strings(value: &Value, field: &str, depth: usize, out: &mut HashSet<String>) {
+        match value {
+            Value::String(s) if !s.is_empty() => {
+                out.insert(s.clone());
+            }
+            Value::Array(items) if depth < 8 => {
+                for item in items {
+                    strings(item, field, depth + 1, out);
+                }
+            }
+            Value::Object(members) if depth < 8 => {
+                // `@id` is how an XML attribute `id` reads (see the SOAP mapper).
+                let own = |name: &str| name.strip_prefix('@').unwrap_or(name) == field;
+                for (_, member) in members.iter().filter(|(name, _)| !own(name)) {
+                    strings(member, field, depth + 1, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let identity = op.identity.as_ref();
+    let own_param = identity
+        .and_then(|i| i.path_param.as_deref())
+        .filter(|_| matches!(op.kind, OperationKind::Command(Effect::Create)));
+    let mut out: HashSet<String> = call
+        .path_params
+        .iter()
+        .filter(|(name, _)| Some(name.as_str()) != own_param)
+        .filter_map(|(_, v)| id_string(v))
+        .collect();
+    let field = identity.map_or("id", |i| i.field.as_str());
+    if let Some(body) = &call.body {
+        strings(body, field, 0, &mut out);
+    }
+    out
+}
+
+/// Gives a create's answer a fresh identity when its generated one is taken (see
+/// [`taken_id`]).
 async fn unique_create_id(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
@@ -1663,6 +1729,7 @@ async fn unique_create_id(
     let Some(body) = generated.body.as_ref() else {
         return;
     };
+    let carried = request_values(op, call);
     for _ in 0..3 {
         let Some(fresh) = fresh_record(rt, op, generated.status, (body, answer), 0) else {
             return;
@@ -1670,7 +1737,9 @@ async fn unique_create_id(
         let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
             return;
         };
-        if state.get(session, resource_type, &fresh_id).await.is_none() {
+        if !carried.contains(&fresh_id)
+            && state.get(session, resource_type, &fresh_id).await.is_none()
+        {
             generated.body = Some(fresh);
             return;
         }
@@ -1694,6 +1763,7 @@ async fn place_new_record(
     };
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let mut fresh = None;
+    let carried = request_values(op, call);
     if let Some(body) = generated.body.as_ref() {
         for attempt in 0..3 {
             let draw = fresh_record(rt, op, generated.status, (body, answer), attempt);
@@ -1701,7 +1771,9 @@ async fn place_new_record(
             let Some(drawn) = drawn else {
                 break;
             };
-            if state.get(session, resource_type, &drawn).await.is_none() {
+            if !carried.contains(&drawn)
+                && state.get(session, resource_type, &drawn).await.is_none()
+            {
                 fresh = draw;
                 break;
             }
@@ -1806,6 +1878,11 @@ pub(crate) struct BundleIndex {
     /// Per resource type whose read by path answers its record in an envelope or an
     /// array, the record's own schema: what a stored record of the type must suit.
     record_schemas: HashMap<String, Value>,
+    /// Per resource type, the string members of its items that a lookup keys on: a
+    /// list read whose required query parameter names the member (see
+    /// [`lists::filtered_member`]), sorted. Auth0's `email`, which
+    /// `/users-by-email?email=` requires; never an optional filter such as `state`.
+    lookup_members: HashMap<String, Vec<String>>,
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: an
@@ -2016,6 +2093,16 @@ impl BundleIndex {
         for (i, channel) in bundle.channels.iter().enumerate() {
             channel_by_id.entry(channel.id.clone()).or_insert(i);
         }
+        let types_by_def: HashMap<String, String> = ranked_defs
+            .into_iter()
+            .map(|(def, (_, t, member))| {
+                let t = member
+                    .and_then(|m| [format!("{m}s"), m].into_iter().find(in_detail_reads))
+                    .unwrap_or(t);
+                (def, t)
+            })
+            .collect();
+        let lookup_members = lookup_members(bundle, &types_by_def, &list_members_of);
         Self {
             by_id,
             #[cfg(any(test, feature = "events"))]
@@ -2024,15 +2111,8 @@ impl BundleIndex {
             identity_fields,
             listed,
             list_members: list_members_of,
-            types_by_def: ranked_defs
-                .into_iter()
-                .map(|(def, (_, t, member))| {
-                    let t = member
-                        .and_then(|m| [format!("{m}s"), m].into_iter().find(in_detail_reads))
-                        .unwrap_or(t);
-                    (def, t)
-                })
-                .collect(),
+            types_by_def,
+            lookup_members,
             read_types,
             detail_reads,
             other_shapes: shapes
@@ -2078,6 +2158,73 @@ impl BundleIndex {
     fn referrers(&self, resource_type: &str) -> &[String] {
         self.referrers.get(resource_type).map_or(&[], Vec::as_slice)
     }
+
+    fn lookup_members(&self, resource_type: &str) -> &[String] {
+        self.lookup_members
+            .get(resource_type)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The resource type of the items of `op`'s list answer `body`: the one their
+    /// `$defs` entry is, else `op`'s.
+    fn item_type(&self, bundle: &mb_mcm::Bundle, op: &Operation, body: &Value) -> Option<String> {
+        let schema = op.success_output().and_then(|o| o.schema.as_ref());
+        let items = schema.and_then(|schema| item_schema(bundle, schema, body));
+        items
+            .as_ref()
+            .and_then(def_name)
+            .and_then(|d| self.types_by_def.get(d).cloned())
+            .or_else(|| op.resource_type.clone())
+    }
+}
+
+/// Per resource type, the string members of its items a list read's required query
+/// parameter keys on (see [`BundleIndex::lookup_members`]).
+fn lookup_members(
+    bundle: &mb_mcm::Bundle,
+    types_by_def: &HashMap<String, String>,
+    members_of: &[Vec<String>],
+) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for (i, op) in bundle.operations.iter().enumerate() {
+        let query = op.input.query.as_ref();
+        let params = query
+            .and_then(|q| q.get("properties"))
+            .and_then(Value::as_object);
+        let (true, Some(params)) = (matches!(op.kind, OperationKind::Query), params) else {
+            continue;
+        };
+        let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
+        for (_, items) in list_item_schemas(bundle, op, members) {
+            let t = def_name(&items)
+                .and_then(|d| types_by_def.get(d).cloned())
+                .or_else(|| op.resource_type.clone());
+            let Some(t) = t else { continue };
+            let (item_parts, _) = schema_parts(bundle, Some(&items));
+            // Only a parameter the route requires keys a lookup; an optional one
+            // (`state`, `status`) narrows a list of many.
+            let required = query
+                .and_then(|q| q.get("required"))
+                .and_then(Value::as_array);
+            let keys = params.keys().filter(|param| {
+                required.is_some_and(|names| names.iter().any(|n| n.as_str() == Some(param)))
+            });
+            for param in keys {
+                if let Some(member) = lists::filtered_member(bundle, query, &item_parts, param)
+                    && member.is_text()
+                {
+                    out.entry(t.clone())
+                        .or_default()
+                        .push(member.name.to_string());
+                }
+            }
+        }
+    }
+    for fields in out.values_mut() {
+        fields.sort_unstable();
+        fields.dedup();
+    }
+    out
 }
 
 /// What routes the contract's operations share: see [`BundleIndex::single_reads`] and
@@ -2678,11 +2825,11 @@ async fn store_wrapped(
             let took = state.upsert(session, resource).await;
             if took && state.tracks_deleted {
                 let scope = collection.map(|c| c.path.as_str());
-                deleted::clear(state, session, &stored.resource_type, scope, &stored.id).await;
+                deleted::clear(state, session, &stored.resource_type, scope, &stored).await;
             }
             if took && let Some(collection) = collection {
                 rt.collections()
-                    .remember(session, &stored, collection.clone());
+                    .record(session, &stored, collection.clone(), true);
             }
         } else if rt.consistency
             && !transient_fallback(generated)
@@ -3625,45 +3772,123 @@ const MAX_COLLECTIONS: usize = 4096;
 /// Only a hint: otherwise, as on another node or after a restart, the resource
 /// must show its owner (see [`shows_owner`]).
 #[derive(Debug, Default)]
-pub(crate) struct Collections(std::sync::Mutex<HashMap<OwnRead, (Collection, u64)>>);
+pub(crate) struct Collections(std::sync::Mutex<CollectionRecords>);
+
+/// What [`Collections`] keeps.
+#[derive(Debug, Default)]
+struct CollectionRecords {
+    records: HashMap<OwnRead, CollectionRecord>,
+    /// The order of the next record.
+    next: u64,
+}
+
+/// Where a resource was recorded, its hash then, when, and whether a create put it
+/// there.
+#[derive(Debug)]
+struct CollectionRecord {
+    collection: Collection,
+    digest: u64,
+    order: u64,
+    created: bool,
+}
 
 impl Collections {
     fn remember(&self, session: &SessionKey, r: &StoredResource, collection: Collection) {
-        let Ok(mut records) = self.0.lock() else {
+        self.record(session, r, collection, false);
+    }
+
+    fn record(
+        &self,
+        session: &SessionKey,
+        r: &StoredResource,
+        collection: Collection,
+        created: bool,
+    ) {
+        let Ok(mut held) = self.0.lock() else {
             return;
         };
-        if records.len() >= MAX_COLLECTIONS {
-            records.clear();
+        if held.records.len() >= MAX_COLLECTIONS {
+            held.records.clear();
         }
-        let digest = OwnReads::digest(&r.data);
-        records.insert(OwnReads::key(session, r), (collection, digest));
+        let order = held.next;
+        held.next += 1;
+        let key = OwnReads::key(session, r);
+        // A later write or list there leaves what a create put there.
+        let created = created
+            || held
+                .records
+                .get(&key)
+                .is_some_and(|was| was.created && was.collection == collection);
+        let record = CollectionRecord {
+            collection,
+            digest: OwnReads::digest(&r.data),
+            order,
+            created,
+        };
+        held.records.insert(key, record);
     }
 
     fn forget(&self, session: &SessionKey, r: &StoredResource) {
-        if let Ok(mut records) = self.0.lock() {
-            records.remove(&OwnReads::key(session, r));
+        if let Ok(mut held) = self.0.lock() {
+            held.records.remove(&OwnReads::key(session, r));
         }
     }
 
     /// The collection `r` was recorded under, as it stands.
     fn get(&self, session: &SessionKey, r: &StoredResource) -> Option<Collection> {
-        let records = self.0.lock().ok()?;
-        let (collection, digest) = records.get(&OwnReads::key(session, r))?;
-        (*digest == OwnReads::digest(&r.data)).then(|| collection.clone())
+        let held = self.0.lock().ok()?;
+        let record = held.records.get(&OwnReads::key(session, r))?;
+        (record.digest == OwnReads::digest(&r.data)).then(|| record.collection.clone())
     }
 
     /// Whether a record for `r`'s key exists, as `r` may not be what it recorded.
     fn has(&self, session: &SessionKey, r: &StoredResource) -> bool {
         self.0
             .lock()
-            .is_ok_and(|records| records.contains_key(&OwnReads::key(session, r)))
+            .is_ok_and(|held| held.records.contains_key(&OwnReads::key(session, r)))
     }
 
-    /// `old`'s record goes on to what replaced it, `new`.
+    /// `old`'s record goes on to what replaced it, `new`, a create's mark with it.
     fn carry(&self, session: &SessionKey, old: &StoredResource, new: &StoredResource) {
+        let created = {
+            let Ok(held) = self.0.lock() else {
+                return;
+            };
+            held.records
+                .get(&OwnReads::key(session, old))
+                .is_some_and(|record| record.created)
+        };
         if let Some(collection) = self.get(session, old) {
-            self.remember(session, new, collection);
+            self.record(session, new, collection, created);
         }
+    }
+
+    /// The resources a create put in a collection `fits` in `session`, as (type, id),
+    /// the newest first, at most `max`. They may since have changed or gone: the caller
+    /// reads them and checks with [`Collections::get`].
+    fn created_in(
+        &self,
+        session: &SessionKey,
+        fits: impl Fn(&Collection) -> bool,
+        max: usize,
+    ) -> Vec<(String, String)> {
+        let Ok(held) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut found: Vec<(&OwnRead, u64)> = held
+            .records
+            .iter()
+            .filter(|(key, record)| {
+                record.created && key.session == *session && fits(&record.collection)
+            })
+            .map(|(key, record)| (key, record.order))
+            .collect();
+        found.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
+        found
+            .into_iter()
+            .take(max)
+            .map(|(key, _)| (key.resource_type.clone(), key.id.clone()))
+            .collect()
     }
 
     /// Whether `r` is `owner`'s, when a record can say.
@@ -4370,6 +4595,82 @@ fn holds(resources: &[StoredResource], resource: &StoredResource) -> bool {
         .any(|r| r.resource_type == resource.resource_type && r.id == resource.id)
 }
 
+/// Records [`created_alongside`] reads, at most.
+const MAX_CREATED_ALONGSIDE: usize = 4;
+
+/// The path of the record a read by path parameter reads: `/captures/C1` of
+/// `/captures/{capture_id}`.
+fn record_path(op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let param = format!("{{{}}}", target_param(op)?);
+    let segments = path_segments(path);
+    let at = segments.iter().position(|s| *s == param)?;
+    Some(fill_path(call, &segments[..=at])?.path)
+}
+
+/// Adds to `related` what creates put in the collection under a parent path that a
+/// create or a read runs in (`/captures/C1/refund`), newest first: a second refund is
+/// shown the first. A read of one record by its path (`/captures/C1`) is shown, the
+/// same way, what creates put under that path, so a capture's read sees its refunds.
+/// The record must still be what was created there, or [`Collections`] no longer
+/// places it; it is scrubbed as a record found by value is
+/// ([`write_memory::matched_for_context`]). Context only, and only where
+/// [`write_memory::applies`] holds.
+async fn created_alongside(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    target: Option<&StoredResource>,
+    related: &mut Vec<StoredResource>,
+) {
+    let rt = state.rt;
+    let op = plan.op;
+    if !write_memory::applies(rt, plan)
+        || !matches!(
+            op.kind,
+            OperationKind::Query | OperationKind::Command(Effect::Create)
+        )
+    {
+        return;
+    }
+    let alongside = collection_of(op, call);
+    let beneath = matches!(op.kind, OperationKind::Query)
+        .then(|| record_path(op, call))
+        .flatten()
+        .map(|path| format!("{path}/"));
+    if alongside.is_none() && beneath.is_none() {
+        return;
+    }
+    let fits = |c: &Collection| {
+        alongside.as_ref() == Some(c) || beneath.as_ref().is_some_and(|p| c.path.starts_with(p))
+    };
+    let session = &plan.session;
+    let created = rt
+        .collections()
+        .created_in(session, fits, MAX_CREATED_ALONGSIDE);
+    for (t, id) in created {
+        let shown = |r: &StoredResource| r.resource_type == t && r.id == id;
+        if target.is_some_and(shown) || related.iter().any(shown) {
+            continue;
+        }
+        let Some(held) = state.get(session, &t, &id).await else {
+            continue;
+        };
+        if !rt
+            .collections()
+            .get(session, &held)
+            .is_some_and(|c| fits(&c))
+        {
+            continue;
+        }
+        if let Some(data) = write_memory::matched_for_context(rt, plan, &t, &held.data) {
+            related.push(StoredResource { data, ..held });
+        }
+    }
+}
+
 /// The stored resources that refer to `id` of `op`'s resource type, for a
 /// read of an id the session does not hold: at most [`MAX_SCAN`] resources
 /// of the types the contract says can refer to it are read, newest first,
@@ -4629,11 +4930,13 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             if state.upsert(session, resource).await {
                 if state.tracks_deleted && !was_held {
                     let scope = collection.as_ref().map(|c| c.path.as_str());
-                    deleted::clear(state, session, resource_type, scope, &stored.id).await;
+                    deleted::clear(state, session, resource_type, scope, &stored).await;
                 }
+                let created = op.kind == OperationKind::Command(Effect::Create);
                 match (collection, held) {
                     (Some(collection), _) => {
-                        rt.collections().remember(session, &stored, collection)
+                        rt.collections()
+                            .record(session, &stored, collection, created);
                     }
                     (None, Some(held)) => rt.collections().carry(session, &held, &stored),
                     (None, None) => {}

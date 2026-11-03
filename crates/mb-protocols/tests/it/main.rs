@@ -43,6 +43,7 @@ mod soap;
 mod sse;
 mod webhooks;
 mod world;
+mod world_lists;
 mod write_memory;
 mod writes_stick;
 mod ws;

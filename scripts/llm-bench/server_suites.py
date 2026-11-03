@@ -39,6 +39,10 @@ Suites (contracts are in-repo, so the bench is reproducible):
 - journeys_blind2: the same again over five more contracts: Twilio messages and calls,
   SendGrid templates and bounces, Plaid items, PayPal refunds and OpenWeatherMap. Not in
   the default suites. Written under the same rule, and no check gates the rest of its journey.
+- journeys_blind3: the same again over five contracts written for it, in
+  `scripts/llm-bench/contracts/blind3/`: Trello boards, Asana tasks, GitLab issues,
+  Freshdesk tickets and Mailchimp audiences. Not in the default suites. Same rule; no
+  check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -54,6 +58,7 @@ import argparse
 import base64
 import fcntl
 import glob
+import hashlib
 import http.client
 import json
 import os
@@ -72,7 +77,8 @@ import uuid
 from datetime import datetime
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2")
+SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
+          "journeys_blind3")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -115,6 +121,7 @@ JOURNEY_MOCKS = {
     "stripe": ("examples/apis/stripe/stripe.openapi.yaml", "/stripe", None),
     "travel": ("docs/benchmarks/contracts/travel.openapi.yaml", "/travel", None),
     "github": ("examples/apis/github-rest/github-rest.openapi.yaml", "/github", None),
+    "invoices": ("docs/benchmarks/contracts/invoicing.openapi.yaml", "/invoices", None),
 }
 # The held-out journeys, contracts alone as well: no persona.
 HELDOUT_MOCKS = {
@@ -787,6 +794,11 @@ JOURNEY_CHECKS = {
         "repo detail keeps the listed repo", "issue keeps its title", "issue reads back as created",
         "issue list holds the new issue", "repo keeps its identity",
     ],
+    "invoices": [
+        "remind keeps the status", "preview keeps the status", "validate answers a report",
+        "validate keeps the status", "pay moves the status on", "read shows the paid status",
+        "pin sets the flag", "pin keeps the text", "read shows the pinned note",
+    ],
 }
 # The check recorded when a journey cannot go on past its first call.
 JOURNEY_GATE = {"travel": "search returned offers", "github": "search returned repositories"}
@@ -965,6 +977,37 @@ def github_steps(j):
                 before=before, after=after["open_issues_count"])
 
 
+def invoices_steps(j):
+    inv = j.call("POST", "/invoices", body={"customer": "Ana Silva", "amount": 4180, "currency": "eur"})
+    iid = inv.get("id")
+    # An action that moves nothing on is the check against a prompt that pushes every status.
+    rem = j.call("POST", f"/invoices/{iid}/remind")
+    j.check("remind keeps the status", eq(rem.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=rem.get("status"))
+    seen = j.call("POST", f"/invoices/{iid}/preview")
+    j.check("preview keeps the status", eq(seen.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=seen.get("status"))
+    report = j.call("POST", f"/invoices/{iid}/validate")
+    j.check("validate answers a report", isinstance(report.get("valid"), bool), report=report)
+    read = j.call("GET", f"/invoices/{iid}")
+    j.check("validate keeps the status", eq(read.get("status"), inv.get("status")),
+            before=inv.get("status"), status_value=read.get("status"))
+    paid = j.call("POST", f"/invoices/{iid}/pay")
+    j.check("pay moves the status on", paid.get("status") == "paid",
+            before=rem.get("status"), status_value=paid.get("status"))
+    read = j.call("GET", f"/invoices/{iid}")
+    j.check("read shows the paid status", eq(read.get("status"), paid.get("status")),
+            paid=paid.get("status"), read=read.get("status"))
+    # No enum, so nothing in the prompt may talk about a status.
+    note = j.call("POST", "/notes", body={"text": "Call the bank"})
+    nid = note.get("id")
+    pinned = j.call("POST", f"/notes/{nid}/pin")
+    j.check("pin sets the flag", pinned.get("pinned") is True, pinned=pinned.get("pinned"))
+    j.check("pin keeps the text", eq(pinned.get("text"), "Call the bank"))
+    read = j.call("GET", f"/notes/{nid}")
+    j.check("read shows the pinned note", read.get("pinned") is True, pinned=read.get("pinned"))
+
+
 def journey_stripe(srv, sink, args, rep):
     run_one_journey("stripe", stripe_steps, srv, sink, args, rep)
 
@@ -977,13 +1020,18 @@ def journey_github(srv, sink, args, rep):
     run_one_journey("github", github_steps, srv, sink, args, rep)
 
 
-JOURNEYS = {"stripe": journey_stripe, "travel": journey_travel, "github": journey_github}
+JOURNEYS = {
+    "stripe": journey_stripe, "travel": journey_travel, "github": journey_github,
+    "invoices": lambda srv, sink, args, rep: run_one_journey("invoices", invoices_steps, srv, sink, args, rep),
+}
+# What a journeys run without --journey does: the set the published results compare.
+DEFAULT_JOURNEYS = ("stripe", "travel", "github")
 
 
 def run_journeys(srv, sink, args):
     for rep in range(args.repeat):
-        for fn in JOURNEYS.values():
-            fn(srv, sink, args, rep)
+        for name in args.journey or DEFAULT_JOURNEYS:
+            JOURNEYS[name](srv, sink, args, rep)
 
 
 # ---------------------------------------------------------------- held-out journeys
@@ -2152,6 +2200,400 @@ def run_journeys_blind2(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- third blind journeys
+
+# The same rule again, over five contracts written for this suite from each real API's
+# public documentation (scripts/llm-bench/contracts/blind3/), so nobody working on the
+# engine has seen them. No check gates the rest: a journey goes on with an id of its own
+# when a call gave none. A check asserts only what its contract promises a client. Do
+# not edit a check to suit results.
+BLIND3_CHECKS = {
+    "trello": [
+        "board has an id", "read matches the created board", "list belongs to the board", "board lists hold both",
+        "card sits in its list and board", "card keeps its due date", "list cards hold the card",
+        "moving a card changes its list", "old list no longer holds the card", "comment keeps its text",
+        "card actions list the comment", "closed filter holds the archived card", "renamed board reads back renamed",
+        "deleted card is gone",
+    ],
+    "asana": [
+        "project has a gid", "section belongs to the project", "task keeps its project", "read matches what was sent",
+        "project filter holds both tasks", "limit pages the task list", "section lists the added task",
+        "subtask names its parent", "subtasks list the subtask", "completion reads back",
+        "completed_since=now leaves out the completed task", "comment keeps its text", "task stories hold the comment",
+        "deleted task is gone",
+    ],
+    "gitlab": [
+        "milestone has an id", "issue has an iid in its project", "issue keeps its labels", "issue names its milestone",
+        "read matches the created issue", "labels filter holds only labelled issues", "search finds the issue by title",
+        "per_page caps the list", "milestone issues hold the issue", "closing an issue closes it",
+        "state filter leaves out the closed issue", "note keeps its body", "issue notes hold the note",
+        "deleted issue is gone",
+    ],
+    "freshdesk": [
+        "contact names its company", "email filter finds only the contact", "ticket names the contact as requester",
+        "ticket keeps what was sent", "read matches the created ticket", "requester filter holds the ticket",
+        "reply names its ticket", "a note is private by default", "conversations hold the reply and the note",
+        "update resolves the ticket", "stats show when it was resolved", "search finds the ticket",
+        "deleted filter holds the deleted ticket", "default list leaves out the deleted ticket",
+    ],
+    "mailchimp": [
+        "list has an id", "read matches the created list", "member id is the email's hash",
+        "member keeps its status and merge fields", "read by hash matches the member",
+        "status filter holds only subscribed members", "count caps the members", "member tags hold the added tag",
+        "update changes the merge field", "update keeps the other merge field",
+        "upsert adds a new address with status_if_new", "search finds the member by email",
+        "archived member reads as archived", "erased member is gone",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND3_CHECKS)
+BLIND3_DIR = "scripts/llm-bench/contracts/blind3"
+# Contracts alone: no persona.
+BLIND3_MOCKS = {name: (f"{BLIND3_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND3_CHECKS}
+
+
+def instant(value):
+    """The moment an ISO 8601 date-time names, or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def ids_of(items, key="id"):
+    return [i.get(key) for i in dicts(items)]
+
+
+def trello_steps(j):
+    # Fields go in the query string, as the contract has them. The contract keeps a deleted
+    # board out of the journey (a delete answers only `_value`), so the delete is a card's.
+    auth = {"key": "bench-placeholder", "token": "bench-placeholder"}
+
+    def call(method, path, **query):
+        return j.call(method, path, query=dict(query, **auth))
+
+    def trello_id():
+        return "".join(j.rng.choice("0123456789abcdef") for _ in range(24))
+
+    tag = j.rng.randrange(10**5, 10**6)
+    name, desc = f"Kitchen remodel {tag}", "Everything for the new kitchen."
+    board = obj(call("POST", "/1/boards", name=name, desc=desc, defaultLists="false"))
+    j.check("board has an id", j.last["status"] == 200 and matches(r"[0-9a-fA-F]{24}", board.get("id")),
+            id=board.get("id"))
+    bid = board.get("id") or trello_id()
+    read = obj(call("GET", f"/1/boards/{bid}"))
+    j.check("read matches the created board",
+            eq(read.get("id"), bid) and eq(read.get("name"), name) and eq(read.get("desc"), desc))
+    todo = obj(call("POST", "/1/lists", name="To do", idBoard=bid))
+    j.check("list belongs to the board", eq(todo.get("idBoard"), bid), idBoard=todo.get("idBoard"))
+    done = obj(call("POST", "/1/lists", name="Done", idBoard=bid))
+    todo_id, done_id = todo.get("id") or trello_id(), done.get("id") or trello_id()
+    lists = call("GET", f"/1/boards/{bid}/lists")
+    j.check("board lists hold both", bool(by_id(lists, todo_id)) and bool(by_id(lists, done_id)), listed=ids_of(lists))
+    due = "2026-12-01T17:00:00.000Z"
+    card = obj(call("POST", "/1/cards", idList=todo_id, name="Order the tiles", desc="Grey, 30 by 60.", due=due))
+    j.check("card sits in its list and board", eq(card.get("idList"), todo_id) and eq(card.get("idBoard"), bid))
+    j.check("card keeps its due date", eq(instant(card.get("due")), instant(due)), due=card.get("due"))
+    cid = card.get("id") or trello_id()
+    rows = call("GET", f"/1/lists/{todo_id}/cards")
+    j.check("list cards hold the card", bool(by_id(rows, cid)) and all(eq(c.get("idList"), todo_id) for c in dicts(rows)),
+            listed=ids_of(rows))
+    moved = obj(call("PUT", f"/1/cards/{cid}", idList=done_id))
+    j.check("moving a card changes its list", eq(moved.get("id"), cid) and eq(moved.get("idList"), done_id),
+            idList=moved.get("idList"))
+    rows = call("GET", f"/1/lists/{todo_id}/cards")
+    j.check("old list no longer holds the card", j.last["status"] == 200 and isinstance(rows, list) and not by_id(rows, cid),
+            listed=ids_of(rows))
+    text = "Tiles ordered, delivery on Friday."
+    comment = obj(call("POST", f"/1/cards/{cid}/actions/comments", text=text))
+    j.check("comment keeps its text", eq(obj(comment.get("data")).get("text"), text))
+    aid = comment.get("id") or trello_id()
+    actions = call("GET", f"/1/cards/{cid}/actions", filter="commentCard")
+    j.check("card actions list the comment",
+            bool(by_id(actions, aid)) and all(eq(a.get("type"), "commentCard") for a in dicts(actions)),
+            listed=ids_of(actions))
+    call("PUT", f"/1/cards/{cid}", closed="true")
+    closed = call("GET", f"/1/boards/{bid}/cards/closed")
+    j.check("closed filter holds the archived card",
+            bool(by_id(closed, cid)) and all(c.get("closed") is True for c in dicts(closed)), listed=ids_of(closed))
+    renamed = f"Kitchen and pantry {tag}"
+    call("PUT", f"/1/boards/{bid}", name=renamed)
+    read = obj(call("GET", f"/1/boards/{bid}"))
+    j.check("renamed board reads back renamed", eq(read.get("name"), renamed), board_name=read.get("name"))
+    call("DELETE", f"/1/cards/{cid}")
+    deleted = j.last["status"]
+    call("GET", f"/1/cards/{cid}")
+    j.check("deleted card is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def asana_steps(j):
+    # Lists answer compact records, so list checks look only at gids. Where a task lands
+    # when created in a project without a section is the project's first section, which
+    # may not be the one created here, so the section check asks only for the task added.
+    j.headers.update(HELDOUT_AUTH)
+
+    def gid():
+        return "1" + "".join(j.rng.choice("0123456789") for _ in range(15))
+
+    def data(value):
+        return obj(obj(value).get("data"))
+
+    def gids(value):
+        return ids_of(obj(value).get("data"), "gid")
+
+    tag = j.rng.randrange(10**5, 10**6)
+    project = data(j.call("POST", "/api/1.0/projects",
+                          body={"data": {"name": f"Offsite {tag}", "notes": "Team offsite in March.", "workspace": gid()}}))
+    j.check("project has a gid", j.last["status"] == 201 and matches(r"[0-9]+", project.get("gid")), gid=project.get("gid"))
+    pid = project.get("gid") or gid()
+    section = data(j.call("POST", f"/api/1.0/projects/{pid}/sections", body={"data": {"name": "Shortlist"}}))
+    j.check("section belongs to the project", eq(obj(section.get("project")).get("gid"), pid))
+    sid = section.get("gid") or gid()
+    sent = {"name": f"Book the venue {tag}", "notes": "Room for forty people.", "due_on": "2026-12-04"}
+    task = data(j.call("POST", "/api/1.0/tasks", body={"data": dict(sent, projects=[pid])}))
+    j.check("task keeps its project", pid in ids_of(task.get("projects"), "gid"))
+    t1 = task.get("gid") or gid()
+    read = data(j.call("GET", f"/api/1.0/tasks/{t1}"))
+    j.check("read matches what was sent", eq(read.get("gid"), t1) and same(read, sent, "name", "notes", "due_on"))
+    t2 = data(j.call("POST", "/api/1.0/tasks",
+                     body={"data": {"name": f"Send the invitations {tag}", "projects": [pid]}})).get("gid") or gid()
+    listed = gids(j.call("GET", "/api/1.0/tasks", query={"project": pid}))
+    j.check("project filter holds both tasks", t1 in listed and t2 in listed, listed=listed)
+    page = obj(j.call("GET", "/api/1.0/tasks", query={"project": pid, "limit": 1}))
+    offset = obj(page.get("next_page")).get("offset")
+    j.check("limit pages the task list", len(dicts(page.get("data"))) == 1 and isinstance(offset, str) and bool(offset),
+            listed=gids(page), next_page=page.get("next_page"))
+    j.call("POST", f"/api/1.0/sections/{sid}/addTask", body={"data": {"task": t1}})
+    listed = gids(j.call("GET", f"/api/1.0/sections/{sid}/tasks"))
+    j.check("section lists the added task", t1 in listed, listed=listed)
+    sub = data(j.call("POST", f"/api/1.0/tasks/{t1}/subtasks", body={"data": {"name": "Confirm the catering"}}))
+    j.check("subtask names its parent", eq(obj(sub.get("parent")).get("gid"), t1))
+    sub_id = sub.get("gid") or gid()
+    listed = gids(j.call("GET", f"/api/1.0/tasks/{t1}/subtasks"))
+    j.check("subtasks list the subtask", sub_id in listed, listed=listed)
+    j.call("PUT", f"/api/1.0/tasks/{t2}", body={"data": {"completed": True}})
+    read = data(j.call("GET", f"/api/1.0/tasks/{t2}"))
+    j.check("completion reads back", read.get("completed") is True, completed=read.get("completed"))
+    listed = gids(j.call("GET", "/api/1.0/tasks", query={"project": pid, "completed_since": "now"}))
+    j.check("completed_since=now leaves out the completed task",
+            j.last["status"] == 200 and t1 in listed and t2 not in listed, listed=listed)
+    text = "The north wing is free on the 12th."
+    story = data(j.call("POST", f"/api/1.0/tasks/{t1}/stories", body={"data": {"text": text}}))
+    j.check("comment keeps its text", eq(story.get("text"), text))
+    story_id = story.get("gid") or gid()
+    listed = gids(j.call("GET", f"/api/1.0/tasks/{t1}/stories"))
+    j.check("task stories hold the comment", story_id in listed, listed=listed)
+    j.call("DELETE", f"/api/1.0/tasks/{t2}")
+    deleted = j.last["status"]
+    j.call("GET", f"/api/1.0/tasks/{t2}")
+    j.check("deleted task is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def gitlab_steps(j):
+    # Issue routes take the iid; the milestone route takes the milestone's global id.
+    # Closing writes a system note, so the note check asks only that its note is listed.
+    j.headers["private-token"] = "bench-placeholder"
+    project = j.rng.randrange(10**6, 10**7)
+    base = f"/api/v4/projects/{project}"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def iids(query):
+        return ids_of(j.call("GET", f"{base}/issues", query=query), "iid")
+
+    milestone = obj(j.call("POST", f"{base}/milestones", body={"title": f"Release {tag}", "due_date": "2026-12-18"}))
+    j.check("milestone has an id", j.last["status"] == 201 and is_int(milestone.get("id")), id=milestone.get("id"))
+    mid = milestone.get("id") if is_int(milestone.get("id")) else j.rng.randrange(10**6, 10**7)
+    word = f"flaky{tag}"
+    sent = {"title": f"Checkout {word} on Safari", "description": "The pay button does nothing after a coupon.",
+            "labels": "bug,backend", "milestone_id": mid, "due_date": "2026-12-11"}
+    first = obj(j.call("POST", f"{base}/issues", body=sent))
+    j.check("issue has an iid in its project",
+            j.last["status"] == 201 and is_int(first.get("iid")) and eq(first.get("project_id"), project),
+            iid=first.get("iid"), project_id=first.get("project_id"))
+    labels = first.get("labels")
+    j.check("issue keeps its labels", isinstance(labels, list) and sorted(map(str, labels)) == ["backend", "bug"],
+            labels=labels)
+    j.check("issue names its milestone", eq(obj(first.get("milestone")).get("id"), mid))
+    iid = first.get("iid") if is_int(first.get("iid")) else 1
+    read = obj(j.call("GET", f"{base}/issues/{iid}"))
+    j.check("read matches the created issue", same(read, first, "id", "iid", "title", "description", "due_date"))
+    second = obj(j.call("POST", f"{base}/issues", body={"title": "Update the API docs", "labels": "docs"}))
+    iid2 = second.get("iid") if is_int(second.get("iid")) else iid + 1
+    rows = j.call("GET", f"{base}/issues", query={"labels": "bug"})
+    listed = ids_of(rows, "iid")
+    j.check("labels filter holds only labelled issues",
+            iid in listed and iid2 not in listed and all(isinstance(r.get("labels"), list) and "bug" in r["labels"] for r in dicts(rows)),
+            listed=listed)
+    listed = iids({"search": word})
+    j.check("search finds the issue by title", iid in listed and iid2 not in listed, listed=listed)
+    rows = j.call("GET", f"{base}/issues", query={"per_page": 1})
+    j.check("per_page caps the list", isinstance(rows, list) and len(rows) == 1, listed=ids_of(rows, "iid"))
+    rows = j.call("GET", f"{base}/milestones/{mid}/issues")
+    j.check("milestone issues hold the issue",
+            iid in ids_of(rows, "iid") and all(eq(obj(r.get("milestone")).get("id"), mid) for r in dicts(rows)),
+            listed=ids_of(rows, "iid"))
+    closed = obj(j.call("PUT", f"{base}/issues/{iid}", body={"state_event": "close"}))
+    j.check("closing an issue closes it", eq(closed.get("state"), "closed"), state=closed.get("state"))
+    listed = iids({"state": "opened"})
+    j.check("state filter leaves out the closed issue", iid2 in listed and iid not in listed, listed=listed)
+    text = "Reproduced on Safari 18 with the SPRING coupon."
+    note = obj(j.call("POST", f"{base}/issues/{iid}/notes", body={"body": text}))
+    j.check("note keeps its body", eq(note.get("body"), text))
+    note_id = note.get("id") if is_int(note.get("id")) else j.rng.randrange(10**6, 10**7)
+    notes = j.call("GET", f"{base}/issues/{iid}/notes")
+    j.check("issue notes hold the note", bool(by_id(notes, note_id)), listed=ids_of(notes))
+    j.call("DELETE", f"{base}/issues/{iid2}")
+    deleted = j.last["status"]
+    j.call("GET", f"{base}/issues/{iid2}")
+    j.check("deleted issue is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def freshdesk_steps(j):
+    # A deleted ticket goes to the trash, so it is looked for under filter=deleted rather
+    # than expected to answer 404. Search terms are those the ticket was last given.
+    j.headers["authorization"] = "Basic " + base64.b64encode(b"bench-placeholder:X").decode()
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def number():
+        return j.rng.randrange(10**8, 10**9)
+
+    company = obj(j.call("POST", "/api/v2/companies", body={"name": f"Northwind {tag}"}))
+    company_id = company.get("id") if is_int(company.get("id")) else number()
+    email = f"ana.{tag}@northwind.example"
+    contact = obj(j.call("POST", "/api/v2/contacts", body={"name": "Ana Silva", "email": email, "company_id": company_id}))
+    j.check("contact names its company", j.last["status"] == 201 and eq(contact.get("company_id"), company_id),
+            company_id=contact.get("company_id"))
+    contact_id = contact.get("id") if is_int(contact.get("id")) else number()
+    rows = j.call("GET", "/api/v2/contacts", query={"email": email})
+    j.check("email filter finds only the contact",
+            bool(by_id(rows, contact_id)) and all(eq(r.get("email"), email) for r in dicts(rows)), listed=ids_of(rows))
+    sent = {"subject": f"Invoice {tag} shows the wrong VAT", "description": "<p>The VAT rate should be 23%.</p>",
+            "email": email, "priority": 3, "status": 2, "source": 2, "tags": ["billing", "vat"]}
+    ticket = obj(j.call("POST", "/api/v2/tickets", body=sent))
+    j.check("ticket names the contact as requester", eq(ticket.get("requester_id"), contact_id),
+            requester_id=ticket.get("requester_id"))
+    j.check("ticket keeps what was sent",
+            same(ticket, sent, "subject", "priority", "status", "source") and sorted(map(str, ticket.get("tags") or [])) == sent["tags"])
+    tid = ticket.get("id") if is_int(ticket.get("id")) else number()
+    read = obj(j.call("GET", f"/api/v2/tickets/{tid}"))
+    j.check("read matches the created ticket", same(read, ticket, "id", "subject", "priority", "status", "requester_id"))
+    rows = j.call("GET", "/api/v2/tickets", query={"requester_id": contact_id})
+    j.check("requester filter holds the ticket",
+            bool(by_id(rows, tid)) and all(eq(r.get("requester_id"), contact_id) for r in dicts(rows)), listed=ids_of(rows))
+    reply = obj(j.call("POST", f"/api/v2/tickets/{tid}/reply", body={"body": "<p>Thanks, we are on it.</p>"}))
+    j.check("reply names its ticket", eq(reply.get("ticket_id"), tid))
+    note = obj(j.call("POST", f"/api/v2/tickets/{tid}/notes", body={"body": "Finance confirmed the 23% rate."}))
+    j.check("a note is private by default", note.get("private") is True, private=note.get("private"))
+    convs = j.call("GET", f"/api/v2/tickets/{tid}/conversations")
+    j.check("conversations hold the reply and the note",
+            bool(by_id(convs, reply.get("id"))) and bool(by_id(convs, note.get("id"))), listed=ids_of(convs))
+    resolved = obj(j.call("PUT", f"/api/v2/tickets/{tid}", body={"status": 4}))
+    j.check("update resolves the ticket", eq(resolved.get("status"), 4), status_value=resolved.get("status"))
+    stats = obj(obj(j.call("GET", f"/api/v2/tickets/{tid}", query={"include": "stats"})).get("stats"))
+    j.check("stats show when it was resolved", instant(stats.get("resolved_at")) is not None,
+            resolved_at=stats.get("resolved_at"))
+    found = dicts(obj(j.call("GET", "/api/v2/search/tickets", query={"query": '"priority:3 AND status:4"'})).get("results"))
+    j.check("search finds the ticket",
+            bool(by_id(found, tid)) and all(eq(t.get("priority"), 3) and eq(t.get("status"), 4) for t in found),
+            listed=ids_of(found))
+    j.call("DELETE", f"/api/v2/tickets/{tid}")
+    deleted = j.last["status"]
+    rows = j.call("GET", "/api/v2/tickets", query={"filter": "deleted"})
+    j.check("deleted filter holds the deleted ticket", bool(by_id(rows, tid)), delete_status=deleted, listed=ids_of(rows))
+    rows = j.call("GET", "/api/v2/tickets")
+    j.check("default list leaves out the deleted ticket",
+            j.last["status"] == 200 and isinstance(rows, list) and not by_id(rows, tid), listed=ids_of(rows))
+
+
+def mailchimp_steps(j):
+    # A member's path is the MD5 of its lowercase email, which the client computes itself,
+    # so every member call uses that hash whatever the create answered.
+    j.headers["authorization"] = "Basic " + base64.b64encode(b"bench:bench-placeholder").decode()
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def md5(email):
+        return hashlib.md5(email.lower().encode()).hexdigest()
+
+    sent = {
+        "name": f"Bakery news {tag}",
+        "contact": {"company": "Crumb & Co", "address1": "12 Market St", "city": "Oakland", "state": "CA",
+                    "zip": "94607", "country": "US"},
+        "permission_reminder": "You signed up at our counter.",
+        "campaign_defaults": {"from_name": "Crumb & Co", "from_email": "news@crumb.example",
+                              "subject": "Fresh this week", "language": "en"},
+        "email_type_option": False,
+    }
+    made = obj(j.call("POST", "/3.0/lists", body=sent))
+    j.check("list has an id", j.last["status"] == 200 and isinstance(made.get("id"), str) and bool(made.get("id")),
+            id=made.get("id"))
+    lid = made.get("id") or "".join(j.rng.choice("0123456789abcdef") for _ in range(10))
+    members = f"/3.0/lists/{lid}/members"
+    read = obj(j.call("GET", f"/3.0/lists/{lid}"))
+    j.check("read matches the created list",
+            eq(read.get("id"), lid) and same(read, sent, "name", "permission_reminder")
+            and eq(obj(read.get("campaign_defaults")).get("from_email"), "news@crumb.example"))
+    email = f"Ada.Lovelace.{tag}@example.com"
+    h = md5(email)
+    member = obj(j.call("POST", members, body={"email_address": email, "status": "subscribed",
+                                               "merge_fields": {"FNAME": "Ada", "LNAME": "Lovelace"}}))
+    j.check("member id is the email's hash", eq(member.get("id"), h), id=member.get("id"), hash=h)
+    fields = obj(member.get("merge_fields"))
+    j.check("member keeps its status and merge fields",
+            eq(member.get("status"), "subscribed") and eq(fields.get("FNAME"), "Ada") and eq(fields.get("LNAME"), "Lovelace"))
+    read = obj(j.call("GET", f"{members}/{h}"))
+    j.check("read by hash matches the member",
+            eq(read.get("id"), h) and str(read.get("email_address")).lower() == email.lower() and eq(read.get("list_id"), lid))
+    other = f"grace.hopper.{tag}@example.com"
+    h2 = md5(other)
+    j.call("POST", members, body={"email_address": other, "status": "pending"})
+    rows = dicts(obj(j.call("GET", members, query={"status": "subscribed"})).get("members"))
+    listed = ids_of(rows)
+    j.check("status filter holds only subscribed members",
+            h in listed and h2 not in listed and all(eq(m.get("status"), "subscribed") for m in rows), listed=listed)
+    rows = dicts(obj(j.call("GET", members, query={"count": 1})).get("members"))
+    j.check("count caps the members", len(rows) == 1, listed=ids_of(rows))
+    label = f"vip-{tag}"
+    j.call("POST", f"{members}/{h}/tags", body={"tags": [{"name": label, "status": "active"}]})
+    names = ids_of(obj(j.call("GET", f"{members}/{h}/tags")).get("tags"), "name")
+    j.check("member tags hold the added tag", label in names, tags=names)
+    patched = obj(j.call("PATCH", f"{members}/{h}", body={"merge_fields": {"FNAME": "Augusta"}}))
+    j.check("update changes the merge field", eq(obj(patched.get("merge_fields")).get("FNAME"), "Augusta"))
+    read = obj(j.call("GET", f"{members}/{h}"))
+    j.check("update keeps the other merge field", eq(obj(read.get("merge_fields")).get("LNAME"), "Lovelace"),
+            merge_fields=read.get("merge_fields"))
+    third = f"katherine.johnson.{tag}@example.com"
+    upserted = obj(j.call("PUT", f"{members}/{md5(third)}", body={"email_address": third, "status_if_new": "subscribed"}))
+    j.check("upsert adds a new address with status_if_new",
+            eq(upserted.get("id"), md5(third)) and eq(upserted.get("status"), "subscribed"), status_value=upserted.get("status"))
+    found = obj(j.call("GET", "/3.0/search-members", query={"query": email, "list_id": lid}))
+    exact = ids_of(obj(found.get("exact_matches")).get("members"))
+    j.check("search finds the member by email", h in exact, listed=exact)
+    j.call("DELETE", f"{members}/{h}")
+    deleted = j.last["status"]
+    read = obj(j.call("GET", f"{members}/{h}"))
+    j.check("archived member reads as archived", j.last["status"] == 200 and eq(read.get("status"), "archived"),
+            delete_status=deleted, status_value=read.get("status"))
+    j.call("POST", f"{members}/{h2}/actions/delete-permanent")
+    erased = j.last["status"]
+    j.call("GET", f"{members}/{h2}")
+    j.check("erased member is gone", j.last["status"] == 404, erase_status=erased)
+
+
+BLIND3_JOURNEYS = {"trello": trello_steps, "asana": asana_steps, "gitlab": gitlab_steps,
+                   "freshdesk": freshdesk_steps, "mailchimp": mailchimp_steps}
+
+
+def run_journeys_blind3(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND3_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -2162,6 +2604,7 @@ RUNNERS = {
     "journeys_heldout": (HELDOUT_MOCKS, run_journeys_heldout),
     "journeys_blind": (BLIND_MOCKS, run_journeys_blind),
     "journeys_blind2": (BLIND2_MOCKS, run_journeys_blind2),
+    "journeys_blind3": (BLIND3_MOCKS, run_journeys_blind3),
 }
 
 
@@ -2172,6 +2615,8 @@ def main():
     p.add_argument("--out", required=True, help="results directory (server.jsonl is appended)")
     p.add_argument("--repeat", type=int, default=3, help="reps (fresh session each) per suite")
     p.add_argument("--suite", action="append", choices=SUITES, help="default: consistency, sse, import")
+    p.add_argument("--journey", action="append", choices=tuple(JOURNEYS),
+                   help="journeys to run; default: stripe, travel, github")
     p.add_argument("--binary", default="target/release/mockingbird")
     p.add_argument("--timeout", type=float, default=180, help="client timeout per call, seconds")
     p.add_argument("--stream-items", type=int, default=5, help="SSE events to read per rep")
@@ -2189,6 +2634,10 @@ def main():
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
     failed = False
+    if args.journey:
+        # --journey alone means the journeys suite; each journey runs once.
+        args.journey = list(dict.fromkeys(args.journey))
+        args.suite = args.suite or ["journeys"]
     for suite in args.suite or DEFAULT_SUITES:
         mocks, runner = RUNNERS[suite]
         sink = Sink(args.out, args.model, suite)

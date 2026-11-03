@@ -3407,27 +3407,19 @@ ids and field values) and, for create or update operations, with the request bod
         instructions(&h, 1),
         format!(
             "{TRUST} This call acts on the API: the response shows the state after it, which \
-usually differs from <existing_resource> (an action moves a status on). What the call does not \
-change stays as it is in the existing and related resources (same ids, same values), and the \
-response stays consistent with the request body. This is a successful `cancel`: the call \
-succeeded, so the resource has moved to the state that follows `cancel`, whatever it needed \
-before."
+usually differs from <existing_resource>. What the call does not change stays as it is in the \
+existing and related resources (same ids, same values), and the response stays consistent with \
+the request body."
         )
     );
-    assert_eq!(
-        instructions(&h, 2),
-        format!(
-            "{consistent} This is a successful `confirm`: the call succeeded, so the resource \
-has moved to the state that follows `confirm`, whatever it needed before."
-        )
-    );
+    assert_eq!(instructions(&h, 2), consistent);
     assert_eq!(instructions(&h, 3), consistent);
     let cancel = prompt_of(&h, 1);
     assert!(
         cancel.ends_with(
             "</shown_resources>\nThe response is not <existing_resource>, so it changes only \
-through \"effects\": they must include what `cancel` changes on it, as {\"type\": \
-\"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
+through \"effects\": they include what `cancel` changes on it, if it changes anything, as \
+{\"type\": \"payment_intents\", \"id\": \"pi_1\", \"set\": {...}}."
         ),
         "{cancel}"
     );
@@ -5387,4 +5379,171 @@ components:
     let (source, own) = read(&api, "/v1/charges/ch_a/refunds/re_1").await;
     assert_eq!(source, "state", "{own}");
     assert_eq!(own["amount"], 100);
+}
+
+const CHANNEL_MESSAGES: &str = r##"
+openapi: 3.0.0
+info: {title: Chat, version: "1"}
+paths:
+  /channels:
+    post:
+      operationId: createChannel
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /channels/{channel_id}:
+    get:
+      operationId: getChannel
+      parameters: [{name: channel_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /channels/{channel_id}/messages:
+    post:
+      operationId: createChannelMessage
+      parameters: [{name: channel_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {content: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /messages:
+    post:
+      operationId: postMessage
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {channel: {type: string}, content: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /messages/{message_id}:
+    get:
+      operationId: getMessage
+      parameters: [{name: message_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /users:
+    post:
+      operationId: createUser
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /users/{user_id}:
+    get:
+      operationId: getUser
+      parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /accounts:
+    post:
+      operationId: createAccount
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /accounts/{account_id}:
+    get:
+      operationId: getAccount
+      parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /buckets:
+    post:
+      operationId: createBucket
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Bucket"}}}}
+  /buckets/{bucket}:
+    get:
+      operationId: getBucket
+      parameters: [{name: bucket, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Bucket"}}}}
+components:
+  schemas:
+    Channel:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Message:
+      type: object
+      required: [id, content]
+      properties: {id: {type: string}, channel: {type: string}, content: {type: string}}
+    Bucket:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+"##;
+
+/// A new message's id is not that of a held record its request names: an answer
+/// reusing its channel's id, named in the path or in a body member, gets a fresh one,
+/// under which it reads back.
+#[tokio::test]
+async fn a_create_id_equal_to_a_path_value_or_a_held_record_is_redrawn() {
+    let message = |id: &str, content: &str| {
+        Ok(json!({"id": id, "channel": "c1", "content": content}).to_string())
+    };
+    let h = actions_of(
+        CHANNEL_MESSAGES,
+        vec![
+            Ok(json!({"id": "c1", "name": "general"}).to_string()),
+            message("c1", "first"),
+            message("c1", "second"),
+        ],
+    );
+    let (status, _, channel) = h.call("POST", "/channels", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(channel["id"], "c1");
+    let (_, _, first) = h
+        .call(
+            "POST",
+            "/channels/c1/messages",
+            Some(json!({"content": "first"})),
+        )
+        .await;
+    let (_, _, second) = h
+        .call(
+            "POST",
+            "/messages",
+            Some(json!({"channel": "c1", "content": "second"})),
+        )
+        .await;
+    for (answer, content) in [(&first, "first"), (&second, "second")] {
+        let id = answer["id"].as_str().unwrap();
+        assert_ne!(id, "c1", "{answer}");
+        assert!(!id.is_empty());
+        let (_, source, read) = h.call("GET", &format!("/messages/{id}"), None).await;
+        assert_eq!(source, "state", "{read}");
+        assert_eq!(read["content"], content);
+    }
+    let (_, source, kept) = h.call("GET", "/channels/c1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(kept["name"], "general");
+}
+
+/// A create may answer a body value as its id: a bucket named `my-bucket` is
+/// stored, and read back, as `my-bucket`.
+#[tokio::test]
+async fn a_create_keeps_an_id_its_body_named_otherwise() {
+    let h = actions_of(
+        CHANNEL_MESSAGES,
+        vec![Ok(
+            json!({"id": "my-bucket", "name": "my-bucket"}).to_string()
+        )],
+    );
+    let (status, _, bucket) = h
+        .call("POST", "/buckets", Some(json!({"name": "my-bucket"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(bucket["id"], "my-bucket", "{bucket}");
+    let (_, source, read) = h.call("GET", "/buckets/my-bucket", None).await;
+    assert_eq!(source, "state", "{read}");
+}
+
+/// Another type's record under the same id says nothing when the request does not
+/// name it: with user `42` held, a new account answered `42` keeps it.
+#[tokio::test]
+async fn a_create_keeps_an_id_another_type_holds_that_the_request_does_not_name() {
+    let named = |id: &str| Ok(json!({"id": id, "name": "n"}).to_string());
+    let h = actions_of(CHANNEL_MESSAGES, vec![named("42"), named("42")]);
+    let (_, _, user) = h.call("POST", "/users", None).await;
+    assert_eq!(user["id"], "42");
+    let (status, _, account) = h.call("POST", "/accounts", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(account["id"], "42", "{account}");
+    let (_, source, _) = h.call("GET", "/accounts/42", None).await;
+    assert_eq!(source, "state");
 }

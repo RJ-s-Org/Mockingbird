@@ -175,6 +175,7 @@ fn streaming_flags_map_to_kinds() {
             content_type: Some("application/grpc".into()),
             schema: Some(json!({"$ref": "#/$defs/routeguide.Feature"})),
             headers: Default::default(),
+            description: None,
         }]
     );
     assert_eq!(get.resource_type.as_deref(), Some("feature"));

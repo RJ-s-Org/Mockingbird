@@ -1108,15 +1108,19 @@ impl Engine {
             op,
         } = target;
         let response = encode_base64(validator, bundle, schema, response);
+        // A create reflects the defaults of what its body leaves out; a scenario's
+        // `set` still beats them.
+        let defaulted = prompt::with_body_defaults(bundle, op, call);
+        let reflected = defaulted.as_ref().unwrap_or(call);
         let response = match self.record_target(bundle, op, schema) {
             Some((record_op, record_validator)) => reflect_record(
                 (validator, &record_validator),
                 (op, &record_op),
-                call,
+                reflected,
                 ctx,
                 response,
             ),
-            None => reflect(validator, op, call, ctx, response),
+            None => reflect(validator, op, reflected, ctx, response),
         };
         let response = self.keep_persona_formats(validator, call, response, draws);
         let response = if matches!(op.kind, OperationKind::Query)

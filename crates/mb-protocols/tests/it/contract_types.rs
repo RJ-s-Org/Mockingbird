@@ -1018,3 +1018,61 @@ async fn a_deleted_bounce_with_an_id_leaves_no_copy() {
     h.call("GET", "/bounces?email=x", None).await;
     assert!(!h.prompt(1).contains("ann@example.com"), "{}", h.prompt(1));
 }
+
+/// A bounce deleted by its address does not come back in a list filtered by it, though
+/// the model lists it: the address is its identity, so the delete marked it.
+#[tokio::test]
+async fn a_deleted_address_stays_out_of_a_filtered_list() {
+    let h = harness(
+        BOUNCES,
+        vec![
+            json!([bounce("ann@example.com")]),
+            json!([bounce("ann@example.com")]),
+        ],
+    );
+    h.call("GET", "/bounces/ann@example.com", None).await;
+    let (status, _, _) = h.call("DELETE", "/bounces/ann@example.com", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, listed) = h
+        .call("GET", "/bounces?email=ann%40example.com", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed, json!([]));
+    assert!(h.exported().await.is_empty(), "{:?}", h.exported().await);
+}
+
+/// An enveloped ticket deleted is gone from its read, and from a list of tickets the
+/// model still lists it in.
+#[tokio::test]
+async fn a_deleted_enveloped_ticket_stays_gone() {
+    let contract = STRICT_TICKETS
+        .replace(
+            "  /tickets:\n    post:\n",
+            r##"  /tickets:
+    get:
+      operationId: listTickets
+      parameters: [{name: status, in: query, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {tickets: {type: array, items: {$ref: "#/components/schemas/Ticket"}}}}}}}}
+    post:
+"##,
+        )
+        .replace(
+            "    put:\n      operationId: updateTicket\n",
+            "    delete:\n      operationId: deleteTicket\n      responses: {\"204\": {description: gone}}\n    put:\n      operationId: updateTicket\n",
+        );
+    let h = harness(
+        &contract,
+        vec![
+            json!({"ticket": ticket("Printer", &[]), "audit": {"id": 1}}),
+            json!({"tickets": [ticket("Printer", &[]), {"id": 36, "subject": "Desk"}]}),
+        ],
+    );
+    created_ticket(&h).await;
+    let (status, _, _) = h.call("DELETE", "/tickets/35", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = h.call("GET", "/tickets/35", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, listed) = h.call("GET", "/tickets", None).await;
+    assert_eq!(listed, json!({"tickets": [{"id": 36, "subject": "Desk"}]}));
+    assert_eq!(h.calls(), 2);
+}

@@ -26,6 +26,11 @@ fn list_key(obj: &serde_json::Map<String, Value>) -> Option<&str> {
     arrays.next().is_none().then_some(key.as_str())
 }
 
+/// The member of object `body` that [`list_items`] takes its items from.
+pub fn list_member(body: &Value) -> Option<&str> {
+    list_key(body.as_object()?)
+}
+
 /// The items of a list body: the body when it is an array, else the array
 /// an envelope holds (see [`ENVELOPE_KEYS`]); `None` otherwise.
 pub fn list_items(body: &Value) -> Option<&Vec<Value>> {
@@ -177,7 +182,7 @@ pub fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<V
 }
 
 /// The schema of one item of list `body` answered for `schema`.
-pub(crate) fn item_schema(bundle: &Bundle, schema: &Value, body: &Value) -> Option<Value> {
+pub fn item_schema(bundle: &Bundle, schema: &Value, body: &Value) -> Option<Value> {
     let list = match body {
         Value::Array(_) => deref(bundle, schema).clone(),
         Value::Object(obj) => property_schema(bundle, schema, list_key(obj)?)?,

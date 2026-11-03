@@ -81,6 +81,14 @@ impl Drop for WatchGuard {
 
 type Debounced = Debouncer<notify::RecommendedWatcher, RecommendedCache>;
 
+/// One debounced batch of file system events: the paths they name, and
+/// whether any asks for a rescan (events were lost, so the paths are not
+/// the whole story).
+struct Batch {
+    paths: Vec<PathBuf>,
+    rescan: bool,
+}
+
 /// The debouncer with the directories it watches and the files of interest.
 struct Watcher {
     debouncer: Debounced,
@@ -101,6 +109,12 @@ impl Watcher {
         }
         self.files.insert(file);
         Ok(())
+    }
+
+    /// Whether `batch` may have changed a file of interest: it names one,
+    /// or it asks for a rescan.
+    fn concerns_batch(&self, batch: &Batch) -> bool {
+        batch.rescan || self.concerns(&batch.paths)
     }
 
     fn concerns(&self, paths: &[PathBuf]) -> bool {
@@ -133,8 +147,10 @@ fn normalize(path: &Path) -> Option<(PathBuf, PathBuf)> {
 
 /// Watches `config_path` and its contracts, reconciling the store after
 /// each change settles (debounced by [`DEBOUNCE`]) with the `MB_*`
-/// environment variables applied. A config that fails to load or
-/// reconcile is logged and the previous state kept.
+/// environment variables applied. It also reconciles once as soon as the
+/// watch is armed, so an edit made between the caller's last read of the
+/// file and the start of the watch is not lost. A config that fails to
+/// load or reconcile is logged and the previous state kept.
 ///
 /// Must be called inside a Tokio runtime.
 ///
@@ -216,17 +232,22 @@ pub fn spawn_with_status(
     applied: Option<Applied>,
     status: ReloadStatus,
 ) -> anyhow::Result<WatchGuard> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Batch>();
     let debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
         match result {
             Ok(events) => {
+                // A rescan event means the OS dropped or coalesced events
+                // (FSEvents does under heavy file system churn): it names
+                // a directory, not the files that changed, so any of them
+                // may have.
+                let rescan = events.iter().any(|e| e.event.need_rescan());
                 let paths = events
                     .into_iter()
                     .flat_map(|e| e.event.paths)
                     .collect::<Vec<_>>();
-                if !paths.is_empty() {
+                if rescan || !paths.is_empty() {
                     // A closed channel means the watch is being dropped.
-                    let _ = tx.send(paths);
+                    let _ = tx.send(Batch { paths, rescan });
                 }
             }
             Err(errors) => {
@@ -253,53 +274,27 @@ pub fn spawn_with_status(
     }
     let watcher = Arc::new(Mutex::new(watcher));
 
-    let shared = Arc::clone(&watcher);
+    let reloader = Reloader {
+        config_path,
+        store,
+        state,
+        prepare,
+        applied,
+        status,
+        watcher: Arc::clone(&watcher),
+    };
     let task = tokio::spawn(async move {
-        while let Some(paths) = rx.recv().await {
-            let relevant = match shared.lock() {
-                Ok(w) => w.concerns(&paths),
+        // The file is watched from here on, but an edit made before then
+        // (after the caller last read it, e.g. during a new leader's
+        // reconcile) raised no event: re-read it once.
+        reloader.reload(true).await;
+        while let Some(batch) = rx.recv().await {
+            let relevant = match reloader.watcher.lock() {
+                Ok(w) => w.concerns_batch(&batch),
                 Err(_) => return,
             };
-            if !relevant {
-                continue;
-            }
-            match load_and_reconcile(&config_path, store.as_ref(), state.as_ref(), &prepare).await {
-                Ok((cfg, report)) => {
-                    status.succeeded();
-                    if let Ok(mut w) = shared.lock() {
-                        for path in contract_paths(&cfg) {
-                            if let Err(error) = w.add(&path) {
-                                tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
-                            }
-                        }
-                    }
-                    if let Some(applied) = &applied {
-                        applied(cfg).await;
-                    }
-                    if report.is_empty() {
-                        tracing::info!(config = %config_path.display(), "config reloaded: no changes");
-                    } else {
-                        let changed = report.summary();
-                        tracing::info!(
-                            config = %config_path.display(),
-                            added = report.created.len(),
-                            removed = report.deleted.len(),
-                            created = ?report.created,
-                            updated = ?report.updated,
-                            deleted = ?report.deleted,
-                            new_versions = ?report.new_versions,
-                            "config reloaded: {changed}"
-                        );
-                    }
-                }
-                Err(error) => {
-                    status.failed(format!("{error:#}"));
-                    tracing::error!(
-                        config = %config_path.display(),
-                        error = %format!("{error:#}"),
-                        "config reload failed; keeping the previous state"
-                    );
-                }
+            if relevant {
+                reloader.reload(false).await;
             }
         }
     });
@@ -308,6 +303,76 @@ pub fn spawn_with_status(
         _watcher: watcher,
         task,
     })
+}
+
+/// What a reload needs: the config, where it goes, and the watcher to add
+/// new contracts to.
+struct Reloader {
+    config_path: PathBuf,
+    store: Arc<dyn ControlStore>,
+    state: Arc<dyn StateStore>,
+    prepare: Prepare,
+    applied: Option<Applied>,
+    status: ReloadStatus,
+    watcher: Arc<Mutex<Watcher>>,
+}
+
+impl Reloader {
+    /// Re-reads the config and reconciles it, keeping the previous state
+    /// when that fails. `initial` is the check made as the watch starts,
+    /// which usually finds nothing changed and then logs at debug level.
+    async fn reload(&self, initial: bool) {
+        let path = self.config_path.display();
+        match load_and_reconcile(
+            &self.config_path,
+            self.store.as_ref(),
+            self.state.as_ref(),
+            &self.prepare,
+        )
+        .await
+        {
+            Ok((cfg, report)) => {
+                self.status.succeeded();
+                if let Ok(mut w) = self.watcher.lock() {
+                    for contract in contract_paths(&cfg) {
+                        if let Err(error) = w.add(&contract) {
+                            tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
+                        }
+                    }
+                }
+                if let Some(applied) = &self.applied {
+                    applied(cfg).await;
+                }
+                if report.is_empty() {
+                    if initial {
+                        tracing::debug!(config = %path, "config unchanged since it was last applied");
+                    } else {
+                        tracing::info!(config = %path, "config reloaded: no changes");
+                    }
+                } else {
+                    let changed = report.summary();
+                    tracing::info!(
+                        config = %path,
+                        added = report.created.len(),
+                        removed = report.deleted.len(),
+                        created = ?report.created,
+                        updated = ?report.updated,
+                        deleted = ?report.deleted,
+                        new_versions = ?report.new_versions,
+                        "config reloaded: {changed}"
+                    );
+                }
+            }
+            Err(error) => {
+                self.status.failed(format!("{error:#}"));
+                tracing::error!(
+                    config = %path,
+                    error = %format!("{error:#}"),
+                    "config reload failed; keeping the previous state"
+                );
+            }
+        }
+    }
 }
 
 async fn load_and_reconcile(
@@ -351,5 +416,24 @@ mod tests {
         assert!(!w.concerns(&[dir.path().join("..data_tmp")]));
         assert!(!w.concerns(&[dir.path().join("other.yaml")]));
         assert!(!w.concerns(&[other.path().join("..data")]));
+    }
+
+    /// A rescan names the directory, not the file: events were dropped,
+    /// so the config may have changed and is reloaded.
+    #[test]
+    fn a_rescan_concerns_the_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = watcher(dir.path(), "mockingbird.yaml");
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let named = |rescan| Batch {
+            paths: vec![canonical.clone()],
+            rescan,
+        };
+        assert!(!w.concerns_batch(&named(false)));
+        assert!(w.concerns_batch(&named(true)));
+        assert!(w.concerns_batch(&Batch {
+            paths: Vec::new(),
+            rescan: true,
+        }));
     }
 }

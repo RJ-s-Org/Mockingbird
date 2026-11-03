@@ -38,6 +38,7 @@ fn out(status: StatusSelector) -> OutputVariant {
         content_type: Some("application/json".into()),
         schema: None,
         headers: Default::default(),
+        description: None,
     }
 }
 
@@ -351,6 +352,7 @@ fn operation_target_and_stream_item_schema() {
             content_type: None,
             schema: Some(json!({"type": "string"})),
             headers: Default::default(),
+            description: None,
         }],
     );
     assert_eq!(o.target(), "GET /orders/{id}");

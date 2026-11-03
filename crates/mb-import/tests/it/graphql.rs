@@ -131,6 +131,7 @@ fn root_fields_become_operations() {
             content_type: Some("application/json".into()),
             schema: Some(json!({"anyOf": [{"$ref": "#/$defs/Issue"}, {"type": "null"}]})),
             headers: Default::default(),
+            description: None,
         }]
     );
 

@@ -1,0 +1,638 @@
+openapi: 3.0.3
+info:
+  title: Freshdesk API v2 (companies, contacts, tickets and conversations)
+  version: "2"
+  description: |
+    A subset of the Freshdesk REST API v2. Requests use HTTP basic auth with the API
+    key as the user name and `X` as the password.
+
+    A ticket is raised by a requester, who is a contact. When a ticket is created with
+    the `email` of an existing contact, that contact is the requester; with a new email,
+    Freshdesk creates the contact. Ticket `status` is 2 Open, 3 Pending, 4 Resolved,
+    5 Closed; `priority` is 1 Low, 2 Medium, 3 High, 4 Urgent; `source` is 1 Email,
+    2 Portal, 3 Phone, 7 Chat, 9 Feedback widget, 10 Outbound email.
+
+    Deleting a ticket moves it to the trash: it can still be viewed, with
+    `deleted: true`, and is listed under `filter=deleted` but not in the default list.
+    Replies and notes are conversations of a ticket; a note is private unless
+    `private: false` is sent.
+
+    Lists take `page` and `per_page` (default 30, at most 100) and send a `link`
+    header when there is a next page. Errors are `{description, errors[]}`.
+servers:
+  - url: https://acme.freshdesk.com
+security:
+  - basicAuth: []
+tags:
+  - name: Companies
+  - name: Contacts
+  - name: Tickets
+  - name: Conversations
+  - name: Search
+paths:
+  /api/v2/companies:
+    post:
+      tags: [Companies]
+      operationId: createCompany
+      summary: Create a company
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 255}
+                description: {type: string}
+                note: {type: string}
+                domains:
+                  type: array
+                  items: {type: string}
+                industry: {type: string}
+                account_tier: {type: string, enum: [Basic, Premium, Enterprise]}
+      responses:
+        '201':
+          description: The created company.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Company'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v2/contacts:
+    get:
+      tags: [Contacts]
+      operationId: listContacts
+      summary: List all contacts
+      description: By default, verified and unverified contacts that are not deleted or blocked.
+      parameters:
+        - name: email
+          in: query
+          schema: {type: string, format: email}
+        - name: mobile
+          in: query
+          schema: {type: string}
+        - name: phone
+          in: query
+          schema: {type: string}
+        - name: company_id
+          in: query
+          schema: {type: integer, format: int64}
+        - name: state
+          in: query
+          schema: {type: string, enum: [blocked, deleted, unverified, verified]}
+        - name: updated_since
+          in: query
+          schema: {type: string, format: date-time}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The contacts that match.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Contact'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Contacts]
+      operationId: createContact
+      summary: Create a contact
+      description: One of `email`, `phone`, `mobile`, `twitter_id` or `unique_external_id` is needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContactRequest'}
+      responses:
+        '201':
+          description: The created contact.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Contact'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v2/contacts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Contacts]
+      operationId: viewContact
+      summary: View a contact
+      responses:
+        '200':
+          description: The contact.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Contact'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Contacts]
+      operationId: updateContact
+      summary: Update a contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ContactRequest'}
+      responses:
+        '200':
+          description: The updated contact.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Contact'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v2/tickets:
+    get:
+      tags: [Tickets]
+      operationId: listTickets
+      summary: List all tickets
+      description: |
+        By default, tickets created in the past 30 days that are not deleted or spam,
+        newest first. `filter`, `requester_id`, `email` and `company_id` narrow the
+        list; only one of them may be used at a time.
+      parameters:
+        - name: filter
+          in: query
+          description: A predefined filter. `deleted` lists the tickets in the trash.
+          schema: {type: string, enum: [new_and_my_open, watching, spam, deleted]}
+        - name: requester_id
+          in: query
+          schema: {type: integer, format: int64}
+        - name: email
+          in: query
+          description: Tickets raised by the contact with this email.
+          schema: {type: string, format: email}
+        - name: company_id
+          in: query
+          schema: {type: integer, format: int64}
+        - name: updated_since
+          in: query
+          schema: {type: string, format: date-time}
+        - name: order_by
+          in: query
+          schema: {type: string, enum: [created_at, due_by, updated_at, status], default: created_at}
+        - name: order_type
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - name: include
+          in: query
+          description: Embeds more in each ticket, comma separated.
+          schema: {type: string, enum: [requester, stats, description]}
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The tickets that match.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Ticket'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Tickets]
+      operationId: createTicket
+      summary: Create a ticket
+      description: One of `requester_id`, `email`, `phone`, `twitter_id` or `unique_external_id` names the requester.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, description, status, priority]
+              properties:
+                subject: {type: string, minLength: 1}
+                description: {type: string, description: HTML content of the ticket.}
+                email: {type: string, format: email}
+                requester_id: {type: integer, format: int64}
+                name: {type: string}
+                phone: {type: string}
+                status: {$ref: '#/components/schemas/TicketStatus'}
+                priority: {$ref: '#/components/schemas/TicketPriority'}
+                source: {$ref: '#/components/schemas/TicketSource'}
+                type: {type: string, enum: [Question, Incident, Problem, Feature Request, Refund]}
+                tags:
+                  type: array
+                  items: {type: string}
+                cc_emails:
+                  type: array
+                  items: {type: string, format: email}
+                company_id: {type: integer, format: int64}
+                group_id: {type: integer, format: int64}
+                responder_id: {type: integer, format: int64}
+                due_by: {type: string, format: date-time}
+                custom_fields:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '201':
+          description: The created ticket.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ticket'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v2/tickets/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Tickets]
+      operationId: viewTicket
+      summary: View a ticket
+      description: A deleted ticket can still be viewed and has `deleted` true.
+      parameters:
+        - name: include
+          in: query
+          description: Embeds more in the ticket, comma separated.
+          schema: {type: string, example: 'conversations,requester,company,stats'}
+      responses:
+        '200':
+          description: The ticket.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ticket'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Tickets]
+      operationId: updateTicket
+      summary: Update a ticket
+      description: Changes only the fields given.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                subject: {type: string}
+                description: {type: string}
+                status: {$ref: '#/components/schemas/TicketStatus'}
+                priority: {$ref: '#/components/schemas/TicketPriority'}
+                type: {type: string, enum: [Question, Incident, Problem, Feature Request, Refund]}
+                tags:
+                  type: array
+                  items: {type: string}
+                group_id: {type: integer, format: int64}
+                responder_id: {type: integer, format: int64}
+                due_by: {type: string, format: date-time}
+      responses:
+        '200':
+          description: The updated ticket.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ticket'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [Tickets]
+      operationId: deleteTicket
+      summary: Delete a ticket
+      description: Moves the ticket to the trash.
+      responses:
+        '204': {description: The ticket was moved to the trash.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v2/tickets/{id}/reply:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Conversations]
+      operationId: replyToTicket
+      summary: Reply to a ticket
+      description: A public reply from an agent, sent to the requester.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: {type: string, minLength: 1, description: HTML content of the reply.}
+                from_email: {type: string, format: email}
+                user_id: {type: integer, format: int64}
+                cc_emails:
+                  type: array
+                  items: {type: string, format: email}
+      responses:
+        '201':
+          description: The reply.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Conversation'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v2/tickets/{id}/notes:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Conversations]
+      operationId: addNoteToTicket
+      summary: Add a note to a ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: {type: string, minLength: 1}
+                private: {type: boolean, default: true, description: Whether the note is private.}
+                incoming: {type: boolean, default: false}
+                notify_emails:
+                  type: array
+                  items: {type: string, format: email}
+                user_id: {type: integer, format: int64}
+      responses:
+        '201':
+          description: The note.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Conversation'}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v2/tickets/{id}/conversations:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Conversations]
+      operationId: listTicketConversations
+      summary: List all conversations of a ticket
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: The ticket's replies and notes, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Conversation'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v2/search/tickets:
+    get:
+      tags: [Search]
+      operationId: filterTickets
+      summary: Filter tickets
+      description: |
+        Tickets that match a query string. The query is wrapped in double quotes and
+        combines `field:value` terms with AND and OR, for example
+        `"priority:3 AND status:2"` or `"tag:'vip'"`. Results come 30 to a page, at
+        most 10 pages.
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema: {type: string, maxLength: 512, example: '"priority:3 AND status:2"'}
+        - name: page
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 10, default: 1}
+      responses:
+        '200':
+          description: The tickets that match and how many there are.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, total]
+                properties:
+                  results:
+                    type: array
+                    items: {$ref: '#/components/schemas/Ticket'}
+                  total: {type: integer, minimum: 0}
+        '400': {$ref: '#/components/responses/ValidationFailed'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    Page:
+      name: page
+      in: query
+      schema: {type: integer, minimum: 1, default: 1}
+    PerPage:
+      name: per_page
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 30}
+  responses:
+    ValidationFailed:
+      description: The request failed validation.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ValidationError'}
+    Unauthorized:
+      description: The API key is missing or invalid.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SimpleError'}
+    NotFound:
+      description: No resource has that id.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/SimpleError'}
+    Conflict:
+      description: A unique field, such as the email, is already in use.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ValidationError'}
+  schemas:
+    SimpleError:
+      type: object
+      properties:
+        code: {type: string, example: invalid_credentials}
+        message: {type: string}
+    ValidationError:
+      type: object
+      required: [description, errors]
+      properties:
+        description: {type: string, example: Validation failed}
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message, code]
+            properties:
+              field: {type: string}
+              message: {type: string}
+              code: {type: string, enum: [missing_field, invalid_value, duplicate_value, datatype_mismatch, invalid_field, invalid_json, invalid_credentials, access_denied, require_feature, account_suspended, ssl_required, readonly_field, inconsistent_state]}
+    TicketStatus:
+      type: integer
+      enum: [2, 3, 4, 5]
+      description: 2 Open, 3 Pending, 4 Resolved, 5 Closed.
+    TicketPriority:
+      type: integer
+      enum: [1, 2, 3, 4]
+      description: 1 Low, 2 Medium, 3 High, 4 Urgent.
+    TicketSource:
+      type: integer
+      enum: [1, 2, 3, 7, 9, 10]
+      description: 1 Email, 2 Portal, 3 Phone, 7 Chat, 9 Feedback widget, 10 Outbound email.
+    Company:
+      type: object
+      required: [id, name, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        note: {type: string, nullable: true}
+        domains:
+          type: array
+          items: {type: string}
+        industry: {type: string, nullable: true}
+        account_tier: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ContactRequest:
+      type: object
+      properties:
+        name: {type: string, minLength: 1, maxLength: 255}
+        email: {type: string, format: email}
+        phone: {type: string}
+        mobile: {type: string}
+        twitter_id: {type: string}
+        unique_external_id: {type: string}
+        company_id: {type: integer, format: int64}
+        job_title: {type: string}
+        language: {type: string, default: en}
+        time_zone: {type: string}
+        tags:
+          type: array
+          items: {type: string}
+        description: {type: string}
+        address: {type: string}
+    Contact:
+      type: object
+      required: [id, name, email, active, company_id, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        email: {type: string, format: email, nullable: true}
+        phone: {type: string, nullable: true}
+        mobile: {type: string, nullable: true}
+        twitter_id: {type: string, nullable: true}
+        unique_external_id: {type: string, nullable: true}
+        company_id: {type: integer, format: int64, nullable: true}
+        job_title: {type: string, nullable: true}
+        language: {type: string}
+        time_zone: {type: string}
+        tags:
+          type: array
+          items: {type: string}
+        description: {type: string, nullable: true}
+        address: {type: string, nullable: true}
+        active: {type: boolean, description: Whether the contact is verified.}
+        deleted: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Ticket:
+      type: object
+      required: [id, subject, status, priority, source, requester_id, tags, created_at, updated_at, due_by, fr_due_by]
+      properties:
+        id: {type: integer, format: int64}
+        subject: {type: string}
+        description: {type: string, description: HTML content. Listed tickets leave it out unless asked for.}
+        description_text: {type: string}
+        status: {$ref: '#/components/schemas/TicketStatus'}
+        priority: {$ref: '#/components/schemas/TicketPriority'}
+        source: {$ref: '#/components/schemas/TicketSource'}
+        type: {type: string, nullable: true}
+        requester_id: {type: integer, format: int64}
+        responder_id: {type: integer, format: int64, nullable: true}
+        company_id: {type: integer, format: int64, nullable: true}
+        group_id: {type: integer, format: int64, nullable: true}
+        tags:
+          type: array
+          items: {type: string}
+        cc_emails:
+          type: array
+          items: {type: string}
+        fr_escalated: {type: boolean}
+        is_escalated: {type: boolean}
+        spam: {type: boolean}
+        deleted: {type: boolean, description: True once the ticket is in the trash.}
+        due_by: {type: string, format: date-time}
+        fr_due_by: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        custom_fields:
+          type: object
+          additionalProperties: true
+        requester:
+          type: object
+          description: Embedded when `include=requester` is asked for.
+          properties:
+            id: {type: integer, format: int64}
+            name: {type: string}
+            email: {type: string, format: email, nullable: true}
+            mobile: {type: string, nullable: true}
+            phone: {type: string, nullable: true}
+        stats:
+          type: object
+          description: Embedded when `include=stats` is asked for.
+          properties:
+            agent_responded_at: {type: string, format: date-time, nullable: true}
+            requester_responded_at: {type: string, format: date-time, nullable: true}
+            first_responded_at: {type: string, format: date-time, nullable: true}
+            status_updated_at: {type: string, format: date-time, nullable: true}
+            reopened_at: {type: string, format: date-time, nullable: true}
+            resolved_at:
+              type: string
+              format: date-time
+              nullable: true
+              description: When the ticket was last set to Resolved, or null if it never was.
+            closed_at: {type: string, format: date-time, nullable: true}
+            pending_since: {type: string, format: date-time, nullable: true}
+        conversations:
+          type: array
+          description: Embedded when `include=conversations` is asked for (up to ten).
+          items: {$ref: '#/components/schemas/Conversation'}
+    Conversation:
+      type: object
+      required: [id, body, body_text, ticket_id, user_id, incoming, private, source, created_at, updated_at]
+      properties:
+        id: {type: integer, format: int64}
+        body: {type: string, description: HTML content.}
+        body_text: {type: string}
+        ticket_id: {type: integer, format: int64}
+        user_id: {type: integer, format: int64}
+        incoming: {type: boolean}
+        private: {type: boolean}
+        source:
+          type: integer
+          description: 0 Reply, 2 Note, and other channel values.
+          enum: [0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11]
+        support_email: {type: string, format: email, nullable: true}
+        from_email: {type: string, nullable: true}
+        to_emails:
+          type: array
+          items: {type: string}
+        cc_emails:
+          type: array
+          items: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
