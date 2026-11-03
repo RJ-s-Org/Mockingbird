@@ -382,7 +382,11 @@ async fn a_capture_read_sees_its_refunds() {
         ],
     );
     let (status, _) = api
-        .call("POST", "/captures/C1/refund", Some(json!({"amount": "1.00"})))
+        .call(
+            "POST",
+            "/captures/C1/refund",
+            Some(json!({"amount": "1.00"})),
+        )
         .await;
     assert_eq!(status, StatusCode::CREATED);
     api.get("/captures/C1").await;

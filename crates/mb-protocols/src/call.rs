@@ -3458,13 +3458,13 @@ impl Collections {
         }
     }
 
-    /// The resources a create put in `collection` in `session`, as (type, id), the
-    /// newest first, at most `max`. They may since have changed or gone: the caller
+    /// The resources a create put in a collection `fits` in `session`, as (type, id),
+    /// the newest first, at most `max`. They may since have changed or gone: the caller
     /// reads them and checks with [`Collections::get`].
     fn created_in(
         &self,
         session: &SessionKey,
-        collection: &Collection,
+        fits: impl Fn(&Collection) -> bool,
         max: usize,
     ) -> Vec<(String, String)> {
         let Ok(held) = self.0.lock() else {
@@ -3474,7 +3474,7 @@ impl Collections {
             .records
             .iter()
             .filter(|(key, record)| {
-                record.created && key.session == *session && record.collection == *collection
+                record.created && key.session == *session && fits(&record.collection)
             })
             .map(|(key, record)| (key, record.order))
             .collect();
@@ -4192,10 +4192,24 @@ fn holds(resources: &[StoredResource], resource: &StoredResource) -> bool {
 /// Records [`created_alongside`] reads, at most.
 const MAX_CREATED_ALONGSIDE: usize = 4;
 
+/// The path of the record a read by path parameter reads: `/captures/C1` of
+/// `/captures/{capture_id}`.
+fn record_path(op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let param = format!("{{{}}}", target_param(op)?);
+    let segments = path_segments(path);
+    let at = segments.iter().position(|s| *s == param)?;
+    Some(fill_path(call, &segments[..=at])?.path)
+}
+
 /// Adds to `related` what creates put in the collection under a parent path that a
 /// create or a read runs in (`/captures/C1/refund`), newest first: a second refund is
-/// shown the first. The record must still be what was created there, or [`Collections`]
-/// no longer places it; it is scrubbed as a record found by value is
+/// shown the first. A read of one record by its path (`/captures/C1`) is shown, the
+/// same way, what creates put under that path, so a capture's read sees its refunds.
+/// The record must still be what was created there, or [`Collections`] no longer
+/// places it; it is scrubbed as a record found by value is
 /// ([`write_memory::matched_for_context`]). Context only, and only where
 /// [`write_memory::applies`] holds.
 async fn created_alongside(
@@ -4215,13 +4229,21 @@ async fn created_alongside(
     {
         return;
     }
-    let Some(collection) = collection_of(op, call) else {
+    let alongside = collection_of(op, call);
+    let beneath = matches!(op.kind, OperationKind::Query)
+        .then(|| record_path(op, call))
+        .flatten()
+        .map(|path| format!("{path}/"));
+    if alongside.is_none() && beneath.is_none() {
         return;
+    }
+    let fits = |c: &Collection| {
+        alongside.as_ref() == Some(c) || beneath.as_ref().is_some_and(|p| c.path.starts_with(p))
     };
     let session = &plan.session;
     let created = rt
         .collections()
-        .created_in(session, &collection, MAX_CREATED_ALONGSIDE);
+        .created_in(session, fits, MAX_CREATED_ALONGSIDE);
     for (t, id) in created {
         let shown = |r: &StoredResource| r.resource_type == t && r.id == id;
         if target.is_some_and(shown) || related.iter().any(shown) {
@@ -4230,7 +4252,11 @@ async fn created_alongside(
         let Some(held) = state.get(session, &t, &id).await else {
             continue;
         };
-        if rt.collections().get(session, &held).as_ref() != Some(&collection) {
+        if !rt
+            .collections()
+            .get(session, &held)
+            .is_some_and(|c| fits(&c))
+        {
             continue;
         }
         if let Some(data) = write_memory::matched_for_context(rt, plan, &t, &held.data) {
