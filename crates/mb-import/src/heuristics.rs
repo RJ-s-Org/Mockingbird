@@ -67,46 +67,6 @@ fn is_version(seg: &str) -> bool {
     numbers(number) && letters.bytes().all(|b| b.is_ascii_lowercase())
 }
 
-/// The words of a name, split at `_`, `-`, `.` and changes of case: `issueIdOrKey` is
-/// `issue Id Or Key`, `task_gid` is `task gid`, `HTTPStatus` is `HTTP Status`.
-fn words(name: &str) -> Vec<&str> {
-    let chars: Vec<(usize, char)> = name.char_indices().collect();
-    let mut words = Vec::new();
-    let mut start = None;
-    for (k, &(at, c)) in chars.iter().enumerate() {
-        if !c.is_alphanumeric() {
-            if let Some(from) = start.take() {
-                words.push(&name[from..at]);
-            }
-            continue;
-        }
-        let prev = k.checked_sub(1).map(|p| chars[p].1);
-        let next = chars.get(k + 1).map(|n| n.1);
-        let starts_word = c.is_uppercase()
-            && prev.is_some_and(|p| {
-                p.is_lowercase()
-                    || p.is_ascii_digit()
-                    || (p.is_uppercase() && next.is_some_and(char::is_lowercase))
-            });
-        if starts_word && let Some(from) = start.take() {
-            words.push(&name[from..at]);
-        }
-        start.get_or_insert(at);
-    }
-    if let Some(from) = start {
-        words.push(&name[from..]);
-    }
-    words
-}
-
-/// A name lowercased without its separators, so `id_or_key` and `IdOrKey` are one.
-fn joined(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 /// Verbs that make a `POST` a read in RPC-style APIs (Plaid's
 /// `/accounts/get`, `/transactions/sync`; Elasticsearch's `_search`; Slack's
 /// `users.list`).
@@ -256,7 +216,7 @@ fn is_scalar_member(schema: &Value, defs: &Map<String, Value>) -> bool {
 }
 
 /// The response field path parameter `param` names: the property of that name, else
-/// the scalar one the longest trailing group of its [`words`] names, separators and
+/// the scalar one the longest trailing group of its [`mb_mcm::words`] names, separators and
 /// case aside. `issue_iid` names `iid`, `task_gid` `gid`, `issueIdOrKey` `key`,
 /// `MessageSid` `sid` and `issue_number` `number`.
 fn param_field<'a>(
@@ -265,12 +225,14 @@ fn param_field<'a>(
     defs: &Map<String, Value>,
 ) -> Option<&'a str> {
     property(props, param).or_else(|| {
-        let words = words(param);
+        let words = mb_mcm::words(param);
         (0..words.len()).find_map(|from| {
-            let group = joined(&words[from..].concat());
+            let group = mb_mcm::joined_name(&words[from..].concat());
             props
                 .iter()
-                .find(|(member, schema)| joined(member) == group && is_scalar_member(schema, defs))
+                .find(|(member, schema)| {
+                    mb_mcm::joined_name(member) == group && is_scalar_member(schema, defs)
+                })
                 .map(|(member, _)| member.as_str())
         })
     })
@@ -1560,7 +1522,7 @@ mod tests {
             ("sha256Hash", &["sha256", "Hash"]),
             ("id", &["id"]),
         ] {
-            assert_eq!(words(name), expected, "{name}");
+            assert_eq!(mb_mcm::words(name), expected, "{name}");
         }
     }
 

@@ -2615,7 +2615,9 @@ fn overlay(validator: &SchemaValidator, base: Value, fields: Option<&Value>) -> 
     best
 }
 
-/// Set `body[identity.field]` to the path id (else the request body's
+/// Set `body[identity.field]` to the path id (the record's
+/// [`mb_mcm::Identity::path_member`] where it has one, so `/issues/{issue_iid}` sets
+/// `iid` and the key keeps the answer's value; else the request body's
 /// `identity.input_field`), as a string or (when the schema wants one) a
 /// number. The answer of an action that does not return its resource is a
 /// record of its own: only a member named for the path parameter names the
@@ -2654,7 +2656,16 @@ fn force_identity(
     let Some(record) = identity.record_in(&body) else {
         return body;
     };
-    if !record.is_object() || record.get(&identity.field) == Some(id) {
+    // A path naming another member than the key (`/issues/{issue_iid}`) sets that
+    // member, and the key keeps the answer's own value. A record without the member
+    // (an action's own record) takes the value in its key, as before.
+    let named = identity.path_member();
+    let field = if from_path.is_some() && record.get(named).is_some() {
+        named
+    } else {
+        identity.field.as_str()
+    };
+    if !record.is_object() || record.get(field) == Some(id) {
         return body;
     }
     let mut candidates = vec![id.clone()];
@@ -2672,7 +2683,7 @@ fn force_identity(
     for candidate in candidates {
         let mut forced = body.clone();
         if let Some(Value::Object(obj)) = identity.record_in_mut(&mut forced) {
-            obj.insert(identity.field.clone(), candidate);
+            obj.insert(field.to_owned(), candidate);
         }
         if validator.is_valid(&forced) {
             return forced;

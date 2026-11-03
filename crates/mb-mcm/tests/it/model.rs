@@ -1,6 +1,26 @@
 use mb_mcm::*;
 use serde_json::json;
 
+#[test]
+fn the_path_names_its_member_unless_its_words_name_the_key_too() {
+    let identity = |param: &str, path_field: Option<&str>| Identity {
+        path_param: Some(param.into()),
+        field: "id".into(),
+        input_field: None,
+        path_field: path_field.map(Into::into),
+        record: None,
+    };
+    assert_eq!(identity("issue_iid", Some("iid")).path_member(), "iid");
+    assert_eq!(
+        identity("issue_number", Some("number")).path_member(),
+        "number"
+    );
+    assert_eq!(identity("issueIdOrKey", Some("key")).path_member(), "id");
+    assert_eq!(identity("id", None).path_member(), "id");
+    assert!(names_member("issueIdOrKey", "id_or_key"));
+    assert!(!names_member("issue_iid", "id"));
+}
+
 fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
     Operation {
         id: id.into(),

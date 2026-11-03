@@ -2887,11 +2887,10 @@ async fn store_wrapped(
 /// answer for another's: such an answer stores nothing, the response cache
 /// keeping its repeat. So does one naming its target after an owner that it
 /// does not show (see [`shows_owner`]).
-/// A route read by another member (`/issues/{number}`) stores nothing when its
-/// answer's `id` came from the path, as that is no resource's and a list would
-/// store the issue again. Otherwise it goes under that `id` when the member holds
-/// the path's value and the answer shows the path's owner: a team read by its
-/// `slug`.
+/// A route read by another member (`/issues/{number}`, `/teams/{team_slug}`) goes
+/// under its answer's own `id` when that member holds the path's value, which
+/// the engine sets there. A later read finds it by that member, within the
+/// path's owner.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -2925,13 +2924,16 @@ async fn seed_own_read(
     if detail_schema.is_none() || detail_schema != own_schema {
         return;
     }
-    let id = if let Some(named) = identity.path_field.as_deref() {
-        // Read by another member than its key (`/teams/{team_slug}` by `slug`): stored
-        // under its own key when the answer holds the path's value in that member and
-        // a key that is not the path's value too, which would be no record's.
+    let named = identity.path_member();
+    let id = if named != identity.field {
+        // Read by another member than its key (`/issues/{issue_iid}` by `iid`): the path's
+        // value is in that member, and the record goes under its own key.
         let value = |member: &str| body.get(member).and_then(id_string);
-        value(&identity.field)
-            .filter(|id| id != target_id && value(named).as_deref() == Some(target_id))
+        value(&identity.field).filter(|_| value(named).as_deref() == Some(target_id))
+    } else if identity.path_field.is_some() {
+        // A path that may hold the key or another member (Jira's `issueIdOrKey`) tells
+        // neither apart, so a generated read stores nothing.
+        return;
     } else if path_names_identity(identity) {
         Some(target_id.to_string())
     } else {
@@ -2947,7 +2949,7 @@ async fn seed_own_read(
         id,
         data: body.clone(),
     };
-    if (identity.path_field.is_some() || !path_names_identity(identity))
+    if !path_names_identity(identity)
         && let Some(owner) = owner_of(op, call)
         && !shows_owner(rt, &resource, &owner)
     {
@@ -3596,7 +3598,20 @@ async fn read_context(
             .get(session, t, id)
             .await
             .filter(|hit| owner.is_none_or(|o| key_fits(rt, session, hit, o)))
-        {
+            // Where the path names another member than the key (`/issues/{number}`),
+            // a record keyed by the path's value is another one unless that member
+            // says so too.
+            .filter(|hit| {
+                op.identity.as_ref().is_none_or(|identity| {
+                    let named = identity.path_member();
+                    named == identity.field
+                        || hit
+                            .data
+                            .get(named)
+                            .and_then(id_string)
+                            .is_none_or(|value| value == id)
+                })
+            }) {
             Some(hit) => Some(hit),
             None => {
                 let delete = matches!(op.kind, OperationKind::Command(Effect::Delete));
@@ -5873,7 +5888,8 @@ paths:
             mock: "m".into(),
             session: DEFAULT_SESSION.into(),
         };
-        let data = json!({"id": "c1", "offerId": "of1", "customer": "c2"});
+        // `customer` is the member the path names, so it holds the path's value.
+        let data = json!({"id": "c1", "offerId": "of1", "customer": "c1"});
         let stored = StoredResource {
             resource_type: "customers".into(),
             id: "c1".into(),

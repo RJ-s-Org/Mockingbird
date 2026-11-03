@@ -1244,7 +1244,9 @@ async fn a_read_by_number_does_not_answer_for_another_issue() {
 async fn a_read_by_number_keeps_its_id_and_is_stored() {
     let api = actions_of(
         ISSUES,
-        vec![Ok(json!({"id": 999, "number": 3, "title": "seven"}).to_string())],
+        vec![Ok(
+            json!({"id": 999, "number": 3, "title": "seven"}).to_string()
+        )],
     );
     let (_, issue) = read(&api, "/issues/7").await;
     assert_eq!(issue["id"], 999, "{issue}");
