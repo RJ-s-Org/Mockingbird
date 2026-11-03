@@ -635,7 +635,7 @@ components:
         isBookmarked: {type: boolean}
         isSubscribed: {type: boolean}
         hasSeen: {type: boolean}
-        count: {type: string, description: Events seen, as a string.}
+        count: {type: string, description: "Events seen, as a string."}
         userCount: {type: integer}
         firstSeen: {type: string, format: date-time}
         lastSeen: {type: string, format: date-time}

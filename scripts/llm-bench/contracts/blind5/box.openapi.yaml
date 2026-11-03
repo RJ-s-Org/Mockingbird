@@ -138,7 +138,7 @@ paths:
             schema:
               type: object
               properties:
-                name: {type: string, description: A new name, when the old one is taken.}
+                name: {type: string, description: "A new name, when the old one is taken."}
                 parent: {$ref: "#/components/schemas/ParentInput"}
       responses:
         "201":
@@ -294,7 +294,7 @@ paths:
             schema:
               type: object
               properties:
-                name: {type: string, description: A new name, when the old one is taken.}
+                name: {type: string, description: "A new name, when the old one is taken."}
                 parent: {$ref: "#/components/schemas/ParentInput"}
       responses:
         "201":
