@@ -11,7 +11,8 @@
 //! of, a text query parameter of the route other than the page size: Zoom's
 //! `next_page_token` for `next_page_token`, Square's `cursor` for `cursor`, Pipedrive's
 //! `additional_data.next_cursor` for `cursor`. A pair is a cursor only when the request
-//! does not carry the parameter (a page is asked for without one first), the parameter
+//! does not carry the parameter, or carries it empty (`cursor=`: a page is asked for
+//! without one first), the parameter
 //! names no member of the items (`status` filters them), and what the model put in the
 //! member echoes no value of the request (a search's `query`). Exactly one pair, or none
 //! is used; nor is a token written that leaves the answer invalid. With none, the
@@ -23,9 +24,11 @@
 //! size, the page as answered, and the items left out that no delete marker covers (at
 //! most [`MAX_REST`]). They are seeded as a list's items are, so a read of one finds it.
 //! A session keeps at most [`MAX_CUTS`] cuts: each goes in one of that many places,
-//! taken in turn, so a new cut ends the oldest and nothing is read to count them; two
-//! nodes may take the same place, which only ends a cut early. The session's TTL ends
-//! them all. A token is the cut's nonce, its place and the offset of the next item, in
+//! picked by a counter this process shares across sessions, so nothing is read to count
+//! them. A new cut ends whichever of the session's cuts held its place, which is not
+//! always its oldest when other sessions mint meanwhile, and two nodes may pick the same
+//! place: either only ends a cut early, whose token then goes to the model. The
+//! session's TTL ends them all. A token is the cut's nonce, its place and the offset of the next item, in
 //! [`TOKEN_LEN`] hex digits: the same token always serves the same page and the same
 //! next token, and serving one writes nothing.
 //!
@@ -36,7 +39,9 @@
 //! ([`lists::narrow`]) and the delete markers ([`deleted::drop_from_list`]) applied
 //! again, as the session may have written since; and the next token when more remain.
 //! The last page's token is `null`, left out or empty, whichever the answer validates
-//! with; with none, the request is the model's. A token with other filter values, of
+//! with; with none, the request is the model's. A boolean beside the token, in the same
+//! object, that the first page set `true` (`has_more`) is `false` on the last page when
+//! the answer validates so, and else as it was. A token with other filter values, of
 //! a cut since ended, or of another route, is the model's too. Its query differs from
 //! the first page's by the token, so the response cache never answers it with the
 //! first page; it is not cached itself, as the token already serves it.
@@ -90,7 +95,7 @@ fn is_free_text(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
             .any(|p| p.get("const").is_some() || p.get("enum").is_some())
 }
 
-/// The text values `call` holds in its path and query.
+/// The text values `call` holds in its path and query, empty ones aside.
 fn request_values(call: &OperationCall) -> Vec<String> {
     let mut out = Vec::new();
     for value in call.path_params.values().chain(call.query.values()) {
@@ -99,7 +104,49 @@ fn request_values(call: &OperationCall) -> Vec<String> {
             other => out.extend(id_string(other)),
         }
     }
+    out.retain(|value| !value.trim().is_empty());
     out
+}
+
+/// Whether `call` carries query parameter `name` with a value: `cursor=` carries none.
+fn carries(call: &OperationCall, name: &str) -> bool {
+    call.query.get(name).is_some_and(|value| match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        _ => true,
+    })
+}
+
+/// `body` with each boolean beside `slot`, in the same object, that `first` holds
+/// `true` set to `false`: a `has_more` the first page set, on the last.
+fn without_more(body: &Value, first: &Value, slot: &[String]) -> Option<Value> {
+    let (_, parents) = slot.split_last()?;
+    let object_at = |value: &Value| {
+        parents
+            .iter()
+            .try_fold(value.clone(), |at, name| at.get(name).cloned())
+    };
+    let flags: Vec<String> = object_at(first)?
+        .as_object()?
+        .iter()
+        .filter(|(_, value)| value.as_bool() == Some(true))
+        .map(|(name, _)| name.clone())
+        .collect();
+    if flags.is_empty() {
+        return None;
+    }
+    let mut out = body.clone();
+    let mut at = &mut out;
+    for name in parents {
+        at = at.get_mut(name)?;
+    }
+    let object = at.as_object_mut()?;
+    for flag in flags {
+        if object.get(&flag).and_then(Value::as_bool) == Some(true) {
+            object.insert(flag, Value::Bool(false));
+        }
+    }
+    Some(out)
 }
 
 /// The one place answer `body` to `call` has for a token (see the module's doc).
@@ -119,7 +166,7 @@ fn slot(
         .filter(|(name, schema)| {
             name.as_str() != size_param
                 && !mb_mcm::is_generic_id(name)
-                && !call.query.contains_key(name.as_str())
+                && !carries(call, name)
                 && lists::named_member(bundle, &item_parts, name).is_none()
                 && is_free_text(bundle, schema)
         })
@@ -491,7 +538,12 @@ pub(super) async fn serve(
         let end = ends
             .into_iter()
             .filter_map(|end| placed(&body, &cut.slot, end))
-            .find_map(|candidate| valid(&candidate));
+            .find_map(|candidate| {
+                // No more, as the first page said there was, where the answer allows.
+                without_more(&candidate, &cut.page, &cut.slot)
+                    .and_then(|done| valid(&done))
+                    .or_else(|| valid(&candidate))
+            });
         if end.is_none() {
             tracing::debug!(
                 mock = %rt.name,
