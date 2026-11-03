@@ -384,17 +384,14 @@ fn apply_item_members(operations: &mut [Operation], defs: &Map<String, Value>) {
         let (Some(member), None) = (named.next(), named.next()) else {
             continue;
         };
+        // The member the path names is the key, whatever else the item has: the
+        // record is stored, found and forced by it, as on the type's other routes.
         let member = member.clone();
-        let field = if props.contains_key("id") {
-            "id".to_owned()
-        } else {
-            member.clone()
-        };
         op.identity = Some(Identity {
             path_param: Some(param.clone()),
-            path_field: (field != member).then(|| member.clone()),
-            field,
+            field: member.clone(),
             input_field: None,
+            path_field: None,
             record: Some(mb_mcm::RecordAt::Item),
         });
         found.push((t, param, member));

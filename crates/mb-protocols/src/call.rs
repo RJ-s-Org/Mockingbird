@@ -1030,8 +1030,9 @@ fn nothing_held(
 
 /// A read of a member of its parent (see [`BundleIndex::member_reads`]), answered by
 /// that member of the stored parent: Spotify's `/playlists/{id}/items` by the stored
-/// playlist's `tracks`. Not while a write the parent's record does not show yet is
-/// remembered for the parent or for this route, as the member is then behind it.
+/// playlist's `tracks`. Not with a query, and not while a write the parent's record
+/// does not show yet is remembered for the parent or for this route, as the member is
+/// then behind it.
 async fn member_read(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -1040,9 +1041,11 @@ async fn member_read(
 ) -> Option<GeneratedResponse> {
     let rt = state.rt;
     let op = plan.op;
+    // A query asks for another view of the member (a page, a filter): it generates.
     if !(rt.consistency
         && matches!(op.kind, OperationKind::Query)
         && plain(plan)
+        && call.query.is_empty()
         && mb_engine::seed::request_seed(call).is_none())
     {
         return None;
@@ -1166,27 +1169,34 @@ pub(crate) async fn complete(
                 && rt.consistency
                 && target_id.is_none()
                 && !transient_fallback(&generated);
-            // A single answer with an identity of its own is the record, not a list of
-            // what it holds (a weather reading's `weather` conditions). One of a route
-            // with no parameters (`/me`) is an earlier answer (see [`world`]) instead.
-            let single_read = match &op.binding {
-                Binding::Http { path, .. } => rt.index().single_reads.contains_key(path),
-                _ => false,
+            // A single answer with an identity of its own is one record, not a list of
+            // what it holds (a weather reading's `weather` conditions). It is stored
+            // under its identity only on a route with no path parameter, which then
+            // reads it: one with a parameter that is not the identity (TMDB's
+            // `/movie/{movie_id}/credits`) would make a type of what no read finds, and
+            // one with no parameters at all (`/me`) is an earlier answer (see
+            // [`world`]) instead.
+            let (in_path, single_read) = match &op.binding {
+                Binding::Http { path, .. } => (
+                    path.contains('{'),
+                    rt.index().single_reads.contains_key(path),
+                ),
+                _ => (false, false),
             };
             let own_record = op
                 .identity
                 .as_ref()
-                .filter(|i| seeding && !single_read && i.path_param.is_none())
+                .filter(|i| seeding && i.path_param.is_none())
                 .and_then(|i| generated.body.as_ref()?.get(&i.field).and_then(id_string));
-            if let Some(id) = own_record
-                && let Some(body) = generated.body.clone()
-            {
-                let resource = StoredResource {
-                    resource_type: t.to_string(),
-                    id,
-                    data: body,
-                };
-                state.insert_seeded(session, resource).await;
+            if let Some(id) = own_record {
+                if let Some(body) = generated.body.clone().filter(|_| !in_path && !single_read) {
+                    let resource = StoredResource {
+                        resource_type: t.to_string(),
+                        id,
+                        data: body,
+                    };
+                    state.insert_seeded(session, resource).await;
+                }
             } else if (!is_query || seeding)
                 && !unstored
                 && !write_memory::keeps_stored(rt, plan, &generated, target.is_some())
@@ -1793,6 +1803,41 @@ pub(crate) struct BundleIndex {
     /// `/playlists/{id}`), by position, when it answers exactly the schema of one of
     /// that record's members (`tracks`): where to find it (see [`member_read`]).
     member_reads: HashMap<usize, MemberRead>,
+    /// Per resource type whose read by path answers its record in an envelope or an
+    /// array, the record's own schema: what a stored record of the type must suit.
+    record_schemas: HashMap<String, Value>,
+}
+
+/// The schema of the record an answer of `schema` holds where `identity` says: an
+/// envelope's member, or an array's items. `None` for an answer that is its record.
+fn record_schema_of(
+    bundle: &mb_mcm::Bundle,
+    identity: &mb_mcm::Identity,
+    schema: &Value,
+) -> Option<Value> {
+    match identity.record.as_ref()? {
+        mb_mcm::RecordAt::Member(member) => property_schema(bundle, schema, member),
+        mb_mcm::RecordAt::Item => {
+            let (parts, _) = schema_parts(bundle, Some(schema));
+            parts.iter().find_map(|p| p.get("items")).cloned()
+        }
+    }
+}
+
+/// The [`BundleIndex::record_schemas`] of `bundle`, from the reads by path chosen.
+fn record_schemas_of(
+    bundle: &mb_mcm::Bundle,
+    detail_reads: &HashMap<String, usize>,
+) -> HashMap<String, Value> {
+    detail_reads
+        .iter()
+        .filter_map(|(t, i)| {
+            let op = bundle.operations.get(*i)?;
+            let schema = op.success_output()?.schema.as_ref()?;
+            let record = record_schema_of(bundle, op.identity.as_ref()?, schema)?;
+            Some((t.clone(), record))
+        })
+        .collect()
 }
 
 /// Where a read of a member of its parent finds it.
@@ -1960,6 +2005,7 @@ impl BundleIndex {
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
         let (single_reads, written_lists) = routes_of(bundle, &read_types, &list_members_of);
+        let record_schemas = record_schemas_of(bundle, &detail_reads);
         let mut effect_types: Vec<String> =
             detail_reads.keys().chain(shapes.keys()).cloned().collect();
         effect_types.sort_unstable();
@@ -1998,6 +2044,7 @@ impl BundleIndex {
             single_reads,
             written_lists,
             member_reads: member_reads_of(bundle),
+            record_schemas,
         }
     }
 
@@ -2212,13 +2259,11 @@ fn rank_defs(
     });
     found.extend(items);
     for (rank, def, member) in found {
-        // A list held by one record is of the type its member names, if any, and
-        // never of the record's.
-        let (t, rank) = match (&member, own && rank == LIST) {
-            (Some(m), true) if mb_mcm::stem(m) == mb_mcm::stem(t) => continue,
-            (Some(m), true) => (m.as_str(), OTHER),
-            _ => (t, rank),
-        };
+        // A list held by one record says nothing of what its items are: they are of
+        // a type only where another read serves exactly their schema.
+        if own && rank == LIST {
+            continue;
+        }
         let held = ranked
             .entry(def)
             .or_insert_with(|| (rank, t.to_string(), member.clone()));
@@ -2256,12 +2301,9 @@ fn record_shapes(
     };
     for (member, items) in lists {
         match member.as_deref() {
-            // What a record holds is no shape of its type.
-            Some(m) if own => {
-                if mb_mcm::stem(m) != mb_mcm::stem(t) {
-                    record(m, ITEMS, items);
-                }
-            }
+            // What a record holds is no shape of a type, its own or one named for
+            // the member.
+            Some(_) if own => {}
             None => record(t, ITEMS, items),
             Some(m) if ENVELOPE_KEYS.contains(&m) || members.len() == 1 => {
                 record(t, ITEMS, items);
@@ -2880,7 +2922,8 @@ fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
     let index = rt.index();
     let bundle = rt.bundle();
     let (read, shape) = match index.detail_reads.get(t) {
-        Some(i) => (Some(*i), None),
+        // A record its read answers in an envelope or an array suits its own schema.
+        Some(i) => (Some(*i), index.record_schemas.get(t)),
         None => match index.other_shapes.get(t) {
             Some((i, schema)) => (Some(*i), Some(schema)),
             None => (None, None),
@@ -3672,7 +3715,8 @@ fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option
         return Some(paths.all(|text| path_shows(text, owner)));
     }
     let index = rt.index();
-    let schema = index.detail_reads.get(&r.resource_type).and_then(|i| {
+    let schema = index.record_schemas.get(&r.resource_type).or_else(|| {
+        let i = index.detail_reads.get(&r.resource_type)?;
         rt.bundle()
             .operations
             .get(*i)?
@@ -4915,7 +4959,8 @@ paths:
     }
 
     /// A list under a member naming a type read by path is that type, and one a
-    /// record holds under any other member is the member's, not the record's.
+    /// record holds, of a schema no read serves, is of no type: not the record's,
+    /// and not one named for its member.
     #[test]
     fn a_listed_def_takes_its_members_type() {
         let path = format!(
@@ -4926,7 +4971,7 @@ paths:
         let index = rt.index();
         assert_eq!(index.types_by_def["Offer"], "offers");
         assert_eq!(index.types_by_def["FlightOffer"], "offers");
-        assert_eq!(index.types_by_def["PassengerRecord"], "passengers");
+        assert_eq!(index.types_by_def.get("PassengerRecord"), None);
     }
 
     /// GitHub's `repository` is the detail route's type, not a list's.
