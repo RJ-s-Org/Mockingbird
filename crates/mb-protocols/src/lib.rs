@@ -400,6 +400,9 @@ pub struct MockRuntime {
     /// Which stored resource a path field value names, from this
     /// runtime's writes (see [`call::PathAliases`]).
     path_aliases: call::PathAliases,
+    /// The identities and member values of this runtime's writes (see
+    /// [`call::ValueIndex`]).
+    value_index: call::ValueIndex,
     /// Which types each session was last seen writing (see [`call::WrittenTypes`]).
     written_types: call::WrittenTypes,
     /// Which stored resources are a plain read's own answer (see
@@ -524,6 +527,7 @@ impl MockRuntime {
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),
+            value_index: call::ValueIndex::default(),
             written_types: call::WrittenTypes::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
@@ -573,6 +577,12 @@ impl MockRuntime {
     /// [`call::PathAliases`]).
     pub(crate) fn path_aliases(&self) -> &call::PathAliases {
         &self.path_aliases
+    }
+
+    /// Identities and member values of this runtime's writes (see
+    /// [`call::ValueIndex`]).
+    pub(crate) fn value_index(&self) -> &call::ValueIndex {
+        &self.value_index
     }
 
     /// Which types each session was last seen writing.

@@ -31,7 +31,10 @@ use crate::{
 mod deleted;
 mod lists;
 mod minted;
+mod value_index;
 mod world;
+
+pub(crate) use value_index::ValueIndex;
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
@@ -4367,11 +4370,15 @@ impl<'a> StateAccess<'a> {
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
         let t = r.resource_type.clone();
+        let indexed = value_index::Indexed::of(rt, &r);
         let r = rt.state.upsert(s, r).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
         if ok && t != mb_state::INTERNAL_TYPE {
             rt.written_types().remember(s, &t);
+        }
+        if ok {
+            rt.value_index().remember_indexed(s, indexed);
         }
         if ok && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
@@ -4387,6 +4394,9 @@ impl<'a> StateAccess<'a> {
         let r = self.rt.state.delete(s, t, id).await;
         let ok = self.settle(r).is_some();
         self.wrote |= ok;
+        if ok {
+            self.rt.value_index().forget(s, t, id);
+        }
         ok
     }
 
@@ -4405,11 +4415,13 @@ impl<'a> StateAccess<'a> {
         let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
         let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
         let t = r.resource_type.clone();
+        let indexed = value_index::Indexed::of(rt, &r);
         let r = rt.state.insert_seeded(s, r).await;
         let stored = self.settle(r).unwrap_or(false);
         self.wrote |= stored;
         if stored {
             rt.written_types().remember(s, &t);
+            rt.value_index().remember_indexed(s, indexed);
         }
         if stored && let Some((t, id)) = named {
             rt.path_aliases().remember(s, &t, &id, values);
