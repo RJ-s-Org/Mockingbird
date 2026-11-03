@@ -5388,3 +5388,76 @@ components:
     assert_eq!(source, "state", "{own}");
     assert_eq!(own["amount"], 100);
 }
+
+const CHANNEL_MESSAGES: &str = r##"
+openapi: 3.0.0
+info: {title: Chat, version: "1"}
+paths:
+  /channels/{channel_id}/messages:
+    post:
+      operationId: createMessage
+      parameters: [{name: channel_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content: {type: string}
+                reference: {type: object, properties: {message_id: {type: string}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /channels/{channel_id}/messages/{message_id}:
+    get:
+      operationId: getMessage
+      parameters:
+        - {name: channel_id, in: path, required: true, schema: {type: string}}
+        - {name: message_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+components:
+  schemas:
+    Message:
+      type: object
+      required: [id, content]
+      properties: {id: {type: string}, channel_id: {type: string}, content: {type: string}}
+"##;
+
+/// A new message's id is not one its request carries: an answer reusing the
+/// channel's id from the path, or the id of the message a body member links to,
+/// gets a fresh one, under which it reads back.
+#[tokio::test]
+async fn a_create_id_equal_to_an_id_in_the_request_is_redrawn() {
+    let message = |id: &str, content: &str| {
+        Ok(json!({"id": id, "channel_id": "c1", "content": content}).to_string())
+    };
+    let h = actions_of(
+        CHANNEL_MESSAGES,
+        vec![message("c1", "first"), message("m9", "second")],
+    );
+    let (status, _, first) = h
+        .call(
+            "POST",
+            "/channels/c1/messages",
+            Some(json!({"content": "first"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, _, second) = h
+        .call(
+            "POST",
+            "/channels/c1/messages",
+            Some(json!({"content": "second", "reference": {"message_id": "m9"}})),
+        )
+        .await;
+    for (answer, carried, content) in [(&first, "c1", "first"), (&second, "m9", "second")] {
+        let id = answer["id"].as_str().unwrap();
+        assert_ne!(id, carried, "{answer}");
+        assert!(!id.is_empty());
+        let (_, source, read) = h
+            .call("GET", &format!("/channels/c1/messages/{id}"), None)
+            .await;
+        assert_eq!(source, "state", "{read}");
+        assert_eq!(read["content"], content);
+    }
+}

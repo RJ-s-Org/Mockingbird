@@ -73,6 +73,19 @@ No migration or configuration. With `limits.output_budget_tokens` on, for a resp
 - **Recorded prompts**: a snapshot taken before this release may not replay for such a call, as the schema sent differs.
 - **Rust API**: `budget::shape` takes the request's page size as a `budget::PageLimit`, as `budget::requested_limit` reads it from the query schema, the answer's schema and the call.
 
+### Prompts carry response descriptions and request defaults
+
+No migration or configuration.
+
+- **Recompile to show descriptions**: a bundle stored before this release has no response descriptions, so its prompts stay as they were until the contract is imported again.
+- **More prompt tokens where they apply**: a response description adds a line of up to 160 characters to the system message, and request defaults a `<request_defaults>` block of about 20 tokens plus the values to the user message. The system message's array rule is about 20 tokens longer on every call.
+- **A create can answer differently**: a body member it leaves out that declares a `default` now answers the default, where the model or the faker picked any value. An update's body is never defaulted.
+- **Lists can be empty**: a search that nothing matches can now answer an empty array where the model gave 3 to 5 invented items.
+- **The output budget can fill different members**: deeper required members go first, and an array item's only object member with a required `id` or `uri` stays in the schema, so a shaped answer may keep more of each item and fill more of what lies below it.
+- **New ids avoid the request's values**: a create's id equal to a path value or a body string is redrawn, so an answer that reused one is stored under a fresh id.
+- **Recorded prompts**: a snapshot or recording taken before this release may not replay where one of these applies.
+- **Rust API**: `mb_mcm::OutputVariant` gains `description`, which breaks code constructing it in full.
+
 ### An update's answer settles on the stored copy by what the request named
 
 No migration or configuration. For an update (`PUT` or `PATCH`, not an action route) answered by an LLM with the schema of the resource's read, on a stored resource:

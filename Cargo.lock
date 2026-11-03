@@ -3777,6 +3777,7 @@ dependencies = [
  "cron",
  "flate2",
  "futures",
+ "http 1.5.0",
  "insta",
  "ipnet",
  "jsonschema",
