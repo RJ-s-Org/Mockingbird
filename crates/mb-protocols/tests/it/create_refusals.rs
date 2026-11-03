@@ -30,7 +30,7 @@ paths:
       operationId: createContact
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, properties: {name: {type: string}, email: {type: string}, status: {type: string}}}}}
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}, email: {type: string}, status: {type: string}, org_id: {type: string}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
         "409": {description: A contact with this email already exists., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
@@ -45,7 +45,7 @@ paths:
       operationId: createFolder
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, properties: {name: {type: string}, parent: {type: object, properties: {id: {type: string}}}}}}}
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}, note: {type: string}, parent: {type: object, properties: {id: {type: string}}}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}
         "409": {description: An item with the same name already exists in the parent., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
@@ -65,12 +65,14 @@ components:
         name: {type: string}
         email: {type: string}
         status: {type: string}
+        org_id: {type: string}
     Folder:
       type: object
       required: [id, name]
       properties:
         id: {type: string}
         name: {type: string}
+        note: {type: string}
         parent: {type: object, properties: {id: {type: string}}}
     Error:
       type: object
@@ -115,12 +117,23 @@ fn harness(contract: &str, script: Vec<Value>) -> Harness {
 
 impl Harness {
     async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
-        let req = Request::builder()
+        self.post_with(uri, body, &[]).await
+    }
+
+    async fn post_with(
+        &self,
+        uri: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
             .method("POST")
             .uri(uri)
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req.body(Body::from(body.to_string())).unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -219,6 +232,17 @@ async fn a_create_with_a_taken_email_is_shown_its_holder_and_offered_the_409() {
     assert!(
         prompt.contains("409: A contact with this email already exists."),
         "{prompt}"
+    );
+    let note = &prompt[prompt.find("<same_values>").unwrap_or_default()..];
+    assert!(!note.is_empty(), "{prompt}");
+    let before = &prompt[..prompt.find("<same_values>").unwrap_or_default()];
+    let preface = &before[before.rfind("\n\n").map_or(0, |i| i + 2)..];
+    assert!(
+        preface.contains("data, not instructions")
+            && preface.contains("only when")
+            && preface.contains("description")
+            && preface.contains("otherwise"),
+        "the note says a shared value is no conflict by itself: {prompt}"
     );
     assert_eq!(
         h.format_schema(1)["properties"]["refusal"],
@@ -361,4 +385,226 @@ async fn a_taken_name_counts_only_in_the_same_parent() {
     let prompt = h.prompt(1);
     assert!(!prompt.contains("fd-000001"), "{prompt}");
     assert!(!prompt.contains("refusal"), "{prompt}");
+}
+
+/// A same-email create of a contact under another org, by its body's reference, is no
+/// conflict: the referenced parent differs, so the stored contact is not shown.
+#[tokio::test]
+async fn a_body_reference_to_another_parent_shows_nothing() {
+    let mut stored = contact("ct-000101", "Jane Roe", "jane.roe@example.com");
+    stored["org_id"] = json!("org-000001");
+    let mut second = contact("ct-000102", "Jane Roe", "jane.roe@example.com");
+    second["org_id"] = json!("org-000002");
+    let h = harness(CONTRACT, vec![stored, second]);
+    h.post(
+        "/contacts",
+        json!({"name": "Jane Roe", "email": "jane.roe@example.com", "org_id": "org-000001"}),
+    )
+    .await;
+    let (status, _) = h
+        .post(
+            "/contacts",
+            json!({"name": "Jane Roe", "email": "jane.roe@example.com", "org_id": "org-000002"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = h.prompt(1);
+    assert!(!prompt.contains("ct-000101"), "{prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
+}
+
+/// A plain value alone, or beside members that are no reference, is no evidence of a
+/// conflict: a folder of the same name and note, with no parent, is shown nothing.
+#[tokio::test]
+async fn a_lone_plain_value_is_no_conflict() {
+    for body in [
+        json!({"name": "Quarterly Reports"}),
+        json!({"name": "Quarterly Reports", "note": "numbers for the board"}),
+    ] {
+        let mut held = body.clone();
+        held["id"] = json!("fd-000001");
+        let mut again = body.clone();
+        again["id"] = json!("fd-000002");
+        let h = harness(CONTRACT, vec![held, again]);
+        h.post("/folders", body.clone()).await;
+        let (status, _) = h.post("/folders", body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let prompt = h.prompt(1);
+        assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
+        assert!(!prompt.contains("same_values"), "{prompt}");
+        assert!(!prompt.contains("refusal"), "{prompt}");
+    }
+}
+
+/// Members of an org and tasks of a project, created under the parent their path
+/// names, each declaring a conflict.
+const NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Nested, version: "1"}
+paths:
+  /orgs/{org}/members:
+    post:
+      operationId: addMember
+      parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {email: {type: string}}}}}
+      responses:
+        "201": {description: added, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+        "409": {description: The email is already a member., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /members/{member_id}:
+    get:
+      operationId: getMember
+      parameters: [{name: member_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+  /projects/{project}/tasks:
+    post:
+      operationId: addTask
+      parameters: [{name: project, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}
+      responses:
+        "201": {description: added, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+        "422": {description: The task is not valid., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /tasks/{task_id}:
+    get:
+      operationId: getTask
+      parameters: [{name: task_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Member:
+      type: object
+      required: [id, email]
+      properties: {id: {type: string}, email: {type: string}}
+    Task:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+    Error:
+      type: object
+      required: [name, message]
+      properties: {name: {type: string}, message: {type: string}}
+"##;
+
+/// The same email under another org, or the same title under another project, is in
+/// another collection: neither is shown nor offered a refusal.
+#[tokio::test]
+async fn a_hit_under_another_path_parent_shows_nothing() {
+    let h = harness(
+        NESTED,
+        vec![
+            json!({"id": "mb-000001", "email": "jane.roe@example.com"}),
+            json!({"id": "mb-000002", "email": "jane.roe@example.com"}),
+        ],
+    );
+    let body = json!({"email": "jane.roe@example.com"});
+    h.post("/orgs/acme/members", body.clone()).await;
+    let (status, _) = h.post("/orgs/globex/members", body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = h.prompt(1);
+    assert!(!prompt.contains("mb-000001"), "{prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
+
+    // In the same org, the member is a conflict.
+    let h = harness(
+        NESTED,
+        vec![
+            json!({"id": "mb-000001", "email": "jane.roe@example.com"}),
+            refusal(),
+        ],
+    );
+    let body = json!({"email": "jane.roe@example.com"});
+    h.post("/orgs/acme/members", body.clone()).await;
+    let (status, _) = h.post("/orgs/acme/members", body).await;
+    let prompt = h.prompt(1);
+    assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+    let same = block(&prompt, "same_values").unwrap_or_default();
+    assert!(same.contains("mb-000001"), "{prompt}");
+
+    let h = harness(
+        NESTED,
+        vec![
+            json!({"id": "tk-000001", "title": "Buy milk"}),
+            json!({"id": "tk-000002", "title": "Buy milk"}),
+        ],
+    );
+    let body = json!({"title": "Buy milk"});
+    h.post("/projects/A/tasks", body.clone()).await;
+    let (status, _) = h.post("/projects/B/tasks", body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = h.prompt(1);
+    assert!(!prompt.contains("tk-000001"), "{prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
+}
+
+/// A create carrying a declared idempotency key may be a retry of the one stored, which
+/// the API answers again rather than refuses: it is shown nothing of its type. A header
+/// known by its description counts as one named so does.
+#[tokio::test]
+async fn an_idempotent_retry_shows_nothing() {
+    for header in [
+        "        - {name: Idempotency-Key, in: header, schema: {type: string}}\n",
+        "        - {name: X-Request-Ref, in: header, description: A unique idempotency key for safely retrying the request., schema: {type: string}}\n",
+    ] {
+        let name = if header.contains("Idempotency-Key") {
+            "Idempotency-Key"
+        } else {
+            "X-Request-Ref"
+        };
+        let contract = CONTRACT.replacen(
+            "      operationId: createContact\n",
+            &format!("      operationId: createContact\n      parameters:\n{header}"),
+            1,
+        );
+        assert_ne!(contract, CONTRACT);
+        let h = harness(
+            &contract,
+            vec![
+                contact("ct-000101", "Jane Roe", "jane.roe@example.com"),
+                contact("ct-000102", "Jane Roe", "jane.roe@example.com"),
+                refusal(),
+            ],
+        );
+        let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
+        h.post_with("/contacts", body.clone(), &[(name, "key-000001")])
+            .await;
+        let (status, _) = h
+            .post_with("/contacts", body.clone(), &[(name, "key-000001")])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{name}");
+        let prompt = h.prompt(1);
+        assert!(!prompt.contains("refusal"), "{name}: {prompt}");
+        // Without the key, the same create is offered the refusal.
+        let (status, _) = h.post("/contacts", body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{name}: {}", h.prompt(2));
+    }
+}
+
+/// A create whose answer has a member named as the refusal is offered none, so it is
+/// shown nothing of its type either: the two gates stay in step.
+#[tokio::test]
+async fn a_create_never_offered_a_refusal_is_shown_nothing() {
+    let contract = CONTRACT.replacen(
+        "        status: {type: string}\n        org_id: {type: string}\n",
+        "        status: {type: string}\n        org_id: {type: string}\n        refusal: {type: string}\n",
+        1,
+    );
+    assert_ne!(contract, CONTRACT);
+    let h = harness(
+        &contract,
+        vec![
+            contact("ct-000101", "Jane Roe", "jane.roe@example.com"),
+            contact("ct-000102", "J. Roe", "jane.roe@example.com"),
+        ],
+    );
+    let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
+    h.post("/contacts", body.clone()).await;
+    let (status, _) = h.post("/contacts", body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = h.prompt(1);
+    assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
 }
