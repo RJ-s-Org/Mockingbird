@@ -1432,8 +1432,9 @@ pub(crate) fn transient_fallback(generated: &GeneratedResponse) -> bool {
 }
 
 /// The id of `generated`'s answer, when the request did not ask for it and the
-/// session already holds a resource under it or the request carries it (see
-/// [`request_values`]): a new record is not the parent or channel it was made in.
+/// session already holds a resource under it, of this type or another (see
+/// [`world::held_elsewhere`]), or the call's path carries it (see [`call_path_values`]): a
+/// new record is not the parent or channel it was made in.
 async fn taken_id(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1452,52 +1453,29 @@ async fn taken_id(
     if requested.as_deref() == Some(id.as_str()) {
         return None;
     }
-    (request_values(op, call).contains(&id)
-        || state.get(session, resource_type, &id).await.is_some())
-    .then_some(id)
+    if call_path_values(op, call).contains(&id)
+        || state.get(session, resource_type, &id).await.is_some()
+        || world::held_elsewhere(state, session, resource_type, &id).await
+    {
+        return Some(id);
+    }
+    None
 }
 
-/// The values a request carries in its path and, as strings, anywhere in its body:
-/// what it acts on or links to. A create's path value naming the record itself, and
-/// a body member named as the identity at any depth (`{"book": {"id": ..}}`, or
-/// `@id` for an XML attribute), are
-/// its request for an id, and left out.
-fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
-    fn strings(value: &Value, field: &str, depth: usize, out: &mut HashSet<String>) {
-        match value {
-            Value::String(s) if !s.is_empty() => {
-                out.insert(s.clone());
-            }
-            Value::Array(items) if depth < 8 => {
-                for item in items {
-                    strings(item, field, depth + 1, out);
-                }
-            }
-            Value::Object(members) if depth < 8 => {
-                // `@id` is how an XML attribute `id` reads (see the SOAP mapper).
-                let own = |name: &str| name.strip_prefix('@').unwrap_or(name) == field;
-                for (_, member) in members.iter().filter(|(name, _)| !own(name)) {
-                    strings(member, field, depth + 1, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let identity = op.identity.as_ref();
-    let own_param = identity
+/// The values of the call's path parameters, but for a create's own (a path naming
+/// the record it makes): what the call acts on or is made under. A body's values are
+/// no such signal, as a create may answer one as its id (`{"name": "my-bucket"}`).
+fn call_path_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
+    let own = op
+        .identity
+        .as_ref()
         .and_then(|i| i.path_param.as_deref())
         .filter(|_| matches!(op.kind, OperationKind::Command(Effect::Create)));
-    let mut out: HashSet<String> = call
-        .path_params
+    call.path_params
         .iter()
-        .filter(|(name, _)| Some(name.as_str()) != own_param)
+        .filter(|(name, _)| Some(name.as_str()) != own)
         .filter_map(|(_, v)| id_string(v))
-        .collect();
-    let field = identity.map_or("id", |i| i.field.as_str());
-    if let Some(body) = &call.body {
-        strings(body, field, 0, &mut out);
-    }
-    out
+        .collect()
 }
 
 /// Gives a create's answer a fresh identity when its generated one is taken (see
@@ -1521,7 +1499,7 @@ async fn unique_create_id(
     let Some(body) = generated.body.as_ref() else {
         return;
     };
-    let carried = request_values(op, call);
+    let carried = call_path_values(op, call);
     for _ in 0..3 {
         let Some(fresh) = rt
             .engine
@@ -1560,7 +1538,7 @@ async fn place_new_record(
     };
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let mut fresh = None;
-    let carried = request_values(op, call);
+    let carried = call_path_values(op, call);
     if let Some(body) = generated.body.as_ref() {
         for attempt in 0..3 {
             let draw = rt

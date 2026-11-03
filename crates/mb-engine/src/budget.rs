@@ -19,7 +19,8 @@
 //!    goes last, as the rest of its items' members can go instead (a search's
 //!    `tracks` is nothing without its `items`). An array item's only object
 //!    member with an identity of its own (a required `id` or `uri`) stays, as
-//!    the item is that record: a playlist entry's `track`.
+//!    the item is that record (a playlist entry's `track`), unless nothing else
+//!    brings the estimate within budget.
 //!
 //! A request's page size ([`requested_limit`]) holds for the page's item arrays
 //! (arrays of objects, the heaviest in each object), and the estimate counts it: those arrays are not capped below
@@ -113,19 +114,35 @@ pub fn shape(
         .filter(|cap| size.is_some_and(|l| *cap < l))
         .map(Some);
     let last = size.map(|_| None);
-    let mut planned = None;
-    for floor in std::iter::once(size).chain(lower).chain(last) {
-        let plan = plan(doc, requested, selected, budget, Held::at(floor, &pages))?;
-        let fits = plan.tokens <= budget;
-        planned = Some(plan);
-        if fits {
+    let floors: Vec<Option<u64>> = std::iter::once(size).chain(lower).chain(last).collect();
+    let mut planned: Option<Plan> = None;
+    // An item's identity is kept while anything else can go instead; when nothing
+    // else fits the budget, it goes too.
+    'shaping: for spare in [true, false] {
+        if !spare && !planned.as_ref().is_some_and(|p| p.spared) {
             break;
+        }
+        for floor in &floors {
+            let plan = plan(
+                doc,
+                requested,
+                selected,
+                budget,
+                Held::at(*floor, &pages),
+                spare,
+            )?;
+            let fits = plan.tokens <= budget;
+            planned = Some(plan);
+            if fits {
+                break 'shaping;
+            }
         }
     }
     let Plan {
         schema,
         dropped,
         tokens,
+        ..
     } = planned?;
     tracing::debug!(
         estimated = before.round(),
@@ -142,15 +159,19 @@ struct Plan {
     /// See [`Shaped::fills`].
     dropped: HashSet<(String, String)>,
     tokens: f64,
+    /// An item's identity member was kept that could have gone.
+    spared: bool,
 }
 
-/// The steps of shaping, with the page's arrays held as `held` says.
+/// The steps of shaping, with the page's arrays held as `held` says; `spare` keeps
+/// an array item's identity member (see [`Member::identity`]).
 fn plan(
     doc: &Value,
     requested: &HashSet<String>,
     selected: bool,
     budget: f64,
     held: Held<'_>,
+    spare: bool,
 ) -> Option<Plan> {
     let mut doc = doc.clone();
     let mut stats = Stats::of(&doc, held)?;
@@ -183,8 +204,9 @@ fn plan(
             if stats.tokens <= budget || (pages && floor.is_some()) {
                 break;
             }
-            let required =
-                |m: &Member| m.required && m.min_depth >= 2 && (pages || !m.page) && !m.identity;
+            let required = |m: &Member| {
+                m.required && m.min_depth >= 2 && (pages || !m.page) && !(spare && m.identity)
+            };
             drop_until(
                 &mut doc,
                 &mut stats,
@@ -195,10 +217,12 @@ fn plan(
             )?;
         }
     }
+    let spared = spare && !selected && stats.members.values().any(|m| m.identity && m.required);
     Some(Plan {
         schema: doc,
         dropped,
         tokens: stats.tokens,
+        spared,
     })
 }
 
@@ -1212,6 +1236,39 @@ mod tests {
         doc["$defs"]["entry"]["properties"]["added_by"] = json!({"$ref": "#/$defs/track"});
         let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
         assert!(shaped.fills("/$defs/entry", "track") || shaped.fills("/$defs/entry", "added_by"));
+    }
+
+    /// Keeping an item's identity is a preference: a `track` of required scalars that
+    /// nothing within it can shrink goes when the budget needs it to.
+    #[test]
+    fn an_identity_too_heavy_for_the_budget_still_goes() {
+        let mut track = user();
+        track["required"].as_array_mut().unwrap().push(json!("id"));
+        track["properties"]["id"] = json!({"type": "string"});
+        let doc = json!({
+            "type": "object",
+            "required": ["items"],
+            "properties": {"items": {"type": "array", "items": {
+                "type": "object",
+                "required": ["added_at", "track"],
+                "properties": {
+                    "added_at": {"type": "string", "format": "date-time"},
+                    "track": track
+                }
+            }}}
+        });
+        for budget in [100, 200] {
+            let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
+            let estimate = Stats::of(&shaped.schema, every(None)).unwrap().tokens;
+            assert!(estimate <= f64::from(budget), "{budget}: {estimate}");
+        }
+        // At 100 one track alone is over budget.
+        let shaped = shape(&doc, &HashSet::new(), false, 100, None).unwrap();
+        assert!(
+            shaped.fills("/properties/items/items", "track"),
+            "{}",
+            shaped.schema
+        );
     }
 
     #[test]

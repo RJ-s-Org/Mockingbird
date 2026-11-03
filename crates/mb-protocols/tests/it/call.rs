@@ -5393,71 +5393,128 @@ const CHANNEL_MESSAGES: &str = r##"
 openapi: 3.0.0
 info: {title: Chat, version: "1"}
 paths:
+  /channels:
+    post:
+      operationId: createChannel
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /channels/{channel_id}:
+    get:
+      operationId: getChannel
+      parameters: [{name: channel_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
   /channels/{channel_id}/messages:
     post:
-      operationId: createMessage
+      operationId: createChannelMessage
       parameters: [{name: channel_id, in: path, required: true, schema: {type: string}}]
       requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                content: {type: string}
-                reference: {type: object, properties: {message_id: {type: string}}}
+        content: {application/json: {schema: {type: object, properties: {content: {type: string}}}}}
       responses:
         "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
-  /channels/{channel_id}/messages/{message_id}:
+  /messages:
+    post:
+      operationId: postMessage
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {channel: {type: string}, content: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /messages/{message_id}:
     get:
       operationId: getMessage
-      parameters:
-        - {name: channel_id, in: path, required: true, schema: {type: string}}
-        - {name: message_id, in: path, required: true, schema: {type: string}}
+      parameters: [{name: message_id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /buckets:
+    post:
+      operationId: createBucket
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Bucket"}}}}
+  /buckets/{bucket}:
+    get:
+      operationId: getBucket
+      parameters: [{name: bucket, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Bucket"}}}}
 components:
   schemas:
+    Channel:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
     Message:
       type: object
       required: [id, content]
-      properties: {id: {type: string}, channel_id: {type: string}, content: {type: string}}
+      properties: {id: {type: string}, channel: {type: string}, content: {type: string}}
+    Bucket:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
 "##;
 
-/// A new message's id is not one its request carries: an answer reusing the
-/// channel's id from the path, or the id of the message a body member links to,
+/// A new message's id is no id the path carries, nor another record's the session
+/// holds: an answer reusing its channel's id, from the path or from a body member,
 /// gets a fresh one, under which it reads back.
 #[tokio::test]
-async fn a_create_id_equal_to_an_id_in_the_request_is_redrawn() {
+async fn a_create_id_equal_to_a_path_value_or_a_held_record_is_redrawn() {
     let message = |id: &str, content: &str| {
-        Ok(json!({"id": id, "channel_id": "c1", "content": content}).to_string())
+        Ok(json!({"id": id, "channel": "c1", "content": content}).to_string())
     };
     let h = actions_of(
         CHANNEL_MESSAGES,
-        vec![message("c1", "first"), message("m9", "second")],
+        vec![
+            Ok(json!({"id": "c1", "name": "general"}).to_string()),
+            message("c1", "first"),
+            message("c1", "second"),
+        ],
     );
-    let (status, _, first) = h
+    let (status, _, channel) = h.call("POST", "/channels", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(channel["id"], "c1");
+    let (_, _, first) = h
         .call(
             "POST",
             "/channels/c1/messages",
             Some(json!({"content": "first"})),
         )
         .await;
-    assert_eq!(status, StatusCode::CREATED);
     let (_, _, second) = h
         .call(
             "POST",
-            "/channels/c1/messages",
-            Some(json!({"content": "second", "reference": {"message_id": "m9"}})),
+            "/messages",
+            Some(json!({"channel": "c1", "content": "second"})),
         )
         .await;
-    for (answer, carried, content) in [(&first, "c1", "first"), (&second, "m9", "second")] {
+    for (answer, content) in [(&first, "first"), (&second, "second")] {
         let id = answer["id"].as_str().unwrap();
-        assert_ne!(id, carried, "{answer}");
+        assert_ne!(id, "c1", "{answer}");
         assert!(!id.is_empty());
-        let (_, source, read) = h
-            .call("GET", &format!("/channels/c1/messages/{id}"), None)
-            .await;
+        let (_, source, read) = h.call("GET", &format!("/messages/{id}"), None).await;
         assert_eq!(source, "state", "{read}");
         assert_eq!(read["content"], content);
     }
+    let (_, source, kept) = h.call("GET", "/channels/c1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(kept["name"], "general");
+}
+
+/// A create may answer a body value as its id: a bucket named `my-bucket` is
+/// stored, and read back, as `my-bucket`.
+#[tokio::test]
+async fn a_create_keeps_an_id_its_body_named_otherwise() {
+    let h = actions_of(
+        CHANNEL_MESSAGES,
+        vec![Ok(
+            json!({"id": "my-bucket", "name": "my-bucket"}).to_string()
+        )],
+    );
+    let (status, _, bucket) = h
+        .call("POST", "/buckets", Some(json!({"name": "my-bucket"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(bucket["id"], "my-bucket", "{bucket}");
+    let (_, source, read) = h.call("GET", "/buckets/my-bucket", None).await;
+    assert_eq!(source, "state", "{read}");
 }

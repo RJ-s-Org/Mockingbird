@@ -78,12 +78,12 @@ No migration or configuration. With `limits.output_budget_tokens` on, for a resp
 No migration or configuration.
 
 - **Recompile to show descriptions**: a bundle stored before this release has no response descriptions, so its prompts stay as they were until the contract is imported again.
-- **More prompt tokens where they apply**: a response description adds a line of up to 160 characters to the system message, and request defaults a `<request_defaults>` block of about 20 tokens plus the values to the user message. The system message's array rule is about 20 tokens longer on every call.
+- **More prompt tokens**: the system message's array rule is about 20 tokens longer on every call. A response description adds a `<response_description>` block of about 25 tokens plus up to 160 characters to the system message, and request defaults a `<request_defaults>` block of about 20 tokens plus the values to the user message. Page sizes and what the credential checks hide are never shown as defaults.
 - **A create can answer differently**: a body member it leaves out that declares a `default` now answers the default, where the model or the faker picked any value. An update's body is never defaulted.
 - **Lists can be empty**: a search that nothing matches can now answer an empty array where the model gave 3 to 5 invented items.
-- **The output budget can fill different members**: deeper required members go first, and an array item's only object member with a required `id` or `uri` stays in the schema, so a shaped answer may keep more of each item and fill more of what lies below it.
-- **New ids avoid the request's values**: a create's id equal to a path value or a body string is redrawn, so an answer that reused one is stored under a fresh id.
-- **Recorded prompts**: a snapshot or recording taken before this release may not replay where one of these applies.
+- **The output budget can fill different members**: deeper required members go first, and an array item's only object member with a required `id` or `uri` stays in the schema while anything else can go, so a shaped answer may keep more of each item and fill more of what lies below it. The estimate fits the budget wherever it did before.
+- **New ids avoid the call's path and other held records**: a create's id equal to a path value, or to the id of a record of another type the session holds, is redrawn, so an answer that reused one is stored under a fresh id. A create can cost up to 32 more store reads with `consistency: on`. Body values do not count.
+- **Recorded prompts**: the system message changed for every call, so a snapshot or recording keyed on the exact prompt and taken before this release no longer replays.
 - **Rust API**: `mb_mcm::OutputVariant` gains `description`, which breaks code constructing it in full.
 
 ### An update's answer settles on the stored copy by what the request named
