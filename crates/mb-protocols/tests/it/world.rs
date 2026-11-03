@@ -2215,9 +2215,12 @@ async fn a_write_on_a_shown_record_can_be_refused_as_declared() {
     let prompt = h.prompt(0);
     assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
     assert!(
-        prompt.contains("for this call: 422."),
+        prompt.contains(
+            "<refusal_statuses>\n- 422: the capture cannot be refunded\n</refusal_statuses>"
+        ),
         "only what fits: {prompt}"
     );
+    assert!(!prompt.contains("- 401"), "{prompt}");
     assert_eq!(
         format_schema(&h, 0)["properties"]["refusal"],
         json!({"type": "integer", "enum": [422]})
@@ -2306,8 +2309,8 @@ async fn no_declared_error_leaves_the_call_as_it_was() {
     );
 }
 
-/// A create is offered no refusal, though it was shown a record: what it would be refused
-/// on is not its own target.
+/// A create is offered no refusal, though it was shown a record: only its body names it,
+/// which is neither a parent its path names nor a record of the type it creates.
 #[tokio::test]
 async fn a_create_is_offered_no_refusal() {
     let contract = REFUNDS.replace(
@@ -2333,6 +2336,453 @@ async fn a_create_is_offered_no_refusal() {
     let related = block(&prompt, "related_resources").unwrap_or_default();
     assert!(related.contains("cap-4711"), "{prompt}");
     assert!(!prompt.contains("refusal"), "{prompt}");
+}
+
+/// Refunds created under the capture their path names, which declare a 409 and a
+/// 422 for one the capture cannot take.
+const CAPTURE_REFUNDS: &str = r##"
+openapi: 3.0.0
+info: {title: Refunds, version: "1"}
+paths:
+  /captures/{capture_id}:
+    get:
+      operationId: getCapture
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Capture"}}}}
+  /captures/{capture_id}/refunds:
+    post:
+      operationId: createRefund
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {amount: {type: string}}}}}
+      responses:
+        "201": {description: refunded, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+        "409": {description: The capture is already fully refunded., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "422": {description: The amount is more than the capture has left., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "401": {description: unauthorized, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /refunds/{refund_id}:
+    get:
+      operationId: getRefund
+      parameters: [{name: refund_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+components:
+  schemas:
+    Capture:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, amount: {type: string}}
+    Refund:
+      type: object
+      required: [id, status, refunded_amount]
+      properties: {id: {type: string}, status: {type: string}, refunded_amount: {type: string}}
+    Error:
+      type: object
+      required: [name, message]
+      properties: {name: {type: string}, message: {type: string}}
+"##;
+
+fn capture_refund() -> Value {
+    json!({"id": "ref-1", "status": "COMPLETED", "refunded_amount": "10.00"})
+}
+
+/// A create under a stored parent its path names, shown to it, can answer a declared
+/// conflict: the prompt lists each declared status with the contract's description of
+/// it and says to refuse only when what is shown contradicts the request. Nothing is
+/// stored, and the parent is as it was.
+#[tokio::test]
+async fn a_create_under_a_shown_parent_can_be_refused_as_declared() {
+    let bundle = compile(CAPTURE_REFUNDS.as_bytes()).unwrap();
+    let op = bundle.operation("createRefund").unwrap();
+    assert_eq!(
+        op.kind,
+        mb_mcm::OperationKind::Command(mb_mcm::Effect::Create)
+    );
+    let h = harness_with(
+        CAPTURE_REFUNDS.as_bytes(),
+        vec![json!({"effects": [], "response": null, "refusal": 409})],
+        |_| {},
+    );
+    h.hold("captures", "cap-4711", capture()).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/captures/cap-4711/refunds",
+            Some(json!({"amount": "10.00"})),
+        )
+        .await;
+    let prompt = h.prompt(0);
+    assert_eq!(status, StatusCode::CONFLICT, "{body} {prompt}");
+    assert!(
+        body["name"].is_string() && body["message"].is_string(),
+        "{body}"
+    );
+    assert_eq!(h.calls(), 1, "no second call to render it");
+    assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
+    assert!(
+        prompt.contains("409: The capture is already fully refunded."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("422: The amount is more than the capture has left."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("contradict"), "{prompt}");
+    assert!(!prompt.contains("401"), "{prompt}");
+    assert_eq!(
+        format_schema(&h, 0)["properties"]["refusal"],
+        json!({"type": "integer", "enum": [409, 422]})
+    );
+    assert_eq!(h.held("captures", "cap-4711").await, capture());
+    let exported = h.store.export(&session()).await.unwrap();
+    assert_eq!(exported.len(), 1, "no refund stored: {exported:?}");
+}
+
+/// A create whose operation declares no such error is offered no refusal, though it
+/// was shown its parent; and a create under a parent that is not stored is shown
+/// nothing it could conflict with, so it is offered none either.
+#[tokio::test]
+async fn a_create_with_no_declared_conflict_or_nothing_shown_is_offered_no_refusal() {
+    let without = CAPTURE_REFUNDS
+        .lines()
+        .filter(|l| !l.contains("\"409\"") && !l.contains("\"422\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(without, CAPTURE_REFUNDS);
+    let h = harness_with(
+        without.as_bytes(),
+        vec![json!({"effects": [], "response": capture_refund(), "refusal": 409})],
+        |_| {},
+    );
+    h.hold("captures", "cap-4711", capture()).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/captures/cap-4711/refunds",
+            Some(json!({"amount": "10.00"})),
+        )
+        .await;
+    let prompt = h.prompt(0);
+    assert_eq!(status, StatusCode::CREATED, "{body} {prompt}");
+    assert!(prompt.contains("cap-4711\""), "shown its parent: {prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
+
+    let h = harness_with(CAPTURE_REFUNDS.as_bytes(), vec![capture_refund()], |_| {});
+    let (status, _) = h
+        .call(
+            "POST",
+            "/captures/cap-unknown/refunds",
+            Some(json!({"amount": "10.00"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(!h.prompt(0).contains("refusal"), "{}", h.prompt(0));
+}
+
+/// Entries replaced with the version they were read at in a header, which declare a
+/// 409 for a stale one.
+const VERSIONED: &str = r##"
+openapi: 3.0.0
+info: {title: Entries, version: "1"}
+security: [{bearer: []}]
+paths:
+  /entries/{entry_id}:
+    get:
+      operationId: getEntry
+      parameters: [{name: entry_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}
+    put:
+      operationId: putEntry
+      parameters:
+        - {name: entry_id, in: path, required: true, schema: {type: string}}
+        - {name: X-Entry-Version, in: header, description: The version the entry was read at., schema: {type: integer}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}
+        "409": {description: The version is not the entry's current one., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer}
+  schemas:
+    Entry:
+      type: object
+      required: [id, version]
+      properties: {id: {type: string}, version: {type: integer}, title: {type: string}}
+    Error:
+      type: object
+      required: [name, message]
+      properties: {name: {type: string}, message: {type: string}}
+"##;
+
+/// A write's declared header reaches the prompt with the contract's description of it,
+/// so a stale version can be refused as declared; its bearer token never does.
+#[tokio::test]
+async fn a_declared_header_reaches_the_prompt_and_its_token_does_not() {
+    let h = harness_with(
+        VERSIONED.as_bytes(),
+        vec![json!({"effects": [], "response": null, "refusal": 409})],
+        |_| {},
+    );
+    let entry = json!({"id": "e1", "version": 3, "title": "a"});
+    h.hold("entries", "e1", entry.clone()).await;
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/entries/e1")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer tok-very-secret")
+        .header("x-entry-version", "2")
+        .body(Body::from(json!({"title": "b"}).to_string()))
+        .unwrap();
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    let prompt = h.prompt(0);
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "{prompt}");
+    let request = block(&prompt, "request").unwrap_or_default();
+    assert!(
+        request.contains("\"headers\":{\"X-Entry-Version\":\"2\"}"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("header `X-Entry-Version`: The version the entry was read at."),
+        "{prompt}"
+    );
+    for request in h.provider.requests() {
+        for message in &request.messages {
+            assert!(!message.content.contains("tok-very-secret"), "{prompt}");
+            assert!(
+                !message
+                    .content
+                    .to_ascii_lowercase()
+                    .contains("authorization"),
+                "{prompt}"
+            );
+        }
+    }
+    assert_eq!(h.held("entries", "e1").await, entry);
+}
+
+/// Comments on a post, one of which may answer another, which declare a 409.
+const COMMENTS: &str = r##"
+openapi: 3.0.0
+info: {title: Comments, version: "1"}
+paths:
+  /posts/{post_id}/comments:
+    post:
+      operationId: createComment
+      parameters: [{name: post_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {text: {type: string}, in_reply_to: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+        "409": {description: The same comment was already posted., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /comments/{comment_id}:
+    get:
+      operationId: getComment
+      parameters: [{name: comment_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+components:
+  schemas:
+    Comment:
+      type: object
+      required: [id, text]
+      properties: {id: {type: string}, text: {type: string}, in_reply_to: {type: string}}
+    Error:
+      type: object
+      required: [name, message]
+      properties: {name: {type: string}, message: {type: string}}
+"##;
+
+/// A comment its body only names (the one it answers) is no conflict, though it is of
+/// the type the create makes: the create is offered no refusal. One that a create put
+/// in the same collection is, and the next create is offered the declared 409.
+#[tokio::test]
+async fn a_record_only_the_body_names_offers_a_create_no_refusal() {
+    let first = json!({"id": "cmt-000201", "text": "me too", "in_reply_to": "cmt-000123"});
+    let h = harness_with(
+        COMMENTS.as_bytes(),
+        vec![
+            json!({"effects": [], "response": first}),
+            json!({"effects": [], "response": null, "refusal": 409}),
+        ],
+        |_| {},
+    );
+    h.hold(
+        "comments",
+        "cmt-000123",
+        json!({"id": "cmt-000123", "text": "hello"}),
+    )
+    .await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too", "in_reply_to": "cmt-000123"})),
+        )
+        .await;
+    let prompt = h.prompt(0);
+    assert_eq!(status, StatusCode::CREATED, "{body} {prompt}");
+    let related = block(&prompt, "related_resources").unwrap_or_default();
+    assert!(related.contains("cmt-000123"), "shown by value: {prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
+
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too"})),
+        )
+        .await;
+    let prompt = h.prompt(1);
+    assert!(prompt.contains("cmt-000201"), "shown alongside: {prompt}");
+    assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body} {prompt}");
+}
+
+/// A comment the request names by value that a create also put in the same
+/// collection still counts as created alongside, though what the prompt shows of it is
+/// a scrubbed copy: the next create is offered the declared 409.
+#[tokio::test]
+async fn a_record_created_alongside_counts_when_also_named_by_value() {
+    let first = json!({
+        "id": "cmt-000201",
+        "text": "me too",
+        "access_token": "tok-kept-out-1",
+    });
+    let h = harness_with(
+        COMMENTS.as_bytes(),
+        vec![
+            first,
+            json!({"effects": [], "response": null, "refusal": 409}),
+        ],
+        |_| {},
+    );
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too", "in_reply_to": "cmt-000201"})),
+        )
+        .await;
+    let prompt = h.prompt(1);
+    assert!(prompt.contains("cmt-000201"), "{prompt}");
+    assert!(!prompt.contains("tok-kept-out-1"), "scrubbed: {prompt}");
+    assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body} {prompt}");
+}
+
+/// Entries listed in the language a header names.
+const LOCALIZED: &str = r##"
+openapi: 3.0.0
+info: {title: Entries, version: "1"}
+paths:
+  /entries:
+    get:
+      operationId: listEntries
+      parameters:
+        - {name: X-Locale, in: header, description: The language of the answer., schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Entry"}}}}}
+components:
+  schemas:
+    Entry:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+"##;
+
+async fn get_with(h: &Harness, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    let mut req = Request::builder().method("GET").uri(uri);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let resp = h
+        .router
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A declared header the prompt shows is part of what a read is cached by: another
+/// language is generated, the same one is repeated, and a header the prompt does not
+/// show changes nothing.
+#[tokio::test]
+async fn a_shown_header_keys_the_read_cache() {
+    let h = harness_with(
+        LOCALIZED.as_bytes(),
+        vec![
+            json!([{"id": "e1", "title": "Hello"}]),
+            // Another id: the list overlay would lay the stored e1 over a second e1.
+            json!([{"id": "e2", "title": "Bonjour"}]),
+        ],
+        |_| {},
+    );
+    let (_, en) = get_with(&h, "/entries", &[("x-locale", "en")]).await;
+    let (_, fr) = get_with(&h, "/entries", &[("x-locale", "fr")]).await;
+    assert_eq!(h.calls(), 2, "{en} {fr}");
+    assert_eq!(fr[0]["title"], "Bonjour", "{fr}");
+    let (_, again) = get_with(&h, "/entries", &[("x-locale", "en"), ("x-undeclared", "1")]).await;
+    assert_eq!(h.calls(), 2, "repeated from the cache");
+    assert_eq!(again, en);
+}
+
+/// Items found by an API key sent in the query, with no data-plane auth.
+const KEYED_QUERY: &str = r##"
+openapi: 3.0.0
+info: {title: Items, version: "1"}
+security: [{key: []}]
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {type: object, properties: {id: {type: string}}}}}}}
+components:
+  securitySchemes:
+    key: {type: apiKey, in: query, name: access}
+"##;
+
+/// The value of a query parameter an API-key scheme names never reaches the prompt,
+/// whatever it is called; the rest of the query does.
+#[tokio::test]
+async fn an_api_key_in_the_query_stays_out_of_the_prompt() {
+    let h = harness_with(KEYED_QUERY.as_bytes(), vec![json!([{"id": "i1"}])], |_| {});
+    let (status, _) = h
+        .call("GET", "/items?q=lamp&access=query-secret-8", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let prompt = h.prompt(0);
+    let request = block(&prompt, "request").unwrap_or_default();
+    assert!(request.contains("\"query\":{\"q\":\"lamp\"}"), "{prompt}");
+    for request in h.provider.requests() {
+        for message in &request.messages {
+            assert!(!message.content.contains("query-secret-8"), "{prompt}");
+        }
+    }
 }
 
 /// An error body the faker cannot make valid is served saying so, as a fallback.

@@ -520,6 +520,60 @@ async fn none_mode_unchanged() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// API keys under names no compiled requirement uses, with no data-plane auth.
+const DECLARED_KEYS: &str = r##"
+openapi: 3.0.0
+info: {title: Keys, version: "1"}
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+components:
+  securitySchemes:
+    tenant: {type: apiKey, in: header, name: X-Tenant-Ident}
+    access: {type: apiKey, in: query, name: access}
+"##;
+
+/// With `data_plane_auth: none`, a header or query parameter any API-key scheme of the
+/// contract names never enters the request record, though no requirement uses it; the
+/// rest is kept. A bundle compiled before those names were kept records as it did.
+#[tokio::test]
+async fn none_mode_never_records_a_declared_api_key() {
+    let send_one = |bundle: Arc<Bundle>| async move {
+        let collect = Arc::new(Collect::default());
+        let mut rt = runtime("keys", bundle, None, memory());
+        rt.recorder = Some(collect.clone());
+        let router = http_rest::router(Arc::new(rt));
+        let resp = send(
+            &router,
+            get(
+                "/things?access=qsecret-1&x=1",
+                &[("X-Tenant-Ident", "hsecret-2"), ("x-trace", "t1")],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let records = collect.records.lock().unwrap().clone();
+        records[0].request.clone()
+    };
+    let bundle = Arc::new(compile(DECLARED_KEYS.as_bytes()).unwrap());
+    let recorded = send_one(Arc::clone(&bundle)).await;
+    assert_eq!(recorded["query"], json!({"x": "1"}), "{recorded}");
+    assert_eq!(recorded["headers"]["x-trace"], "t1", "{recorded}");
+    for secret in ["qsecret-1", "hsecret-2"] {
+        assert!(!recorded.to_string().contains(secret), "{recorded}");
+    }
+    let mut old = (*bundle).clone();
+    old.api_key_names = None;
+    let recorded = send_one(Arc::new(old)).await;
+    assert_eq!(
+        recorded["query"]["access"], "qsecret-1",
+        "as before: {recorded}"
+    );
+}
+
 /// Data-plane auth runs in the shared call pipeline, so a SOAP mock in
 /// `api_key` mode reads the key from its HTTP headers: without one the call
 /// is a `401` client Fault with the challenge; with one it is served, and

@@ -352,7 +352,10 @@ fn params_schema(params: &[&Value], location: &str) -> Option<Value> {
                 .map(|(_, m)| schema_of(m))
                 .unwrap_or_else(|| json!({})),
         };
-        props.insert(name.to_owned(), schema);
+        props.insert(
+            name.to_owned(),
+            crate::schema::with_param_description(schema, p),
+        );
         if p.get("required").and_then(Value::as_bool) == Some(true) || location == "path" {
             required.push(Value::String(name.to_owned()));
         }
@@ -870,6 +873,10 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
         protocol_payload: None,
         channels: Vec::new(),
         webhooks,
+        api_key_names: Some(crate::security::api_key_names(
+            doc,
+            "/components/securitySchemes",
+        )),
     })
 }
 

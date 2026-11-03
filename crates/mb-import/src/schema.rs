@@ -6,6 +6,24 @@ use serde_json::{Map, Value};
 
 const DEFS_PREFIX: &str = "#/$defs/";
 
+/// `schema`, a parameter's, with the parameter object `param`'s own `description` when
+/// the schema has none: the engine tells a model what a parameter the request sends
+/// means. On a schema that refers to another it goes beside the `$ref`, an
+/// annotation JSON Schema 2020-12 allows there, which validates as the reference
+/// alone does. A schema that is no object is left as it is.
+pub(crate) fn with_param_description(mut schema: Value, param: &Value) -> Value {
+    let Some(description) = param.get("description").and_then(Value::as_str) else {
+        return schema;
+    };
+    if let Some(obj) = schema.as_object_mut()
+        && !obj.contains_key("description")
+        && !description.trim().is_empty()
+    {
+        obj.insert("description".into(), Value::String(description.to_owned()));
+    }
+    schema
+}
+
 /// Convert an OpenAPI/Swagger schema into JSON Schema 2020-12.
 ///
 /// `ref_prefix` is the source component prefix (e.g. `#/components/schemas/`)
