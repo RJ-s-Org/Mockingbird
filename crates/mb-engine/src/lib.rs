@@ -1094,10 +1094,11 @@ impl Engine {
     /// other members its schema (the narrowed `response_schema` when given) requires,
     /// as Cal.com's `{status, data}` does its `status`: the value `kept` holds for it
     /// (what the API answered in an envelope of this shape before), else the value the
-    /// member's schema fixes (a `const`, a one-value `enum`, a `default`, else the
-    /// first `enum` value or example), else a faker value drawn the same way for every
-    /// read of `op`. The record is not changed; whether the answer suits its schema is
-    /// for [`Engine::serve_stored`] to say.
+    /// member's schema fixes (a `const`, a one-value `enum`, a `default`), else its
+    /// example when that suits it and is not a boolean's. `None` when a required member
+    /// has none of these: a guess is no answer, and the read is generated instead. The
+    /// record is not changed; whether the answer suits its schema is for
+    /// [`Engine::serve_stored`] to say.
     #[must_use]
     pub fn held_answer(
         &self,
@@ -1106,9 +1107,9 @@ impl Engine {
         record: &Value,
         kept: Option<&Map<String, Value>>,
         response_schema: Option<&Value>,
-    ) -> Value {
+    ) -> Option<Value> {
         let Some(identity) = op.identity.as_ref().filter(|i| i.record.is_some()) else {
-            return record.clone();
+            return Some(record.clone());
         };
         let mut answer = identity.answer_holding(record.clone(), None);
         let (Some(mb_mcm::RecordAt::Member(member)), Some(envelope), Some(schema)) = (
@@ -1116,32 +1117,25 @@ impl Engine {
             answer.as_object_mut(),
             response_schema.or_else(|| op.success_output()?.schema.as_ref()),
         ) else {
-            return answer;
+            return Some(answer);
         };
-        let mut draws = None;
         for name in consistency::required_members(bundle, schema) {
             if &name == member || envelope.contains_key(&name) {
                 continue;
             }
-            let Some(member_schema) = consistency::property_schema(bundle, schema, &name) else {
-                continue;
-            };
-            let earlier = kept.and_then(|k| k.get(&name)).cloned();
-            let value = earlier
+            let member_schema = consistency::property_schema(bundle, schema, &name)?;
+            let value = kept
+                .and_then(|k| k.get(&name))
+                .cloned()
                 .or_else(|| consistency::fixed_value(bundle, &member_schema))
-                .unwrap_or_else(|| {
-                    let draws = draws.get_or_insert_with(|| {
-                        seed::Draws::seeded(
-                            self.faker_seed.unwrap_or(seed::DEFAULT_FAKER_SEED),
-                            &[&bundle.source_digest, &op.id, "envelope"],
-                            &[],
-                        )
-                    });
-                    self.fake_field(bundle, &name, &member_schema, draws)
-                });
+                .or_else(|| {
+                    let example = consistency::example_value(bundle, &member_schema)?;
+                    let validator = self.schema_validator(bundle, &member_schema).ok()?;
+                    validator.is_valid(&example).then_some(example)
+                })?;
             envelope.insert(name, value);
         }
-        answer
+        Some(answer)
     }
 
     /// A `404` for a resource the session does not hold: the operation's
@@ -3002,5 +2996,109 @@ mod tests {
         // All at once when that validates.
         let out = overlay(&v, json!({"a": "x"}), Some(&json!({"b": 3})));
         assert_eq!(out, json!({"a": "x", "b": 3}));
+    }
+
+    /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.
+    fn enveloped(required: &str, properties: &str) -> Bundle {
+        let contract = format!(
+            r##"
+openapi: 3.1.0
+info: {{title: T, version: "1"}}
+paths:
+  /deals:
+    get:
+      operationId: listDeals
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, required: [data], properties: {{data: {{type: array, items: {{$ref: "#/components/schemas/Deal"}}}}}}}}}}}}}}}}
+  /deals/{{id}}:
+    parameters: [{{name: id, in: path, required: true, schema: {{type: integer}}}}]
+    get:
+      operationId: getDeal
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Out"}}}}}}}}}}
+components:
+  schemas:
+    Deal: {{type: object, required: [id], properties: {{id: {{type: integer}}}}}}
+    Out:
+      allOf:
+        - {{type: object, required: [data], properties: {{data: {{$ref: "#/components/schemas/Deal"}}}}}}
+        - {{type: object, required: [{required}], properties: {{{properties}}}}}
+"##
+        );
+        mb_import::compile(contract.as_bytes()).unwrap()
+    }
+
+    fn held(bundle: &Bundle, kept: Option<&Map<String, Value>>) -> Option<Value> {
+        let engine = Engine::new(None, EngineConfig::default());
+        let op = bundle.operation("getDeal").unwrap();
+        assert!(
+            matches!(
+                op.identity.as_ref().and_then(|i| i.record.as_ref()),
+                Some(mb_mcm::RecordAt::Member(m)) if m == "data"
+            ),
+            "{:?}",
+            op.identity
+        );
+        engine.held_answer(bundle, op, &json!({"id": 7}), kept, None)
+    }
+
+    #[test]
+    fn required_members_look_through_refs_and_all_of() {
+        let bundle = enveloped("status", "status: {type: string}");
+        let schema = json!({"$ref": "#/$defs/Out"});
+        assert_eq!(
+            consistency::required_members(&bundle, &schema),
+            ["data", "status"]
+        );
+        assert!(consistency::required_members(&bundle, &json!({"type": "object"})).is_empty());
+    }
+
+    #[test]
+    fn a_fixed_value_is_what_the_schema_says_and_no_guess() {
+        let bundle = enveloped("s", "s: {type: string}");
+        let fixed = |schema: Value| consistency::fixed_value(&bundle, &schema);
+        assert_eq!(fixed(json!({"const": "ok"})), Some(json!("ok")));
+        assert_eq!(fixed(json!({"enum": ["ok"]})), Some(json!("ok")));
+        assert_eq!(
+            fixed(json!({"enum": ["ok", "error"], "default": "error"})),
+            Some(json!("error"))
+        );
+        // The first of several values, or an example, is a guess.
+        assert_eq!(fixed(json!({"enum": ["ok", "error"]})), None);
+        assert_eq!(fixed(json!({"type": "string", "example": "ok"})), None);
+        assert_eq!(fixed(json!({"type": "boolean"})), None);
+    }
+
+    #[test]
+    fn held_answer_fills_what_is_fixed_or_kept_and_gives_up_on_the_rest() {
+        let record = json!({"id": 7});
+        // What the schema fixes.
+        let bundle = enveloped(
+            "status, ok",
+            "status: {type: string, enum: [success]}, ok: {type: boolean, default: true}",
+        );
+        assert_eq!(
+            held(&bundle, None),
+            Some(json!({"status": "success", "ok": true, "data": record}))
+        );
+        // A free boolean: what was kept, else nothing.
+        let bundle = enveloped("success", "success: {type: boolean}");
+        assert_eq!(held(&bundle, None), None);
+        let kept: Map<String, Value> = json!({"success": true}).as_object().unwrap().clone();
+        assert_eq!(
+            held(&bundle, Some(&kept)),
+            Some(json!({"success": true, "data": record}))
+        );
+        // The first of several enum values is no answer.
+        let bundle = enveloped("status", "status: {type: string, enum: [success, error]}");
+        assert_eq!(held(&bundle, None), None);
+        // A string's example that suits it stands; a boolean's never does.
+        let bundle = enveloped("message", "message: {type: string, examples: [Done]}");
+        assert_eq!(
+            held(&bundle, None),
+            Some(json!({"message": "Done", "data": record}))
+        );
+        let bundle = enveloped("success", "success: {type: boolean, examples: [true]}");
+        assert_eq!(held(&bundle, None), None);
+        let bundle = enveloped("count", "count: {type: integer, examples: [not-a-number]}");
+        assert_eq!(held(&bundle, None), None);
     }
 }

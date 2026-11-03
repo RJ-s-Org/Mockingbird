@@ -884,9 +884,13 @@ pub(crate) async fn prepare<'a>(
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
-        && let Some(mut served) = serve_held(&mut state, plan, stored, response_schema)
-            .instrument(state_span())
-            .await
+        // What the schema alone tells of the envelope costs no read; what the session's
+        // answers said of it ([`envelopes`]) is read only for an answer that stands.
+        && let (bare, enveloped) = (
+            serve_held(rt, op, stored, None, response_schema),
+            envelopes::applies(rt, op),
+        )
+        && (bare.is_some() || enveloped)
     {
         let mut earlier = write_memory::recall(
             &mut state,
@@ -897,12 +901,26 @@ pub(crate) async fn prepare<'a>(
         )
         .instrument(state_span())
         .await;
-        if !earlier.forces(rt, plan, call) {
-            write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
-            state.touch(session).instrument(state_span()).await;
-            return Prepared::Answered(served);
+        if earlier.forces(rt, plan, call) {
+            earlier.stored_answer = bare.map(Box::new);
+        } else {
+            let kept = match enveloped {
+                true => {
+                    envelopes::recall(&mut state, plan)
+                        .instrument(state_span())
+                        .await
+                }
+                false => None,
+            };
+            let served = kept
+                .and_then(|kept| serve_held(rt, op, stored, Some(&kept), response_schema))
+                .or(bare);
+            if let Some(mut served) = served {
+                write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
+                state.touch(session).instrument(state_span()).await;
+                return Prepared::Answered(served);
+            }
         }
-        earlier.stored_answer = Some(Box::new(served));
         recalled = Some(earlier);
     }
     if target.is_none()
@@ -1045,38 +1063,22 @@ pub(crate) async fn prepare<'a>(
     }))
 }
 
-/// Stored `stored` served as `plan`'s answer, in the envelope its read holds it in (see
-/// [`mb_engine::Engine::held_answer`]): with what the session's answers of that envelope
-/// said besides the record ([`envelopes`]), else, when that does not suit the schema,
-/// with what the schema gives. `None` when neither suits it.
-async fn serve_held(
-    state: &mut StateAccess<'_>,
-    plan: &CallPlan<'_>,
+/// Stored `stored` served as `op`'s answer, in the envelope its read holds it in (see
+/// [`mb_engine::Engine::held_answer`]), with what `kept` says the session's answers of
+/// that envelope said besides the record ([`envelopes`]). `None` when the envelope
+/// cannot be told, or the answer does not suit the schema.
+fn serve_held(
+    rt: &MockRuntime,
+    op: &Operation,
     stored: &StoredResource,
+    kept: Option<&Map<String, Value>>,
     response_schema: Option<&Value>,
 ) -> Option<GeneratedResponse> {
-    let rt = state.rt;
-    let op = plan.op;
-    let enveloped = op
-        .identity
-        .as_ref()
-        .is_some_and(|i| matches!(i.record, Some(mb_mcm::RecordAt::Member(_))));
-    let kept = if enveloped {
-        envelopes::recall(state, plan).await
-    } else {
-        None
-    };
-    let serve = |kept: Option<&Map<String, Value>>| {
-        let answer = rt
-            .engine
-            .held_answer(&rt.bundle, op, &stored.data, kept, response_schema);
-        rt.engine
-            .serve_stored(&rt.bundle, op, &answer, response_schema)
-    };
-    match kept {
-        Some(kept) => serve(Some(&kept)).or_else(|| serve(None)),
-        None => serve(None),
-    }
+    let answer = rt
+        .engine
+        .held_answer(&rt.bundle, op, &stored.data, kept, response_schema)?;
+    rt.engine
+        .serve_stored(&rt.bundle, op, &answer, response_schema)
 }
 
 /// The answer to a read of a record the session does not hold, or deleted: a read

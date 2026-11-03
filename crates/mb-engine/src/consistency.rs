@@ -189,26 +189,43 @@ pub fn required_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
     out
 }
 
-/// The value `schema` fixes or names first, through `$ref`s: its `const`, its one
-/// `enum` value, its `default`, else its first `enum` value or example. `None` when
-/// it names none.
+/// The value `schema` fixes, through `$ref`s: its `const`, its one `enum` value, else
+/// its `default`. `None` when it fixes none: the first of several `enum` values, or an
+/// example, is a guess.
 pub(crate) fn fixed_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
     let schema = deref(bundle, schema);
-    let values = schema.get("enum").and_then(Value::as_array);
-    let only = values.filter(|v| v.len() == 1).and_then(|v| v.first());
+    let only = enum_values(bundle, schema)
+        .filter(|v| v.len() == 1)
+        .and_then(|v| v.first());
     schema
         .get("const")
         .or(only)
         .or_else(|| schema.get("default"))
-        .or_else(|| values.and_then(|v| v.first()))
-        .or_else(|| schema.get("example"))
-        .or_else(|| {
-            schema
-                .get("examples")
-                .and_then(Value::as_array)
-                .and_then(|v| v.first())
-        })
         .cloned()
+}
+
+/// The example `schema` gives, through `$ref`s: its `example`, else its first
+/// `examples`. Not of a boolean, whose example says nothing of which it is.
+pub(crate) fn example_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let schema = deref(bundle, schema);
+    let boolean = |t: &Value| t == "boolean";
+    let declared_boolean = match schema.get("type") {
+        Some(Value::Array(types)) => types.iter().any(boolean),
+        Some(t) => boolean(t),
+        None => false,
+    };
+    let example = schema.get("example").or_else(|| {
+        schema
+            .get("examples")
+            .and_then(Value::as_array)
+            .and_then(|v| v.first())
+    })?;
+    (!declared_boolean && !example.is_boolean()).then(|| example.clone())
+}
+
+/// The values `schema` allows, through `$ref`s, when it is an `enum`.
+pub fn enum_values<'a>(bundle: &'a Bundle, schema: &'a Value) -> Option<&'a Vec<Value>> {
+    deref(bundle, schema).get("enum").and_then(Value::as_array)
 }
 
 /// The schema of `field` in object `schema`, looking through `$ref`s and

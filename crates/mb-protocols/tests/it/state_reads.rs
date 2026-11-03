@@ -228,12 +228,34 @@ async fn a_record_in_an_envelope_with_an_enum_member_is_read_from_state() {
     assert_eq!(h.calls(), 1);
 }
 
-/// `success` has no value its schema fixes: the faker gives it one, and the record
-/// is served as it was stored.
+/// `success` has no value its schema fixes and no answer of the read's envelope said
+/// one: a deal a list seeded is not answered from state, so no guess is served.
 #[tokio::test]
-async fn a_record_in_an_envelope_with_a_free_member_is_read_from_state() {
+async fn a_free_member_nothing_said_is_not_guessed() {
     let deal = json!({"id": 7, "title": "Big deal", "value": 1000.0});
-    let h = harness(PIPEDRIVE, vec![json!({"success": true, "data": deal})]);
+    let h = harness(
+        PIPEDRIVE,
+        vec![
+            json!({"success": true, "data": [deal]}),
+            json!({"success": true, "data": deal}),
+        ],
+    );
+    let (status, _, listed) = h.call("GET", "/v1/deals", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+
+    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_ne!(source, "state", "{read}");
+    assert_eq!(h.calls(), 2);
+}
+
+/// What the create's envelope said is what a read of the same envelope says: Pipedrive's
+/// `success: true`, which its schema (a plain boolean) does not fix.
+#[tokio::test]
+async fn a_read_answers_the_envelope_the_create_answered() {
+    let deal = json!({"id": 7, "title": "Big deal", "value": 1000.0});
+    let answer = json!({"success": true, "data": deal});
+    let h = harness(PIPEDRIVE, vec![answer.clone()]);
     let (status, _, created) = h
         .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
@@ -246,29 +268,39 @@ async fn a_record_in_an_envelope_with_a_free_member_is_read_from_state() {
             (StatusCode::OK, "state"),
             "{read}"
         );
-        assert_eq!(read["data"], deal);
-        assert!(read["success"].is_boolean(), "{read}");
+        assert_eq!(read, answer);
     }
     assert_eq!(h.calls(), 1);
 }
 
-/// What the create's envelope said is what a read of the same envelope says: Pipedrive's
-/// `success: true`, which its schema (a plain boolean) does not fix, and a request id no
-/// schema could give.
+/// A string a create answered (`message: "Deal created"`) is that call's, not the
+/// read's: the read is generated, and then its own message is what it answers again.
 #[tokio::test]
-async fn a_read_answers_the_envelope_the_create_answered() {
+async fn a_string_stays_with_the_operation_that_answered_it() {
     let contract = PIPEDRIVE.replace(
         "      required: [success, data]\n      properties:\n        success: {type: boolean}\n        data: {$ref: \"#/components/schemas/Deal\"}",
-        "      required: [success, data, request_id]\n      properties:\n        success: {type: boolean}\n        request_id: {type: string}\n        data: {$ref: \"#/components/schemas/Deal\"}",
+        "      required: [success, data, message]\n      properties:\n        success: {type: boolean}\n        message: {type: string}\n        data: {$ref: \"#/components/schemas/Deal\"}",
     );
     assert_ne!(contract, PIPEDRIVE);
     let deal = json!({"id": 7, "title": "Big deal", "value": 1000.0});
-    let answer = json!({"success": true, "request_id": "req_8f2c1a", "data": deal});
-    let h = harness(&contract, vec![answer.clone()]);
+    let found = json!({"success": true, "message": "Deal found", "data": deal});
+    let h = harness(
+        &contract,
+        vec![
+            json!({"success": true, "message": "Deal created", "data": deal}),
+            found.clone(),
+        ],
+    );
     let (status, _, created) = h
         .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_ne!(source, "state", "{read}");
+    assert_ne!(read["message"], "Deal created", "{read}");
+    assert_eq!(h.calls(), 2);
 
     let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
     assert_eq!(
@@ -276,8 +308,49 @@ async fn a_read_answers_the_envelope_the_create_answered() {
         (StatusCode::OK, "state"),
         "{read}"
     );
-    assert_eq!(read, answer);
-    assert_eq!(h.calls(), 1);
+    assert_eq!(read, found);
+    assert_eq!(h.calls(), 2);
+}
+
+/// An answer holding no record (`{success: false, data: null}`) says nothing of the
+/// envelope a record is answered in: a later read still says `success: true`.
+#[tokio::test]
+async fn an_envelope_with_no_record_is_not_remembered() {
+    let contract = PIPEDRIVE
+        .replace(
+            "    Deal:\n      type: object\n",
+            "    Deal:\n      type: object\n      nullable: true\n",
+        )
+        .replace(
+            "  /v1/deals/{id}:\n    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]\n",
+            "  /v1/deals/{id}:\n    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]\n    put:\n      operationId: updateDeal\n      requestBody: {content: {application/json: {schema: {type: object}}}}\n      responses: {\"200\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/DealOutput\"}}}}}\n",
+        );
+    assert!(contract.contains("updateDeal") && contract.contains("nullable"));
+    let deal = json!({"id": 7, "title": "Big deal", "value": 1000.0});
+    let h = harness(
+        &contract,
+        vec![
+            json!({"success": true, "data": deal}),
+            json!({"success": false, "data": null}),
+        ],
+    );
+    let (status, _, created) = h
+        .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _, updated) = h
+        .call("PUT", "/v1/deals/7", Some(json!({"title": "Bigger deal"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["success"], false, "{updated}");
+
+    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    assert_eq!(
+        (status, source.as_str()),
+        (StatusCode::OK, "state"),
+        "{read}"
+    );
+    assert_eq!(read["success"], true, "{read}");
 }
 
 /// A booking's `eventTypeId` refers to an `event-types` record: the create's prompt
