@@ -1216,6 +1216,23 @@ paths:
       operationId: deleteUser
       responses:
         "204": {description: gone}
+  /feed:
+    get:
+      operationId: listFeed
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  has_more: {type: boolean}
+                  next_cursor: {type: string}
   /orders:
     get:
       operationId: listOrders
@@ -1541,4 +1558,32 @@ async fn a_filter_or_an_echo_is_no_cursor() {
     let body = api.get("/search?limit=1&query=ann").await;
     assert_eq!(body["query"], "ann", "{body}");
     assert_eq!(ids_in(&body, "results"), ["u1"]);
+}
+
+/// A `has_more` beside the cursor that the first page set is `false` on the last.
+#[tokio::test]
+async fn the_last_page_has_no_more() {
+    let answer = json!({"data": users(3), "has_more": true, "next_cursor": "made-up"});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/feed?limit=2").await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    assert_ne!(cursor, "made-up");
+    let last = api.get(&format!("/feed?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(last["has_more"], false, "{last}");
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// An empty cursor (`cursor=`) asks for the first page, which mints as without one.
+#[tokio::test]
+async fn an_empty_cursor_is_no_cursor() {
+    let answer = json!({"data": users(3), "next_cursor": ""});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/feed?limit=2&cursor=").await;
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    let last = api.get(&format!("/feed?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(api.provider.requests().len(), 1);
 }
