@@ -6,30 +6,46 @@
 //! can still refer to a record otherwise: by an id inside a URI (Spotify's
 //! `spotify:track:<id>`), by a short id in an object named after its type (Jira's
 //! `transition: {id: "21"}`), or by a member value only that record holds (a ticket
-//! created with its requester's `email`). Each record this runtime stores is indexed by
-//! its identity and by the plain string members its read declares. A request's values,
-//! at any depth of its body, query or path, are matched against that index:
+//! created with its requester's `email`). Each record this runtime stores is indexed, per
+//! session, by its identity and by the plain string members its read declares. A
+//! request's values, at any depth of its body, query or path, are matched against it:
 //!
 //! - a whole value of an id's shape (see [`id_like`]) matches the one record it is the
-//!   identity of, else the one record holding it in a member;
+//!   identity of;
+//! - failing that, a whole value matches the one record holding it in a member of the
+//!   same name as the request's member, by stem or by whole words (`requester_email` names
+//!   `email`; `zone` names no `timezone`). Records of the type the operation creates or
+//!   targets are its siblings and left out; a value an id lookup already resolved, and a
+//!   member that is a reference (`<x>_id`, or named after a type), never take this path;
 //! - a delimited token of a longer string (split on what is not alphanumeric) matches
 //!   only a record whose identity it is, exactly;
 //! - a short value under an identity member of an object matches only a record whose
 //!   identity it is and whose type that object's member names ([`entity_type`]).
 //!
-//! A match must be unique: a value two records hold, as an identity or as a member,
-//! names neither. Trivial values are never indexed or matched: what is too short, words,
-//! booleans, numbers too small to be an id, enum and `const` values and dates the schema
-//! declares, and what a credential's member holds or a credential looks like. A hit is
-//! read once to check it still holds the value, scrubbed for the prompt
-//! ([`write_memory::matched_for_context`]), and joins the related resources as context,
+//! A match must be unique: a value two live records hold names neither. Trivial values
+//! are never indexed or matched: what is too short, words, booleans, numbers too small to
+//! be an id, enum and `const` values and dates the schema declares, and what a
+//! credential's member holds or a credential looks like. A hit is scrubbed for the prompt
+//! ([`write_memory::matched_for_context`]) and joins the related resources as context,
 //! within the bounds [`world::named_by_value`] keeps. It is not one of the records a
 //! create marks as referenced ([`world::referenced_by_value`]), and an answer's body is
 //! never stored on it.
 //!
-//! Like [`PathAliases`], the index is only a hint of this runtime's writes: what another
-//! node, the Admin API or a restart stored is not in it, and a stale entry costs at most
-//! the read that finds the record changed or gone.
+//! The index is a hint of this runtime's writes, as [`PathAliases`] is. Resets, mock
+//! resets and expiry happen in the store (from the Admin API or its sweep), where no
+//! runtime sees them, so every holder of a value is read back before uniqueness is
+//! decided: a record gone or changed since is forgotten, and neither matches nor makes a
+//! value ambiguous. Each session keeps at most [`MAX_SESSION_ENTRIES`] entries, the
+//! oldest records going first, and the least recently written of more than
+//! [`MAX_SESSIONS`] sessions is dropped whole.
+//!
+//! An identity is unique by construction, so matching identities is safe whatever the
+//! store. A member value's uniqueness is known only where this process sees every write:
+//! with a store other nodes write to (SQL, Redis, a relayed bus; see
+//! [`mb_state::StateStore::local_only`]), members are not indexed and only identities
+//! match.
+
+use std::collections::BTreeMap;
 
 use mb_state::INTERNAL_TYPE;
 
@@ -46,15 +62,19 @@ const MIN_SHORT_LEN: usize = 2;
 const MAX_LEN: usize = 128;
 /// A token with no digit must be at least this long to be an id rather than a word.
 const MIN_WORD_TOKEN_LEN: usize = 16;
-/// Members of one record indexed, at most.
+/// Members of one record indexed, at most, besides its identity.
 const MAX_MEMBERS: usize = 16;
-/// Entries the index holds at most; it is emptied when full.
-const MAX_ENTRIES: usize = 16_384;
+/// Entries one session keeps at most; the oldest records go first.
+const MAX_SESSION_ENTRIES: usize = 4096;
+/// Sessions the index keeps at most; the least recently written goes first.
+const MAX_SESSIONS: usize = 256;
 /// Values of one request matched, at most.
 const MAX_CANDIDATES: usize = 16;
 /// How deep a request is walked.
 const MAX_DEPTH: usize = 8;
-/// Store reads one request pays to check its matches.
+/// Holders of one value read back, at most: more is ambiguous without reading.
+const MAX_HOLDERS: usize = 4;
+/// Store reads one request pays to read holders back.
 const MAX_READS: usize = 8;
 
 /// Who holds an indexed value: a record, by its identity (`member` `None`) or a member.
@@ -65,43 +85,72 @@ struct Holder {
     member: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RecordKey {
-    session: SessionKey,
-    resource_type: String,
-    id: String,
+impl Holder {
+    fn is(&self, t: &str, id: &str) -> bool {
+        self.resource_type == t && self.id == id
+    }
 }
 
+/// A record as one session's index holds it: when it was indexed, and under what.
+#[derive(Debug)]
+struct Record {
+    at: u64,
+    values: Vec<String>,
+}
+
+/// One session's index.
 #[derive(Debug, Default)]
-struct Entries {
-    /// Per session and value, who holds it.
-    by_value: HashMap<(SessionKey, String), Vec<Holder>>,
-    /// Per record, the values it is indexed under.
-    by_record: HashMap<RecordKey, Vec<String>>,
+struct SessionEntries {
+    /// Per value, who holds it.
+    by_value: HashMap<String, Vec<Holder>>,
+    /// Per record (type, id), what it is indexed under.
+    by_record: HashMap<(String, String), Record>,
+    /// The records by when they were indexed, oldest first.
+    order: BTreeMap<u64, (String, String)>,
+    /// Entries held: holders, over every value.
     len: usize,
+    /// When the session was last written.
+    used: u64,
 }
 
-impl Entries {
-    fn forget(&mut self, key: &RecordKey) {
-        let Some(values) = self.by_record.remove(key) else {
+impl SessionEntries {
+    fn forget(&mut self, t: &str, id: &str) {
+        let key = (t.to_string(), id.to_string());
+        let Some(record) = self.by_record.remove(&key) else {
             return;
         };
-        for value in values {
-            let slot = (key.session.clone(), value);
-            if let Some(holders) = self.by_value.get_mut(&slot) {
+        self.order.remove(&record.at);
+        for value in record.values {
+            if let Some(holders) = self.by_value.get_mut(&value) {
                 let before = holders.len();
-                holders.retain(|h| h.resource_type != key.resource_type || h.id != key.id);
+                holders.retain(|h| !h.is(t, id));
                 self.len = self.len.saturating_sub(before - holders.len());
                 if holders.is_empty() {
-                    self.by_value.remove(&slot);
+                    self.by_value.remove(&value);
                 }
             }
         }
     }
+
+    /// Forgets the oldest records until `room` more entries fit.
+    fn make_room(&mut self, room: usize) {
+        while self.len + room > MAX_SESSION_ENTRIES {
+            let Some((_, (t, id))) = self.order.pop_first() else {
+                return;
+            };
+            self.forget(&t, &id);
+        }
+    }
 }
 
-/// The identities and unique-candidate member values of the records this runtime stored,
-/// per session (see the module's doc).
+#[derive(Debug, Default)]
+struct Entries {
+    sessions: HashMap<SessionKey, SessionEntries>,
+    clock: u64,
+}
+
+/// The identities and member values of the records this runtime stored, per session
+/// (see the module's doc).
 #[derive(Debug, Default)]
 pub(crate) struct ValueIndex(std::sync::Mutex<Entries>);
 
@@ -109,8 +158,7 @@ impl ValueIndex {
     /// Indexes `record` as it is now stored, in place of what it was indexed under.
     #[cfg(test)]
     fn remember(&self, rt: &MockRuntime, session: &SessionKey, record: &StoredResource) {
-        let values = Indexed::of(rt, record);
-        self.remember_indexed(session, values);
+        self.remember_indexed(session, Indexed::of(rt, record));
     }
 
     /// Indexes a record now stored under what [`Indexed::of`] took from it, in place of
@@ -127,48 +175,52 @@ impl ValueIndex {
         let Ok(mut entries) = self.0.lock() else {
             return;
         };
-        let key = RecordKey {
-            session: session.clone(),
-            resource_type,
-            id,
-        };
-        entries.forget(&key);
+        entries.clock += 1;
+        let at = entries.clock;
+        if !entries.sessions.contains_key(session) && entries.sessions.len() >= MAX_SESSIONS {
+            let oldest = entries
+                .sessions
+                .iter()
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                entries.sessions.remove(&oldest);
+            }
+        }
+        let held = entries.sessions.entry(session.clone()).or_default();
+        held.used = at;
+        held.forget(&resource_type, &id);
         if values.is_empty() {
             return;
         }
-        if entries.len + values.len() > MAX_ENTRIES {
-            *entries = Entries::default();
-        }
+        held.make_room(values.len());
         let mut kept = Vec::with_capacity(values.len());
         for (member, value) in values {
             let holder = Holder {
-                resource_type: key.resource_type.clone(),
-                id: key.id.clone(),
+                resource_type: resource_type.clone(),
+                id: id.clone(),
                 member,
             };
-            let holders = entries
-                .by_value
-                .entry((session.clone(), value.clone()))
-                .or_default();
+            let holders = held.by_value.entry(value.clone()).or_default();
             if !holders.contains(&holder) {
                 holders.push(holder);
-                entries.len += 1;
+                held.len += 1;
             }
             if !kept.contains(&value) {
                 kept.push(value);
             }
         }
-        entries.by_record.insert(key, kept);
+        let key = (resource_type, id);
+        held.order.insert(at, key.clone());
+        held.by_record.insert(key, Record { at, values: kept });
     }
 
-    /// Forgets record `id` of type `t`, deleted.
+    /// Forgets record `id` of type `t` of `session`: deleted, or found gone or changed.
     pub(super) fn forget(&self, session: &SessionKey, t: &str, id: &str) {
-        if let Ok(mut entries) = self.0.lock() {
-            entries.forget(&RecordKey {
-                session: session.clone(),
-                resource_type: t.to_string(),
-                id: id.to_string(),
-            });
+        if let Ok(mut entries) = self.0.lock()
+            && let Some(held) = entries.sessions.get_mut(session)
+        {
+            held.forget(t, id);
         }
     }
 
@@ -176,18 +228,22 @@ impl ValueIndex {
         self.0
             .lock()
             .ok()
-            .and_then(|entries| {
-                entries
-                    .by_value
-                    .get(&(session.clone(), value.to_string()))
-                    .cloned()
-            })
+            .and_then(|entries| entries.sessions.get(session)?.by_value.get(value).cloned())
             .unwrap_or_default()
     }
 
     #[cfg(test)]
-    fn len(&self) -> usize {
-        self.0.lock().map(|e| e.len).unwrap_or_default()
+    fn len(&self, session: &SessionKey) -> usize {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|e| e.sessions.get(session).map(|s| s.len))
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn sessions(&self) -> usize {
+        self.0.lock().map(|e| e.sessions.len()).unwrap_or_default()
     }
 }
 
@@ -197,6 +253,16 @@ fn id_like(text: &str) -> bool {
     (MIN_LEN..=MAX_LEN).contains(&text.len())
         && !text.chars().any(char::is_whitespace)
         && text.chars().any(|c| !c.is_alphabetic())
+}
+
+/// Whether a request member named `asked` may carry what a stored member named `stored`
+/// holds: the same stem (`emails`, `email`), or one's whole words naming the other
+/// (`requester_email`, `email`).
+fn same_name(asked: &str, stored: &str) -> bool {
+    !asked.is_empty()
+        && (mb_mcm::stem(asked) == mb_mcm::stem(stored)
+            || mb_mcm::names_member(asked, stored)
+            || mb_mcm::names_member(stored, asked))
 }
 
 /// Whether `schema`, a member's, says its value is no reference: one of a declared set
@@ -234,9 +300,10 @@ impl Indexed {
     }
 }
 
-/// What `record` is indexed under: its identity, and the string members its read's
-/// schema declares that have an id's shape, are not trivial ([`trivial_member`]) and
-/// hold no credential.
+/// What `record` is indexed under: its identity and, with a store only this process
+/// writes to, the string members its read's schema declares that have an id's shape, are
+/// not trivial ([`trivial_member`]), are no reference to another record and hold no
+/// credential.
 fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let id = record.id.as_str();
@@ -246,6 +313,9 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<Stri
     {
         out.push((None, id.to_string()));
     }
+    if !rt.state.local_only() {
+        return out;
+    }
     let (Value::Object(members), Some(schema)) = (
         &record.data,
         write_memory::read_schema(rt, &record.resource_type),
@@ -254,8 +324,9 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<Stri
     };
     let bundle = rt.bundle();
     let parts = schema_parts(bundle, Some(schema)).0;
+    let mut kept = 0;
     for (name, value) in members {
-        if out.len() > MAX_MEMBERS {
+        if kept >= MAX_MEMBERS {
             break;
         }
         let Value::String(text) = value else {
@@ -263,6 +334,8 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<Stri
         };
         if text == id
             || !id_like(text)
+            || reference_prefix(name).is_some()
+            || entity_type(rt.index(), None, name).is_some()
             || write_memory::is_credential_name(rt, name)
             || mb_mcm::credentials::hides_in_context(name)
             || mb_mcm::credentials::is_credential_value(text)
@@ -276,6 +349,7 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<Stri
             continue;
         }
         out.push((Some(name.clone()), text.clone()));
+        kept += 1;
     }
     out
 }
@@ -283,7 +357,11 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<Stri
 /// A request value to match, and how it may match (see the module's doc).
 #[derive(Debug, PartialEq)]
 enum Candidate {
-    Whole(String),
+    /// A whole value, under request member `member`.
+    Whole {
+        value: String,
+        member: String,
+    },
     Token(String),
     /// A short value under `member` of an object found under `parent`.
     Short {
@@ -294,8 +372,9 @@ enum Candidate {
 }
 
 /// Adds the candidates `value`, under member `name` of an object found under `parent`,
-/// holds to `out`. What a credential's member holds, or a credential looks like, is not
-/// matched.
+/// holds to `out`: an object's own values before what it nests, so the bound reaches
+/// what is nearest first. What a credential's member holds, or a credential looks like,
+/// is not matched.
 fn candidates(
     rt: &MockRuntime,
     (parent, name): (&str, &str),
@@ -321,12 +400,18 @@ fn candidates(
     };
     match value {
         Value::Object(members) => {
-            for (key, inner) in members {
+            let (nested, scalars): (Vec<_>, Vec<_>) = members
+                .iter()
+                .partition(|(_, inner)| inner.is_object() || inner.is_array());
+            for (key, inner) in scalars.into_iter().chain(nested) {
                 candidates(rt, (name, key), inner, depth + 1, out);
             }
         }
         Value::Array(items) => {
-            for item in items {
+            let (nested, scalars): (Vec<_>, Vec<_>) = items
+                .iter()
+                .partition(|inner| inner.is_object() || inner.is_array());
+            for item in scalars.into_iter().chain(nested) {
                 candidates(rt, (parent, name), item, depth + 1, out);
             }
         }
@@ -335,7 +420,10 @@ fn candidates(
                 return;
             }
             if id_like(text) {
-                push(Candidate::Whole(text.clone()));
+                push(Candidate::Whole {
+                    value: text.clone(),
+                    member: name.to_string(),
+                });
             } else if !parent.is_empty()
                 && (MIN_SHORT_LEN..MIN_LEN).contains(&text.len())
                 && text.chars().all(char::is_alphanumeric)
@@ -357,7 +445,10 @@ fn candidates(
             if let Some(n) = number.as_u64() {
                 let text = n.to_string();
                 if n >= MIN_NUMBER {
-                    push(Candidate::Whole(text));
+                    push(Candidate::Whole {
+                        value: text,
+                        member: name.to_string(),
+                    });
                 } else if !parent.is_empty() && text.len() >= MIN_SHORT_LEN {
                     push(short(&text));
                 }
@@ -367,20 +458,22 @@ fn candidates(
     }
 }
 
-/// The one record `candidate` names among what the index holds, if just one.
-fn resolve(
+/// What a match is decided against: the operation's own type, whose records are
+/// siblings of what it creates or targets, and whether an id lookup already resolved a
+/// value.
+struct Context<'a, R: Fn(&str) -> bool> {
+    own_type: Option<&'a str>,
+    resolved: R,
+}
+
+/// The holders `candidate` may name, before they are read back (see the module's doc).
+fn eligible<R: Fn(&str) -> bool>(
     rt: &MockRuntime,
     session: &SessionKey,
     candidate: &Candidate,
-) -> Option<(Holder, String)> {
+    cx: &Context<'_, R>,
+) -> (Vec<Holder>, String) {
     let index = rt.value_index();
-    let unique = |holders: Vec<Holder>| {
-        let first = holders.first()?;
-        holders
-            .iter()
-            .all(|h| h.resource_type == first.resource_type && h.id == first.id)
-            .then(|| first.clone())
-    };
     let identities = |holders: &[Holder]| -> Vec<Holder> {
         holders
             .iter()
@@ -389,27 +482,30 @@ fn resolve(
             .collect()
     };
     match candidate {
-        Candidate::Whole(value) => {
+        Candidate::Whole { value, member } => {
             let holders = index.holders(session, value);
             let named = identities(&holders);
-            // A record's identity is what it is called; others holding it refer to it.
-            let found = if named.is_empty() {
-                unique(holders)
-            } else {
-                unique(named)
-            }?;
-            Some((found, value.clone()))
+            if !named.is_empty() || (cx.resolved)(value) {
+                return (named, value.clone());
+            }
+            let held: Vec<Holder> = holders
+                .into_iter()
+                .filter(|h| {
+                    h.member.as_deref().is_some_and(|m| same_name(member, m))
+                        && cx.own_type != Some(h.resource_type.as_str())
+                })
+                .collect();
+            (held, value.clone())
         }
-        Candidate::Token(value) => {
-            let found = unique(identities(&index.holders(session, value)))?;
-            Some((found, value.clone()))
-        }
+        Candidate::Token(value) => (identities(&index.holders(session, value)), value.clone()),
         Candidate::Short {
             value,
             member,
             parent,
         } => {
-            let t = entity_type(rt.index(), None, parent)?;
+            let Some(t) = entity_type(rt.index(), None, parent) else {
+                return (Vec::new(), value.clone());
+            };
             let fields = rt.index().identity_fields(&t);
             let names_identity = if fields.is_empty() {
                 mb_mcm::is_generic_id(member)
@@ -417,65 +513,94 @@ fn resolve(
                 fields.iter().any(|f| f == member)
             };
             if !names_identity {
-                return None;
+                return (Vec::new(), value.clone());
             }
-            let of_type: Vec<Holder> = identities(&index.holders(session, value))
+            let of_type = identities(&index.holders(session, value))
                 .into_iter()
                 .filter(|h| h.resource_type == t)
                 .collect();
-            Some((unique(of_type)?, value.clone()))
+            (of_type, value.clone())
         }
     }
 }
 
 /// The stored records `call` refers to by value through the index (see the module's
 /// doc), at most `room`, other than what `known(type, id)` says is in hand: each once,
-/// checked against the store and scrubbed for the prompt. Context only.
+/// read back and scrubbed for the prompt. `resolved(value)` says an id lookup already
+/// found the record `value` is the id of. Context only.
 pub(super) async fn matched(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     room: usize,
     known: impl Fn(&str, &str) -> bool,
+    resolved: impl Fn(&str) -> bool,
 ) -> Vec<StoredResource> {
     let rt = state.rt;
     if room == 0 || !write_memory::applies(rt, plan) {
         return Vec::new();
     }
-    let mut found_values = Vec::new();
+    let mut values = Vec::new();
     for (name, value) in &call.path_params {
-        candidates(rt, ("", name), value, 1, &mut found_values);
+        candidates(rt, ("", name), value, 1, &mut values);
     }
     for (name, value) in &call.query {
-        candidates(rt, ("", name), value, 1, &mut found_values);
+        candidates(rt, ("", name), value, 1, &mut values);
     }
     if let Some(body) = &call.body {
-        candidates(rt, ("", ""), body, 0, &mut found_values);
+        candidates(rt, ("", ""), body, 0, &mut values);
     }
+    let cx = Context {
+        own_type: plan.op.resource_type.as_deref(),
+        resolved,
+    };
     let session = &plan.session;
     let mut reads = 0;
     let mut out: Vec<StoredResource> = Vec::new();
-    for candidate in &found_values {
-        if out.len() >= room || reads >= MAX_READS {
+    'values: for candidate in &values {
+        if out.len() >= room {
             break;
         }
-        let Some((holder, value)) = resolve(rt, session, candidate) else {
-            continue;
-        };
-        let shown =
-            |r: &StoredResource| r.resource_type == holder.resource_type && r.id == holder.id;
-        if known(&holder.resource_type, &holder.id) || out.iter().any(shown) {
+        let (holders, value) = eligible(rt, session, candidate, &cx);
+        if holders.is_empty() || holders.len() > MAX_HOLDERS {
             continue;
         }
-        reads += 1;
-        let Some(hit) = state.get(session, &holder.resource_type, &holder.id).await else {
+        // Each holder read back: what is gone or changed counts for nothing.
+        let mut live: Vec<StoredResource> = Vec::new();
+        for holder in &holders {
+            if live.iter().any(|r| holder.is(&r.resource_type, &r.id)) {
+                continue;
+            }
+            if reads >= MAX_READS {
+                break 'values;
+            }
+            reads += 1;
+            let hit = state.get(session, &holder.resource_type, &holder.id).await;
+            let holds_it = hit.as_ref().is_some_and(|hit| match &holder.member {
+                None => hit.id == value,
+                Some(member) => {
+                    hit.data.get(member).and_then(Value::as_str) == Some(value.as_str())
+                }
+            });
+            match hit {
+                Some(hit) if holds_it => live.push(hit),
+                _ => rt
+                    .value_index()
+                    .forget(session, &holder.resource_type, &holder.id),
+            }
+        }
+        // Two live records, or none: no match.
+        if live.len() != 1 {
+            continue;
+        }
+        let Some(hit) = live.pop() else {
             continue;
         };
-        let holds_it = match &holder.member {
-            None => hit.id == value,
-            Some(member) => hit.data.get(member).and_then(Value::as_str) == Some(value.as_str()),
-        };
-        if !holds_it {
+        if known(&hit.resource_type, &hit.id)
+            || out
+                .iter()
+                .any(|r| r.resource_type == hit.resource_type && r.id == hit.id)
+        {
             continue;
         }
         if let Some(data) =
@@ -491,6 +616,34 @@ pub(super) async fn matched(
 mod tests {
     use super::*;
 
+    const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: t, version: "1"}
+paths:
+  /contacts/{contact_id}:
+    get:
+      operationId: getContact
+      parameters: [{name: contact_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+  /accounts/{account_id}:
+    get:
+      operationId: getAccount
+      parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+components:
+  schemas:
+    Contact:
+      type: object
+      properties:
+        id: {type: string}
+        email: {type: string}
+        account_id: {type: string}
+        account: {type: string}
+        state: {type: string, enum: [on-hold]}
+"##;
+
     fn session(name: &str) -> SessionKey {
         SessionKey {
             workspace: "w".into(),
@@ -500,13 +653,12 @@ mod tests {
     }
 
     fn runtime() -> MockRuntime {
-        let contract = "openapi: 3.0.0\ninfo: {title: t, version: '1'}\npaths: {}\n";
         let state: std::sync::Arc<dyn mb_state::StateStore> = std::sync::Arc::new(
             mb_state::MemoryStore::new(std::time::Duration::from_secs(3600)),
         );
         MockRuntime::new(
             "m",
-            std::sync::Arc::new(mb_import::compile(contract.as_bytes()).unwrap()),
+            std::sync::Arc::new(mb_import::compile(CONTRACT.as_bytes()).unwrap()),
             std::sync::Arc::new(mb_engine::Engine::new(
                 None,
                 mb_engine::EngineConfig::default(),
@@ -520,6 +672,14 @@ mod tests {
         let mut out = Vec::new();
         candidates(&rt, ("", ""), &value, 0, &mut out);
         out
+    }
+
+    fn thing(n: usize) -> StoredResource {
+        StoredResource {
+            resource_type: "things".into(),
+            id: format!("thing-{n:06}"),
+            data: serde_json::json!({}),
+        }
     }
 
     #[test]
@@ -543,25 +703,87 @@ mod tests {
         );
     }
 
+    /// An object's own values come before what it nests, so the bound reaches them.
     #[test]
-    fn the_index_is_bounded_and_forgets() {
+    fn values_at_a_level_come_before_nested_ones() {
+        let mut nested = serde_json::Map::new();
+        for n in 0..MAX_CANDIDATES {
+            nested.insert(format!("m{n:02}"), Value::from(format!("deep-{n:04}")));
+        }
+        let out = walk(serde_json::json!({"a": nested, "z": "near-0001"}));
+        assert_eq!(out.len(), MAX_CANDIDATES);
+        assert_eq!(
+            out[0],
+            Candidate::Whole {
+                value: "near-0001".into(),
+                member: "z".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn names_match_by_stem_or_whole_words() {
+        assert!(same_name("email", "email"));
+        assert!(same_name("emails", "email"));
+        assert!(same_name("requester_email", "email"));
+        assert!(same_name("contactEmail", "email"));
+        assert!(!same_name("zone", "timezone"));
+        assert!(!same_name("contact", "email"));
+        assert!(!same_name("", "email"));
+    }
+
+    /// References, enum values and undeclared members are not indexed; the member cap
+    /// leaves the identity out.
+    #[test]
+    fn what_a_record_is_indexed_under() {
+        let rt = runtime();
+        let record = StoredResource {
+            resource_type: "contacts".into(),
+            id: "ct-000101".into(),
+            data: serde_json::json!({
+                "id": "ct-000101", "email": "jane@example.com", "account_id": "acc-000001",
+                "account": "acc-000001", "state": "on-hold", "undeclared": "und-000001",
+            }),
+        };
+        let values = indexed_values(&rt, &record);
+        assert_eq!(
+            values,
+            vec![
+                (None, "ct-000101".to_string()),
+                (Some("email".to_string()), "jane@example.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_index_is_bounded_per_session_and_forgets() {
         let rt = runtime();
         let index = ValueIndex::default();
-        let s = session("a");
-        for n in 0..(MAX_ENTRIES + 10) {
-            let record = StoredResource {
-                resource_type: "things".into(),
-                id: format!("thing-{n:06}"),
-                data: serde_json::json!({}),
-            };
-            index.remember(&rt, &s, &record);
+        let (a, b) = (session("a"), session("b"));
+        index.remember(&rt, &b, &thing(0));
+        for n in 0..(MAX_SESSION_ENTRIES + 10) {
+            index.remember(&rt, &a, &thing(n));
         }
-        assert!(index.len() <= MAX_ENTRIES);
-        index.forget(&s, "things", &format!("thing-{:06}", MAX_ENTRIES + 9));
-        assert!(
-            index
-                .holders(&s, &format!("thing-{:06}", MAX_ENTRIES + 9))
-                .is_empty()
-        );
+        assert_eq!(index.len(&a), MAX_SESSION_ENTRIES);
+        // The oldest went, the newest stay, and the other session is untouched.
+        assert!(index.holders(&a, &thing(0).id).is_empty());
+        let newest = thing(MAX_SESSION_ENTRIES + 9).id;
+        assert_eq!(index.holders(&a, &newest).len(), 1);
+        assert_eq!(index.holders(&b, &thing(0).id).len(), 1);
+        index.forget(&a, "things", &newest);
+        assert!(index.holders(&a, &newest).is_empty());
+    }
+
+    #[test]
+    fn the_least_recently_written_session_goes_first() {
+        let rt = runtime();
+        let index = ValueIndex::default();
+        for n in 0..=MAX_SESSIONS {
+            index.remember(&rt, &session(&format!("s{n}")), &thing(n));
+        }
+        assert_eq!(index.sessions(), MAX_SESSIONS);
+        assert!(index.holders(&session("s0"), &thing(0).id).is_empty());
+        let last = session(&format!("s{MAX_SESSIONS}"));
+        assert_eq!(index.holders(&last, &thing(MAX_SESSIONS).id).len(), 1);
     }
 }

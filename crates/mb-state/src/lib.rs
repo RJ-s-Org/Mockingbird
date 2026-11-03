@@ -246,6 +246,13 @@ pub trait StateStore: Send + Sync {
     fn response_cache(&self) -> Option<&ResponseCache> {
         None
     }
+    /// Whether only this process writes to this store, so what it saw written is all
+    /// there is: true of [`MemoryStore`] alone. A shared backend (SQL, Redis) or one other
+    /// nodes relay writes to is not. This default, for test doubles and wrappers that do
+    /// not say, answers `false`.
+    fn local_only(&self) -> bool {
+        false
+    }
 }
 
 /// Opens a state store: `memory` gives a [`MemoryStore`]; `redis://…` and

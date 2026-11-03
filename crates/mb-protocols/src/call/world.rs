@@ -188,7 +188,11 @@ pub(super) async fn named_by_value(
     let in_hand = |t: &str, id: &str| {
         known(t, id) || found.iter().any(|r| r.resource_type == t && r.id == id)
     };
-    let more = value_index::matched(state, plan, call, room, in_hand).await;
+    // A value an id lookup resolved names that record, not a sibling sharing it.
+    let resolved = |value: &str| {
+        target.is_some_and(|r| r.id == value) || named.iter().chain(&found).any(|r| r.id == value)
+    };
+    let more = value_index::matched(state, plan, call, room, in_hand, resolved).await;
     found.extend(more);
     if found.is_empty() {
         return;
