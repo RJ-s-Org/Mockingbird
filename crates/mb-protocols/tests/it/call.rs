@@ -3376,9 +3376,7 @@ after it; or it made a new one of the same kind, so give that a new id of its ow
     assert!(!prompt.contains("has moved"), "{prompt}");
     assert!(
         prompt.ends_with(
-            "</shown_resources>\nIf it made a new one and changed nothing else, \"effects\" is \
-empty.\n`capture` succeeded. If a missing member would have stopped it, that member is now there: \
-fill it in."
+            "</shown_resources>\nIf it made a new one and changed nothing else, \"effects\" is empty."
         ),
         "{prompt}"
     );

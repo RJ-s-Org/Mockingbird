@@ -1,24 +1,48 @@
-# Action note, 2026-10-31
+# Action prompts, 2026-10-31
 
-Follow-up to the one bar [simulated-world journeys](../journeys-2026-10-30/README.md) missed: a confirm moved its status on only 3 of 6 times. No context beyond each contract. Spend was $1.76 through `proxy.py`, most of it comparing wordings.
+Follow-up to the one bar [simulated-world journeys](../journeys-2026-10-30/README.md) missed: a confirm moved its status on only 3 of 6 times. No context beyond each contract. Spend was $2.26 through `proxy.py`, most of it comparing wordings.
 
-**Result:** the bar is met, but less of that is this change than it first looked. By the time this was ready, [the contract-driven action routes](https://github.com/RJ-s-Org/Mockingbird/pull/170) had taken confirm to 16/18. This change takes it to 17/18 in the journeys and from 64/71 to 71/71 in replays. Its larger effect is that prompts stop assuming a status: actions that should change nothing rose from 42/54 to 47/54.
+**Result:** the bar is met on main without this change. Action routes, write memory and the later world fixes took Stripe confirm to 115/120 in replays. This change does not add a note for it, because on the final main a note cost more than it gave. What it does is stop prompts telling actions that a status moves. On main, every model told a `validate` succeeded invents `status: "validated"`, which the contract does not allow, in 87 of 87 replays. With this change, 49 of 90 keep the status.
 
 ## The change
 
-Failing answers showed models reasoning from what was missing: shown `payment_method: null`, Luna kept `requires_payment_method` and invented a `last_payment_error`. When an action route answers with its own resource, the prompt now ends:
+Three phrases are gone from the prompt:
 
-> \`confirm\` succeeded. If a missing member would have stopped it, that member is now there: fill it in.
+- "(an action moves a status on)", from every write shown its target.
+- "This is a successful `validate`: the call succeeded, so the resource has moved to the state that follows `validate`, whatever it needed before", for an action that does not answer its own resource.
+- "must", in what such an action owes its target. That now reads "they include what `validate` changes on it, if it changes anything".
 
-Three things are gone:
+Nothing in these prompts names a status now, so a `preview`, a `validate` or a resource with no status is not told something moved. #170's sentence for an action that answers its own resource is unchanged.
 
-- "(an action moves a status on)".
-- "the resource has moved to the state that follows `confirm`, whatever it needed before".
-- "must" in what an action answering something else owes its target. That now reads "they include what `validate` changes on it, if it changes anything".
+## On the final main
 
-Nothing in these prompts names a status, so a `preview`, a `validate` or a resource with no status is not told something moved. An action answering something else gets no note. The verb comes from the route's path, and a scenario's instructions override the note.
+Prompts were captured from the merged code through `fake_llm.py` at no cost, then replayed to the 3 models with main's wording put back, 30 calls per model.
 
-## Results
+| Route | Main | This change |
+| --- | ---: | ---: |
+| Invoice `validate` keeps the status | 0/87 | **49/90** |
+| Square `complete` moves the status on | 88/89 | 88/90 |
+| Zendesk update applies the request | 39/40 | 43/43 |
+| Notion update applies the request | 89/90 | 88/88 |
+
+## The note that was dropped
+
+This branch first ended action prompts with a note: "`confirm` succeeded. If a missing member would have stopped it, that member is now there: fill it in." It helped before the later world fixes merged. On prompts captured from the final main, 40 calls per model, it no longer paid:
+
+| Route | Without the note | With it |
+| --- | ---: | ---: |
+| Stripe confirm | 115/120 | 119/120 |
+| Invoice `remind` keeps the status | 90/117 | 76/114 |
+| Invoice `preview` keeps the status | 85/120 | 83/120 |
+| PayPal confirm | 69/116 | 66/117 |
+
+Its gain was 4 Lightning confirms. It cost the default model 10 of 40 on `remind`, and Luna already confirms 40/40 without it.
+
+## Earlier measurements
+
+These were taken on earlier main, while the note was in, and are kept for what they show about wording:
+
+### Results
 
 Compared with main at `ce95046`, before write memory merged, 3 models. Published journeys and invoicing had 6 repetitions each, held-out journeys 4. Files ending `-before` are main.
 
@@ -45,7 +69,7 @@ Compared with main at `ce95046`, before write memory merged, 3 models. Published
 
 All the misses are Lightning, which is still 3/6 on `preview` and `validate`.
 
-## What was tried
+### What was tried
 
 To compare wordings without rebuilding, prompts recorded from the journeys were replayed with their text changed, 24 calls per model at `max_tokens` 2,500, and answers lost upstream left out. All on prompts that already include #170.
 
@@ -66,7 +90,7 @@ Replays before #170, at 20 calls per model on Lightning:
 - **Listing the status enum's values** cost confirm (15/20 against 19/20) and gained little on `remind`, so no code reads the schema for them.
 - **The system message**, with an earlier wording, did worst on confirm (0/9 on Luna, 3/10 on Lightning).
 
-## Does the note still earn its place?
+### Does the note still earn its place?
 
 Checked after [write memory](../write-memory-2026-10-31/README.md) merged, with replays and no new journey run. Prompts recorded from this branch before that merge were sent with and without the note, 40 calls per model and answers lost upstream left out. Write memory can add requests to these prompts, and these recordings do not hold any, so this was not measured on its exact prompts.
 
@@ -79,13 +103,11 @@ Checked after [write memory](../write-memory-2026-10-31/README.md) merged, with 
 | Invoice remind keeps the status | 117/120 | 117/120 |
 | PayPal confirm | 91/120 | 83/119 |
 
-It stays, on a narrower case than it first looked. The gain is on the weaker models: Luna's Stripe confirm goes from 30/39 to 40/40, and Lightning's `preview` from 14/40 to 25/40. **The default model does not gain overall:** Stripe confirm goes from 37/40 to 40/40, and PayPal confirm falls from 26/40 to 19/40, more often keeping `CREATED`. With the earlier replay (14/30 against 12/30) that fall is 40/70 against 31/70, which could still be chance, but its direction has held twice. If the default model matters most, this is the case for dropping the note and keeping only the wording removals.
+At that point it stayed, on a narrower case than it first looked; the final main reversed this (see above). The gain is on the weaker models: Luna's Stripe confirm goes from 30/39 to 40/40, and Lightning's `preview` from 14/40 to 25/40. **The default model does not gain overall:** Stripe confirm goes from 37/40 to 40/40, and PayPal confirm falls from 26/40 to 19/40, more often keeping `CREATED`. With the earlier replay (14/30 against 12/30) that fall is 40/70 against 31/70, which could still be chance, but its direction has held twice. If the default model matters most, this is the case for dropping the note and keeping only the wording removals.
 
 ## Limits
 
-- The wording was chosen on Stripe and invoicing, and the invoicing contract was written by the author of the note.
-- `paypal.confirm moves the status on` fell from 11/12 to 9/12, all on the default model, which answered `CREATED`. Replaying that prompt 30 times each, the default model kept `CREATED` 16 times without the note and 18 with it, so this is a weakness main shares.
-- `paypal.capture completes the order` was 11/12, Luna answering malformed JSON. An earlier wording made Luna's capture answers about 30% longer. This was not re-measured for the shipped wording.
-- Effects are not checked against the resource's schema, so a model can store `status: "validated"`, which the contract's enum does not allow.
-- Held-out `zendesk.update changes status and priority` and `notion.update changes the properties` are not reached by this note. A separate session is working on them.
-- A few Luna calls failed upstream with a 400 saying the prompt was flagged as potentially violating usage policy. The cause was not investigated.
+- The removals were measured by replaying prompts with the old wording put back, not by a journey run on the final main. Captured prompts come from a fake LLM's world, so their resources are less realistic than a real run's.
+- `validate` still invents a status about half the time. Effects are not checked against the resource's schema, so `status: "validated"` is stored although the contract's enum does not allow it. Checking effects against the schema would close this, and is not done here.
+- The invoicing contract was written by the author of this change.
+- Some Luna calls failed upstream with a 400 saying the prompt was flagged as potentially violating usage policy. The cause was not investigated.

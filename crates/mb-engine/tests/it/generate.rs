@@ -3130,8 +3130,8 @@ fn unpaid_intent() -> StoredResource {
     }
 }
 
-/// A successful action's prompt ends by saying it succeeded and that what it
-/// needs is there.
+/// A successful action's prompt names its verb and leaves the model to decide
+/// whether it changed its target or made a new one.
 #[tokio::test]
 async fn an_action_prompt_says_it_succeeded() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
@@ -3143,64 +3143,27 @@ async fn an_action_prompt_says_it_succeeded() {
         ),
         "{prompt}"
     );
-    assert!(
-        prompt.ends_with(
-            "`confirm` succeeded. If a missing member would have stopped it, that member is now \
-             there: fill it in."
-        ),
-        "{prompt}"
-    );
 }
 
-/// The prompt never tells an action that a status moved: `preview` or
-/// `validate` move none, and a resource may have none.
+/// No action is told a status moved: `preview` or `validate` move none, and a
+/// resource may have none. Measured, saying so made models invent one.
 #[tokio::test]
 async fn an_action_prompt_does_not_assume_a_status() {
-    let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
-    let (instructions, _) = prompt.split_once("<now>").unwrap();
-    let (_, note) = prompt.rsplit_once("</shown_resources>").unwrap();
-    for text in [instructions, note] {
-        assert!(!text.contains("status"), "{text}");
+    let booking = StoredResource {
+        resource_type: "bookings".into(),
+        id: "b1".into(),
+        data: json!({"id": "b1", "status": "confirmed"}),
+    };
+    for prompt in [
+        action_prompt("confirmIntent", Some(unpaid_intent()), None).await,
+        action_prompt("cancelBooking", Some(booking), None).await,
+        action_prompt("cancelBooking", None, None).await,
+    ] {
+        let (instructions, _) = prompt.split_once("<now>").unwrap();
+        assert!(!instructions.contains("status"), "{instructions}");
+        assert!(!prompt.contains("has moved"), "{prompt}");
+        assert!(!prompt.contains("must include"), "{prompt}");
     }
-}
-
-/// A scenario's instructions win over what a success supplies: a mock owner
-/// can still answer a 200 that holds an error.
-#[tokio::test]
-async fn a_scenario_overrides_what_an_action_prompt_says() {
-    let bundle = compile(ACTIONS_PROMPT.as_bytes()).unwrap();
-    let (provider, engine) = scripted(vec![Ok(json!({"id": "x", "status": "s"}).to_string())]);
-    let call = OperationCall {
-        operation_id: "confirmIntent".into(),
-        ..OperationCall::default()
-    };
-    let target = unpaid_intent();
-    let scenario = mb_engine::ScenarioSpec {
-        name: "declined".into(),
-        instructions: Some("The card is declined.".into()),
-        ..mb_engine::ScenarioSpec::default()
-    };
-    let ctx = GenerationContext {
-        target: Some(&target),
-        scenario: Some(&scenario),
-        ..GenerationContext::default()
-    };
-    engine
-        .generate(
-            &bundle,
-            bundle.operation("confirmIntent").unwrap(),
-            &call,
-            ctx,
-        )
-        .await
-        .unwrap();
-    let prompt = provider.requests()[0]
-        .messages
-        .last()
-        .unwrap()
-        .content
-        .clone();
-    assert!(prompt.ends_with("<scenario> overrides this."), "{prompt}");
 }
 
 /// Nothing is said of an action answered with an error, of a write on the
@@ -3245,8 +3208,7 @@ async fn an_effect_is_asked_for_only_of_an_other_action_with_a_target() {
     let prompt = action_prompt("confirmIntent", Some(unpaid_intent()), None).await;
     assert!(!prompt.contains("if it changes anything"), "{prompt}");
     let prompt = action_prompt("cancelBooking", None, None).await;
-    assert!(!prompt.contains("`cancel` succeeded"), "{prompt}");
-    assert!(!prompt.contains("if it changes anything"), "{prompt}");
+    assert!(!prompt.contains("changes only through"), "{prompt}");
 }
 
 /// An action of its target's schema, for what the engine decides of its answer.

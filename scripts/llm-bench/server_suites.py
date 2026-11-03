@@ -2233,6 +2233,10 @@ def main():
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
     failed = False
+    if args.journey:
+        # --journey alone means the journeys suite; each journey runs once.
+        args.journey = list(dict.fromkeys(args.journey))
+        args.suite = args.suite or ["journeys"]
     for suite in args.suite or DEFAULT_SUITES:
         mocks, runner = RUNNERS[suite]
         sink = Sink(args.out, args.model, suite)
