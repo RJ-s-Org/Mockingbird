@@ -1162,6 +1162,8 @@ pub(crate) async fn complete(
             && deleted::applies(rt, plan)
             && let Some(body) = generated.body.as_mut()
         {
+            // The store first: a filter sees what the session wrote since.
+            lists::overlay_stored(&mut state, plan, resource_type, body).await;
             lists::narrow(rt, plan, call, body);
         }
         if (200..300).contains(&generated.status)

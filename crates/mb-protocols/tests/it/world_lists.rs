@@ -665,14 +665,14 @@ fn with(mut item: Value, member: &str, value: Value) -> Value {
     item
 }
 
-/// Creates ticket `t1` and updates it to `closed` with three replies.
-async fn created_then_updated(api: &Api) {
+/// Creates ticket `t1` and updates its status to `to`.
+async fn created_then_updated(api: &Api, to: &str) {
     let (status, _) = api
         .call("POST", "/tickets", Some(json!({"title": "T t1"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, _) = api
-        .call("PATCH", "/tickets/t1", Some(json!({"status": "closed"})))
+        .call("PATCH", "/tickets/t1", Some(json!({"status": to})))
         .await;
     assert_eq!(status, StatusCode::OK);
 }
@@ -697,15 +697,17 @@ fn updated_script(list: Value) -> Vec<Result<String, LlmError>> {
 async fn a_listed_item_shows_its_stored_record() {
     let list = json!([ticket("t1", "open"), ticket("t2", "open")]);
     let api = api_of(TICKETS, true, updated_script(list));
-    created_then_updated(&api).await;
+    created_then_updated(&api, "closed").await;
+    let held = api.get("/tickets/t1").await;
+    assert_eq!(held["status"], "closed");
+    assert_eq!(held["internal_note"], "secret");
     let body = api.get("/tickets").await;
     assert_eq!(body[0]["status"], "closed", "{body}");
-    assert_eq!(body[0]["reply_count"], 3, "{body}");
+    assert_eq!(body[0]["title"], held["title"], "{body}");
     assert!(body[0].get("internal_note").is_none(), "{body}");
     assert_eq!(body[1], ticket("t2", "open"));
-    let held = api.get("/tickets/t1").await;
-    assert_eq!(held["internal_note"], "secret");
-    assert_eq!(held["status"], "closed");
+    // The list changed no stored record.
+    assert_eq!(api.get("/tickets/t1").await, held);
     assert_eq!(api.provider.requests().len(), 3);
 }
 
@@ -717,7 +719,8 @@ async fn a_stored_record_the_item_does_not_allow_changes_nothing() {
     let mut script = updated_script(list);
     script[1] = Ok(ticket("t1", "pending").to_string());
     let api = api_of(TICKETS, true, script);
-    created_then_updated(&api).await;
+    created_then_updated(&api, "pending").await;
+    assert_eq!(api.get("/tickets/t1").await["status"], "pending");
     let body = api.get("/tickets").await;
     assert_eq!(body, json!([ticket("t1", "open")]));
 }
@@ -728,7 +731,7 @@ async fn a_stored_record_the_item_does_not_allow_changes_nothing() {
 async fn a_filter_sees_the_stored_record() {
     let list = json!([ticket("t1", "open"), ticket("t2", "open")]);
     let api = api_of(TICKETS, true, updated_script(list));
-    created_then_updated(&api).await;
+    created_then_updated(&api, "closed").await;
     let body = api.get("/tickets?status=open").await;
     assert_eq!(ids(&body), ["t2"]);
 }
@@ -738,7 +741,7 @@ async fn a_filter_sees_the_stored_record() {
 async fn consistency_off_overlays_nothing() {
     let list = json!([ticket("t1", "open")]);
     let api = api_of(TICKETS, false, updated_script(list));
-    created_then_updated(&api).await;
+    created_then_updated(&api, "closed").await;
     let body = api.get("/tickets").await;
     assert_eq!(body, json!([ticket("t1", "open")]));
 }
@@ -797,20 +800,20 @@ async fn a_null_reference_contradicts_a_value() {
 
 fn four() -> Value {
     json!([
-        ticket("t1", "open"),
-        ticket("t2", "open"),
-        ticket("t10", "open"),
+        ticket("tk-001", "open"),
+        ticket("tk-002", "open"),
+        ticket("tk-0010", "open"),
         ticket("2", "open"),
     ])
 }
 
 /// A bound naming an item's identity, under a parameter naming no member, leaves that
-/// item out, and only it: `t1` is not `t10`.
+/// item out, and only it: `tk-001` is not `tk-0010`.
 #[tokio::test]
 async fn a_bound_naming_an_item_leaves_it_out() {
     let api = api_of(TICKETS, true, vec![Ok(four().to_string())]);
-    let body = api.get("/tickets?before=t1").await;
-    assert_eq!(ids(&body), ["t2", "t10", "2"]);
+    let body = api.get("/tickets?before=tk-001").await;
+    assert_eq!(ids(&body), ["tk-002", "tk-0010", "2"]);
 }
 
 /// A boolean parameter that is true (`inclusive`) keeps the bound's item.
@@ -821,22 +824,24 @@ async fn an_inclusive_flag_keeps_the_bound() {
         true,
         vec![Ok(four().to_string()), Ok(four().to_string())],
     );
-    let body = api.get("/tickets?before=t1&inclusive=true").await;
-    assert_eq!(ids(&body), ["t1", "t2", "t10", "2"]);
-    let body = api.get("/tickets?before=t1&inclusive=false").await;
-    assert_eq!(ids(&body), ["t2", "t10", "2"]);
+    let body = api.get("/tickets?before=tk-001&inclusive=true").await;
+    assert_eq!(ids(&body), ["tk-001", "tk-002", "tk-0010", "2"]);
+    let body = api.get("/tickets?before=tk-001&inclusive=false").await;
+    assert_eq!(ids(&body), ["tk-002", "tk-0010", "2"]);
 }
 
-/// A number parameter (`page=2`), a search (`q`) and a value naming no item are no
-/// bound, and a parameter's own `enum` word (`status=all`) no filter: nothing changes.
+/// A number parameter (`page=2`), a search (`q`), a value naming no item and one too
+/// short or plain to be an id (`2`, as a search for a word is no bound) are no bound,
+/// and a parameter's own `enum` word (`status=all`) no filter: nothing changes.
 #[tokio::test]
 async fn parameters_naming_nothing_change_nothing() {
-    let script = (0..5).map(|_| Ok(four().to_string())).collect();
+    let script = (0..6).map(|_| Ok(four().to_string())).collect();
     let api = api_of(TICKETS, true, script);
     for uri in [
         "/tickets?page=2",
         "/tickets?q=bug",
         "/tickets?before=zz9",
+        "/tickets?before=2",
         "/tickets?status=all",
         "/tickets?labels=",
     ] {
@@ -854,6 +859,6 @@ async fn a_required_parameter_is_no_bound() {
         "{name: q, in: query, required: true, schema: {type: string}}",
     );
     let api = api_of(&contract, true, vec![Ok(four().to_string())]);
-    let body = api.get("/tickets?q=t1").await;
+    let body = api.get("/tickets?q=tk-001").await;
     assert_eq!(body, four());
 }
