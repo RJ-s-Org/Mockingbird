@@ -730,6 +730,16 @@ pub fn requested_limit<'a>(
     doc: impl Fn() -> &'a Value,
     call: &crate::OperationCall,
 ) -> Option<PageLimit> {
+    requested_page(query, doc, call).map(|(_, limit)| limit)
+}
+
+/// [`requested_limit`], with the name of the query parameter that asks for it.
+#[must_use]
+pub fn requested_page<'a, 'c>(
+    query: Option<&Value>,
+    doc: impl Fn() -> &'a Value,
+    call: &'c crate::OperationCall,
+) -> Option<(&'c str, PageLimit)> {
     let declared = query.and_then(|q| q.get("properties"));
     let mut sizes: Vec<(&String, u64, Option<&Value>)> = call
         .query
@@ -746,22 +756,23 @@ pub fn requested_limit<'a>(
         })
         .collect();
     sizes.sort_by_key(|(name, ..)| *name);
-    for (_, items, param) in &sizes {
+    for (name, items, param) in &sizes {
         let maximum = param.and_then(|p| p.get("maximum")).and_then(Value::as_u64);
         if let Some(maximum) = maximum
             && !arrays_up_to(doc(), maximum)?.is_empty()
         {
-            return Some(PageLimit {
+            let limit = PageLimit {
                 items: *items,
                 maximum: Some(maximum),
-            });
+            };
+            return Some((name.as_str(), limit));
         }
     }
     PAGE_SIZE_WORDS.iter().find_map(|word| {
         sizes
             .iter()
             .find(|(name, ..)| normalized(name).contains(word))
-            .map(|(_, items, _)| PageLimit::from(*items))
+            .map(|(name, items, _)| (name.as_str(), PageLimit::from(*items)))
     })
 }
 

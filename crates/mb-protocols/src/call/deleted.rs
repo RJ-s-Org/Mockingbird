@@ -18,6 +18,15 @@
 //! `/projects/1/tasks/5`) is not marked either. The bound is kept by an index, read, changed and written back: two deletes at the same
 //! moment can lose an entry, which only leaves a marker it does not count.
 //!
+//! A lookup by value can bring a record back under a new id: after a delete, Auth0's
+//! `/users-by-email?email=` answered a user the model made up, holding the deleted
+//! user's email. So a delete of a stored record also marks, by hash, the text of its
+//! identifying members: its identity, and the members a list read of its type filters by
+//! (see [`BundleIndex::lookup_members`]), not every text it holds. A generated list item
+//! of that type that the session does not hold, whose such member holds a marked value
+//! that the request names too, goes as a marked id does. A create storing a record with
+//! that value clears its marker, so a record made again with the same email stays.
+//!
 //! An LLM and `consistency: on` only: offline answers, and those with consistency
 //! off, are as they were. Not GraphQL, which stores what its answers hold under their
 //! own types.
@@ -53,6 +62,75 @@ fn marker_key(t: &str, scope: Option<&str>, id: &str) -> String {
     let digest = hasher.finalize();
     let hash: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
     format!("{INDEX}/{hash}")
+}
+
+/// The marker of value `value` of member `member` of a deleted `t` under `scope`.
+fn value_key(t: &str, scope: Option<&str>, member: &str, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    for part in ["value", t, scope.unwrap_or_default(), member, value] {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let hash: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{INDEX}/{hash}")
+}
+
+/// Members whose text a delete of a `t` marks, at most.
+const MAX_MARKED_VALUES: usize = 8;
+
+/// The members of a `t` that identify it: its identity, and those a list read of its
+/// type filters by.
+fn identifying(rt: &MockRuntime, t: &str) -> Vec<String> {
+    let index = rt.index();
+    let mut members: Vec<String> = index.identity_fields(t).to_vec();
+    for member in index.lookup_members(t) {
+        if !members.contains(member) {
+            members.push(member.clone());
+        }
+    }
+    members
+}
+
+/// The text `data` holds in `t`'s identifying members, with the member.
+fn identifying_values<'a>(rt: &MockRuntime, t: &str, data: &'a Value) -> Vec<(String, &'a str)> {
+    identifying(rt, t)
+        .into_iter()
+        .filter_map(|member| {
+            let value = data.get(&member)?.as_str().filter(|v| !v.is_empty())?;
+            Some((member, value))
+        })
+        .take(MAX_MARKED_VALUES)
+        .collect()
+}
+
+/// Strings a request holds, at most this many, and how deep its body is walked.
+const MAX_NAMED_VALUES: usize = 64;
+const MAX_NAMED_DEPTH: usize = 4;
+
+/// The text a request names: in its path, its query and its body.
+fn named_values(call: &OperationCall) -> HashSet<String> {
+    fn walk(value: &Value, depth: usize, out: &mut HashSet<String>) {
+        if depth > MAX_NAMED_DEPTH || out.len() >= MAX_NAMED_VALUES {
+            return;
+        }
+        match value {
+            Value::String(text) => {
+                out.insert(text.clone());
+            }
+            Value::Array(items) => items.iter().for_each(|v| walk(v, depth + 1, out)),
+            Value::Object(members) => members.values().for_each(|v| walk(v, depth + 1, out)),
+            _ => {}
+        }
+    }
+    let mut out = HashSet::new();
+    for value in call.path_params.values().chain(call.query.values()) {
+        walk(value, 0, &mut out);
+    }
+    if let Some(body) = &call.body {
+        walk(body, 0, &mut out);
+    }
+    out
 }
 
 /// The concrete parent of what `op` reads or lists: `/projects/1/tasks` for a route's
@@ -118,21 +196,31 @@ fn scope_of_type(rt: &MockRuntime, t: &str, call: &OperationCall) -> Option<Opti
     }
 }
 
-/// Marks what a delete of `id` on `op`'s route removed: `id`, and what the path called
-/// it, which may be a key its reads go by, both under the route's parent.
+/// Marks what a delete of `id` on `op`'s route removed: `id`, what the path called it,
+/// which may be a key its reads go by, and the identifying text of `held`, what the
+/// session held under it, all under the route's parent.
 pub(super) async fn mark(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
-    op: &Operation,
-    call: &OperationCall,
+    (op, call): (&Operation, &OperationCall),
     t: &str,
     id: &str,
+    held: Option<&StoredResource>,
 ) {
+    let rt = state.rt;
     let parent = scope(op, call);
     let named = target_id(op, call).unwrap_or_else(|| id.to_string());
     let mut keys = vec![marker_key(t, parent.as_deref(), &named)];
     if named != id {
         keys.push(marker_key(t, parent.as_deref(), id));
+    }
+    if let Some(held) = held.filter(|h| h.resource_type == t) {
+        for (member, value) in identifying_values(rt, t, &held.data) {
+            let key = value_key(t, parent.as_deref(), &member, value);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
     }
     for key in &keys {
         let marker = StoredResource {
@@ -193,15 +281,15 @@ pub(super) async fn mention_is_deleted(
     is_deleted(state, session, t, parent.as_deref(), id).await
 }
 
-/// Ends the marker of what was just stored under `id`, under `scope` and where its read
-/// would look. The index keeps its entry, which a later delete moves on or the bound
-/// takes out.
+/// Ends the markers of what was just stored, its id and its identifying text, under
+/// `scope` and where its read would look. The index keeps its entries, which a later
+/// delete moves on or the bound takes out.
 pub(super) async fn clear(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
     scope: Option<&str>,
-    id: &str,
+    stored: &StoredResource,
 ) {
     let rt = state.rt;
     let read = state
@@ -209,22 +297,30 @@ pub(super) async fn clear(
         .as_ref()
         .and_then(|call| scope_of_type(rt, t, call))
         .flatten();
-    state
-        .delete(session, INTERNAL_TYPE, &marker_key(t, scope, id))
-        .await;
+    let mut scopes = vec![scope];
     if read.as_deref() != scope {
+        scopes.push(read.as_deref());
+    }
+    let values = identifying_values(rt, t, &stored.data);
+    for scope in scopes {
         state
-            .delete(session, INTERNAL_TYPE, &marker_key(t, read.as_deref(), id))
+            .delete(session, INTERNAL_TYPE, &marker_key(t, scope, &stored.id))
             .await;
+        for (member, value) in &values {
+            state
+                .delete(session, INTERNAL_TYPE, &value_key(t, scope, member, value))
+                .await;
+        }
     }
 }
 
-/// Takes marked ids out of a generated list answer, each only if the answer stays
+/// Takes marked ids out of a generated list answer, and the items the session does
+/// not hold that carry a marked value `call` names, each only if the answer stays
 /// valid, and corrects the count beside the list that is clearly its own.
 pub(super) async fn drop_from_list(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
-    plan: &CallPlan<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
     t: &str,
     scope: Option<&str>,
     generated: &mut GeneratedResponse,
@@ -246,6 +342,44 @@ pub(super) async fn drop_from_list(
             gone.push(at);
         }
     }
+    let item_type = rt
+        .index()
+        .item_type(rt.bundle(), op, body)
+        .unwrap_or_else(|| t.to_string());
+    let named = named_values(call);
+    for (at, item) in items.iter().enumerate() {
+        if named.is_empty() {
+            break;
+        }
+        if gone.contains(&at) {
+            continue;
+        }
+        let mut marked = false;
+        for (member, value) in identifying_values(rt, &item_type, item) {
+            if named.contains(value)
+                && state
+                    .get(
+                        session,
+                        INTERNAL_TYPE,
+                        &value_key(&item_type, scope, &member, value),
+                    )
+                    .await
+                    .is_some()
+            {
+                marked = true;
+                break;
+            }
+        }
+        let held = match item.get(&field).and_then(id_string) {
+            Some(id) if marked => state.get(session, &item_type, &id).await.is_some(),
+            _ => false,
+        };
+        if marked && !held {
+            gone.push(at);
+        }
+    }
+    gone.sort_unstable();
+    gone.dedup();
     if gone.is_empty() {
         return;
     }
@@ -284,7 +418,7 @@ pub(super) async fn drop_from_list(
 /// the one member beside it that the contract declares an integer, is named as a
 /// count of it (`total`, `<list>_count`) and is at least what the list held. With
 /// none, or two to choose from, nothing says what it counts.
-fn with_count_corrected(
+pub(super) fn with_count_corrected(
     rt: &MockRuntime,
     op: &Operation,
     before: &Value,
