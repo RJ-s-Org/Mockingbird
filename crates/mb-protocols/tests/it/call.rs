@@ -2658,18 +2658,18 @@ async fn a_searched_offer_keeps_what_the_search_listed() {
         "{prompt}"
     );
 
-    // The booking names the offer, so the offer's next read catches up once, shown
-    // the booking as new; then the store answers, whole.
-    let (source, caught_up) = read(&api, &format!("/offers/{OFFER_ID}")).await;
+    // The booking names the offer, so the offer's next read is told of it once, shown
+    // the booking as new. An answer listing no effect on the offer changes nothing:
+    // the store's copy answers, whole, then and after.
+    let (source, told) = read(&api, &format!("/offers/{OFFER_ID}")).await;
     assert_eq!(source, "llm");
     let prompt = prompt_of(&api, 3);
     assert!(prompt.contains("<new_resources>"), "{prompt}");
     assert!(prompt.contains("H4K2P9"), "{prompt}");
-    assert_eq!(caught_up["seatsRemaining"], 3);
-    assert_eq!(caught_up["price"]["amount"], "148.30");
+    assert_eq!(told, offer);
     let (source, again) = read(&api, &format!("/offers/{OFFER_ID}")).await;
     assert_eq!(source, "state");
-    assert_eq!(again, caught_up);
+    assert_eq!(again, offer);
     assert_eq!(api.provider.requests().len(), 4);
 }
 

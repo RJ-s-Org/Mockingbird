@@ -3907,6 +3907,7 @@ paths:
         "404": {description: gone, content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
         "409": {description: odd, content: {application/json: {schema: {$ref: "#/components/schemas/Small"}}}}
         "422": {description: worded, content: {application/json: {schema: {$ref: "#/components/schemas/Worded"}}}}
+        "410": {description: gone, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: number}}}}}}
     put:
       operationId: putThing
       parameters: [{name: thing_id, in: path, required: true, schema: {type: string}}]
@@ -3989,6 +3990,13 @@ async fn a_problem_bodys_status_is_the_http_status() {
         .unwrap();
     assert_eq!(out.body.unwrap()["status"], "failed");
 
+    let (_, engine) = scripted(vec![Ok(json!({"status": 3.5}).to_string())]);
+    let out = engine
+        .generate(&bundle, op, &problem_call(), forced(410))
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["status"], 410, "a number is patched too");
+
     let (_, engine) = scripted(vec![Ok(json!({"id": "t1", "status": 3}).to_string())]);
     let out = engine
         .generate(&bundle, op, &problem_call(), ctx())
@@ -4047,6 +4055,42 @@ async fn records_created_since_are_shown_as_new() {
     assert!(
         shown.find("<new_resources>").unwrap() < shown.find("<earlier_requests>").unwrap(),
         "{shown}"
+    );
+}
+
+/// A read whose target changes only by effects is offered the effects envelope and
+/// answers the stored copy, whatever its answer says; its effects are handed back.
+#[tokio::test]
+async fn a_read_changing_by_effects_answers_the_stored_copy() {
+    let bundle = effects_bundle();
+    let target = stored_booking();
+    let earlier = [json!({"operation": "createCharge", "path": "/charges"})];
+    let answer = json!({
+        "effects": [{"type": "bookings", "id": "b1", "set": {"note": "charged"}}],
+        "response": cancelled(),
+    });
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let ctx = GenerationContext {
+        target: Some(&target),
+        earlier_requests: &earlier,
+        changes_by_effects: true,
+        ..GenerationContext::default()
+    };
+    let out = engine
+        .generate(
+            &bundle,
+            bundle.operation("getBooking").unwrap(),
+            &booking_call("getBooking"),
+            ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.body.as_ref().unwrap()["status"], target.data["status"]);
+    assert_eq!(out.effects.len(), 1);
+    let prompt = &provider.requests()[0].messages[1].content;
+    assert!(
+        prompt.contains("changes only through \"effects\""),
+        "{prompt}"
     );
 }
 

@@ -244,14 +244,25 @@ fn payment(id: &str, refunded: i64, status: &str) -> Value {
     json!({"id": id, "amount": 100, "amount_refunded": refunded, "status": status})
 }
 
+/// An answer to a read of a record behind a create naming it: what it lists as
+/// effects on the record, and a body that also says otherwise, which goes.
+fn by_effects(id: &str, set: Value, response: Value) -> Value {
+    json!({"effects": [{"type": "payments", "id": id, "set": set}], "response": response})
+}
+
 /// A refund naming its payment by value, made at a route that says nothing of the
-/// payment: the payment's next read catches up once, shown the refund as new.
+/// payment: the payment's next read is told once, shown the refund as new, and
+/// changes by the effects it lists only.
 #[tokio::test]
 async fn a_refund_naming_its_payment_brings_the_payments_read_up_to_date() {
     let h = related(vec![
         payment("pay_100001", 0, "captured"),
         json!({"id": "re_200001", "amount": 40, "payment_id": "pay_100001"}),
-        payment("pay_100001", 40, "partially_refunded"),
+        by_effects(
+            "pay_100001",
+            json!({"amount_refunded": 40, "status": "partially_refunded"}),
+            json!({"id": "pay_100001", "amount": 7, "amount_refunded": 40, "status": "partially_refunded"}),
+        ),
     ]);
     h.call("POST", "/payments", Some(json!({"amount": 100})))
         .await;
@@ -272,8 +283,10 @@ async fn a_refund_naming_its_payment_brings_the_payments_read_up_to_date() {
     assert_eq!(source, "llm", "the payment is behind the refund");
     assert_eq!(read["amount_refunded"], 40);
     assert_eq!(read["status"], "partially_refunded");
+    assert_eq!(read["amount"], 100, "what no effect lists stays as stored");
     assert_eq!(h.calls(), 3, "one call for the read");
     let prompt = h.prompt(2);
+    assert!(prompt.contains(r#""effects""#), "{prompt}");
     let earlier = block(&prompt, "earlier_requests").expect("told the refund's request");
     assert!(earlier.contains("createRefund"), "{prompt}");
     let new = block(&prompt, "new_resources").expect("shown the refund as new");
@@ -286,7 +299,7 @@ async fn a_refund_naming_its_payment_brings_the_payments_read_up_to_date() {
     // Caught up: state answers, and the refund's own read needed nothing.
     let (_, source, again) = h.call("GET", "/payments/pay_100001", None).await;
     assert_eq!(source, "state");
-    assert_eq!(again["amount_refunded"], 40);
+    assert_eq!(again, read);
     let (_, source, _) = h.call("GET", "/refunds/re_200001", None).await;
     assert_eq!(source, "state");
     assert_eq!(h.calls(), 3);
@@ -335,7 +348,10 @@ async fn a_reply_brings_the_message_it_answers_up_to_date() {
     let h = related(vec![
         json!({"id": "msg_100001", "text": "hello", "reply_count": 0}),
         json!({"id": "msg_100002", "text": "hi back", "reply_count": 0, "thread": "msg_100001"}),
-        json!({"id": "msg_100001", "text": "hello", "reply_count": 1}),
+        json!({
+            "effects": [{"type": "messages", "id": "msg_100001", "set": {"reply_count": 1}}],
+            "response": {"id": "msg_100001", "text": "rewritten", "reply_count": 1},
+        }),
     ]);
     h.call("POST", "/messages", Some(json!({"text": "hello"})))
         .await;
@@ -352,6 +368,7 @@ async fn a_reply_brings_the_message_it_answers_up_to_date() {
     let (_, source, read) = h.call("GET", "/messages/msg_100001", None).await;
     assert_eq!(source, "llm");
     assert_eq!(read["reply_count"], 1);
+    assert_eq!(read["text"], "hello", "only the effect changes it");
     assert_eq!(h.calls(), 3);
     let prompt = h.prompt(2);
     let new = block(&prompt, "new_resources").expect("shown the reply as new");
@@ -503,4 +520,117 @@ async fn an_update_by_form_moves_the_record() {
     assert_eq!(answered["idList"], "list_100002");
     let (_, _, read) = h.call("GET", "/cards/card_100001", None).await;
     assert_eq!(read["idList"], "list_100002");
+}
+
+// The review's probes, each a test.
+
+/// A read of a record a create named by value changes by no member its answer only
+/// says: the stored amount and status stand.
+#[tokio::test]
+async fn probe_a_catch_up_does_not_rewrite_the_amount() {
+    let h = related(vec![
+        payment("pay_100001", 0, "captured"),
+        json!({"id": "re_200001", "amount": 40, "payment_id": "pay_100001"}),
+        json!({"id": "pay_100001", "amount": 7, "amount_refunded": 40, "status": "weird"}),
+    ]);
+    h.call("POST", "/payments", Some(json!({"amount": 100})))
+        .await;
+    h.call(
+        "POST",
+        "/refunds",
+        Some(json!({"payment_id": "pay_100001", "amount": 40})),
+    )
+    .await;
+    let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "llm", "told the refund once");
+    assert_eq!(read, payment("pay_100001", 0, "captured"));
+    let (_, source, again) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(again, read);
+    assert_eq!(h.calls(), 3);
+}
+
+/// A message whose request names a payment under any member tells the payment, which
+/// its read's answer still cannot rewrite.
+#[tokio::test]
+async fn probe_a_message_naming_a_payment_does_not_rewrite_it() {
+    let h = related(vec![
+        payment("pay_100001", 0, "captured"),
+        json!({"id": "msg_100002", "text": "x", "reply_count": 0, "thread": "pay_100001"}),
+        json!({"id": "pay_100001", "amount": 999, "amount_refunded": 0, "status": "captured"}),
+    ]);
+    h.call("POST", "/payments", Some(json!({"amount": 100})))
+        .await;
+    h.call(
+        "POST",
+        "/messages",
+        Some(json!({"text": "x", "thread": "pay_100001"})),
+    )
+    .await;
+    let (_, _, read) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(read["amount"], 100);
+    let held = h.store.get(&session(), "payments", "pay_100001").await;
+    assert_eq!(held.unwrap().unwrap().data["amount"], 100);
+}
+
+/// A value only the generated answer holds names nothing: a count equal to a
+/// payment's id marks no payment.
+#[tokio::test]
+async fn probe_a_number_in_the_answer_marks_nothing() {
+    let h = related(vec![
+        json!({"id": "100001", "amount": 100, "amount_refunded": 0, "status": "captured"}),
+        json!({"id": "msg_100002", "text": "x", "reply_count": 100001}),
+        json!({"id": "100001", "amount": 1, "amount_refunded": 0, "status": "changed"}),
+    ]);
+    h.call("POST", "/payments", Some(json!({"amount": 100})))
+        .await;
+    h.call("POST", "/messages", Some(json!({"text": "x"})))
+        .await;
+    let (_, source, read) = h.call("GET", "/payments/100001", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read["amount"], 100);
+    assert_eq!(h.calls(), 2);
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+}
+
+/// Five refunds, each read back: each read is told once (one call), and the payment
+/// changes by effects only, of which these answers list none.
+#[tokio::test]
+async fn probe_a_create_heavy_flow_costs_one_call_per_affected_read() {
+    let mut script = vec![payment("pay_100001", 0, "captured")];
+    for i in 0..5 {
+        script.push(json!({"id": format!("re_20000{i}"), "amount": 1, "payment_id": "pay_100001"}));
+        script.push(payment("pay_100001", i + 1, "partially_refunded"));
+    }
+    let h = related(script);
+    h.call("POST", "/payments", Some(json!({"amount": 100})))
+        .await;
+    for _ in 0..5 {
+        h.call(
+            "POST",
+            "/refunds",
+            Some(json!({"payment_id": "pay_100001", "amount": 1})),
+        )
+        .await;
+        let (_, _, read) = h.call("GET", "/payments/pay_100001", None).await;
+        assert_eq!(read, payment("pay_100001", 0, "captured"));
+    }
+    assert_eq!(h.calls(), 11);
+}
+
+/// What the query names is stored as the query says, whatever the answer says, and
+/// what it does not name stays.
+#[tokio::test]
+async fn probe_a_query_member_is_stored_as_the_query_says() {
+    let h = related(vec![
+        card("old", "list_100001"),
+        json!({"id": "card_100001", "name": "llm-renamed", "idList": "list_100009", "closed": true}),
+    ]);
+    h.call("GET", "/cards/card_100001", None).await;
+    let (_, _, answered) = h
+        .call("PUT", "/cards/card_100001?idList=list_100001", None)
+        .await;
+    assert_eq!(answered, card("old", "list_100001"));
+    let (_, _, read) = h.call("GET", "/cards/card_100001", None).await;
+    assert_eq!(read, card("old", "list_100001"));
 }
