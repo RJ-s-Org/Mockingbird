@@ -111,7 +111,24 @@ No migration or configuration. A contract whose routes already have an identity 
 - **What changes:** with no other identity, a member named for the type becomes one: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one: `{id}`, `{userId}`, `{user_id}`. So `/users/{handle}` gets none, and `GET /users/alice` keeps the `user_id` it is answered. A compiled bundle can change, also for offline mocks.
 - **What follows:** the Auth0 example's user is now stored by `POST`, served by `GET`, updated by `PATCH` and marked by `DELETE`.
 - **`unknown_ids: 404` can answer 404 where it generated before**: `GET /accounts/7` over `account_id`, and Auth0's users, as a read now knows it is by id and that the session does not hold it.
-- **Not covered**: a route answering an envelope (`{"user": {...}}`) or an array has no such member, and any other name is not guessed. [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) sets the identity where the contract's names do not give it. Square's, Zendesk's and SendGrid's reads by path and Twilio's lookup are as they were.
+- **Not covered**: any other name is not guessed. [`x-mockingbird-resource`](import.md#correcting-it-x-mockingbird-resource) sets the identity where the contract's names do not give it. Twilio's lookup is as it was. Envelopes and arrays are below.
+
+### A record in an envelope or an array has an identity
+
+No migration or configuration. A contract whose routes already have an identity is as it was, with the same LLM calls ([how it is read](import.md#how-a-resources-identity-is-read)).
+
+- **What changes in a compiled bundle:** an identity can say where the answer holds the record, as `record: {member: "payment"}` or `record: item`; a bundle without one serializes as before. Square's payment, customer and refund routes, Zendesk's ticket and user routes, and SendGrid's `GET` and `DELETE /v3/suppression/bounces/{email}` gain an identity. Square's `CompletePayment` becomes an update of the payment, where it stored nothing.
+- **What follows:** these records are stored as what the envelope holds, served from state in their envelope, and `unknown_ids: 404` can answer 404 for them. A SendGrid bounce read by address answers `[{...}]` from state, and `[]` once deleted, where a deleted record answers 404 elsewhere.
+- **Not covered**: an envelope with several members none of which, or more than one of which, is the type's record schema (`{data: User, links}` with no other route answering a `User`), and an array whose items do not require the member the parameter names.
+- **Rust API**: `mb_mcm::Identity` gains the public field `record`, which breaks code constructing it in full, and `mb_mcm::RecordAt` and `Identity::record_in`, `record_in_mut` and `answer_holding` are new.
+
+### Records and lists by their schemas
+
+No migration or configuration.
+
+- **A list is typed by its items** under a path parameter or beside its own type's routes, when every array it lists holds exactly what one type's `GET` by path serves. In the examples: Notion's `query-data-source` and `post-database-query` are `pages`, Jira's `GET /search/jql` is `issue`, Spotify's `get-an-artists-top-tracks` is `tracks`, and GitHub's `/installation/repositories` and `/search/repositories` are `repos`. They are shown that type's stored records and store what they list under it. A shorter or longer form of the record, as a search result composing it with `allOf`, keeps the route's type.
+- **A single answer with an identity of its own is stored as itself**: OpenWeatherMap's `GET /data/2.5/weather` stores the reading by its city `id`, where it stored each `weather` condition as a `weather` record. The lists a record's answer holds are not records of its type: an order's `lines` mentioned in its answer are stored as `lines`, where they were stored as `orders`.
+- **A read below a record that answers exactly one of its members is served from it**: Spotify's `GET /playlists/{id}/items` answers the stored playlist's `tracks` from state, one LLM call fewer, while no write the playlist does not show yet is remembered for it or for that path. A write there still reaches the playlist through the write memory, and the next read of the items generates, told of it.
 
 ### A lookup reads as the type of its items
 
@@ -119,7 +136,7 @@ No migration or configuration. A read whose path has no parameter, whose type ha
 
 - **It is shown that type's stored records, and stores what it lists under them**, instead of nothing. A prompt can be longer, and a recorded prompt may not replay.
 - **Another shape beside them keeps the route's own type**: `{users: [Hit], tickets: [Ticket]}` would store a hit as a ticket. An array of strings does not count. Items with no declared members do, as they could be anything.
-- **A list under a path parameter (`/teams/{team}/members`) and a read of one record (`/me`) keep their types**, as does a read whose items two types' `GET`s answer. So does a type with another route, or one set by `x-mockingbird-resource`.
+- **A read of one record (`/me`) keeps its type**, as does a read whose items two types' `GET`s answer, or one set by `x-mockingbird-resource`. A list under a path parameter (`/teams/{team}/members`) or beside its type's routes keeps its type unless its items are exactly a type's record (see [records and lists by their schemas](#records-and-lists-by-their-schemas)).
 
 ### Action routes act on their parent resource
 
