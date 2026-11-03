@@ -801,6 +801,8 @@ pub(crate) async fn prepare<'a>(
                 .await
         }
     };
+    // What the path named, before a record found by another member takes its place.
+    let named_id = target_id.clone();
     // Found by another field (an issue's `number`): writes go to its id.
     if let Some(found) = &target {
         target_id = Some(found.id.clone());
@@ -835,12 +837,16 @@ pub(crate) async fn prepare<'a>(
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
     }
-    // Whatever `unknown_ids` says: this one is known to be gone.
+    // Whatever `unknown_ids` says: this one is known to be gone. A record found by
+    // another member than its key (`/issues/{issue_iid}`) is not what the path named
+    // when that was deleted: another issue can share the `iid`.
     if matches!(op.kind, OperationKind::Query)
         && plan.forced_status.is_none()
-        && target.is_none()
+        && target
+            .as_ref()
+            .is_none_or(|found| Some(found.id.as_str()) != named_id.as_deref())
         && state.tracks_deleted
-        && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+        && let (Some(t), Some(id)) = (resource_type, named_id.as_deref())
         && deleted::is_deleted(
             &mut state,
             session,
@@ -2908,9 +2914,9 @@ async fn store_wrapped(
 /// answer for another's: such an answer stores nothing, the response cache
 /// keeping its repeat. So does one naming its target after an owner that it
 /// does not show (see [`shows_owner`]).
-/// A route read by another field (`/issues/{number}`) stores nothing: its
-/// answer's `id` comes from
-/// the path and is no resource's, so a list would store the issue again.
+/// A route read by another member (`/issues/{number}`, `/teams/{team_slug}`) goes
+/// under its answer's own `id` when that member holds the path's value, which
+/// the engine sets there, and the answer shows the path's owner, if it has one.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -2944,10 +2950,17 @@ async fn seed_own_read(
     if detail_schema.is_none() || detail_schema != own_schema {
         return;
     }
-    if identity.path_field.is_some() {
+    let named = identity.path_member();
+    let id = if named != identity.field {
+        // Read by another member than its key (`/issues/{issue_iid}` by `iid`): the path's
+        // value is in that member, and the record goes under its own key.
+        let value = |member: &str| body.get(member).and_then(id_string);
+        value(&identity.field).filter(|_| value(named).as_deref() == Some(target_id))
+    } else if identity.path_field.is_some() {
+        // A path that may hold the key or another member (Jira's `issueIdOrKey`) tells
+        // neither apart, so a generated read stores nothing.
         return;
-    }
-    let id = if path_names_identity(identity) {
+    } else if path_names_identity(identity) {
         Some(target_id.to_string())
     } else {
         body.get(&identity.field)
@@ -2962,7 +2975,7 @@ async fn seed_own_read(
         id,
         data: body.clone(),
     };
-    if !path_names_identity(identity)
+    if (named != identity.field || !path_names_identity(identity))
         && let Some(owner) = owner_of(op, call)
         && !shows_owner(rt, &resource, &owner)
     {
@@ -3611,7 +3624,20 @@ async fn read_context(
             .get(session, t, id)
             .await
             .filter(|hit| owner.is_none_or(|o| key_fits(rt, session, hit, o)))
-        {
+            // Where the path names another member than the key (`/issues/{number}`),
+            // a record keyed by the path's value is another one unless that member
+            // says so too.
+            .filter(|hit| {
+                op.identity.as_ref().is_none_or(|identity| {
+                    let named = identity.path_member();
+                    named == identity.field
+                        || hit
+                            .data
+                            .get(named)
+                            .and_then(id_string)
+                            .is_none_or(|value| value == id)
+                })
+            }) {
             Some(hit) => Some(hit),
             None => {
                 let delete = matches!(op.kind, OperationKind::Command(Effect::Delete));
@@ -5888,7 +5914,8 @@ paths:
             mock: "m".into(),
             session: DEFAULT_SESSION.into(),
         };
-        let data = json!({"id": "c1", "offerId": "of1", "customer": "c2"});
+        // `customer` is the member the path names, so it holds the path's value.
+        let data = json!({"id": "c1", "offerId": "of1", "customer": "c1"});
         let stored = StoredResource {
             resource_type: "customers".into(),
             id: "c1".into(),

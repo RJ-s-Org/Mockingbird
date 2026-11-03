@@ -1113,3 +1113,236 @@ async fn a_refused_action_on_an_enveloped_record_changes_nothing() {
     assert_eq!(completed, json!({"payment": payment("COMPLETED")}));
     assert_eq!(h.stored().await[0].data, payment("COMPLETED"));
 }
+
+/// Asana's shape: a task has a `gid` and no `id`, in a `{data}` envelope, and the
+/// path names it `{task_gid}`. GitLab's: an issue has an `id` and is read by its `iid`.
+const KEYED_BY_PARAM: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tasks:
+    post:
+      operationId: createTask
+      requestBody: {content: {application/json: {schema: {type: object, properties: {data: {type: object, properties: {name: {type: string}}}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+  /tasks/{task_gid}:
+    parameters: [{name: task_gid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTask
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+  /projects/{id}/issues:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: listIssues
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Issue"}}}}}}
+    post:
+      operationId: createIssue
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /projects/{id}/issues/{issue_iid}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+      - {name: issue_iid, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getIssue
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+        "404": {description: missing, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+    delete:
+      operationId: deleteIssue
+      responses: {"204": {description: gone}}
+components:
+  schemas:
+    TaskData:
+      type: object
+      required: [data]
+      properties: {data: {$ref: "#/components/schemas/Task"}}
+    Task:
+      type: object
+      required: [gid, name]
+      properties: {gid: {type: string}, name: {type: string}}
+    Issue:
+      type: object
+      required: [id, iid, title]
+      properties: {id: {type: integer}, iid: {type: integer}, title: {type: string}, project_id: {type: integer}}
+"##;
+
+#[tokio::test]
+async fn a_task_keyed_by_its_gid_is_read_back() {
+    let task = json!({"gid": "1201", "name": "Write the brief"});
+    let h = harness(KEYED_BY_PARAM, vec![json!({"data": task.clone()})]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/tasks",
+            Some(json!({"data": {"name": "Write the brief"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        h.exported().await,
+        [("tasks".to_owned(), "1201".to_owned())]
+    );
+    let (_, source, read) = h.call("GET", "/tasks/1201", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, json!({"data": task}));
+    assert_eq!(h.calls(), 1);
+}
+
+#[tokio::test]
+async fn an_issue_is_read_back_by_its_iid() {
+    let issue = json!({"id": 501, "iid": 3, "title": "Login fails"});
+    let h = harness(KEYED_BY_PARAM, vec![issue.clone()]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/projects/7/issues",
+            Some(json!({"title": "Login fails"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (_, source, read) = h.call("GET", "/projects/7/issues/3", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, issue);
+    assert_eq!(h.calls(), 1);
+}
+
+/// A generated read by `iid` puts the path's value in `iid`, keeps the answer's own
+/// `id` and is stored under it, so the next read is served from state.
+#[tokio::test]
+async fn a_generated_issue_read_by_its_iid_keeps_its_id() {
+    let h = harness(
+        KEYED_BY_PARAM,
+        vec![json!({"id": 501, "iid": 3, "title": "Login fails", "project_id": 1})],
+    );
+    let (status, _, read) = h.call("GET", "/projects/1/issues/7", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["id"], 501, "{read}");
+    assert_eq!(read["iid"], 7, "{read}");
+    assert_eq!(
+        h.exported().await,
+        [("issues".to_owned(), "501".to_owned())]
+    );
+    let (_, source, again) = h.call("GET", "/projects/1/issues/7", None).await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(again, read);
+    assert_eq!(h.calls(), 1);
+}
+
+/// A generated read by `iid` that shows another project than the path's is not stored.
+#[tokio::test]
+async fn a_generated_issue_read_of_another_project_is_not_stored() {
+    let h = harness(
+        KEYED_BY_PARAM,
+        vec![json!({"id": 501, "iid": 3, "title": "Login fails", "project_id": 9})],
+    );
+    let (status, _, read) = h.call("GET", "/projects/1/issues/7", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert!(h.exported().await.is_empty(), "{:?}", h.exported().await);
+}
+
+/// The delete on the read's parameter goes by the same member: an issue deleted by its
+/// `iid` reads as gone, though another issue shares that `iid` under its own `id`.
+#[tokio::test]
+async fn an_issue_deleted_by_its_iid_stays_gone() {
+    let issue = |id: i64| json!({"id": id, "iid": 2, "title": "Login fails", "project_id": 1});
+    let h = harness(KEYED_BY_PARAM, vec![issue(501), json!([issue(502)])]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/projects/1/issues",
+            Some(json!({"title": "Login fails"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, _, listed) = h.call("GET", "/projects/1/issues", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let (status, _, _) = h.call("DELETE", "/projects/1/issues/2", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, read) = h.call("GET", "/projects/1/issues/2", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{read}");
+}
+
+/// A tag read by `{tag_name}` teaches no key to reports: two created "Weekly" reports
+/// are not stored as one record keyed by `name`.
+#[tokio::test]
+async fn two_reports_of_one_name_are_not_one_record() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tags/{tag_name}:
+    parameters: [{name: tag_name, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTag
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}}
+  /reports:
+    post:
+      operationId: createReport
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Report"}}}}}
+components:
+  schemas:
+    Tag: {type: object, required: [name], properties: {name: {type: string}}}
+    Report: {type: object, required: [name, rows], properties: {name: {type: string}, rows: {type: integer}}}
+"##;
+    let report = |rows: i64| json!({"name": "Weekly", "rows": rows});
+    let h = harness(contract, vec![report(3), report(8)]);
+    for _ in 0..2 {
+        let (status, _, made) = h
+            .call("POST", "/reports", Some(json!({"name": "Weekly"})))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{made}");
+    }
+    let stored = h.exported().await;
+    assert_ne!(stored.len(), 1, "{stored:?}");
+}
+
+/// Freshdesk's shape: a note created under a ticket is one of its conversations.
+const CONVERSATIONS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tickets/{id}/notes:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: addNote
+      requestBody: {content: {application/json: {schema: {type: object, properties: {body: {type: string}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /tickets/{id}/conversations:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: listConversations
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Conversation"}}}}}}
+components:
+  schemas:
+    Conversation:
+      type: object
+      required: [id, body, ticket_id]
+      properties: {id: {type: integer}, body: {type: string}, ticket_id: {type: integer}}
+"##;
+
+#[tokio::test]
+async fn a_note_appears_in_its_tickets_conversations() {
+    let note = json!({"id": 77, "body": "Called the customer back", "ticket_id": 9});
+    let h = harness(CONVERSATIONS, vec![note.clone(), json!([note.clone()])]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/tickets/9/notes",
+            Some(json!({"body": "Called the customer back"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        h.exported().await,
+        [("conversations".to_owned(), "77".to_owned())]
+    );
+    let (status, _, listed) = h.call("GET", "/tickets/9/conversations", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(
+        h.prompt(1).contains("Called the customer back"),
+        "{}",
+        h.prompt(1)
+    );
+}

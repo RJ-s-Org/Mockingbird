@@ -1238,6 +1238,24 @@ async fn a_read_by_number_does_not_answer_for_another_issue() {
     assert_eq!(issue["title"], "five");
 }
 
+/// A generated read by number puts the path's value in `number`, keeps its own `id`,
+/// and is stored under it: the same read is then served from state.
+#[tokio::test]
+async fn a_read_by_number_keeps_its_id_and_is_stored() {
+    let api = actions_of(
+        ISSUES,
+        vec![Ok(
+            json!({"id": 999, "number": 3, "title": "seven"}).to_string()
+        )],
+    );
+    let (_, issue) = read(&api, "/issues/7").await;
+    assert_eq!(issue["id"], 999, "{issue}");
+    assert_eq!(issue["number"], 7, "{issue}");
+    let (source, again) = read(&api, "/issues/7").await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(again, issue);
+}
+
 /// A read by number stores nothing a delete could leave behind.
 #[tokio::test]
 async fn a_read_by_number_leaves_nothing_after_a_delete() {

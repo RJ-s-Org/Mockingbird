@@ -39,6 +39,35 @@ fn is_param(seg: &str) -> bool {
     param_name(seg).is_some()
 }
 
+/// Whether a segment is shaped like an API version: `v1`, `v1.2`, `v1beta2`, `3.0`,
+/// `1`, `2024-01-01`. It is one only before another static segment
+/// ([`version_at`]).
+fn is_version(seg: &str) -> bool {
+    let numbers = |s: &str| {
+        !s.is_empty()
+            && s.split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let date = {
+        let parts: Vec<&str> = seg.split('-').collect();
+        parts.iter().map(|p| p.len()).eq([4, 2, 2])
+            && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if date || numbers(seg) {
+        return true;
+    }
+    let Some(rest) = seg.strip_prefix(['v', 'V']) else {
+        return false;
+    };
+    // `v1`, `v1.2`, and a pre-release after the number: `v1beta2`, `v2alpha`.
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(rest.len());
+    let (number, label) = rest.split_at(end);
+    let letters = label.trim_end_matches(|c: char| c.is_ascii_digit());
+    numbers(number) && letters.bytes().all(|b| b.is_ascii_lowercase())
+}
+
 /// Verbs that make a `POST` a read in RPC-style APIs (Plaid's
 /// `/accounts/get`, `/transactions/sync`; Elasticsearch's `_search`; Slack's
 /// `users.list`).
@@ -92,10 +121,15 @@ pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
 }
 
 /// The last static segment before any trailing `{param}`; for an
-/// RPC-style read (`/accounts/get`, `users.list`), what it reads.
+/// RPC-style read (`/accounts/get`, `users.list`), what it reads. A version
+/// segment ([`version_at`]) is never the type: `/3.0/search-members` is
+/// `search-members`.
 pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
     let segs: Vec<&str> = segments(path).into_iter().map(without_format).collect();
-    let mut statics = segs.iter().rev().filter(|s| !is_param(s));
+    let mut statics = (0..segs.len())
+        .rev()
+        .filter(|&at| !is_param(segs[at]) && !version_at(&segs, at))
+        .map(|at| &segs[at]);
     let last = statics.next()?;
     if ends_in_read(path) {
         match rpc_read(last) {
@@ -111,24 +145,143 @@ pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
     Some((*last).to_owned())
 }
 
+/// Whether `segs[at]` is a version: shaped like one ([`is_version`]) and followed by
+/// another static segment, as in `/v1/search`. One the path ends in or a parameter
+/// follows (`/v2/{id}/cancel`) is a resource like any other.
+fn version_at(segs: &[&str], at: usize) -> bool {
+    is_version(segs[at]) && segs.get(at + 1).is_some_and(|next| !is_param(next))
+}
+
 fn trailing_param(path: &str) -> Option<&str> {
     segments(path).last().and_then(|s| param_name(s))
 }
 
-/// Endings of id-like path parameters and the response field each names,
-/// most specific first: `issueIdOrKey` → `key`, `issue_number` → `number`,
-/// `MessageSid` → `sid`.
-const PARAM_FIELDS: [(&[&str], &str); 5] = [
-    (&["IdOrKey", "_id_or_key"], "key"),
-    (&["Number", "_number"], "number"),
-    (&["Sid", "_sid"], "sid"),
-    (&["Key", "_key"], "key"),
-    (&["Uuid", "_uuid"], "uuid"),
-];
-
-/// Fields that identify a created resource without an `id` (Twilio's
-/// `sid`).
+/// Fields that identify a created resource without an `id`, where nothing in the
+/// contract's paths names its key: a create (`POST /calls` answering a `sid`) of a
+/// type no route reads by path. A key a read by path names comes first
+/// ([`record_keys`]); this is only what the contract's structure cannot give.
 const ID_FALLBACKS: [&str; 2] = ["sid", "uuid"];
+
+/// The members one type's reads by path go by: what [`identity_for`] gives each of
+/// its `GET`s ending in a parameter, on the answer and on the record of a one-member
+/// envelope. A create of the type, which has no path parameter, goes by the one of
+/// these its answer has: Asana's `POST /tasks` by the `gid` that
+/// `GET /tasks/{task_gid}` reads.
+type Keys = HashSet<String>;
+
+/// The [`Keys`] of each type, taught by that type's own reads only: a tag read by
+/// `{tag_name}` says nothing of how a report is keyed.
+#[derive(Default)]
+struct TypeKeys {
+    by_type: HashMap<String, Keys>,
+    /// Every type's: only to tell whether two schemas go by the same member
+    /// ([`reads_back`]), which gives nothing an identity.
+    any: Keys,
+    none: Keys,
+}
+
+impl TypeKeys {
+    fn of(&self, resource_type: Option<&str>) -> &Keys {
+        resource_type
+            .and_then(|t| self.by_type.get(t))
+            .unwrap_or(&self.none)
+    }
+}
+
+/// The [`TypeKeys`] of `operations`.
+fn record_keys(operations: &[Operation], defs: &Map<String, Value>) -> TypeKeys {
+    let none = Keys::new();
+    let mut keys = TypeKeys::default();
+    for op in gets(operations, |route| {
+        route.last().is_some_and(|last| is_param(last))
+    })
+    .filter(|op| !is_stream(op))
+    {
+        let (Some(t), Some((_, path)), Some(schema)) =
+            (op.resource_type.as_ref(), http_path(op), answer(op))
+        else {
+            continue;
+        };
+        let param = trailing_param(path);
+        keys.by_type.entry(t.clone()).or_default().extend(
+            answered_things(schema, defs)
+                .iter()
+                .filter_map(|thing| identity_for(param, Some(thing), defs, &none))
+                .map(|identity| identity.field),
+        );
+    }
+    keys.any = keys.by_type.values().flatten().cloned().collect();
+    keys
+}
+
+/// Gives a create with no identity, and no path parameter, the one of its type's
+/// [`Keys`] its answer has.
+fn apply_keys(operations: &mut [Operation], defs: &Map<String, Value>, keys: &TypeKeys) {
+    for op in operations
+        .iter_mut()
+        .filter(|op| op.identity.is_none() && op.kind == OperationKind::Command(Effect::Create))
+    {
+        let Some((_, path)) = http_path(op) else {
+            continue;
+        };
+        if trailing_param(path).is_none() {
+            let keys = keys.of(op.resource_type.as_deref());
+            op.identity = identity_for(None, answer(op), defs, keys);
+        }
+    }
+}
+
+/// Gives each route of a type ending in a parameter that has no identity the one the
+/// type's other routes on that parameter have, when they agree and the path names
+/// another member than the key: GitLab's
+/// `DELETE /projects/{id}/issues/{issue_iid}`, which answers nothing, goes by `iid` as
+/// its `GET` does. The record is where its own answer holds it, so a route with no
+/// answer has it as itself.
+fn apply_shared_identities(operations: &mut [Operation]) {
+    let mut by_route: HashMap<(String, String), Option<Identity>> = HashMap::new();
+    for op in operations.iter().filter(|op| !is_stream(op)) {
+        let (Some(t), Some(param), Some(identity)) = (
+            op.resource_type.clone(),
+            http_path(op).and_then(|(_, path)| trailing_param(path)),
+            op.identity.as_ref(),
+        ) else {
+            continue;
+        };
+        // Only a path naming another member than the key needs it: elsewhere the path's
+        // value is the key (also Jira's `issueIdOrKey`, which names both), which a route
+        // goes by with or without an identity.
+        if identity.path_param.as_deref() != Some(param) || identity.path_member() == identity.field
+        {
+            continue;
+        }
+        let shared = Identity {
+            record: None,
+            ..identity.clone()
+        };
+        by_route
+            .entry((t, param.to_owned()))
+            .and_modify(|known| {
+                if known.as_ref() != Some(&shared) {
+                    *known = None;
+                }
+            })
+            .or_insert(Some(shared));
+    }
+    for op in operations
+        .iter_mut()
+        .filter(|op| op.identity.is_none() && !is_stream(op) && answer(op).is_none())
+    {
+        let (Some(t), Some(param)) = (
+            op.resource_type.clone(),
+            http_path(op).and_then(|(_, path)| trailing_param(path)),
+        ) else {
+            continue;
+        };
+        if let Some(Some(identity)) = by_route.get(&(t, param.to_owned())) {
+            op.identity = Some(identity.clone());
+        }
+    }
+}
 
 /// The member of `props` named `name`, ASCII case-insensitively.
 fn property<'a>(props: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
@@ -138,18 +291,37 @@ fn property<'a>(props: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// The response field path parameter `param` names: the property of that
-/// name, else the one its ending names (see [`PARAM_FIELDS`]).
-fn param_field<'a>(param: &str, props: &'a Map<String, Value>) -> Option<&'a str> {
+/// Whether a member's schema is of a single value, not an object or a list: only
+/// such a member can be a key.
+fn is_scalar_member(schema: &Value, defs: &Map<String, Value>) -> bool {
+    resolve(schema, defs).is_some_and(|schema| {
+        !matches!(
+            schema.get("type").and_then(Value::as_str),
+            Some("object" | "array")
+        ) && schema.get("properties").is_none()
+    })
+}
+
+/// The response field path parameter `param` names: the property of that name, else
+/// the scalar one the longest trailing group of its [`mb_mcm::words`] names, separators and
+/// case aside. `issue_iid` names `iid`, `task_gid` `gid`, `issueIdOrKey` `key`,
+/// `MessageSid` `sid` and `issue_number` `number`.
+fn param_field<'a>(
+    param: &str,
+    props: &'a Map<String, Value>,
+    defs: &Map<String, Value>,
+) -> Option<&'a str> {
     property(props, param).or_else(|| {
-        PARAM_FIELDS
-            .iter()
-            .filter(|(endings, _)| {
-                endings
-                    .iter()
-                    .any(|e| param.len() > e.len() && param.ends_with(e))
-            })
-            .find_map(|(_, field)| property(props, field))
+        let words = mb_mcm::words(param);
+        (0..words.len()).find_map(|from| {
+            let group = mb_mcm::joined_name(&words[from..].concat());
+            props
+                .iter()
+                .find(|(member, schema)| {
+                    mb_mcm::joined_name(member) == group && is_scalar_member(schema, defs)
+                })
+                .map(|(member, _)| member.as_str())
+        })
     })
 }
 
@@ -212,25 +384,38 @@ pub(crate) fn infer_identity(
     success_schema: Option<&Value>,
     defs: &Map<String, Value>,
 ) -> Option<Identity> {
-    identity_for(trailing_param(path), success_schema, defs)
+    // The contract's keys are known once every route is compiled:
+    // [`apply_action_routes`] goes over what has none with them.
+    identity_for(trailing_param(path), success_schema, defs, &Keys::new())
 }
 
-/// The identity of a resource shaped like `schema`, addressed by
-/// `path_param`.
+/// The identity of a resource shaped like `schema`, addressed by `path_param`: its
+/// `id`, else the member the parameter names ([`param_field`]). With no parameter,
+/// the one scalar member that is one of the contract's `keys`; with none of those,
+/// an [`ID_FALLBACKS`] member, and with two, none.
 fn identity_for(
     path_param: Option<&str>,
     success_schema: Option<&Value>,
     defs: &Map<String, Value>,
+    keys: &Keys,
 ) -> Option<Identity> {
     let props = schema_properties(success_schema, defs)?;
     let props = props.as_ref();
-    let named = path_param.and_then(|p| param_field(p, props));
+    let named = path_param.and_then(|p| param_field(p, props, defs));
     let field = if props.contains_key("id") {
         "id"
     } else if let Some(named) = named {
         named
     } else if path_param.is_none() {
-        ID_FALLBACKS.iter().find_map(|f| property(props, f))?
+        let mut keyed = props
+            .iter()
+            .filter(|(member, schema)| keys.contains(*member) && is_scalar_member(schema, defs))
+            .map(|(member, _)| member.as_str());
+        match (keyed.next(), keyed.next()) {
+            (Some(key), None) => key,
+            (None, _) => ID_FALLBACKS.iter().find_map(|f| property(props, f))?,
+            (Some(_), Some(_)) => return None,
+        }
     } else {
         return None;
     };
@@ -264,12 +449,7 @@ fn own_type_member<'a>(
     let (Some(field), None) = (members.next(), members.next()) else {
         return None;
     };
-    let schema = resolve(props.get(field)?, defs)?;
-    let is_scalar = !matches!(
-        schema.get("type").and_then(Value::as_str),
-        Some("object" | "array")
-    ) && schema.get("properties").is_none();
-    is_scalar.then_some(field.as_str())
+    is_scalar_member(props.get(field)?, defs).then_some(field.as_str())
 }
 
 /// Whether a path parameter's name says it holds an id: `id`, `orderId`, `movie_id`.
@@ -426,14 +606,15 @@ fn envelope_record(
     schema: &Value,
     records: &[&Value],
     defs: &Map<String, Value>,
+    keys: &Keys,
 ) -> Option<(String, Value)> {
-    if identity_for(None, Some(schema), defs).is_some() {
+    if identity_for(None, Some(schema), defs, keys).is_some() {
         return None;
     }
     let props = schema_properties(Some(schema), defs)?;
     let is_record = |member: &Value| {
         schema_properties(Some(member), defs).is_some_and(|p| !p.is_empty())
-            && identity_for(None, Some(member), defs).is_some()
+            && identity_for(None, Some(member), defs, keys).is_some()
     };
     if props.len() == 1 {
         let (member, inner) = props.iter().next()?;
@@ -455,14 +636,14 @@ fn envelope_record(
 /// member it is under. Square's `GET /payments/{payment_id}` answering `{payment}`
 /// reads payment `id`; Zendesk's `PUT /tickets/{id}` answering `{ticket, audit}` writes
 /// the ticket, as `ticket` is what the type's other routes answer.
-fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>) {
+fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>, keys: &TypeKeys) {
     let mut records: HashMap<String, Vec<Value>> = HashMap::new();
     for op in operations.iter().filter(|op| !is_stream(op)) {
         let (Some(t), Some(schema)) = (op.resource_type.as_deref(), answer(op)) else {
             continue;
         };
         let held = records.entry(t.to_owned()).or_default();
-        if let Some((_, inner)) = envelope_record(schema, &[], defs) {
+        if let Some((_, inner)) = envelope_record(schema, &[], defs, keys.of(Some(t))) {
             held.push(inner);
         }
         if op.kind == OperationKind::Query {
@@ -491,12 +672,13 @@ fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>) {
             continue;
         };
         let known: Vec<&Value> = records.get(t).into_iter().flatten().collect();
-        let Some((member, inner)) = answer(op).and_then(|a| envelope_record(a, &known, defs))
+        let keys = keys.of(Some(t));
+        let Some((member, inner)) = answer(op).and_then(|a| envelope_record(a, &known, defs, keys))
         else {
             continue;
         };
         let path_param = http_path(op).and_then(|(_, path)| trailing_param(path));
-        if let Some(mut identity) = identity_for(path_param, Some(&inner), defs) {
+        if let Some(mut identity) = identity_for(path_param, Some(&inner), defs, keys) {
             identity.record = Some(mb_mcm::RecordAt::Member(member));
             op.identity = Some(identity);
         }
@@ -522,6 +704,8 @@ fn is_scalar_schema(schema: &Value) -> bool {
 /// listed array holds, the same schema and not a shorter or longer form of it: Notion's
 /// `POST /data_sources/{id}/query` lists pages, and Jira's `GET /search/jql` issues,
 /// whatever other routes its own type has.
+///
+/// A create then takes the type that reads exactly what it stores ([`created_type`]).
 fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Map<String, Value>) {
     for index in 0..hints.len() {
         let op = &operations[index];
@@ -570,13 +754,145 @@ fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Ma
             operations[index].resource_type = found;
         }
     }
+    for index in 0..hints.len() {
+        if let Some(found) = created_type(index, &hints[index], operations, defs) {
+            operations[index].resource_type = Some(found);
+        } else if let Some((found, identity)) =
+            read_as_by_path(index, &hints[index], operations, defs)
+        {
+            let op = &mut operations[index];
+            op.resource_type = Some(found);
+            op.identity = Some(identity);
+        }
+    }
+}
+
+/// The type and identity of a create with no identity of its own whose answer is
+/// exactly what one other type's `GET` by path answers, as its own type has no such
+/// read: Asana's `POST /tasks/{task_gid}/subtasks` answers what `GET /tasks/{task_gid}`
+/// does, so it creates a `tasks` record, keyed and held as that read's.
+fn read_as_by_path(
+    index: usize,
+    hint: &ResourceHint,
+    operations: &[Operation],
+    defs: &Map<String, Value>,
+) -> Option<(String, Identity)> {
+    let op = &operations[index];
+    let creates = hint.resource_type.is_none()
+        && op.identity.is_none()
+        && op.kind == OperationKind::Command(Effect::Create)
+        && !is_stream(op);
+    let answered = resolve(record_schema(op).filter(|_| creates)?, defs)?;
+    if is_scalar_schema(answered) || is_opaque(Some(answered), defs) {
+        return None;
+    }
+    let reads: Vec<&Operation> = gets(operations, |route| {
+        route.last().is_some_and(|last| is_param(last))
+    })
+    .collect();
+    if reads
+        .iter()
+        .any(|read| read.resource_type == op.resource_type)
+    {
+        return None;
+    }
+    let mut serving = reads.into_iter().filter(|read| {
+        read.identity.is_some() && answer(read).and_then(|a| resolve(a, defs)) == Some(answered)
+    });
+    let read = serving.next()?;
+    if serving.any(|other| other.resource_type != read.resource_type) {
+        return None;
+    }
+    let known = read.identity.as_ref()?;
+    let identity = Identity {
+        path_param: None,
+        field: known.field.clone(),
+        input_field: None,
+        path_field: None,
+        record: known.record.clone(),
+    };
+    Some((read.resource_type.clone()?, identity))
+}
+
+/// The type a create at `index` stores its record as, when another type reads exactly
+/// that schema and its own type has no `GET` by path: the type whose `GET` by path
+/// serves it, else the one type whose lists list it and nothing else. So Freshdesk's
+/// `POST /tickets/{id}/notes` and `/reply` store the `conversations` that
+/// `GET /tickets/{id}/conversations` lists, Trello's comment is one of a card's
+/// `actions`, and a subtask created under a task is a `tasks` record. Two such types
+/// are not one, and a shorter or longer form of the record does not count.
+fn created_type(
+    index: usize,
+    hint: &ResourceHint,
+    operations: &[Operation],
+    defs: &Map<String, Value>,
+) -> Option<String> {
+    let op = &operations[index];
+    let creates = hint.resource_type.is_none()
+        && op.kind == OperationKind::Command(Effect::Create)
+        && !is_stream(op);
+    let identity = op.identity.as_ref().filter(|_| creates)?;
+    let record = record_held(record_schema(op)?, Some(identity), defs)?;
+    if is_scalar_schema(&record) || is_opaque(Some(&record), defs) {
+        return None;
+    }
+    let reads = || {
+        gets(operations, |route| {
+            route.last().is_some_and(|last| is_param(last))
+        })
+    };
+    if reads().any(|read| read.resource_type == op.resource_type) {
+        return None;
+    }
+    let one_type = |mut types: Vec<Option<String>>| {
+        let first = types.pop()??;
+        types
+            .iter()
+            .all(|t| t.as_deref() == Some(first.as_str()))
+            .then_some(first)
+    };
+    let served = reads()
+        .filter(|read| record_served(read, defs).as_ref() == Some(&record))
+        .map(|read| read.resource_type.clone())
+        .collect();
+    let lists = |list: &&Operation| {
+        let items: Vec<Value> = answer(list)
+            .map(|a| listed_things(a, defs))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| !is_scalar_schema(item))
+            .collect();
+        list.kind == OperationKind::Query
+            && list.identity.is_none()
+            && !is_stream(list)
+            && !items.is_empty()
+            && items.iter().all(|item| item == &record)
+    };
+    let listed = || {
+        operations
+            .iter()
+            .filter(lists)
+            .map(|list| list.resource_type.clone())
+            .collect()
+    };
+    one_type(served).or_else(|| one_type(listed()))
 }
 
 /// The schema of the record a `GET` by path serves: its answer, or what its identity
 /// says the answer holds it in.
 fn record_served(read: &Operation, defs: &Map<String, Value>) -> Option<Value> {
-    let served = resolve(answer(read)?, defs)?;
-    match read.identity.as_ref().and_then(|i| i.record.as_ref()) {
+    record_held(answer(read)?, read.identity.as_ref(), defs)
+}
+
+/// The schema of the record `schema` holds by `identity`: itself, the member of its
+/// envelope, or its item.
+fn record_held(
+    schema: &Value,
+    identity: Option<&Identity>,
+    defs: &Map<String, Value>,
+) -> Option<Value> {
+    let served = resolve(schema, defs)?;
+    match identity.and_then(|i| i.record.as_ref()) {
         None => Some(served.clone()),
         Some(mb_mcm::RecordAt::Member(member)) => {
             let props = schema_properties(Some(served), defs)?;
@@ -729,7 +1045,12 @@ fn listed_things(schema: &Value, defs: &Map<String, Value>) -> Vec<Value> {
 /// Whether a read answering `read` gives back what `answer` is: the same
 /// schema, or the same identity member, so a list of shorter items counts.
 /// With nothing declared on either side there is nothing to tell them apart.
-fn reads_back(read: Option<&Value>, answer: Option<&Value>, defs: &Map<String, Value>) -> bool {
+fn reads_back(
+    read: Option<&Value>,
+    answer: Option<&Value>,
+    defs: &Map<String, Value>,
+    keys: &Keys,
+) -> bool {
     let (Some(read), Some(answer)) = (read, answer) else {
         return true;
     };
@@ -738,7 +1059,7 @@ fn reads_back(read: Option<&Value>, answer: Option<&Value>, defs: &Map<String, V
     }
     let mut read_things = answered_things(read, defs);
     read_things.extend(listed_things(read, defs));
-    let identity = |s: &Value| identity_for(None, Some(s), defs).map(|i| i.field);
+    let identity = |s: &Value| identity_for(None, Some(s), defs, keys).map(|i| i.field);
     answered_things(answer, defs).iter().any(|a| {
         read_things
             .iter()
@@ -825,6 +1146,7 @@ fn record_identity(
     op: &Operation,
     read: Option<&Operation>,
     defs: &Map<String, Value>,
+    keys: &Keys,
 ) -> Option<Identity> {
     let known = read.and_then(|r| r.identity.as_ref()).map(|i| Identity {
         path_param: None,
@@ -833,7 +1155,7 @@ fn record_identity(
         path_field: None,
         record: None,
     });
-    known.or_else(|| identity_for(None, record_schema(op), defs))
+    known.or_else(|| identity_for(None, record_schema(op), defs, keys))
 }
 
 /// The structural test of a `POST` to `<static>/{param}/<static>...`. When the
@@ -851,7 +1173,13 @@ fn record_identity(
 /// 4. A `GET` by path elsewhere serves it ([`read_elsewhere`]): a record there.
 /// 5. A declared `201`: a record of its own, which stores nothing with no identity.
 /// 6. Otherwise it acts on the parent.
-fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Value>) -> Route {
+fn infer_route(
+    op: &Operation,
+    operations: &[Operation],
+    defs: &Map<String, Value>,
+    all_keys: &TypeKeys,
+) -> Route {
+    let keys = all_keys.of(op.resource_type.as_deref());
     let Some((HttpMethod::Post, path)) = http_path(op) else {
         return Route::Undecided;
     };
@@ -866,7 +1194,7 @@ fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Valu
     }
     let own = |resource_type, read| Route::Collection {
         resource_type,
-        identity: record_identity(op, read, defs),
+        identity: record_identity(op, read, defs, keys),
     };
     let segs = segments(path);
     let has_detail = operations.iter().any(|other| {
@@ -880,7 +1208,7 @@ fn infer_route(op: &Operation, operations: &[Operation], defs: &Map<String, Valu
     let answered = record_schema(op);
     if has_detail
         || gets(operations, |route| same_route(route, &segs))
-            .any(|read| reads_back(answer(read), answered, defs))
+            .any(|read| reads_back(answer(read), answered, defs, &all_keys.any))
     {
         return own(None, None);
     }
@@ -922,6 +1250,7 @@ fn act_on_parent(
     target: ParentTarget,
     operations: &mut [Operation],
     defs: &Map<String, Value>,
+    keys: &Keys,
 ) {
     let op = &operations[index];
     let read = http_path(op).and_then(|(_, path)| parent_read(operations, path, target.tail));
@@ -935,13 +1264,13 @@ fn act_on_parent(
             return None;
         };
         let record = record_served(read, defs)?;
-        let (held, inner) = envelope_record(answered?, &[&record], defs)?;
+        let (held, inner) = envelope_record(answered?, &[&record], defs, keys)?;
         (&held == member && inner == record).then_some(held)
     });
     let (effect, identity) = if let Some(member) = enveloped {
         let record = read.and_then(|read| record_served(read, defs));
         let mut identity =
-            identity_for(Some(&param), record.as_ref(), defs).unwrap_or_else(|| Identity {
+            identity_for(Some(&param), record.as_ref(), defs, keys).unwrap_or_else(|| Identity {
                 path_param: Some(param.clone()),
                 field: "id".to_owned(),
                 input_field: None,
@@ -951,7 +1280,7 @@ fn act_on_parent(
         identity.record = Some(mb_mcm::RecordAt::Member(member));
         (Effect::Update, identity)
     } else if replaces {
-        let identity = identity_for(Some(&param), answered, defs);
+        let identity = identity_for(Some(&param), answered, defs, keys);
         let identity = identity.unwrap_or_else(|| Identity {
             path_param: Some(param.clone()),
             field: "id".to_owned(),
@@ -1113,7 +1442,9 @@ pub(crate) fn apply_action_routes(
     defs: &Map<String, Value>,
     ctx: &mut Ctx,
 ) {
-    apply_envelopes(operations, defs);
+    let keys = record_keys(operations, defs);
+    apply_keys(operations, defs, &keys);
+    apply_envelopes(operations, defs, &keys);
     apply_item_members(operations, defs);
     apply_own_type_members(operations, defs);
     let is_read = |op: &Operation| http_path(op).is_some_and(|(m, _)| m == HttpMethod::Get);
@@ -1122,13 +1453,14 @@ pub(crate) fn apply_action_routes(
     for index in order {
         let hint = &hints[index];
         let op = &operations[index];
-        let inferred = || infer_route(op, operations, defs);
+        let own_keys = keys.of(op.resource_type.as_deref());
+        let inferred = || infer_route(op, operations, defs, &keys);
         let route = match hint.action {
             Some(true) => declared_target(op, ctx).map_or_else(inferred, Route::Action),
             Some(false) => match inferred() {
                 Route::Action(_) => Route::Collection {
                     resource_type: None,
-                    identity: record_identity(op, None, defs),
+                    identity: record_identity(op, None, defs, own_keys),
                 },
                 route => route,
             },
@@ -1154,7 +1486,10 @@ pub(crate) fn apply_action_routes(
             );
         }
         match route {
-            Route::Action(target) => act_on_parent(index, target, operations, defs),
+            Route::Action(target) => {
+                let parent_keys = keys.of(Some(&target.resource_type)).clone();
+                act_on_parent(index, target, operations, defs, &parent_keys);
+            }
             Route::Collection {
                 resource_type,
                 identity,
@@ -1182,6 +1517,7 @@ pub(crate) fn apply_action_routes(
             set_identity(index, field, operations, defs, ctx);
         }
     }
+    apply_shared_identities(operations);
     apply_lookups(operations, hints, defs);
 }
 
@@ -1283,6 +1619,7 @@ pub(crate) fn resource_from_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_parent_target_is_a_static_and_a_param_before_a_static_tail() {
@@ -1318,6 +1655,76 @@ mod tests {
             "/",
         ] {
             assert_eq!(parent_target(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_name_splits_into_words_at_separators_and_case() {
+        for (name, expected) in [
+            ("issueIdOrKey", &["issue", "Id", "Or", "Key"][..]),
+            ("task_gid", &["task", "gid"]),
+            ("MessageSid", &["Message", "Sid"]),
+            ("HTTPStatus", &["HTTP", "Status"]),
+            ("issue-iid", &["issue", "iid"]),
+            ("sha256Hash", &["sha256", "Hash"]),
+            ("id", &["id"]),
+        ] {
+            assert_eq!(mb_mcm::words(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_parameter_names_the_member_its_trailing_words_name() {
+        let defs = Map::new();
+        let props = json!({
+            "id": {"type": "integer"},
+            "iid": {"type": "integer"},
+            "gid": {"type": "string"},
+            "key": {"type": "string"},
+            "id_or_key": {"type": "string"},
+            "sid": {"type": "string"},
+            "kind": {"type": "object"},
+        });
+        let props = props.as_object().unwrap();
+        for (param, field) in [
+            ("issue_iid", Some("iid")),
+            ("task_gid", Some("gid")),
+            ("issueIdOrKey", Some("id_or_key")),
+            ("issueKey", Some("key")),
+            ("MessageSid", Some("sid")),
+            ("userId", Some("id")),
+            ("board_kind", None),
+            ("handle", None),
+        ] {
+            assert_eq!(param_field(param, props, &defs), field, "{param}");
+        }
+    }
+
+    #[test]
+    fn versions_are_judged_by_their_shape() {
+        for seg in [
+            "v1",
+            "V2",
+            "v1.2",
+            "v1beta2",
+            "v2alpha",
+            "3.0",
+            "1",
+            "2024-01-01",
+        ] {
+            assert!(is_version(seg), "{seg}");
+        }
+        for seg in [
+            "v",
+            "values",
+            "vault",
+            "V8Engine",
+            "users",
+            "3.x",
+            "2024-1-01",
+            "a1",
+        ] {
+            assert!(!is_version(seg), "{seg}");
         }
     }
 

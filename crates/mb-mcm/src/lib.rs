@@ -573,6 +573,71 @@ impl Identity {
             Some(RecordAt::Item) => Value::Array(vec![record]),
         }
     }
+
+    /// The member the path's value is in: [`Identity::path_field`] where the path
+    /// names another member than the key and only it (`/issues/{issue_iid}` the `iid`),
+    /// else the key. A parameter whose words name the key too (Jira's `issueIdOrKey`
+    /// names `id`) may hold either, so it is the key, and a record the key finds is it.
+    #[must_use]
+    pub fn path_member(&self) -> &str {
+        match (&self.path_field, &self.path_param) {
+            (Some(named), Some(param)) if !names_member(param, &self.field) => named,
+            _ => &self.field,
+        }
+    }
+}
+
+/// The words of a name, split at `_`, `-`, `.` and changes of case: `issueIdOrKey` is
+/// `issue Id Or Key`, `task_gid` is `task gid`, `HTTPStatus` is `HTTP Status`.
+#[must_use]
+pub fn words(name: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = name.char_indices().collect();
+    let mut words = Vec::new();
+    let mut start = None;
+    for (k, &(at, c)) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if let Some(from) = start.take() {
+                words.push(&name[from..at]);
+            }
+            continue;
+        }
+        let prev = k.checked_sub(1).map(|p| chars[p].1);
+        let next = chars.get(k + 1).map(|n| n.1);
+        let starts_word = c.is_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_lowercase()
+                    || p.is_ascii_digit()
+                    || (p.is_uppercase() && next.is_some_and(char::is_lowercase))
+            });
+        if starts_word && let Some(from) = start.take() {
+            words.push(&name[from..at]);
+        }
+        start.get_or_insert(at);
+    }
+    if let Some(from) = start {
+        words.push(&name[from..]);
+    }
+    words
+}
+
+/// A name lowercased without its separators, so `id_or_key` and `IdOrKey` are one.
+#[must_use]
+pub fn joined_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Whether a run of `name`'s [`words`] names `member`, separators and case aside:
+/// `issueIdOrKey` names `id`, `key` and `id_or_key`; `issue_iid` names `iid`, not `id`.
+#[must_use]
+pub fn names_member(name: &str, member: &str) -> bool {
+    let words = words(name);
+    let member = joined_name(member);
+    (0..words.len()).any(|from| {
+        (from + 1..=words.len()).any(|to| joined_name(&words[from..to].concat()) == member)
+    })
 }
 
 /// Whether a path parameter's name is a bare id with no resource in it (`id`,
