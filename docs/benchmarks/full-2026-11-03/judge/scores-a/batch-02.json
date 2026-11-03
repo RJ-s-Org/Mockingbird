@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-02",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "e50deaf6c2",
+      "realism": 3,
+      "coherence": 4,
+      "rationale": "Ids prod_001/variant_001 are not Shopify gid:// ids, vendor is Acme Co, and prices are flat. The two variants share the title \"Black / XL\" (duplicate); inventory 25+25=50 holds."
+    },
+    {
+      "opaque_id": "04228f95d5",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "gid:// ids, price ranges match the variant min/max, and inventories sum correctly. Cursor words leak into handles (cedar-, raven-), and endCursor \"raven\" echoes the before cursor."
+    },
+    {
+      "opaque_id": "672a35b2c8",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "Rich gid:// ids, varied statuses, inventory sums hold (62+54+32=148, -3+0=-3). One store mixing USD/CAD/EUR/GBP is unrealistic, and reverse:true is not reflected in the ascending ids."
+    }
+  ]
+}

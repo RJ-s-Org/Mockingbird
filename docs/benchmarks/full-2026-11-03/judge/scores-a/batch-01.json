@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-01",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "f637f3e774",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "Path channel_id and message_id are echoed, author is a realistic user (mira.chen / Mira Chen), the content is natural, timestamp format is correct, and type 0 fits a message with no reference."
+    },
+    {
+      "opaque_id": "4ef22e176b",
+      "realism": 3,
+      "coherence": 3,
+      "rationale": "Avatar a1b2c3d4e5f6... is a placeholder pattern and the content is bland. message_reference is set while type is 0 (not 19 reply), and guild_id/message_id are sequential neighbours of the path ids."
+    },
+    {
+      "opaque_id": "3b54a0422e",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "IDs echoed, the content is natural, and the timestamp has realistic microseconds. Author id 171942417377518700 is visibly derived from the channel_id; nonce equal to the message id is plausible."
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-05",
+  "judge": "judge-a",
+  "scores": [
+    {
+      "opaque_id": "cf284851c6",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "orderId ord_8f31c2a7 and a current UTC cancelledAt are plausible for an orderCancelled event; the payload is minimal but complete."
+    },
+    {
+      "opaque_id": "bf8213b30c",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "ord_8f3k2m9q and a recent cancelledAt are plausible; the minimal event has both required fields, consistently."
+    },
+    {
+      "opaque_id": "168809f674",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "ord_7f8a9b2c is slightly patterned but plausible, and cancelledAt is a sensible current timestamp. The event is consistent."
+    }
+  ]
+}

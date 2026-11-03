@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-04",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "956314900c",
+      "realism": 4,
+      "coherence": 3,
+      "rationale": "Result 2.508389566 for 976.32/389.15, true value 2.508853; digits slightly off, fails an exact check."
+    },
+    {
+      "opaque_id": "e9ae8d0cf5",
+      "realism": 4,
+      "coherence": 3,
+      "rationale": "Result 3.360355 for 886.3/263.76, true value 3.360252; close but wrong."
+    },
+    {
+      "opaque_id": "c5148bf140",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "0.7312362934 vs true 0.7312372170; tiny error, plausible magnitude."
+    }
+  ]
+}

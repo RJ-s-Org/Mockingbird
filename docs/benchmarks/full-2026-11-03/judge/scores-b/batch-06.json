@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-06",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "6d34d3c1e4",
+      "realism": 3,
+      "coherence": 3,
+      "rationale": "payment_failed gives refund 0.00 yet status refund_pending with expectedBy; contradictory."
+    },
+    {
+      "opaque_id": "099ae40bad",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "Refund 412.50 with 41.25 fee (10%) plausible; refund_pending but no expectedBy."
+    },
+    {
+      "opaque_id": "16afd4c7e2",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "29.95 refund, 2.50 fee, expectedBy a week out, status matches."
+    }
+  ]
+}

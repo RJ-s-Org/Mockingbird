@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-05",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "cf284851c6",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Plausible ord_ id and current timestamp."
+    },
+    {
+      "opaque_id": "bf8213b30c",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "ord_8f3k2m9q looks random, fine; valid timestamp."
+    },
+    {
+      "opaque_id": "168809f674",
+      "realism": 3,
+      "coherence": 5,
+      "rationale": "ord_7f8a9b2c reads like a made-up sequence; otherwise fine."
+    }
+  ]
+}

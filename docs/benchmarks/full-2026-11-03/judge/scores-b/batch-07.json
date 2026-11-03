@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-07",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "06b267f963",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Plausible name, metadata and description; invoice_prefix matches initials; 555 phone, example.com."
+    },
+    {
+      "opaque_id": "64cf0ce139",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Mira Chen, example.net email, null description/phone; consistent and valid."
+    },
+    {
+      "opaque_id": "60b696da15",
+      "realism": 2,
+      "coherence": 5,
+      "rationale": "alice@example.com, Alice Smith, invoice_prefix A1B2C3D4: placeholder-like values."
+    }
+  ]
+}

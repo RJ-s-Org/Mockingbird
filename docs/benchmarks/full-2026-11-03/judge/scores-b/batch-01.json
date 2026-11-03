@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-01",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "f637f3e774",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Plausible author and content; ids and channel echoed, timestamp fine; snowflake author id slightly short."
+    },
+    {
+      "opaque_id": "4ef22e176b",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "message_reference in same channel/guild, ids echoed; content bland ('I'm not sure about that.')."
+    },
+    {
+      "opaque_id": "3b54a0422e",
+      "realism": 4,
+      "coherence": 4,
+      "rationale": "Realistic content; author id ends in 00 (rounded) and nonce equals message id, slightly odd."
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "batch_id": "batch-03",
+  "judge": "judge-b",
+  "scores": [
+    {
+      "opaque_id": "97e28c19bd",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Empty-ish partialSuccess with rejectedSpans '0'; valid full-accept for a request with an empty span."
+    },
+    {
+      "opaque_id": "49414c1f54",
+      "realism": 4,
+      "coherence": 5,
+      "rationale": "Full success with errorMessage '' and rejectedSpans '0'; equivalent to unset, consistent."
+    },
+    {
+      "opaque_id": "e80929a5af",
+      "realism": 5,
+      "coherence": 5,
+      "rationale": "Rejects 1 span with a specific message about missing trace/span ids, matching the request's empty span {}."
+    }
+  ]
+}
