@@ -1,0 +1,667 @@
+openapi: 3.0.3
+info:
+  title: WooCommerce REST API (products, categories, orders, order notes)
+  version: "3"
+  description: |
+    A subset of the WooCommerce REST API v3, written from its public documentation.
+    Every resource has an integer `id`. Money amounts are decimal strings with two
+    places, such as "24.50".
+
+    Lists page by number: `page` (from 1) and `per_page` (default 10, at most 100).
+    The answer is a bare JSON array, and the `X-WP-Total` and `X-WP-TotalPages`
+    headers give the number of matching items and of pages. A page past the last is
+    an empty array.
+
+    PUT updates only the properties sent; the others keep their values. A product's
+    `sku` is unique across the store: creating or updating a product with an SKU
+    another product has is refused with 400 and the code `product_invalid_sku`.
+    Deleting a product without `force=true` moves it to the trash (its `status`
+    becomes `trash`); with `force=true` it is deleted for good and reading it answers
+    404 `woocommerce_rest_product_invalid_id`.
+
+    The store this contract describes has no tax rates, no shipping methods and no
+    coupons. An order line's `subtotal` and `total` are the product's price times the
+    line's quantity, and the order's `total` is the sum of its line totals. An order's
+    `status` is one of pending, processing, on-hold, completed, cancelled, refunded,
+    failed and trash, and is changed with PUT. Notes belong to one order and are
+    listed under it, newest first.
+
+    Errors answer `code`, `message` and `data.status`, the HTTP status.
+servers:
+  - url: https://example-store.com
+security:
+  - basic: []
+tags:
+  - name: Products
+  - name: Product categories
+  - name: Orders
+  - name: Order notes
+paths:
+  /wp-json/wc/v3/products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List products
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+        - name: search
+          in: query
+          description: Matches products whose name or content contains the text.
+          schema: {type: string}
+        - name: sku
+          in: query
+          description: Only the product with this SKU (or these, comma-separated).
+          schema: {type: string}
+        - name: category
+          in: query
+          description: Only products in the category with this id.
+          schema: {type: string}
+        - name: status
+          in: query
+          schema: {type: string, enum: [any, draft, pending, private, publish], default: any}
+        - name: include
+          in: query
+          style: form
+          explode: false
+          schema: {type: array, items: {type: integer}}
+        - name: orderby
+          in: query
+          schema: {type: string, enum: [date, id, include, title, slug, price, popularity, rating], default: date}
+        - name: order
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+      responses:
+        "200":
+          description: A page of products.
+          headers:
+            X-WP-Total: {$ref: "#/components/headers/X-WP-Total"}
+            X-WP-TotalPages: {$ref: "#/components/headers/X-WP-TotalPages"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Product"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Products]
+      operationId: createProduct
+      summary: Create a product
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ProductInput"
+                - type: object
+                  required: [name]
+      responses:
+        "201":
+          description: The created product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Product"}
+        "400":
+          description: "`product_invalid_sku` when another product has the SKU; `rest_invalid_param` for a property that is not valid."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /wp-json/wc/v3/products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Products]
+      operationId: getProduct
+      summary: Get a product
+      responses:
+        "200":
+          description: The product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Product"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Products]
+      operationId: updateProduct
+      summary: Update a product
+      description: Only the properties sent change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProductInput"}
+      responses:
+        "200":
+          description: The whole updated product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Product"}
+        "400":
+          description: "`product_invalid_sku` when another product has the SKU."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Products]
+      operationId: deleteProduct
+      summary: Trash or delete a product
+      parameters:
+        - name: force
+          in: query
+          description: Delete for good instead of moving to the trash.
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The product as it was, or in the trash.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Product"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /wp-json/wc/v3/products/categories:
+    get:
+      tags: [Product categories]
+      operationId: listProductCategories
+      summary: List product categories
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+        - name: search
+          in: query
+          schema: {type: string}
+        - name: parent
+          in: query
+          schema: {type: integer}
+      responses:
+        "200":
+          description: A page of categories.
+          headers:
+            X-WP-Total: {$ref: "#/components/headers/X-WP-Total"}
+            X-WP-TotalPages: {$ref: "#/components/headers/X-WP-TotalPages"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Category"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Product categories]
+      operationId: createProductCategory
+      summary: Create a product category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                slug: {type: string}
+                parent: {type: integer, default: 0}
+                description: {type: string}
+      responses:
+        "201":
+          description: The created category.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Category"}
+        "400":
+          description: "`term_exists` when a category with the name already exists under the parent."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /wp-json/wc/v3/products/categories/{id}:
+    get:
+      tags: [Product categories]
+      operationId: getProductCategory
+      summary: Get a product category
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: The category.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Category"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /wp-json/wc/v3/orders:
+    get:
+      tags: [Orders]
+      operationId: listOrders
+      summary: List orders
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+        - name: status
+          in: query
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: {type: string, enum: [any, pending, processing, on-hold, completed, cancelled, refunded, failed, trash]}
+        - name: customer
+          in: query
+          schema: {type: integer}
+        - name: product
+          in: query
+          description: Only orders with a line for the product with this id.
+          schema: {type: integer}
+        - name: after
+          in: query
+          schema: {type: string, format: date-time}
+        - name: before
+          in: query
+          schema: {type: string, format: date-time}
+      responses:
+        "200":
+          description: A page of orders, newest first.
+          headers:
+            X-WP-Total: {$ref: "#/components/headers/X-WP-Total"}
+            X-WP-TotalPages: {$ref: "#/components/headers/X-WP-TotalPages"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Order"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Create an order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OrderInput"}
+      responses:
+        "201":
+          description: The created order, its lines priced from their products.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "400":
+          description: "`woocommerce_rest_invalid_product_id` for a line whose product does not exist."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /wp-json/wc/v3/orders/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get an order
+      responses:
+        "200":
+          description: The order.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Orders]
+      operationId: updateOrder
+      summary: Update an order
+      description: Only the properties sent change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OrderInput"}
+      responses:
+        "200":
+          description: The whole updated order.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Orders]
+      operationId: deleteOrder
+      summary: Trash or delete an order
+      parameters:
+        - name: force
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The order as it was.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /wp-json/wc/v3/orders/{order_id}/notes:
+    parameters:
+      - $ref: "#/components/parameters/order_id"
+    get:
+      tags: [Order notes]
+      operationId: listOrderNotes
+      summary: List an order's notes
+      parameters:
+        - name: type
+          in: query
+          schema: {type: string, enum: [any, customer, internal], default: any}
+      responses:
+        "200":
+          description: The order's notes, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/OrderNote"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Order notes]
+      operationId: createOrderNote
+      summary: Add a note to an order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: {type: string}
+                customer_note:
+                  type: boolean
+                  default: false
+                  description: Show the note to the customer (and email it).
+                added_by_user: {type: boolean, default: false}
+      responses:
+        "201":
+          description: The created note.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OrderNote"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /wp-json/wc/v3/orders/{order_id}/notes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/order_id"
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Order notes]
+      operationId: getOrderNote
+      summary: Get an order note
+      responses:
+        "200":
+          description: The note.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OrderNote"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Order notes]
+      operationId: deleteOrderNote
+      summary: Delete an order note
+      parameters:
+        - name: force
+          in: query
+          required: true
+          description: Notes cannot be trashed, so this must be true.
+          schema: {type: boolean}
+      responses:
+        "200":
+          description: The note as it was.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OrderNote"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+      description: The consumer key as the user name and the consumer secret as the password.
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer}
+    order_id:
+      name: order_id
+      in: path
+      required: true
+      schema: {type: integer}
+    page:
+      name: page
+      in: query
+      description: The page number, from 1.
+      schema: {type: integer, minimum: 1, default: 1}
+    per_page:
+      name: per_page
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 10}
+  headers:
+    X-WP-Total:
+      description: The number of items that match, across all pages.
+      schema: {type: integer}
+    X-WP-TotalPages:
+      description: The number of pages at this per_page.
+      schema: {type: integer}
+  responses:
+    BadRequest:
+      description: A parameter or property is not valid (`rest_invalid_param`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: "`woocommerce_rest_cannot_view` or `woocommerce_rest_authentication_error`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No resource has the id (`woocommerce_rest_product_invalid_id`, `woocommerce_rest_shop_order_invalid_id`, `woocommerce_rest_invalid_id`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [code, message, data]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        data:
+          type: object
+          required: [status]
+          properties:
+            status: {type: integer}
+            params: {type: object, additionalProperties: {type: string}}
+    Money:
+      type: string
+      pattern: "^-?[0-9]+\\.[0-9]{2}$"
+    CategoryRef:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        name: {type: string, readOnly: true}
+        slug: {type: string, readOnly: true}
+    ProductInput:
+      type: object
+      properties:
+        name: {type: string}
+        slug: {type: string}
+        type: {type: string, enum: [simple, grouped, external, variable], default: simple}
+        status: {type: string, enum: [draft, pending, private, publish], default: publish}
+        description: {type: string}
+        short_description: {type: string}
+        sku: {type: string, description: Unique across the store.}
+        regular_price: {$ref: "#/components/schemas/Money"}
+        sale_price: {type: string, description: Empty for no sale.}
+        manage_stock: {type: boolean, default: false}
+        stock_quantity: {type: integer, nullable: true}
+        stock_status: {type: string, enum: [instock, outofstock, onbackorder], default: instock}
+        weight: {type: string}
+        categories:
+          type: array
+          items: {$ref: "#/components/schemas/CategoryRef"}
+        tags:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: integer}
+              name: {type: string}
+    Product:
+      type: object
+      required: [id, name, slug, type, status, sku, price, regular_price, sale_price, categories,
+                 date_created, date_modified, permalink]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        slug: {type: string}
+        permalink: {type: string, format: uri}
+        date_created: {type: string, format: date-time}
+        date_modified: {type: string, format: date-time}
+        type: {type: string, enum: [simple, grouped, external, variable]}
+        status: {type: string, enum: [draft, pending, private, publish, trash]}
+        description: {type: string}
+        short_description: {type: string}
+        sku: {type: string}
+        price: {type: string, description: The current price, the sale price while there is one.}
+        regular_price: {type: string}
+        sale_price: {type: string}
+        on_sale: {type: boolean}
+        purchasable: {type: boolean}
+        total_sales: {type: integer}
+        manage_stock: {type: boolean}
+        stock_quantity: {type: integer, nullable: true}
+        stock_status: {type: string, enum: [instock, outofstock, onbackorder]}
+        weight: {type: string}
+        categories:
+          type: array
+          items: {$ref: "#/components/schemas/CategoryRef"}
+        tags:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: integer}
+              name: {type: string}
+              slug: {type: string}
+    Category:
+      type: object
+      required: [id, name, slug, parent, count]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        slug: {type: string}
+        parent: {type: integer}
+        description: {type: string}
+        display: {type: string, enum: [default, products, subcategories, both]}
+        count: {type: integer, description: The number of published products in the category.}
+    Address:
+      type: object
+      properties:
+        first_name: {type: string}
+        last_name: {type: string}
+        company: {type: string}
+        address_1: {type: string}
+        address_2: {type: string}
+        city: {type: string}
+        state: {type: string}
+        postcode: {type: string}
+        country: {type: string, description: ISO 3166-1 alpha-2.}
+        email: {type: string, format: email}
+        phone: {type: string}
+    LineItemInput:
+      type: object
+      required: [product_id, quantity]
+      properties:
+        product_id: {type: integer}
+        variation_id: {type: integer}
+        quantity: {type: integer, minimum: 1}
+    OrderInput:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, processing, on-hold, completed, cancelled, refunded, failed]
+          default: pending
+        currency: {type: string, default: EUR}
+        customer_id: {type: integer, default: 0, description: 0 for a guest.}
+        customer_note: {type: string}
+        billing: {$ref: "#/components/schemas/Address"}
+        shipping: {$ref: "#/components/schemas/Address"}
+        payment_method: {type: string}
+        payment_method_title: {type: string}
+        set_paid: {type: boolean, default: false, description: Mark the order paid, which makes it processing.}
+        line_items:
+          type: array
+          items: {$ref: "#/components/schemas/LineItemInput"}
+    LineItem:
+      type: object
+      required: [id, product_id, quantity, subtotal, total, price, name]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        product_id: {type: integer}
+        variation_id: {type: integer}
+        quantity: {type: integer}
+        sku: {type: string}
+        price: {type: number, description: The unit price.}
+        subtotal: {type: string, description: The unit price times the quantity.}
+        subtotal_tax: {type: string}
+        total: {type: string, description: The subtotal after discounts.}
+        total_tax: {type: string}
+    Order:
+      type: object
+      required: [id, number, order_key, status, currency, date_created, date_modified, total, total_tax,
+                 customer_id, billing, shipping, line_items]
+      properties:
+        id: {type: integer}
+        parent_id: {type: integer}
+        number: {type: string}
+        order_key: {type: string}
+        created_via: {type: string}
+        status: {type: string, enum: [pending, processing, on-hold, completed, cancelled, refunded, failed, trash]}
+        currency: {type: string}
+        date_created: {type: string, format: date-time}
+        date_modified: {type: string, format: date-time}
+        date_paid: {type: string, format: date-time, nullable: true}
+        date_completed: {type: string, format: date-time, nullable: true}
+        discount_total: {type: string}
+        shipping_total: {type: string}
+        total: {type: string, description: The sum of the line totals here, as there is no tax or shipping.}
+        total_tax: {type: string}
+        customer_id: {type: integer}
+        customer_note: {type: string}
+        billing: {$ref: "#/components/schemas/Address"}
+        shipping: {$ref: "#/components/schemas/Address"}
+        payment_method: {type: string}
+        payment_method_title: {type: string}
+        line_items:
+          type: array
+          items: {$ref: "#/components/schemas/LineItem"}
+    OrderNote:
+      type: object
+      required: [id, author, date_created, note, customer_note]
+      properties:
+        id: {type: integer}
+        author: {type: string}
+        date_created: {type: string, format: date-time}
+        note: {type: string}
+        customer_note: {type: boolean}

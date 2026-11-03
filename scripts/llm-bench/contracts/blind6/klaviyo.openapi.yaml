@@ -1,0 +1,582 @@
+openapi: 3.0.3
+info:
+  title: Klaviyo API (profiles and lists)
+  version: "2024-10-15"
+  description: |
+    A subset of the Klaviyo API, written from its public documentation. It follows
+    JSON:API. A request body and an answer hold a resource object in `data`: its
+    `type` (`profile`, `list`), its `id`, its `attributes`, its `relationships` and its
+    `links`, where `links.self` is the resource's own URL. A collection answers an
+    array in `data` and `links` for paging: `self`, `next` and `prev`, each a full URL
+    or null. Following `links.next` answers the next page; it is null on the last.
+    The cursor in it is the `page[cursor]` query parameter.
+
+    Every request names the API version in the `revision` header. Errors answer an
+    `errors` array; each error has the HTTP `status`, a `code`, a `title`, a `detail`
+    and a `source.pointer` to the part of the request at fault.
+
+    A profile's email is unique: creating a profile with an email another profile
+    has is refused with 409 and the code `duplicate_profile`, and the error's
+    `meta.duplicate_profile_id` is the id of the profile that has the email. PATCH
+    changes only the attributes sent; a key under `properties` is merged into the
+    profile's custom properties.
+
+    `filter` takes expressions such as `equals(email,"ana@example.org")`,
+    `any(email,["a@example.org","b@example.org"])` or
+    `greater-than(created,2026-01-01T00:00:00Z)`, joined by `and(...)`.
+
+    A list's members are a relationship: POST and DELETE on
+    `/lists/{id}/relationships/profiles` add and remove profiles given as resource
+    identifiers (`{"type": "profile", "id": ...}`). `/lists/{id}/profiles` answers
+    the member profiles and `/profiles/{id}/lists` the lists a profile is on.
+    Profiles cannot be deleted through this API; lists can.
+servers:
+  - url: https://a.klaviyo.com
+security:
+  - privateKey: []
+tags:
+  - name: Profiles
+  - name: Lists
+paths:
+  /api/profiles:
+    get:
+      tags: [Profiles]
+      operationId: getProfiles
+      summary: Get profiles
+      parameters:
+        - $ref: "#/components/parameters/revision"
+        - name: filter
+          in: query
+          description: 'Over id, email, phone_number, external_id, created and updated, such as equals(email,"ana@example.org").'
+          schema: {type: string}
+        - name: sort
+          in: query
+          description: A field to sort by; a leading `-` sorts descending.
+          schema: {type: string, enum: [created, -created, email, -email, id, -id, updated, -updated]}
+        - name: page[size]
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - name: page[cursor]
+          in: query
+          description: The cursor from the `next` or `prev` link of a page.
+          schema: {type: string}
+        - name: fields[profile]
+          in: query
+          description: A comma-separated list of the attributes to answer.
+          style: form
+          explode: false
+          schema: {type: array, items: {type: string}}
+      responses:
+        "200":
+          description: A page of profiles.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ProfileCollection"}
+        "400": {$ref: "#/components/responses/ClientError"}
+    post:
+      tags: [Profiles]
+      operationId: createProfile
+      summary: Create a profile
+      parameters:
+        - $ref: "#/components/parameters/revision"
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/ProfileCreateQuery"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ProfileCreateQuery"}
+      responses:
+        "201":
+          description: The created profile.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ProfileDocument"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "409":
+          description: |
+            `duplicate_profile`: another profile has the email, phone number or external
+            id. `errors[0].meta.duplicate_profile_id` is that profile's id.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ErrorDocument"}
+  /api/profiles/{id}:
+    parameters:
+      - $ref: "#/components/parameters/revision"
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Profiles]
+      operationId: getProfile
+      summary: Get a profile
+      parameters:
+        - name: include
+          in: query
+          style: form
+          explode: false
+          schema: {type: array, items: {type: string, enum: [lists, segments]}}
+      responses:
+        "200":
+          description: The profile.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ProfileDocument"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Profiles]
+      operationId: updateProfile
+      summary: Update a profile
+      description: Only the attributes sent change. `data.id` must be the id in the path.
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/ProfilePartialUpdateQuery"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ProfilePartialUpdateQuery"}
+      responses:
+        "200":
+          description: The whole updated profile.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ProfileDocument"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: "`duplicate_profile`: the new email belongs to another profile."
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ErrorDocument"}
+  /api/profiles/{id}/lists:
+    get:
+      tags: [Profiles]
+      operationId: getListsForProfile
+      summary: Get the lists a profile is on
+      parameters:
+        - $ref: "#/components/parameters/revision"
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: The profile's lists.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ListCollection"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/lists:
+    get:
+      tags: [Lists]
+      operationId: getLists
+      summary: Get lists
+      parameters:
+        - $ref: "#/components/parameters/revision"
+        - name: filter
+          in: query
+          description: 'Over name, id, created and updated, such as equals(name,"Newsletter").'
+          schema: {type: string}
+        - name: page[cursor]
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of lists, ten at most.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ListCollection"}
+        "400": {$ref: "#/components/responses/ClientError"}
+    post:
+      tags: [Lists]
+      operationId: createList
+      summary: Create a list
+      parameters:
+        - $ref: "#/components/parameters/revision"
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/ListCreateQuery"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ListCreateQuery"}
+      responses:
+        "201":
+          description: The created list.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ListDocument"}
+        "400": {$ref: "#/components/responses/ClientError"}
+  /api/lists/{id}:
+    parameters:
+      - $ref: "#/components/parameters/revision"
+      - $ref: "#/components/parameters/listId"
+    get:
+      tags: [Lists]
+      operationId: getList
+      summary: Get a list
+      responses:
+        "200":
+          description: The list.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ListDocument"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Lists]
+      operationId: updateList
+      summary: Rename a list
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/ListPartialUpdateQuery"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ListPartialUpdateQuery"}
+      responses:
+        "200":
+          description: The updated list.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ListDocument"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Lists]
+      operationId: deleteList
+      summary: Delete a list
+      description: The list is gone; its profiles stay.
+      responses:
+        "204":
+          description: The list is deleted.
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/lists/{id}/profiles:
+    get:
+      tags: [Lists]
+      operationId: getProfilesForList
+      summary: Get the profiles on a list
+      parameters:
+        - $ref: "#/components/parameters/revision"
+        - $ref: "#/components/parameters/listId"
+        - name: filter
+          in: query
+          description: Over email, phone_number, push_token and joined_group_at.
+          schema: {type: string}
+        - name: page[size]
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - name: page[cursor]
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of the list's members.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/ProfileCollection"}
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/lists/{id}/relationships/profiles:
+    parameters:
+      - $ref: "#/components/parameters/revision"
+      - $ref: "#/components/parameters/listId"
+    get:
+      tags: [Lists]
+      operationId: getProfileIdsForList
+      summary: Get the ids of the profiles on a list
+      responses:
+        "200":
+          description: Resource identifiers of the list's members.
+          content:
+            application/vnd.api+json:
+              schema:
+                type: object
+                required: [data, links]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/ProfileIdentifier"}
+                  links: {$ref: "#/components/schemas/CollectionLinks"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Lists]
+      operationId: addProfilesToList
+      summary: Add profiles to a list
+      description: Adding a profile that is already a member changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/ProfileIdentifiers"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ProfileIdentifiers"}
+      responses:
+        "204":
+          description: The profiles are members of the list.
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Lists]
+      operationId: removeProfilesFromList
+      summary: Remove profiles from a list
+      description: The profiles stay; only their membership of this list ends.
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/ProfileIdentifiers"}
+          application/json:
+            schema: {$ref: "#/components/schemas/ProfileIdentifiers"}
+      responses:
+        "204":
+          description: The profiles are no longer on the list.
+        "400": {$ref: "#/components/responses/ClientError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    privateKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: '"Klaviyo-API-Key {private key}".'
+  parameters:
+    revision:
+      name: revision
+      in: header
+      required: true
+      description: The API version, a date such as 2024-10-15.
+      schema: {type: string, default: "2024-10-15"}
+    listId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+  responses:
+    ClientError:
+      description: The request is not valid, such as a malformed filter or a missing attribute.
+      content:
+        application/vnd.api+json:
+          schema: {$ref: "#/components/schemas/ErrorDocument"}
+    NotFound:
+      description: No resource has the id.
+      content:
+        application/vnd.api+json:
+          schema: {$ref: "#/components/schemas/ErrorDocument"}
+  schemas:
+    ErrorDocument:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          items:
+            type: object
+            required: [id, status, code, title, detail]
+            properties:
+              id: {type: string, format: uuid}
+              status: {type: integer}
+              code: {type: string, description: Such as invalid, not_found or duplicate_profile.}
+              title: {type: string}
+              detail: {type: string}
+              source:
+                type: object
+                properties:
+                  pointer: {type: string, description: Such as /data/attributes/email.}
+                  parameter: {type: string}
+              meta:
+                type: object
+                properties:
+                  duplicate_profile_id: {type: string}
+    ObjectLinks:
+      type: object
+      required: [self]
+      properties:
+        self: {type: string, format: uri, description: The resource's own URL.}
+    CollectionLinks:
+      type: object
+      required: [self]
+      properties:
+        self: {type: string, format: uri}
+        first: {type: string, format: uri}
+        last: {type: string, format: uri}
+        prev: {type: string, format: uri, nullable: true}
+        next:
+          type: string
+          format: uri
+          nullable: true
+          description: The next page's URL, with its page[cursor]; null on the last page.
+    Location:
+      type: object
+      properties:
+        address1: {type: string, nullable: true}
+        address2: {type: string, nullable: true}
+        city: {type: string, nullable: true}
+        country: {type: string, nullable: true}
+        region: {type: string, nullable: true}
+        zip: {type: string, nullable: true}
+        timezone: {type: string, nullable: true}
+    ProfileAttributesInput:
+      type: object
+      properties:
+        email: {type: string, format: email, nullable: true}
+        phone_number: {type: string, nullable: true, description: E.164, such as +351912345678.}
+        external_id: {type: string, nullable: true}
+        first_name: {type: string, nullable: true}
+        last_name: {type: string, nullable: true}
+        organization: {type: string, nullable: true}
+        title: {type: string, nullable: true}
+        image: {type: string, nullable: true}
+        location: {$ref: "#/components/schemas/Location"}
+        properties:
+          type: object
+          additionalProperties: true
+          description: Custom properties, keyed by name.
+    ProfileAttributes:
+      allOf:
+        - $ref: "#/components/schemas/ProfileAttributesInput"
+        - type: object
+          properties:
+            created: {type: string, format: date-time}
+            updated: {type: string, format: date-time}
+            last_event_date: {type: string, format: date-time, nullable: true}
+    Profile:
+      type: object
+      required: [type, id, attributes, links]
+      properties:
+        type: {type: string, enum: [profile]}
+        id: {type: string, pattern: "^[0-9A-Z]{26}$"}
+        attributes: {$ref: "#/components/schemas/ProfileAttributes"}
+        relationships:
+          type: object
+          properties:
+            lists:
+              type: object
+              properties:
+                links:
+                  type: object
+                  properties:
+                    self: {type: string, format: uri}
+                    related: {type: string, format: uri}
+        links: {$ref: "#/components/schemas/ObjectLinks"}
+    ProfileDocument:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: "#/components/schemas/Profile"}
+    ProfileCollection:
+      type: object
+      required: [data, links]
+      properties:
+        data:
+          type: array
+          items: {$ref: "#/components/schemas/Profile"}
+        links: {$ref: "#/components/schemas/CollectionLinks"}
+    ProfileCreateQuery:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [type, attributes]
+          properties:
+            type: {type: string, enum: [profile]}
+            attributes: {$ref: "#/components/schemas/ProfileAttributesInput"}
+    ProfilePartialUpdateQuery:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [type, id, attributes]
+          properties:
+            type: {type: string, enum: [profile]}
+            id: {type: string}
+            attributes: {$ref: "#/components/schemas/ProfileAttributesInput"}
+    ProfileIdentifier:
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [profile]}
+        id: {type: string}
+    ProfileIdentifiers:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: "#/components/schemas/ProfileIdentifier"}
+    List:
+      type: object
+      required: [type, id, attributes, links]
+      properties:
+        type: {type: string, enum: [list]}
+        id: {type: string, pattern: "^[A-Za-z0-9]{6}$"}
+        attributes:
+          type: object
+          required: [name]
+          properties:
+            name: {type: string}
+            created: {type: string, format: date-time}
+            updated: {type: string, format: date-time}
+            opt_in_process: {type: string, enum: [double_opt_in, single_opt_in]}
+        relationships:
+          type: object
+          properties:
+            profiles:
+              type: object
+              properties:
+                links:
+                  type: object
+                  properties:
+                    self: {type: string, format: uri}
+                    related: {type: string, format: uri}
+        links: {$ref: "#/components/schemas/ObjectLinks"}
+    ListDocument:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: "#/components/schemas/List"}
+    ListCollection:
+      type: object
+      required: [data, links]
+      properties:
+        data:
+          type: array
+          items: {$ref: "#/components/schemas/List"}
+        links: {$ref: "#/components/schemas/CollectionLinks"}
+    ListCreateQuery:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [type, attributes]
+          properties:
+            type: {type: string, enum: [list]}
+            attributes:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+    ListPartialUpdateQuery:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [type, id, attributes]
+          properties:
+            type: {type: string, enum: [list]}
+            id: {type: string}
+            attributes:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
