@@ -15,7 +15,10 @@
 //! `labels` text beside a `labels` array and a range (`DateSent<`) change nothing. Text
 //! the contract says nothing more of (no `enum`, `format` or `pattern`) is often
 //! searched by part, so it keeps an item whose value contains the requested one,
-//! ignoring case: `name=Ann` keeps `Anna`. An
+//! ignoring case: `name=Ann` keeps `Anna`. A value holding a digit (an id, a phone
+//! number, a code) matches whole, ignoring case, as `u1` is not `u10`. Values are
+//! trimmed, and one with a leading space and a digit also matches with a `+`, as an
+//! unencoded `+` decodes to a space. An
 //! item that does not hold the member, or holds something of another shape, stays. The
 //! list's main array is then cut to the page size a parameter asks for, by the signal
 //! [`mb_engine::budget::requested_limit`] goes by.
@@ -199,16 +202,30 @@ fn wanted(member: &Member<'_>, raw: &Value) -> Option<Vec<Value>> {
         Value::Bool(b) => b.to_string(),
         _ => return None,
     };
-    if raw.trim().is_empty() {
+    let value = raw.trim();
+    if value.is_empty() {
         return None;
     }
-    if raw.contains(',') && member.enumerated().is_some() {
-        let parts: Option<Vec<Value>> = raw.split(',').map(|p| typed(member, p.trim())).collect();
+    if value.contains(',') && member.enumerated().is_some() {
+        let parts: Option<Vec<Value>> = value.split(',').map(|p| typed(member, p.trim())).collect();
         if let Some(parts) = parts {
             return Some(parts);
         }
     }
-    typed(member, &raw).map(|v| vec![v])
+    let mut values = vec![typed(member, value)?];
+    // An unencoded `+` decodes to a space: `to=+1555` arrives as ` 1555`.
+    if raw.starts_with(' ')
+        && holds_a_digit(value)
+        && let Some(plus) = typed(member, &format!("+{value}"))
+    {
+        values.push(plus);
+    }
+    Some(values)
+}
+
+/// Whether `text` holds a digit: an id, a phone number or a code, matched whole.
+fn holds_a_digit(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_digit())
 }
 
 /// Whether `held` is one of `wanted`: text ignoring case, and holding it when `loose`,
@@ -315,10 +332,13 @@ pub(super) fn narrow(
         if let Some(member) = filtered_member(bundle, query, &item_parts, param)
             && let Some(values) = wanted(&member, raw)
         {
+            // `name=Ann` keeps `Anna`; `owner_id=u1` does not keep `u10`.
+            let loose = member.is_free_text()
+                && !values.iter().any(|v| v.as_str().is_some_and(holds_a_digit));
             filters.push(Filter {
                 member: member.name,
                 values,
-                loose: member.is_free_text(),
+                loose,
             });
         }
     }
