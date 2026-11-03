@@ -3,7 +3,7 @@
 //! server again.
 #![cfg(test)]
 
-use crate::support::{fixture, free_port, on_free_ports, port_was_busy};
+use crate::support::{fixture, free_port, logged_admin, on_free_ports, port_was_busy};
 use std::path::Path;
 
 /// A config serving `orders` for `api.orders.test` on free ports; returns
@@ -35,10 +35,12 @@ fn on_fresh_config(
         let admin = write_config(dir);
         let out = go();
         let stderr = String::from_utf8_lossy(&out.stderr);
-        match port_was_busy(&stderr) {
-            true => Err(stderr.into_owned()),
-            false => Ok((out, admin)),
+        if port_was_busy(&stderr) {
+            return Err(stderr.into_owned());
         }
+        // `run` reuses a server that already answers on the admin port:
+        // confirm it started its own instead of finding another process's.
+        logged_admin(&dir.join("state/server.log"), admin).map(|()| (out, admin))
     })
 }
 

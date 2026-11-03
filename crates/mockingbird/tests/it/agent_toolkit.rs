@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
-use crate::support::{free_port, on_free_ports, read, repo};
+use crate::support::{free_port, logged_admin, on_free_ports, read, repo};
 use assert_cmd::cargo::CommandCargoExt;
 use mockingbird::agents::SKILLS;
 use serde_json::{Value, json};
@@ -498,10 +498,13 @@ fn start_server_on_free_ports(
             .as_str()
             .unwrap()
             .to_string();
-        match r["result"]["isError"] == true {
-            true => Err(text),
-            false => Ok((mcp, admin_url, serde_json::from_str(&text).unwrap())),
+        if r["result"]["isError"] == true {
+            return Err(text);
         }
+        let started: Value = serde_json::from_str(&text).unwrap();
+        // Ready on the admin port: confirm it was this server that answered.
+        let log = cwd.join(started["log"].as_str().unwrap());
+        logged_admin(&log, admin).map(|()| (mcp, admin_url, started))
     })
 }
 

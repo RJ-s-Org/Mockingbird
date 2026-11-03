@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use crate::support::{free_port, on_free_ports, spawn_serve};
+use crate::support::{free_port, logged_admin, on_free_ports, spawn_serve};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -82,10 +82,13 @@ fn start_on_free_ports(state: &Path, extra: &[&str], env: &[(&str, &str)]) -> Po
     on_free_ports(|| {
         let ports = Ports::new();
         let out = start(state, &ports, extra, env);
-        match out.status.success() {
-            true => Ok(ports),
-            false => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
         }
+        // Ready on the admin port: confirm it was this server that answered.
+        logged_admin(&state.join("server.log"), ports.admin)
+            .map(|()| ports)
+            .inspect_err(|_| drop(Server(state.to_path_buf())))
     })
 }
 

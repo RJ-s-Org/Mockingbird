@@ -79,10 +79,38 @@ pub fn on_free_ports<T>(mut attempt: impl FnMut() -> Result<T, String>) -> T {
     panic!("a port was still taken after {PORT_ATTEMPTS} attempts: {last}");
 }
 
-/// Whether `text` (a server's stderr or error) says a port was in use.
+/// Whether `text` (a server's stderr or error) says a port was in use,
+/// including by a server of another process that answered in place of ours
+/// (see [`logged_admin`]).
 pub fn port_was_busy(text: &str) -> bool {
     // Unix, then Windows (WSAEADDRINUSE).
-    text.contains("Address already in use") || text.contains("os error 10048")
+    text.contains("Address already in use")
+        || text.contains("os error 10048")
+        || text.contains(NOT_OURS)
+}
+
+/// What [`logged_admin`] reports when the server that answered is not ours.
+const NOT_OURS: &str = "a server of another process answered on";
+
+/// Confirms that the server whose log is `log` bound the admin port
+/// `admin`, so that the server a readiness check reached there is ours and
+/// not another process's that took the port first. `serve` logs its bound
+/// addresses after binding every listener and before serving, so a server
+/// that answered has written the line by then.
+///
+/// # Errors
+///
+/// A text [`port_was_busy`] accepts, when the log lacks the line.
+pub fn logged_admin(log: &Path, admin: u16) -> Result<(), String> {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let line = format!("admin API on http://127.0.0.1:{admin}");
+    match text.contains(&line) {
+        true => Ok(()),
+        false => Err(format!(
+            "{NOT_OURS} {admin}: {} lacks `{line}`:\n{text}",
+            log.display()
+        )),
+    }
 }
 
 /// The addresses a `mockingbird serve` child logged once it had bound them.
