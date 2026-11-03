@@ -509,6 +509,56 @@ pub(crate) fn refusable(op: &mb_mcm::Operation, status: u16, validator: &SchemaV
         })
 }
 
+/// The lowercase words of `text`, split on what is not alphanumeric and at camelCase
+/// boundaries (`displayTitle`, `display_title` and "Display title" all give `display`,
+/// `title`).
+fn words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut lower_before = false;
+    for c in text.chars() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+            lower_before = false;
+            continue;
+        }
+        if c.is_uppercase() && lower_before && !word.is_empty() {
+            out.push(std::mem::take(&mut word));
+        }
+        lower_before = c.is_lowercase() || c.is_ascii_digit();
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+/// Whether the description of a refusal status `op` would be offered
+/// names `member`: its words, in order, as whole words of the description, a plural
+/// too (`name` in "An item with the same name already exists", `displayTitle` in "this
+/// display title"). The contract's own word that a repeated value of that member is
+/// what it refuses, so a plain value of it may be shown as a conflict
+/// ([`crate::GenerationContext::same_values`]); "Validation failed." names none.
+pub fn a_refusal_names(op: &mb_mcm::Operation, member: &str) -> bool {
+    let wanted: Vec<String> = words(member).iter().map(|w| mb_mcm::stem(w)).collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    offered_codes(op).iter().any(|code| {
+        let Some(description) = op
+            .output_for_status(*code)
+            .and_then(|o| o.description.as_deref())
+        else {
+            return false;
+        };
+        let said: Vec<String> = words(description).iter().map(|w| mb_mcm::stem(w)).collect();
+        said.windows(wanted.len()).any(|w| w == wanted.as_slice())
+    })
+}
+
 /// Whether `call` carries a header `op` declares as an idempotency key, by its name or
 /// its description: a create sent again with one may be a retry the API answers as the
 /// first, so what it repeats is no conflict.
@@ -788,6 +838,12 @@ pub(crate) fn refusals(
     if !usable {
         return Vec::new();
     }
+    offered_codes(op)
+}
+
+/// The statuses of [`REFUSAL_STATUSES`] `op` declares by code that a refusal may name,
+/// in order: a create's `400` only when it declares none of the others.
+fn offered_codes(op: &mb_mcm::Operation) -> Vec<u16> {
     let mut codes: Vec<u16> = op
         .outputs
         .iter()
@@ -1347,4 +1403,23 @@ fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> 
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::words;
+
+    #[test]
+    fn words_split_on_case_and_separators() {
+        for text in [
+            "displayTitle",
+            "display_title",
+            "Display title",
+            "DISPLAY-TITLE",
+        ] {
+            assert_eq!(words(text), ["display", "title"], "{text}");
+        }
+        assert_eq!(words("Validation failed."), ["validation", "failed"]);
+        assert_eq!(words("v2Name"), ["v2", "name"]);
+    }
 }

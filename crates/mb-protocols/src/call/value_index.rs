@@ -42,9 +42,11 @@
 //! records holding it, a few at most. A plain string (a name, a slug), indexed apart
 //! under its own cap and never a reference, matches only the one record holding it, and
 //! only when that record agrees with every other value the request sets that it holds,
-//! one of them a reference: a folder's name in the same parent, not in another, and
-//! never a title alone. Any record must agree with the references the body sets, and a
-//! create under a parent path counts only records created in that collection. Trivial
+//! one of them a reference, and when a refusal status the create may be offered names
+//! the member in its description ([`mb_engine::guards::a_refusal_names`]): a folder's
+//! name in the same parent, not in another, and never a title alone. Any record must
+//! agree with the references the body sets, and must have been created in the
+//! collection the create runs in: the same one under a parent path, none at the top. Trivial
 //! values (enums, dates, booleans, short words) are never indexed, and a value two
 //! records hold is no plain match.
 //!
@@ -910,13 +912,10 @@ pub(super) async fn same_values(
     }
     let session = &plan.session;
     let collection = collection_of(op, call);
-    let in_collection = |hit: &StoredResource| {
-        collection.as_ref().is_none_or(|c| {
-            rt.collections()
-                .get(session, hit)
-                .is_some_and(|held| held == *c)
-        })
-    };
+    // The collection the hit was created or listed under must be the create's: none
+    // for a top-level create, and the very same one under a parent path.
+    let in_collection =
+        |hit: &StoredResource| rt.collections().get(session, hit).as_ref() == collection.as_ref();
     let mut reads = 0;
     let mut out: Vec<(StoredResource, String)> = Vec::new();
     'members: for (name, value) in body {
@@ -960,8 +959,9 @@ pub(super) async fn same_values(
                     .forget(session, &holder.resource_type, &holder.id),
             }
         }
-        // A plain value two live records hold is no match.
-        if plain && live.len() != 1 {
+        // A plain value two live records hold is no match, nor one no refusal the
+        // create may be offered names the member of.
+        if plain && (live.len() != 1 || !mb_engine::guards::a_refusal_names(op, name)) {
             continue;
         }
         live.retain(|hit| in_collection(hit) && repeated_by(rt, body, name, plain, hit));

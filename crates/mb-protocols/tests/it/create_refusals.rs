@@ -55,6 +55,45 @@ paths:
       parameters: [{name: folder_id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}
+  /tasks:
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {title: {type: string}, category_id: {type: string}, assignee: {type: object, properties: {id: {type: string}}}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+        "422": {description: Validation failed., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /tasks/{task_id}:
+    get:
+      operationId: getTask
+      parameters: [{name: task_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+  /labels:
+    post:
+      operationId: createLabel
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {displayTitle: {type: string}, board_id: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
+        "409": {description: A label with this display title is already on the board., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /labels/{label_id}:
+    get:
+      operationId: getLabel
+      parameters: [{name: label_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
+  /groups/{group}/contacts:
+    post:
+      operationId: addGroupContact
+      parameters: [{name: group, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}, email: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
 components:
   schemas:
     Contact:
@@ -74,6 +113,18 @@ components:
         name: {type: string}
         note: {type: string}
         parent: {type: object, properties: {id: {type: string}}}
+    Task:
+      type: object
+      required: [id, title]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        category_id: {type: string}
+        assignee: {type: object, properties: {id: {type: string}}}
+    Label:
+      type: object
+      required: [id, displayTitle]
+      properties: {id: {type: string}, displayTitle: {type: string}, board_id: {type: string}}
     Error:
       type: object
       required: [name, message]
@@ -607,4 +658,61 @@ async fn a_create_never_offered_a_refusal_is_shown_nothing() {
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
+}
+
+/// A plain title beside an agreeing reference is still no conflict when no refusal the
+/// create declares names the title: "Validation failed." says nothing of duplicates.
+#[tokio::test]
+async fn a_plain_match_needs_a_refusal_naming_its_member() {
+    for body in [
+        json!({"title": "Buy milk", "category_id": "groceries"}),
+        json!({"title": "Buy milk", "assignee": {"id": "usr-000001"}}),
+    ] {
+        let mut held = body.clone();
+        held["id"] = json!("tk-000001");
+        let mut again = body.clone();
+        again["id"] = json!("tk-000002");
+        let h = harness(CONTRACT, vec![held, again]);
+        h.post("/tasks", body.clone()).await;
+        let (status, _) = h.post("/tasks", body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let prompt = h.prompt(1);
+        assert!(!prompt.contains("tk-000001"), "{prompt}");
+        assert!(!prompt.contains("refusal"), "{prompt}");
+    }
+}
+
+/// A 409 whose description names the member, by its words (`displayTitle` as "display
+/// title"), with an agreeing parent, makes a plain match count.
+#[tokio::test]
+async fn a_plain_match_counts_when_a_refusal_names_its_member() {
+    let label = json!({"id": "lb-000001", "displayTitle": "Urgent work", "board_id": "b1"});
+    let h = harness(CONTRACT, vec![label, refusal()]);
+    let body = json!({"displayTitle": "Urgent work", "board_id": "b1"});
+    h.post("/labels", body.clone()).await;
+    let (status, _) = h.post("/labels", body).await;
+    let prompt = h.prompt(1);
+    assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+    let same = block(&prompt, "same_values").unwrap_or_default();
+    assert!(same.contains("\"member\": \"displayTitle\""), "{prompt}");
+}
+
+/// A top-level create is no repeat of a record of its type created under a parent
+/// path through another route: that one belongs to its own collection.
+#[tokio::test]
+async fn a_top_level_create_skips_records_of_a_parent_path() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            contact("ct-000101", "Jane Roe", "jane.roe@example.com"),
+            contact("ct-000102", "Jane Roe", "jane.roe@example.com"),
+        ],
+    );
+    let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
+    h.post("/groups/g1/contacts", body.clone()).await;
+    let (status, _) = h.post("/contacts", body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt = h.prompt(1);
+    assert!(!prompt.contains("ct-000101"), "{prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
 }
