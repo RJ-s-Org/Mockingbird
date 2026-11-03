@@ -796,6 +796,8 @@ pub(crate) async fn prepare<'a>(
                 .await
         }
     };
+    // What the path named, before a record found by another member takes its place.
+    let named_id = target_id.clone();
     // Found by another field (an issue's `number`): writes go to its id.
     if let Some(found) = &target {
         target_id = Some(found.id.clone());
@@ -830,12 +832,16 @@ pub(crate) async fn prepare<'a>(
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
     }
-    // Whatever `unknown_ids` says: this one is known to be gone.
+    // Whatever `unknown_ids` says: this one is known to be gone. A record found by
+    // another member than its key (`/issues/{issue_iid}`) is not what the path named
+    // when that was deleted: another issue can share the `iid`.
     if matches!(op.kind, OperationKind::Query)
         && plan.forced_status.is_none()
-        && target.is_none()
+        && target
+            .as_ref()
+            .is_none_or(|found| Some(found.id.as_str()) != named_id.as_deref())
         && state.tracks_deleted
-        && let (Some(t), Some(id)) = (resource_type, target_id.as_deref())
+        && let (Some(t), Some(id)) = (resource_type, named_id.as_deref())
         && deleted::is_deleted(
             &mut state,
             session,
@@ -2889,8 +2895,7 @@ async fn store_wrapped(
 /// does not show (see [`shows_owner`]).
 /// A route read by another member (`/issues/{number}`, `/teams/{team_slug}`) goes
 /// under its answer's own `id` when that member holds the path's value, which
-/// the engine sets there. A later read finds it by that member, within the
-/// path's owner.
+/// the engine sets there, and the answer shows the path's owner, if it has one.
 async fn seed_own_read(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -2949,7 +2954,7 @@ async fn seed_own_read(
         id,
         data: body.clone(),
     };
-    if !path_names_identity(identity)
+    if (named != identity.field || !path_names_identity(identity))
         && let Some(owner) = owner_of(op, call)
         && !shows_owner(rt, &resource, &owner)
     {

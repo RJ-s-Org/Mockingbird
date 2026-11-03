@@ -39,8 +39,9 @@ fn is_param(seg: &str) -> bool {
     param_name(seg).is_some()
 }
 
-/// Whether a segment is shaped like an API version, which is never a type: `v1`,
-/// `v1.2`, `v1beta2`, `3.0`, `1`, `2024-01-01`.
+/// Whether a segment is shaped like an API version: `v1`, `v1.2`, `v1beta2`, `3.0`,
+/// `1`, `2024-01-01`. It is one only before another static segment
+/// ([`version_at`]).
 fn is_version(seg: &str) -> bool {
     let numbers = |s: &str| {
         !s.is_empty()
@@ -121,11 +122,14 @@ pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
 
 /// The last static segment before any trailing `{param}`; for an
 /// RPC-style read (`/accounts/get`, `users.list`), what it reads. A version
-/// segment ([`is_version`]) is never the type: `/3.0/search-members` is
+/// segment ([`version_at`]) is never the type: `/3.0/search-members` is
 /// `search-members`.
 pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
     let segs: Vec<&str> = segments(path).into_iter().map(without_format).collect();
-    let mut statics = segs.iter().rev().filter(|s| !is_param(s) && !is_version(s));
+    let mut statics = (0..segs.len())
+        .rev()
+        .filter(|&at| !is_param(segs[at]) && !version_at(&segs, at))
+        .map(|at| &segs[at]);
     let last = statics.next()?;
     if ends_in_read(path) {
         match rpc_read(last) {
@@ -141,6 +145,13 @@ pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
     Some((*last).to_owned())
 }
 
+/// Whether `segs[at]` is a version: shaped like one ([`is_version`]) and followed by
+/// another static segment, as in `/v1/search`. One the path ends in or a parameter
+/// follows (`/v2/{id}/cancel`) is a resource like any other.
+fn version_at(segs: &[&str], at: usize) -> bool {
+    is_version(segs[at]) && segs.get(at + 1).is_some_and(|next| !is_param(next))
+}
+
 fn trailing_param(path: &str) -> Option<&str> {
     segments(path).last().and_then(|s| param_name(s))
 }
@@ -151,47 +162,123 @@ fn trailing_param(path: &str) -> Option<&str> {
 /// ([`record_keys`]); this is only what the contract's structure cannot give.
 const ID_FALLBACKS: [&str; 2] = ["sid", "uuid"];
 
-/// The members a contract's reads by path go by: what [`identity_for`] gives each
-/// `GET` ending in a parameter, on its answer and on the record of a one-member
-/// envelope. A create, which has no path parameter, goes by the one of these its
-/// answer has: Asana's `POST /tasks` by the `gid` that `GET /tasks/{task_gid}` reads.
+/// The members one type's reads by path go by: what [`identity_for`] gives each of
+/// its `GET`s ending in a parameter, on the answer and on the record of a one-member
+/// envelope. A create of the type, which has no path parameter, goes by the one of
+/// these its answer has: Asana's `POST /tasks` by the `gid` that
+/// `GET /tasks/{task_gid}` reads.
 type Keys = HashSet<String>;
 
-/// The [`Keys`] of `operations`.
-fn record_keys(operations: &[Operation], defs: &Map<String, Value>) -> Keys {
+/// The [`Keys`] of each type, taught by that type's own reads only: a tag read by
+/// `{tag_name}` says nothing of how a report is keyed.
+#[derive(Default)]
+struct TypeKeys {
+    by_type: HashMap<String, Keys>,
+    /// Every type's: only to tell whether two schemas go by the same member
+    /// ([`reads_back`]), which gives nothing an identity.
+    any: Keys,
+    none: Keys,
+}
+
+impl TypeKeys {
+    fn of(&self, resource_type: Option<&str>) -> &Keys {
+        resource_type
+            .and_then(|t| self.by_type.get(t))
+            .unwrap_or(&self.none)
+    }
+}
+
+/// The [`TypeKeys`] of `operations`.
+fn record_keys(operations: &[Operation], defs: &Map<String, Value>) -> TypeKeys {
     let none = Keys::new();
-    let mut keys = Keys::new();
+    let mut keys = TypeKeys::default();
     for op in gets(operations, |route| {
         route.last().is_some_and(|last| is_param(last))
     })
     .filter(|op| !is_stream(op))
     {
-        let (Some((_, path)), Some(schema)) = (http_path(op), answer(op)) else {
+        let (Some(t), Some((_, path)), Some(schema)) =
+            (op.resource_type.as_ref(), http_path(op), answer(op))
+        else {
             continue;
         };
         let param = trailing_param(path);
-        keys.extend(
+        keys.by_type.entry(t.clone()).or_default().extend(
             answered_things(schema, defs)
                 .iter()
                 .filter_map(|thing| identity_for(param, Some(thing), defs, &none))
                 .map(|identity| identity.field),
         );
     }
+    keys.any = keys.by_type.values().flatten().cloned().collect();
     keys
 }
 
-/// Gives a route with no identity, and no path parameter, the one of the contract's
+/// Gives a create with no identity, and no path parameter, the one of its type's
 /// [`Keys`] its answer has.
-fn apply_keys(operations: &mut [Operation], defs: &Map<String, Value>, keys: &Keys) {
+fn apply_keys(operations: &mut [Operation], defs: &Map<String, Value>, keys: &TypeKeys) {
     for op in operations
         .iter_mut()
-        .filter(|op| op.identity.is_none() && !is_stream(op))
+        .filter(|op| op.identity.is_none() && op.kind == OperationKind::Command(Effect::Create))
     {
         let Some((_, path)) = http_path(op) else {
             continue;
         };
         if trailing_param(path).is_none() {
+            let keys = keys.of(op.resource_type.as_deref());
             op.identity = identity_for(None, answer(op), defs, keys);
+        }
+    }
+}
+
+/// Gives each route of a type ending in a parameter that has no identity the one the
+/// type's other routes on that parameter have, when they agree and the path names
+/// another member than the key: GitLab's
+/// `DELETE /projects/{id}/issues/{issue_iid}`, which answers nothing, goes by `iid` as
+/// its `GET` does. The record is where its own answer holds it, so a route with no
+/// answer has it as itself.
+fn apply_shared_identities(operations: &mut [Operation]) {
+    let mut by_route: HashMap<(String, String), Option<Identity>> = HashMap::new();
+    for op in operations.iter().filter(|op| !is_stream(op)) {
+        let (Some(t), Some(param), Some(identity)) = (
+            op.resource_type.clone(),
+            http_path(op).and_then(|(_, path)| trailing_param(path)),
+            op.identity.as_ref(),
+        ) else {
+            continue;
+        };
+        // Only a path naming another member than the key needs it: elsewhere the path's
+        // value is the key (also Jira's `issueIdOrKey`, which names both), which a route
+        // goes by with or without an identity.
+        if identity.path_param.as_deref() != Some(param) || identity.path_member() == identity.field
+        {
+            continue;
+        }
+        let shared = Identity {
+            record: None,
+            ..identity.clone()
+        };
+        by_route
+            .entry((t, param.to_owned()))
+            .and_modify(|known| {
+                if known.as_ref() != Some(&shared) {
+                    *known = None;
+                }
+            })
+            .or_insert(Some(shared));
+    }
+    for op in operations
+        .iter_mut()
+        .filter(|op| op.identity.is_none() && !is_stream(op) && answer(op).is_none())
+    {
+        let (Some(t), Some(param)) = (
+            op.resource_type.clone(),
+            http_path(op).and_then(|(_, path)| trailing_param(path)),
+        ) else {
+            continue;
+        };
+        if let Some(Some(identity)) = by_route.get(&(t, param.to_owned())) {
+            op.identity = Some(identity.clone());
         }
     }
 }
@@ -549,14 +636,14 @@ fn envelope_record(
 /// member it is under. Square's `GET /payments/{payment_id}` answering `{payment}`
 /// reads payment `id`; Zendesk's `PUT /tickets/{id}` answering `{ticket, audit}` writes
 /// the ticket, as `ticket` is what the type's other routes answer.
-fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>, keys: &Keys) {
+fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>, keys: &TypeKeys) {
     let mut records: HashMap<String, Vec<Value>> = HashMap::new();
     for op in operations.iter().filter(|op| !is_stream(op)) {
         let (Some(t), Some(schema)) = (op.resource_type.as_deref(), answer(op)) else {
             continue;
         };
         let held = records.entry(t.to_owned()).or_default();
-        if let Some((_, inner)) = envelope_record(schema, &[], defs, keys) {
+        if let Some((_, inner)) = envelope_record(schema, &[], defs, keys.of(Some(t))) {
             held.push(inner);
         }
         if op.kind == OperationKind::Query {
@@ -585,6 +672,7 @@ fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>, keys
             continue;
         };
         let known: Vec<&Value> = records.get(t).into_iter().flatten().collect();
+        let keys = keys.of(Some(t));
         let Some((member, inner)) = answer(op).and_then(|a| envelope_record(a, &known, defs, keys))
         else {
             continue;
@@ -669,8 +757,61 @@ fn apply_lookups(operations: &mut [Operation], hints: &[ResourceHint], defs: &Ma
     for index in 0..hints.len() {
         if let Some(found) = created_type(index, &hints[index], operations, defs) {
             operations[index].resource_type = Some(found);
+        } else if let Some((found, identity)) =
+            read_as_by_path(index, &hints[index], operations, defs)
+        {
+            let op = &mut operations[index];
+            op.resource_type = Some(found);
+            op.identity = Some(identity);
         }
     }
+}
+
+/// The type and identity of a create with no identity of its own whose answer is
+/// exactly what one other type's `GET` by path answers, as its own type has no such
+/// read: Asana's `POST /tasks/{task_gid}/subtasks` answers what `GET /tasks/{task_gid}`
+/// does, so it creates a `tasks` record, keyed and held as that read's.
+fn read_as_by_path(
+    index: usize,
+    hint: &ResourceHint,
+    operations: &[Operation],
+    defs: &Map<String, Value>,
+) -> Option<(String, Identity)> {
+    let op = &operations[index];
+    let creates = hint.resource_type.is_none()
+        && op.identity.is_none()
+        && op.kind == OperationKind::Command(Effect::Create)
+        && !is_stream(op);
+    let answered = resolve(record_schema(op).filter(|_| creates)?, defs)?;
+    if is_scalar_schema(answered) || is_opaque(Some(answered), defs) {
+        return None;
+    }
+    let reads: Vec<&Operation> = gets(operations, |route| {
+        route.last().is_some_and(|last| is_param(last))
+    })
+    .collect();
+    if reads
+        .iter()
+        .any(|read| read.resource_type == op.resource_type)
+    {
+        return None;
+    }
+    let mut serving = reads.into_iter().filter(|read| {
+        read.identity.is_some() && answer(read).and_then(|a| resolve(a, defs)) == Some(answered)
+    });
+    let read = serving.next()?;
+    if serving.any(|other| other.resource_type != read.resource_type) {
+        return None;
+    }
+    let known = read.identity.as_ref()?;
+    let identity = Identity {
+        path_param: None,
+        field: known.field.clone(),
+        input_field: None,
+        path_field: None,
+        record: known.record.clone(),
+    };
+    Some((read.resource_type.clone()?, identity))
 }
 
 /// The type a create at `index` stores its record as, when another type reads exactly
@@ -784,7 +925,7 @@ fn parent_target(path: &str) -> Option<ParentTarget> {
         return None;
     };
     let path_param = param_name(param)?;
-    (!resource.contains('{') && !is_version(without_format(resource))).then(|| ParentTarget {
+    (!resource.contains('{')).then(|| ParentTarget {
         resource_type: without_format(resource).to_owned(),
         path_param: path_param.to_owned(),
         tail,
@@ -1036,8 +1177,9 @@ fn infer_route(
     op: &Operation,
     operations: &[Operation],
     defs: &Map<String, Value>,
-    keys: &Keys,
+    all_keys: &TypeKeys,
 ) -> Route {
+    let keys = all_keys.of(op.resource_type.as_deref());
     let Some((HttpMethod::Post, path)) = http_path(op) else {
         return Route::Undecided;
     };
@@ -1066,7 +1208,7 @@ fn infer_route(
     let answered = record_schema(op);
     if has_detail
         || gets(operations, |route| same_route(route, &segs))
-            .any(|read| reads_back(answer(read), answered, defs, keys))
+            .any(|read| reads_back(answer(read), answered, defs, &all_keys.any))
     {
         return own(None, None);
     }
@@ -1311,13 +1453,14 @@ pub(crate) fn apply_action_routes(
     for index in order {
         let hint = &hints[index];
         let op = &operations[index];
+        let own_keys = keys.of(op.resource_type.as_deref());
         let inferred = || infer_route(op, operations, defs, &keys);
         let route = match hint.action {
             Some(true) => declared_target(op, ctx).map_or_else(inferred, Route::Action),
             Some(false) => match inferred() {
                 Route::Action(_) => Route::Collection {
                     resource_type: None,
-                    identity: record_identity(op, None, defs, &keys),
+                    identity: record_identity(op, None, defs, own_keys),
                 },
                 route => route,
             },
@@ -1343,7 +1486,10 @@ pub(crate) fn apply_action_routes(
             );
         }
         match route {
-            Route::Action(target) => act_on_parent(index, target, operations, defs, &keys),
+            Route::Action(target) => {
+                let parent_keys = keys.of(Some(&target.resource_type)).clone();
+                act_on_parent(index, target, operations, defs, &parent_keys);
+            }
             Route::Collection {
                 resource_type,
                 identity,
@@ -1371,6 +1517,7 @@ pub(crate) fn apply_action_routes(
             set_identity(index, field, operations, defs, ctx);
         }
     }
+    apply_shared_identities(operations);
     apply_lookups(operations, hints, defs);
 }
 
