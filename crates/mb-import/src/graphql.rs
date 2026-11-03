@@ -643,6 +643,7 @@ fn operation(
                 field: "id".into(),
                 input_field,
                 path_field: None,
+                record: None,
             }
         });
     let (body, body_required) = input_values_schema(&f.args);

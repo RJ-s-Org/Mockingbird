@@ -972,6 +972,7 @@ impl<'a> Wsdl<'a> {
             field,
             input_field: id_field(input.as_ref(), defs),
             path_field: None,
+            record: None,
         });
         let mut outputs = vec![OutputVariant {
             status: StatusSelector::Code(200),

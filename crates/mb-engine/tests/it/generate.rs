@@ -1089,6 +1089,7 @@ async fn force_identity_uses_input_field() {
         field: "id".into(),
         input_field: Some("id".into()),
         path_field: None,
+        record: None,
     });
     let op = bundle.operation("getItem").unwrap();
     let mut c = call("getItem");

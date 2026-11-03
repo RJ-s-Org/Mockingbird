@@ -239,6 +239,7 @@ fn identity_for(
         field: field.to_owned(),
         input_field: None,
         path_field: named.filter(|n| *n != field).map(str::to_owned),
+        record: None,
     })
 }
 
@@ -319,6 +320,7 @@ fn apply_own_type_members(operations: &mut [Operation], defs: &Map<String, Value
             field: field.to_owned(),
             input_field: None,
             path_field: None,
+            record: None,
         };
         op.identity = Some(identity);
     }
@@ -626,6 +628,7 @@ fn record_identity(
         field: i.field.clone(),
         input_field: None,
         path_field: None,
+        record: None,
     });
     known.or_else(|| identity_for(None, record_schema(op), defs))
 }
@@ -729,6 +732,7 @@ fn act_on_parent(
             field: "id".to_owned(),
             input_field: None,
             path_field: None,
+            record: None,
         });
         (Effect::Update, identity)
     } else {
@@ -748,6 +752,7 @@ fn act_on_parent(
             field,
             input_field: None,
             path_field: read.and_then(|r| r.path_field.clone()),
+            record: None,
         };
         (Effect::Other, identity)
     };
@@ -985,6 +990,7 @@ fn set_identity(
                 field: field.to_owned(),
                 input_field: None,
                 path_field: None,
+                record: None,
             });
         }
     }

@@ -4491,6 +4491,7 @@ paths:
             field: "id".into(),
             input_field: Some("tickId".into()),
             path_field: None,
+            record: None,
         });
         let call = OperationCall {
             operation_id: op.id.clone(),

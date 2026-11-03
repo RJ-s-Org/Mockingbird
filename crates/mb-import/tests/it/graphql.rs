@@ -102,6 +102,7 @@ fn root_fields_become_operations() {
             field: "id".into(),
             input_field: Some("id".into()),
             path_field: None,
+            record: None,
         })
     );
     assert_eq!(issue.resource_type.as_deref(), Some("issue"));
@@ -174,6 +175,7 @@ fn resource_id_argument_is_the_input_field() {
             field: "id".into(),
             input_field: Some("orderId".into()),
             path_field: None,
+            record: None,
         })
     );
 }

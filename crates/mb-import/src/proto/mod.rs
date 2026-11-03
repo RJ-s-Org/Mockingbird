@@ -241,6 +241,7 @@ fn identity(method: &MethodDescriptor, resource_type: Option<&str>) -> Option<Id
         field: "id".into(),
         input_field,
         path_field: None,
+        record: None,
     })
 }
 

@@ -289,6 +289,7 @@ fn multi_file_imports_resolve() {
             field: "id".into(),
             input_field: Some("orderId".into()),
             path_field: None,
+            record: None,
         })
     );
     assert_eq!(get.resource_type.as_deref(), Some("order"));

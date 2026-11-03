@@ -25,6 +25,7 @@ fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
             field: "id".into(),
             input_field: None,
             path_field: None,
+            record: None,
         }),
         semantic_hints: vec!["orders".into()],
         security: Vec::new(),
