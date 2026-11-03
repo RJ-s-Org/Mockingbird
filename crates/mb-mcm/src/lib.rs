@@ -60,6 +60,42 @@ pub struct Bundle {
     /// `callbacks`); used as webhook payloads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub webhooks: Vec<WebhookDef>,
+    /// Every name an API-key security scheme of the contract declares
+    /// (`securitySchemes`, `securityDefinitions`), whether or not a requirement
+    /// the mock compiled references it: what carries a credential, wherever it
+    /// appears.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_key_names: Vec<ApiKeyName>,
+}
+
+/// A name an API-key security scheme carries a key under.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ApiKeyName {
+    /// Where the key is carried.
+    pub location: ApiKeyLocation,
+    /// The header, parameter or cookie name, as written.
+    pub name: String,
+}
+
+impl Bundle {
+    /// Whether a security scheme of the contract carries a credential under `name`
+    /// (any case): an API-key name it declares, or one a compiled requirement of any
+    /// operation uses, at any location.
+    #[must_use]
+    pub fn is_security_name(&self, name: &str) -> bool {
+        let declared = self
+            .api_key_names
+            .iter()
+            .any(|k| k.name.eq_ignore_ascii_case(name));
+        declared
+            || self
+                .operations
+                .iter()
+                .flat_map(|op| &op.security)
+                .flat_map(|r| &r.schemes)
+                .any(|s| matches!(s, SecurityScheme::ApiKey { name: n, .. } if n.eq_ignore_ascii_case(name)))
+    }
 }
 
 /// An outbound event the contract describes: OpenAPI 3.1 `webhooks` or an

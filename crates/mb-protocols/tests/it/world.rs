@@ -2215,7 +2215,9 @@ async fn a_write_on_a_shown_record_can_be_refused_as_declared() {
     let prompt = h.prompt(0);
     assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
     assert!(
-        prompt.contains("for this call that fits:\n- 422: the capture cannot be refunded\n"),
+        prompt.contains(
+            "<refusal_statuses>\n- 422: the capture cannot be refunded\n</refusal_statuses>"
+        ),
         "only what fits: {prompt}"
     );
     assert!(!prompt.contains("- 401"), "{prompt}");
@@ -2561,6 +2563,185 @@ async fn a_declared_header_reaches_the_prompt_and_its_token_does_not() {
         }
     }
     assert_eq!(h.held("entries", "e1").await, entry);
+}
+
+/// Comments on a post, one of which may answer another, which declare a 409.
+const COMMENTS: &str = r##"
+openapi: 3.0.0
+info: {title: Comments, version: "1"}
+paths:
+  /posts/{post_id}/comments:
+    post:
+      operationId: createComment
+      parameters: [{name: post_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {text: {type: string}, in_reply_to: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+        "409": {description: The same comment was already posted., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /comments/{comment_id}:
+    get:
+      operationId: getComment
+      parameters: [{name: comment_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Comment"}}}}
+components:
+  schemas:
+    Comment:
+      type: object
+      required: [id, text]
+      properties: {id: {type: string}, text: {type: string}, in_reply_to: {type: string}}
+    Error:
+      type: object
+      required: [name, message]
+      properties: {name: {type: string}, message: {type: string}}
+"##;
+
+/// A comment its body only names (the one it answers) is no conflict, though it is of
+/// the type the create makes: the create is offered no refusal. One that a create put
+/// in the same collection is, and the next create is offered the declared 409.
+#[tokio::test]
+async fn a_record_only_the_body_names_offers_a_create_no_refusal() {
+    let first = json!({"id": "cmt-000201", "text": "me too", "in_reply_to": "cmt-000123"});
+    let h = harness_with(
+        COMMENTS.as_bytes(),
+        vec![
+            json!({"effects": [], "response": first}),
+            json!({"effects": [], "response": null, "refusal": 409}),
+        ],
+        |_| {},
+    );
+    h.hold(
+        "comments",
+        "cmt-000123",
+        json!({"id": "cmt-000123", "text": "hello"}),
+    )
+    .await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too", "in_reply_to": "cmt-000123"})),
+        )
+        .await;
+    let prompt = h.prompt(0);
+    assert_eq!(status, StatusCode::CREATED, "{body} {prompt}");
+    let related = block(&prompt, "related_resources").unwrap_or_default();
+    assert!(related.contains("cmt-000123"), "shown by value: {prompt}");
+    assert!(!prompt.contains("refusal"), "{prompt}");
+
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too"})),
+        )
+        .await;
+    let prompt = h.prompt(1);
+    assert!(prompt.contains("cmt-000201"), "shown alongside: {prompt}");
+    assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body} {prompt}");
+}
+
+/// Entries listed in the language a header names.
+const LOCALIZED: &str = r##"
+openapi: 3.0.0
+info: {title: Entries, version: "1"}
+paths:
+  /entries:
+    get:
+      operationId: listEntries
+      parameters:
+        - {name: X-Locale, in: header, description: The language of the answer., schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Entry"}}}}}
+components:
+  schemas:
+    Entry:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+"##;
+
+async fn get_with(h: &Harness, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    let mut req = Request::builder().method("GET").uri(uri);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let resp = h
+        .router
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A declared header the prompt shows is part of what a read is cached by: another
+/// language is generated, the same one is repeated, and a header the prompt does not
+/// show changes nothing.
+#[tokio::test]
+async fn a_shown_header_keys_the_read_cache() {
+    let h = harness_with(
+        LOCALIZED.as_bytes(),
+        vec![
+            json!([{"id": "e1", "title": "Hello"}]),
+            json!([{"id": "e1", "title": "Bonjour"}]),
+        ],
+        |_| {},
+    );
+    let (_, en) = get_with(&h, "/entries", &[("x-locale", "en")]).await;
+    let (_, fr) = get_with(&h, "/entries", &[("x-locale", "fr")]).await;
+    assert_eq!(h.calls(), 2, "{en} {fr}");
+    assert_eq!(fr[0]["title"], "Bonjour", "{fr}");
+    let (_, again) = get_with(&h, "/entries", &[("x-locale", "en"), ("x-undeclared", "1")]).await;
+    assert_eq!(h.calls(), 2, "repeated from the cache");
+    assert_eq!(again, en);
+}
+
+/// Items found by an API key sent in the query, with no data-plane auth.
+const KEYED_QUERY: &str = r##"
+openapi: 3.0.0
+info: {title: Items, version: "1"}
+security: [{key: []}]
+paths:
+  /items:
+    get:
+      operationId: listItems
+      parameters:
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {type: object, properties: {id: {type: string}}}}}}}
+components:
+  securitySchemes:
+    key: {type: apiKey, in: query, name: access}
+"##;
+
+/// The value of a query parameter an API-key scheme names never reaches the prompt,
+/// whatever it is called; the rest of the query does.
+#[tokio::test]
+async fn an_api_key_in_the_query_stays_out_of_the_prompt() {
+    let h = harness_with(KEYED_QUERY.as_bytes(), vec![json!([{"id": "i1"}])], |_| {});
+    let (status, _) = h
+        .call("GET", "/items?q=lamp&access=query-secret-8", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let prompt = h.prompt(0);
+    let request = block(&prompt, "request").unwrap_or_default();
+    assert!(request.contains("\"query\":{\"q\":\"lamp\"}"), "{prompt}");
+    for request in h.provider.requests() {
+        for message in &request.messages {
+            assert!(!message.content.contains("query-secret-8"), "{prompt}");
+        }
+    }
 }
 
 /// An error body the faker cannot make valid is served saying so, as a fallback.

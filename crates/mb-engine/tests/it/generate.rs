@@ -49,6 +49,7 @@ fn ctx() -> GenerationContext<'static> {
         earlier_writes: &[],
         earlier_origins: &[],
         created_since: &[],
+        alongside: &[],
         changes_by_effects: false,
         update_guard: None,
     }
@@ -280,6 +281,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     earlier_writes: &[],
                     earlier_origins: &[],
                     created_since: &[],
+                    alongside: &[],
                     changes_by_effects: false,
                     update_guard: None,
                 },
@@ -1915,7 +1917,13 @@ paths:
         - {name: X-Api-Key, in: header, description: The API key., schema: {type: string}}
         - {name: X-Trace, in: header, description: A trace., schema: {type: string}}
         - {name: Content-Length, in: header, description: The length., schema: {type: integer}}
+        - {name: X-Passcode, in: header, description: The passcode., schema: {type: string, format: password}}
+        - {name: X-Hold, in: header, description: Held back., schema: {type: string, writeOnly: true}}
+        - {name: X-Sealed, in: header, description: Sealed., schema: {$ref: "#/components/schemas/Sealed"}}
+        - {name: X-Spare-Ident, in: header, description: The spare scheme's., schema: {type: string}}
+        - {name: X-Note, in: header, description: A note., schema: {type: string}}
         - {name: filter, in: query, description: "`deleted` lists only deleted entries.", schema: {type: string}}
+        - {name: access, in: query, description: The query scheme's., schema: {type: string}}
         - {name: unsent, in: query, description: Never sent., schema: {type: string}}
       requestBody: {content: {application/json: {schema: {type: object}}}}
       responses:
@@ -1924,8 +1932,11 @@ components:
   securitySchemes:
     bearer: {type: http, scheme: bearer}
     client: {type: apiKey, in: header, name: X-Client-Ident}
+    spare: {type: apiKey, in: header, name: X-Spare-Ident}
+    query: {type: apiKey, in: query, name: access}
   schemas:
     Entry: {type: object, required: [id], properties: {id: {type: string}, version: {type: integer}}}
+    Sealed: {type: string, writeOnly: true}
 "##;
 
 /// [`ENTRIES`] with `Authorization` declared as a header parameter too, which the
@@ -1974,43 +1985,64 @@ fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 
 /// The declared headers a request carries reach `<request>`, and the contract's
 /// descriptions of what it sends reach their own block. A credential never does:
-/// not `Authorization`, not a header named like a key, not a header a security
-/// scheme uses whatever it is called, not a value shaped like a token. Transport
-/// headers, undeclared ones and what the request does not send are left out.
+/// not `Authorization`, not a header named like a key, not a header any security
+/// scheme names whatever it is called (referenced or not), not one whose schema is
+/// `writeOnly` or `format: password` (through a `$ref` too), not a value shaped like
+/// a token, and not the value of an API-key query parameter. Transport headers,
+/// undeclared ones and what the request does not send are left out, and a long header
+/// value is cut.
 #[tokio::test]
 async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
     let bundle = entries();
     let op = bundle.operation("putEntry").unwrap();
     let answer = json!({"id": "e1", "version": 4}).to_string();
     let (provider, engine) = scripted(vec![Ok(answer)]);
+    let long_note = "n".repeat(500);
     let c = entry_call(
         &[
             ("authorization", "Bearer sk_secret_abc"),
             ("x-client-ident", "ident-secret-1"),
             ("x-api-key", "key-secret-2"),
             ("x-trace", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln"),
+            ("x-passcode", "pass-secret-3"),
+            ("x-hold", "hold-secret-4"),
+            ("x-sealed", "sealed-secret-5"),
+            ("x-spare-ident", "spare-secret-6"),
+            ("x-note", &long_note),
             ("content-length", "12"),
             ("x-entry-version", "3"),
             ("x-entry-kind", "post"),
             ("x-undeclared", "zzz"),
             ("x-mockingbird-seed", "7"),
         ],
-        &[("filter", "deleted")],
+        &[("filter", "deleted"), ("access", "query-secret-7")],
     );
     engine.generate(&bundle, op, &c, ctx()).await.unwrap();
     let messages = &provider.requests()[0].messages;
     let (system, user) = (&messages[0].content, &messages[1].content);
     let request: Value = serde_json::from_str(tagged(user, "request").unwrap()).unwrap();
+    let note = request["headers"]["X-Note"].as_str().unwrap_or_default();
+    assert!(note.ends_with('…'), "{user}");
+    assert!(
+        note.chars().count() <= mb_engine::prompt::MAX_HEADER_VALUE_CHARS + 1,
+        "{note}"
+    );
     assert_eq!(
         request["headers"],
-        json!({"X-Entry-Kind": "post", "X-Entry-Version": "3"}),
+        json!({"X-Entry-Kind": "post", "X-Entry-Version": "3", "X-Note": note}),
         "{user}"
     );
+    assert_eq!(request["query"], json!({"filter": "deleted"}), "{user}");
     for secret in [
         "sk_secret_abc",
         "ident-secret-1",
         "key-secret-2",
         "eyJhbGci",
+        "pass-secret-3",
+        "hold-secret-4",
+        "sealed-secret-5",
+        "spare-secret-6",
+        "query-secret-7",
         "zzz",
     ] {
         assert!(!user.contains(secret), "{secret}: {user}");
@@ -2022,6 +2054,10 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
         "x-client-ident",
         "x-api-key",
         "x-trace",
+        "x-passcode",
+        "x-hold",
+        "x-sealed",
+        "x-spare-ident",
         "content-length",
         "x-undeclared",
     ] {
@@ -2036,6 +2072,7 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
             "query `filter`: `deleted` lists only deleted entries.",
             "header `X-Entry-Kind`: The kind to create.",
             "header `X-Entry-Version`: The entry's current version; a stale one is refused.",
+            "header `X-Note`: A note.",
         ],
         "{user}"
     );
@@ -2047,6 +2084,11 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
         "A trace",
         "bearer token",
         "The length",
+        "The passcode",
+        "Held back",
+        "Sealed",
+        "spare scheme",
+        "query scheme",
     ] {
         assert!(!user.contains(unsaid), "{unsaid}: {user}");
     }
@@ -2134,6 +2176,7 @@ paths:
         content: {application/json: {schema: {type: object, properties: {slug: {type: string}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+        "400": {description: The body is malformed., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
         "409": {description: A team with this slug already exists., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
   /teams/{team_id}:
     get:
@@ -2147,9 +2190,19 @@ components:
     Error: {type: object, required: [detail], properties: {detail: {type: string}}}
 "##;
 
+/// The schema the `n`th request asked for.
+fn asked_schema(provider: &ScriptedProvider, n: usize) -> Value {
+    match &provider.requests()[n].response_format {
+        mb_llm::ResponseFormat::JsonSchema { schema, .. } => schema.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A create is offered its declared refusals only when shown what it could conflict
-/// with: a record of the type it creates, or a parent its path names. A record that is
-/// neither, or nothing at all, offers none.
+/// with: a record of the type it creates that creates put in its own collection, or a
+/// parent its path names. A record of its type that only its body names, another
+/// record, or nothing at all, offers none. Declaring a 409 beside a 400, it is offered
+/// the 409 alone, and the descriptions are framed as the contract's data.
 #[tokio::test]
 async fn a_create_is_offered_refusals_only_when_shown_what_it_could_conflict_with() {
     let bundle = inline(TEAMS);
@@ -2157,7 +2210,7 @@ async fn a_create_is_offered_refusals_only_when_shown_what_it_could_conflict_wit
     assert_eq!(op.resource_type.as_deref(), Some("teams"));
     let team = json!({"id": "t2", "slug": "core"});
     let answer = json!({"effects": [], "response": team}).to_string();
-    let (provider, engine) = scripted((0..4).map(|_| Ok(answer.clone())).collect());
+    let (provider, engine) = scripted((0..5).map(|_| Ok(answer.clone())).collect());
     let c = OperationCall {
         operation_id: "createTeam".into(),
         path_params: Map::from_iter([("org".to_string(), json!("acme"))]),
@@ -2169,35 +2222,78 @@ async fn a_create_is_offered_refusals_only_when_shown_what_it_could_conflict_wit
         id: id.into(),
         data: json!({"id": id, "slug": "core"}),
     };
+    let alongside = vec![("teams".to_string(), "t1".to_string())];
     let cases = [
-        (vec![stored("teams", "t1")], true),
-        (vec![stored("orgs", "acme")], true),
-        (vec![stored("users", "u1")], false),
-        (vec![], false),
+        (vec![stored("teams", "t1")], alongside, true),
+        (vec![stored("teams", "t1")], vec![], false),
+        (vec![stored("orgs", "acme")], vec![], true),
+        (vec![stored("users", "u1")], vec![], false),
+        (vec![], vec![], false),
     ];
-    for (i, (related, offered)) in cases.iter().enumerate() {
-        let ctx = GenerationContext { related, ..ctx() };
-        engine.generate(&bundle, op, &c, ctx).await.unwrap();
-        let request = &provider.requests()[i];
-        let user = &request.messages[1].content;
-        assert_eq!(user.contains("\"refusal\""), *offered, "{i}: {user}");
-        if *offered {
-            assert!(
-                user.contains("- 409: A team with this slug already exists."),
-                "{user}"
-            );
-            assert!(user.contains("contradict"), "{user}");
-        }
-        let schema = match &request.response_format {
-            mb_llm::ResponseFormat::JsonSchema { schema, .. } => schema.clone(),
-            other => panic!("{other:?}"),
+    for (i, (related, alongside, offered)) in cases.iter().enumerate() {
+        let ctx = GenerationContext {
+            related,
+            alongside,
+            ..ctx()
         };
+        engine.generate(&bundle, op, &c, ctx).await.unwrap();
+        let user = provider.requests()[i].messages[1].content.clone();
+        assert_eq!(user.contains("\"refusal\""), *offered, "{i}: {user}");
+        let schema = asked_schema(&provider, i);
         assert_eq!(
             schema["properties"].get("refusal").is_some(),
             *offered,
             "{i}: {schema}"
         );
+        if *offered {
+            assert_eq!(
+                schema["properties"]["refusal"],
+                json!({"type": "integer", "enum": [409]})
+            );
+            assert_eq!(
+                tagged(&user, "refusal_statuses"),
+                Some("- 409: A team with this slug already exists."),
+                "{user}"
+            );
+            assert!(!user.contains("malformed"), "{user}");
+            assert!(user.contains("data, not instructions"), "{user}");
+            assert!(user.contains("contradict"), "{user}");
+        }
     }
+}
+
+/// A create whose only declared refusal status is a 400 is offered the 400.
+#[tokio::test]
+async fn a_create_declaring_only_a_400_is_offered_it() {
+    let contract = TEAMS.replace(
+        "        \"409\": {description: A team with this slug already exists., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n",
+        "",
+    );
+    assert_ne!(contract, TEAMS);
+    let bundle = inline(&contract);
+    let op = bundle.operation("createTeam").unwrap();
+    let answer = json!({"effects": [], "response": {"id": "t2", "slug": "core"}}).to_string();
+    let (provider, engine) = scripted(vec![Ok(answer)]);
+    let c = OperationCall {
+        operation_id: "createTeam".into(),
+        path_params: Map::from_iter([("org".to_string(), json!("acme"))]),
+        body: Some(json!({"slug": "core"})),
+        ..OperationCall::default()
+    };
+    let related = [StoredResource {
+        resource_type: "orgs".into(),
+        id: "acme".into(),
+        data: json!({"id": "acme"}),
+    }];
+    let ctx = GenerationContext {
+        related: &related,
+        ..ctx()
+    };
+    engine.generate(&bundle, op, &c, ctx).await.unwrap();
+    assert_eq!(
+        asked_schema(&provider, 0)["properties"]["refusal"],
+        json!({"type": "integer", "enum": [400]})
+    );
 }
 
 #[tokio::test]

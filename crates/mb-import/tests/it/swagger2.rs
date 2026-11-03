@@ -3,6 +3,28 @@ use mb_import::{SourceFormat, compile, compile_with_warnings, sniff};
 use mb_mcm::{Bundle, Effect, OperationKind};
 use serde_json::json;
 
+/// Every name an API-key definition declares is kept on the bundle, referenced or not.
+#[test]
+fn every_api_key_name_a_definition_declares_is_kept() {
+    let contract = br#"{
+  "swagger": "2.0",
+  "info": {"title": "T", "version": "1"},
+  "securityDefinitions": {
+    "spare": {"type": "apiKey", "in": "query", "name": "access"},
+    "head": {"type": "apiKey", "in": "header", "name": "X-Tenant-Ident"}
+  },
+  "paths": {"/tasks": {"get": {"operationId": "listTasks", "responses": {"200": {"description": "ok"}}}}}
+}"#;
+    let bundle = compile(contract).unwrap();
+    let mut names: Vec<&str> = bundle
+        .api_key_names
+        .iter()
+        .map(|k| k.name.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["X-Tenant-Ident", "access"]);
+}
+
 /// A parameter's own description is kept on its schema, where the engine finds it.
 #[test]
 fn a_parameter_description_is_kept_on_its_schema() {

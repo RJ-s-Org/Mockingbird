@@ -697,6 +697,7 @@ pub(crate) async fn generate_pending(
         earlier_writes: &pending.earlier_writes,
         earlier_origins: &pending.earlier_origins,
         created_since: &pending.created_since,
+        alongside: &pending.alongside,
         changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
@@ -767,6 +768,8 @@ pub(crate) struct Pending<'a> {
     earlier_origins: Vec<Value>,
     /// What was written to this list read's own path earlier in the session.
     earlier_writes: Vec<Value>,
+    /// Those of `related` a create's own collection holds (see [`created_alongside`]).
+    alongside: Vec<(String, String)>,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -921,7 +924,7 @@ pub(crate) async fn prepare<'a>(
         format!(
             "{}:{}",
             rt.bundle.source_digest,
-            cache_key(op, call, response_schema)
+            cache_key(&rt.bundle, op, call, response_schema)
         )
     });
     if let (Some(cache), Some(key)) = (cache, &key)
@@ -969,7 +972,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    let ((earlier_answers, unlisted), earlier_writes, earlier_origins) = async {
+    let ((earlier_answers, unlisted), earlier_writes, earlier_origins, alongside) = async {
         parents_by_name(
             &mut state,
             session,
@@ -1000,11 +1003,13 @@ pub(crate) async fn prepare<'a>(
                 }
             }
         }
-        created_alongside(&mut state, plan, call, target.as_ref(), &mut related).await;
+        let alongside =
+            created_alongside(&mut state, plan, call, target.as_ref(), &mut related).await;
         (
             world::recall_answers(&mut state, plan).await,
             write_memory::recall_route(&mut state, plan, call).await,
             minted::recall(&mut state, plan, call).await,
+            alongside,
         )
     }
     .instrument(state_span())
@@ -1027,6 +1032,7 @@ pub(crate) async fn prepare<'a>(
         unlisted,
         earlier_writes,
         earlier_origins,
+        alongside,
     }))
 }
 
@@ -3177,9 +3183,16 @@ fn is_summary(rt: &MockRuntime, t: &str, defs: &[&str], value: &Value) -> bool {
 }
 
 /// The response cache key of a read: its operation, path parameters,
-/// query (sorted), a query operation's body, the narrowed selection and the
-/// call's faker seed (`X-Mockingbird-Seed`).
-fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Value>) -> String {
+/// query (sorted), a query operation's body, the narrowed selection, the
+/// call's faker seed (`X-Mockingbird-Seed`) and, when it carries any, the
+/// declared headers its prompt shows ([`mb_engine::prompt::shown_headers`]), so a
+/// read in another language or at another version is not answered from this one.
+fn cache_key(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
+) -> String {
     use std::hash::{DefaultHasher, Hasher};
     let body = match op.kind {
         OperationKind::Query => call.body.as_ref().map(canonical),
@@ -3190,15 +3203,22 @@ fn cache_key(op: &Operation, call: &OperationCall, response_schema: Option<&Valu
         hash_canonical(schema, &mut hasher);
         format!("{:016x}", hasher.finish())
     });
-    serde_json::json!([
+    let mut key = serde_json::json!([
         op.id,
         canonical(&Value::Object(call.path_params.clone())),
         canonical(&Value::Object(call.query.clone())),
         body,
         selection,
         mb_engine::seed::request_seed(call),
-    ])
-    .to_string()
+    ]);
+    // Only a read carrying such a header keys by it: other keys stay as they were.
+    let headers = mb_engine::prompt::shown_headers(bundle, op, call);
+    if !headers.is_empty()
+        && let Some(parts) = key.as_array_mut()
+    {
+        parts.push(canonical(&Value::Object(headers)));
+    }
+    key.to_string()
 }
 
 /// `value` with every object's keys sorted, whatever map order serde_json
@@ -4709,31 +4729,36 @@ fn record_path(op: &Operation, call: &OperationCall) -> Option<String> {
 /// The record must still be what was created there, or [`Collections`] no longer
 /// places it; it is scrubbed as a record found by value is
 /// ([`write_memory::matched_for_context`]). Context only, and only where
-/// [`write_memory::applies`] holds.
+/// [`write_memory::applies`] holds. For a create, the type and id of every record of
+/// `related` that creates put in its own collection, already shown or added here: what
+/// it can conflict with by being of their type (see
+/// [`mb_engine::GenerationContext::alongside`]).
 async fn created_alongside(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     target: Option<&StoredResource>,
     related: &mut Vec<StoredResource>,
-) {
+) -> Vec<(String, String)> {
     let rt = state.rt;
     let op = plan.op;
+    let mut marked = Vec::new();
     if !write_memory::applies(rt, plan)
         || !matches!(
             op.kind,
             OperationKind::Query | OperationKind::Command(Effect::Create)
         )
     {
-        return;
+        return marked;
     }
+    let create = matches!(op.kind, OperationKind::Command(Effect::Create));
     let alongside = collection_of(op, call);
     let beneath = matches!(op.kind, OperationKind::Query)
         .then(|| record_path(op, call))
         .flatten()
         .map(|path| format!("{path}/"));
     if alongside.is_none() && beneath.is_none() {
-        return;
+        return marked;
     }
     let fits = |c: &Collection| {
         alongside.as_ref() == Some(c) || beneath.as_ref().is_some_and(|p| c.path.starts_with(p))
@@ -4744,7 +4769,19 @@ async fn created_alongside(
         .created_in(session, fits, MAX_CREATED_ALONGSIDE);
     for (t, id) in created {
         let shown = |r: &StoredResource| r.resource_type == t && r.id == id;
-        if target.is_some_and(shown) || related.iter().any(shown) {
+        if target.is_some_and(shown) {
+            continue;
+        }
+        if let Some(held) = related.iter().find(|r| shown(r)) {
+            // Already shown, by value: still one this collection holds.
+            if create
+                && rt
+                    .collections()
+                    .get(session, held)
+                    .is_some_and(|c| fits(&c))
+            {
+                marked.push((t.clone(), id.clone()));
+            }
             continue;
         }
         let Some(held) = state.get(session, &t, &id).await else {
@@ -4758,9 +4795,13 @@ async fn created_alongside(
             continue;
         }
         if let Some(data) = write_memory::matched_for_context(rt, plan, &t, &held.data) {
+            if create {
+                marked.push((t.clone(), id.clone()));
+            }
             related.push(StoredResource { data, ..held });
         }
     }
+    marked
 }
 
 /// The stored resources that refer to `id` of `op`'s resource type, for a
@@ -5202,13 +5243,19 @@ paths:
         };
         let a = call(json!({"a": 1, "b": 2}));
         let b = call(json!({"b": 2, "a": 1}));
-        assert_eq!(cache_key(op, &a, None), cache_key(op, &b, None));
+        assert_eq!(
+            cache_key(&rt.bundle, op, &a, None),
+            cache_key(&rt.bundle, op, &b, None)
+        );
         assert_ne!(
-            cache_key(op, &a, None),
-            cache_key(op, &call(json!({"a": 2, "b": 2})), None)
+            cache_key(&rt.bundle, op, &a, None),
+            cache_key(&rt.bundle, op, &call(json!({"a": 2, "b": 2})), None)
         );
         let narrow = json!({"type": "object", "properties": {"id": {"type": "string"}}});
-        assert_ne!(cache_key(op, &a, None), cache_key(op, &a, Some(&narrow)));
+        assert_ne!(
+            cache_key(&rt.bundle, op, &a, None),
+            cache_key(&rt.bundle, op, &a, Some(&narrow))
+        );
     }
 
     #[test]

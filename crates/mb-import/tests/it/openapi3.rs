@@ -3,9 +3,62 @@ use mb_import::{ImportError, compile};
 use mb_mcm::{Bundle, Effect, Identity, OperationKind, StatusSelector};
 use serde_json::json;
 
+/// Every name an API-key scheme declares is kept on the bundle: one no requirement
+/// references, and one in a requirement dropped for being ANDed with a scheme the mock
+/// cannot check, whatever its location.
+#[test]
+fn every_api_key_name_a_scheme_declares_is_kept() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+security: [{tenant: [], digest: []}]
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses:
+        "200": {description: ok}
+components:
+  securitySchemes:
+    tenant: {type: apiKey, in: header, name: X-Tenant-Ident}
+    digest: {type: http, scheme: digest}
+    spare: {type: apiKey, in: query, name: access}
+    crumb: {type: apiKey, in: cookie, name: crumb}
+    bearer: {type: http, scheme: bearer}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let mut names: Vec<(mb_mcm::ApiKeyLocation, &str)> = bundle
+        .api_key_names
+        .iter()
+        .map(|k| (k.location, k.name.as_str()))
+        .collect();
+    names.sort_by_key(|(_, n)| n.to_string());
+    assert_eq!(
+        names,
+        [
+            (mb_mcm::ApiKeyLocation::Header, "X-Tenant-Ident"),
+            (mb_mcm::ApiKeyLocation::Query, "access"),
+            (mb_mcm::ApiKeyLocation::Cookie, "crumb"),
+        ]
+    );
+    // The dropped requirement is still the only one, and unsatisfiable.
+    let op = bundle.operation("listThings").unwrap();
+    assert!(
+        op.security
+            .iter()
+            .flat_map(|r| &r.schemes)
+            .all(|s| !matches!(
+                s,
+                mb_mcm::SecurityScheme::ApiKey { name, .. } if name == "X-Tenant-Ident"
+            )),
+        "{:?}",
+        op.security
+    );
+}
+
 /// A parameter's own description is kept on its schema, where the engine finds it;
 /// one its schema describes keeps that, and one with no description gets none. A
-/// referenced schema is left as it is.
+/// referenced schema keeps it beside the reference.
 #[test]
 fn a_parameter_description_is_kept_on_its_schema() {
     let contract = r##"
@@ -36,7 +89,11 @@ components:
     );
     assert_eq!(query["page"]["description"], "The schema's own.");
     assert_eq!(query["limit"], json!({"type": "integer"}));
-    assert!(query["kind"].get("description").is_none(), "{query}");
+    assert_eq!(
+        query["kind"],
+        json!({"$ref": "#/$defs/Kind", "description": "A referenced one."}),
+        "kept beside the reference, which validates as it did: {query}"
+    );
     let headers = &op.input.headers.as_ref().unwrap()["properties"];
     assert_eq!(
         headers["X-Item-Version"]["description"],

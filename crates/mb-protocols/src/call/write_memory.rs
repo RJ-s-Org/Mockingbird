@@ -712,12 +712,10 @@ fn is_count(name: &str, value: &Value) -> bool {
     value.is_number() && mb_mcm::credentials::is_count_name(&normalized)
 }
 
-/// Whether `schema` says its value is not to be shown again.
+/// Whether `schema` says its value is not to be shown again (see
+/// [`mb_mcm::credentials::schema_marks_secret`], which a prompt's headers go by too).
 fn schema_hides(bundle: &mb_mcm::Bundle, schema: Option<&Value>) -> bool {
-    schema_parts(bundle, schema).0.iter().any(|p| {
-        p.get("writeOnly").and_then(Value::as_bool) == Some(true)
-            || p.get("format").and_then(Value::as_str) == Some("password")
-    })
+    schema.is_some_and(|s| mb_mcm::credentials::schema_marks_secret(bundle, s))
 }
 
 /// `value` with every credential replaced, at any depth. The contract speaks first:

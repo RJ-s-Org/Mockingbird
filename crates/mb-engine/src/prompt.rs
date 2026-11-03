@@ -125,50 +125,52 @@ const TRANSPORT_HEADERS: [&str; 20] = [
     "x-real-ip",
 ];
 
-/// What the user message tells of a request beyond its path parameters, query and
-/// body (see [`request_notes`]).
+/// Most characters of a header value a prompt shows (see [`shown_headers`]); a longer
+/// one is cut, marked with `…`.
+pub const MAX_HEADER_VALUE_CHARS: usize = 128;
+
+/// What the user message tells of a request beyond its path parameters and body (see
+/// [`request_notes`]).
 #[derive(Debug, Default)]
 pub(crate) struct RequestNotes {
     /// What the request leaves out (see [`request_defaults`]).
     defaults: Option<Map<String, Value>>,
+    /// The request's query as shown, when that is not all of it (see [`shown_query`]).
+    query: Option<Map<String, Value>>,
     /// The declared headers it carries that may be shown, by their declared names.
     headers: Map<String, Value>,
     /// The contract's descriptions of the parameters it sends, one line each.
     descriptions: Vec<String>,
 }
 
-/// What the prompt tells of `call` beyond its path parameters, query and body: the
-/// defaults it leaves out, the headers `op` declares that it carries, and the
-/// contract's descriptions of the parameters it sends. A header is never shown when a
-/// security scheme of the contract uses it, when its name or its value may hold a
-/// credential (see [`mb_mcm::credentials`]), or when it only frames the message
-/// ([`TRANSPORT_HEADERS`], Mockingbird's own); nor is the description of a parameter
-/// left out so.
+/// What the prompt tells of `call` beyond its path parameters and body: the query it
+/// may show, the defaults it leaves out, the headers `op` declares that it carries,
+/// and the contract's descriptions of the parameters it sends. A header is never shown
+/// when a security scheme of the contract names it, when its name, its schema or its
+/// value may hold a credential (see [`mb_mcm::credentials`]), or when it only frames
+/// the message ([`TRANSPORT_HEADERS`], Mockingbird's own); nor is a query value a
+/// security scheme names, or the description of a parameter left out so.
 pub(crate) fn request_notes(bundle: &Bundle, op: &Operation, call: &OperationCall) -> RequestNotes {
     let headers = shown_headers(bundle, op, call);
     let descriptions = parameter_descriptions(bundle, op, call, &headers);
     RequestNotes {
         defaults: request_defaults(bundle, op, call),
+        query: shown_query(bundle, call),
         headers,
         descriptions,
     }
 }
 
-/// The lowercased names that the security schemes of `bundle` carry a credential
-/// under at `location`, for any operation: a name one operation authenticates with
-/// is a credential's on every route.
-fn scheme_names(bundle: &Bundle, op: &Operation, location: mb_mcm::ApiKeyLocation) -> Vec<String> {
-    std::iter::once(op)
-        .chain(&bundle.operations)
-        .flat_map(|o| &o.security)
-        .flat_map(|requirement| &requirement.schemes)
-        .filter_map(|scheme| match scheme {
-            mb_mcm::SecurityScheme::ApiKey { location: at, name } if *at == location => {
-                Some(name.to_ascii_lowercase())
-            }
-            _ => None,
-        })
-        .collect()
+/// `call`'s query without what a security scheme of the contract carries a key under,
+/// when it holds such a parameter; `None` when all of it may be shown. The request
+/// itself is left as it is.
+fn shown_query(bundle: &Bundle, call: &OperationCall) -> Option<Map<String, Value>> {
+    if !call.query.keys().any(|name| bundle.is_security_name(name)) {
+        return None;
+    }
+    let mut query = call.query.clone();
+    query.retain(|name, _| !bundle.is_security_name(name));
+    Some(query)
 }
 
 /// The properties of a parameter schema of `op`.
@@ -179,16 +181,23 @@ fn declared<'a>(bundle: &'a Bundle, schema: Option<&'a Value>) -> Option<&'a Map
         .and_then(Value::as_object)
 }
 
-/// Whether a parameter called `name` stays out of a prompt whatever it holds: a
-/// credential's name, or one a security scheme in `schemes` (lowercased) uses.
-fn hides_parameter(name: &str, schemes: &[String]) -> bool {
-    let lower = name.to_ascii_lowercase();
-    mb_mcm::credentials::hides_in_context(name) || schemes.contains(&lower)
+/// Whether a parameter called `name`, of schema `schema` when declared, stays out of a
+/// prompt whatever it holds: a credential's name, a name a security scheme of the
+/// contract carries a key under, or a schema the contract marks secret.
+fn hides_parameter(bundle: &Bundle, name: &str, schema: Option<&Value>) -> bool {
+    mb_mcm::credentials::hides_in_context(name)
+        || bundle.is_security_name(name)
+        || schema.is_some_and(|s| mb_mcm::credentials::schema_marks_secret(bundle, s))
 }
 
-/// The headers `op` declares that `call` carries and a prompt may show (see
-/// [`request_notes`]), by their declared names.
-fn shown_headers(bundle: &Bundle, op: &Operation, call: &OperationCall) -> Map<String, Value> {
+/// The headers `op` declares that `call` carries and a prompt may show, by their
+/// declared names, each value cut to [`MAX_HEADER_VALUE_CHARS`]: what the prompt's
+/// `<request>` block shows of them, so what a read's cached answer depends on too.
+/// Never a header a security scheme of the contract names, one whose name or schema
+/// marks a credential, or whose value is shaped like one, a transport header or
+/// Mockingbird's own.
+#[must_use]
+pub fn shown_headers(bundle: &Bundle, op: &Operation, call: &OperationCall) -> Map<String, Value> {
     let mut out = Map::new();
     if call.headers.is_empty() {
         return out;
@@ -196,12 +205,11 @@ fn shown_headers(bundle: &Bundle, op: &Operation, call: &OperationCall) -> Map<S
     let Some(props) = declared(bundle, op.input.headers.as_ref()) else {
         return out;
     };
-    let schemes = scheme_names(bundle, op, mb_mcm::ApiKeyLocation::Header);
-    for name in props.keys() {
+    for (name, schema) in props {
         let lower = name.to_ascii_lowercase();
         if lower.starts_with("x-mockingbird-")
             || TRANSPORT_HEADERS.contains(&lower.as_str())
-            || hides_parameter(name, &schemes)
+            || hides_parameter(bundle, name, Some(schema))
         {
             continue;
         }
@@ -213,9 +221,17 @@ fn shown_headers(bundle: &Bundle, op: &Operation, call: &OperationCall) -> Map<S
         else {
             continue;
         };
-        if !hides_credential(name, value) {
-            out.insert(name.clone(), value.clone());
+        if hides_credential(name, value) {
+            continue;
         }
+        let value = match value {
+            Value::String(text) if text.chars().count() > MAX_HEADER_VALUE_CHARS => {
+                let cut: String = text.chars().take(MAX_HEADER_VALUE_CHARS).collect();
+                Value::String(format!("{cut}…"))
+            }
+            other => other.clone(),
+        };
+        out.insert(name.clone(), value);
     }
     out
 }
@@ -230,8 +246,6 @@ fn parameter_descriptions(
     call: &OperationCall,
     headers: &Map<String, Value>,
 ) -> Vec<String> {
-    // A name an API key is sent under in the query is a credential's wherever it is.
-    let schemes = scheme_names(bundle, op, mb_mcm::ApiKeyLocation::Query);
     let parts = [
         ("path", op.input.path.as_ref(), call.path_params.keys()),
         ("query", op.input.query.as_ref(), call.query.keys()),
@@ -246,12 +260,12 @@ fn parameter_descriptions(
         let mut names: Vec<&String> = names.collect();
         names.sort();
         for name in names {
-            if hides_parameter(name, &schemes) {
-                continue;
-            }
             let Some(prop) = props.get(name.as_str()) else {
                 continue;
             };
+            if hides_parameter(bundle, name, Some(prop)) {
+                continue;
+            }
             let Some(text) = prop
                 .get("description")
                 .or_else(|| deref(bundle, prop).get("description"))
@@ -423,6 +437,7 @@ fn stream_user_message(
         earlier_writes: &[],
         earlier_origins: &[],
         created_since: &[],
+        alongside: &[],
         changes_by_effects: false,
         update_guard: None,
     };
@@ -626,7 +641,9 @@ kind, so give that a new id of its own and leave <existing_resource> as it is."
         s,
         "<request>\n{{\"path_params\":{},\"query\":{}{headers},\"body\":{body}}}\n</request>",
         data(&Value::Object(call.path_params.clone())),
-        data(&Value::Object(call.query.clone())),
+        data(&Value::Object(
+            notes.query.clone().unwrap_or_else(|| call.query.clone())
+        )),
     );
     if let Some(defaults) = &notes.defaults {
         let _ = writeln!(
@@ -903,6 +920,7 @@ pub(crate) fn request_defaults(
 ) -> Option<Map<String, Value>> {
     let mut out = Map::new();
     let mut query = omitted_defaults(bundle, op.input.query.as_ref(), &call.query);
+    query.retain(|name, _| !bundle.is_security_name(name));
     if !query.is_empty() {
         let answer = op.success_output().and_then(|o| o.schema.as_ref());
         let doc = std::cell::OnceCell::new();

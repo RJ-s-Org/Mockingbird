@@ -174,6 +174,7 @@ async fn generate(
                     earlier_writes: &[],
                     earlier_origins: &[],
                     created_since: &[],
+                    alongside: &[],
                     changes_by_effects: false,
                     update_guard: None,
                 },
