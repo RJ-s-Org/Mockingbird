@@ -614,8 +614,11 @@ fn mentions(value: &Value, wanted: &str, depth: usize) -> bool {
 
 /// Whether stored `r` shows it is in the collection `call`'s path names: as recorded
 /// there by this runtime, or, for each path parameter, by a member tied to it holding
-/// its value (as [`overlay_stored`] ties them), or an object holding it. A route with no
-/// path parameter is one collection.
+/// its value (as [`overlay_stored`] ties them), or an object holding it. The record
+/// [`Collections`] keeps is this process's own, so on a store several nodes share, a
+/// record another node wrote counts only by its members. A route with no path
+/// parameter is one collection; [`stored_rest`] reads one only when it is the type's
+/// sole such list (see [`BundleIndex::sole_written_list`]).
 fn in_collection(
     rt: &MockRuntime,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -660,14 +663,20 @@ const MAX_STORED_REST: usize = 100;
 /// `cut` with, after the items it left out, the records the session holds that a full
 /// page of list answer `body` does not show but that its query asks for: of the items'
 /// type, in the route's collection (see [`in_collection`]), holding what each of the
-/// query's filters asks, and showing the request's every other value, unless all of
-/// that value's comma-separated words name members of the items (`fields=name,notes`).
-/// A value outside all of that (a search the items do not hold) leaves `cut` as it is.
-/// Each record shows as the items declare it ([`projected`]), and only where it
+/// query's filters asks, and showing the request's every other value, unless the
+/// parameter is an array or free text (no `enum` or `const`) and all of that value's
+/// comma-separated words name members of the items (`fields=name,notes`). A value of a
+/// number parameter, which could be found anywhere, or of any other kind leaves `cut` as
+/// it is. Each record shows as the items declare it ([`projected`]), and only where it
 /// validates as one; one with no identity, or the identity of an item served or left
 /// out, is not taken. A page is full when it holds as many items as the request's page
-/// size asks. The items' type `t` when their schema names no type of its own. Nothing is
-/// written.
+/// size asks. The store is read only when the answer has a place for a token
+/// ([`pages::slot`]), and, with no cut, holds none there that the model gave: a token of
+/// its own goes on to its own next page. A route with no path parameter is read only
+/// when it is the type's sole list read with none and a write of the type shares its
+/// path ([`BundleIndex::sole_written_list`]). The records go least recently written
+/// first, as the store orders them by their last write. The items' type `t` when their
+/// schema names no type of its own. Nothing is written.
 pub(super) async fn stored_rest(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -706,8 +715,40 @@ pub(super) async fn stored_rest(
     let Some(served) = list_items(body).filter(|items| size > 0 && items.len() >= size) else {
         return cut;
     };
+    // No place for a token, no token to mint: the store is not read.
+    let Some(slot) = pages::slot(bundle, (op, call), body, size_param) else {
+        return cut;
+    };
+    // A token the model gave goes on to its own next page.
+    let given = slot
+        .path
+        .iter()
+        .try_fold(body, |at, name| at.get(name))
+        .and_then(Value::as_str)
+        .is_some_and(|token| !token.trim().is_empty());
+    if cut.is_none() && given {
+        return cut;
+    }
+    let Some(item_type) = rt
+        .index()
+        .item_type(bundle, op, body)
+        .or_else(|| t.map(str::to_string))
+    else {
+        return cut;
+    };
+    // A route with no path parameter holds all of the type's records only when it is
+    // the type's one such list, and a write of the type goes to its path.
+    if call.path_params.is_empty() {
+        let Binding::Http { path, .. } = &op.binding else {
+            return cut;
+        };
+        if !rt.index().sole_written_list(path, &item_type) {
+            return cut;
+        }
+    }
     let filters = filters_of(bundle, query, &item_parts, call, page);
     let declared = declared_names(&item_parts);
+    let declared_params = query.and_then(|q| q.get("properties"));
     let mut shown: Vec<String> = Vec::new();
     for (param, raw) in &call.query {
         if param == size_param || filters.iter().any(|(name, _)| name == param) {
@@ -729,24 +770,32 @@ pub(super) async fn stored_rest(
             }
             continue;
         }
-        let names_members = texts.iter().all(|text| {
-            text.split(',').all(|word| {
-                let word = word.trim();
-                let head = word.split('.').next().unwrap_or(word);
-                declared.contains(&head)
-            })
-        });
+        let (param_parts, _) =
+            schema_parts(bundle, declared_params.and_then(|d| d.get(param.as_str())));
+        let param_types = types_of(&param_parts);
+        // A number is found anywhere (a count, a price): such a value is not known.
+        if param_types.contains("integer") || param_types.contains("number") {
+            return cut;
+        }
+        // Only an array or free text lists fields: an `enum` value is a choice.
+        let may_project = !param_parts
+            .iter()
+            .any(|p| p.get("enum").is_some() || p.get("const").is_some())
+            && (param_types.iter().eq(["array"].iter())
+                || param_types.iter().eq(["string"].iter())
+                || param_types.is_empty());
+        let names_members = may_project
+            && texts.iter().all(|text| {
+                text.split(',').all(|word| {
+                    let word = word.trim();
+                    let head = word.split('.').next().unwrap_or(word);
+                    declared.contains(&head)
+                })
+            });
         if !names_members {
             shown.extend(texts);
         }
     }
-    let Some(item_type) = rt
-        .index()
-        .item_type(bundle, op, body)
-        .or_else(|| t.map(str::to_string))
-    else {
-        return cut;
-    };
     let field = item_identity(bundle, op, body);
     let identity = |item: &Value| item.get(&field).and_then(id_string);
     let mut known: Vec<String> = served.iter().filter_map(identity).collect();
@@ -764,7 +813,8 @@ pub(super) async fn stored_rest(
             .is_some()
     };
     let mut records = state.list(&plan.session, &item_type, MAX_STORED_REST).await;
-    // Oldest first, as a list goes on.
+    // The store gives the most recently written first; the least recently written go
+    // first here, which for records only created is the order they were made in.
     records.reverse();
     let mut missing = Vec::new();
     for r in &records {

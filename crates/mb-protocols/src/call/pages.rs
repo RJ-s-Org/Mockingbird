@@ -5,12 +5,16 @@
 //! made up: the request repeats the first's, or names a token no list knows, and the
 //! answer is the first page again (from the cache) or a list made up anew. So when a cut
 //! leaves items out, and the contract has a place for a token, the engine mints one.
-//! A page the model answered full, at the size asked, whatever its token, while the session
-//! holds records the query asks for that it does not show, is a cut too: those records
-//! are its rest ([`lists::stored_rest`]), after any the page size cut. They are stored
-//! already, so they are not seeded again. A count of the list beside it that counts
-//! fewer than the page and its rest (see [`deleted::with_count_at_least`]) is raised to
-//! them.
+//! A page the model answered full, at the size asked, with its token absent, `null` or
+//! empty, while the session holds records the query asks for that it does not show, is
+//! a cut too: those records are its rest ([`lists::stored_rest`]), after any the page
+//! size cut. A token the model gave stays, with its count, as it leads to the model's own
+//! next page. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
+//! a session). Its records are stored already, so they are not seeded again. A count of
+//! the list beside the token that counts fewer than the page and its rest (see
+//! [`deleted::with_count_at_least`]) is raised to them, and a boolean beside the token,
+//! in the same object, that is `false` is `true` where the answer validates so
+//! (`has_more`), as the last page sets it back.
 //!
 //! The place is one text member of the answer (no `const` or `enum`), at its top level
 //! or inside an object member beside the list, whose name is, or ends with the words
@@ -80,8 +84,8 @@ static MINTED: AtomicU64 = AtomicU64::new(0);
 
 /// Where an answer of `op` carries its token: the member's path from the top, and the
 /// query parameter the token comes back under.
-struct Slot {
-    path: Vec<String>,
+pub(super) struct Slot {
+    pub(super) path: Vec<String>,
     param: String,
 }
 
@@ -155,8 +159,28 @@ fn without_more(body: &Value, first: &Value, slot: &[String]) -> Option<Value> {
     Some(out)
 }
 
+/// `body` with each boolean beside `slot`, in the same object, that is `false` set to
+/// `true`: a `has_more` beside a minted token, as [`without_more`] ends it on the last
+/// page. `None` when there is none.
+fn with_more(body: &Value, slot: &[String]) -> Option<Value> {
+    let (_, parents) = slot.split_last()?;
+    let mut out = body.clone();
+    let mut at = &mut out;
+    for name in parents {
+        at = at.get_mut(name)?;
+    }
+    let mut changed = false;
+    for value in at.as_object_mut()?.values_mut() {
+        if value.as_bool() == Some(false) {
+            *value = Value::Bool(true);
+            changed = true;
+        }
+    }
+    changed.then_some(out)
+}
+
 /// The one place answer `body` to `call` has for a token (see the module's doc).
-fn slot(
+pub(super) fn slot(
     bundle: &mb_mcm::Bundle,
     (op, call): (&Operation, &OperationCall),
     body: &Value,
@@ -438,7 +462,12 @@ pub(super) async fn mint(
         .iter()
         .chain(std::iter::once(body))
         .filter_map(|base| placed(base, &slot.path, Some(Value::String(first.clone()))))
-        .find(|page| valid(page))
+        .find_map(|page| {
+            // More to come, where the answer allows saying so.
+            with_more(&page, &slot.path)
+                .filter(|more| valid(more))
+                .or_else(|| valid(&page).then_some(page))
+        })
     else {
         return;
     };

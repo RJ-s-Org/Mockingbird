@@ -1168,6 +1168,7 @@ pub(crate) async fn complete(
     async {
         // What the list's query asks for, before its items are seeded or cached. An
         // answer holding one record (`/users/me` answering `{user}`) is no list.
+        let fallback = transient_fallback(&generated);
         if is_query
             && target_id.is_none()
             && answered.is_none()
@@ -1178,12 +1179,13 @@ pub(crate) async fn complete(
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
             let cut = lists::narrow(rt, plan, call, body);
-            // A full page whose rest the model left out, but the store holds.
-            let cut = lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await;
-            if let Some(cut) = cut
-                && !transient_fallback(&generated)
-            {
-                pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+            if !fallback {
+                // A full page whose rest the model left out, but the store holds.
+                let cut =
+                    lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await;
+                if let Some(cut) = cut {
+                    pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+                }
             }
         }
         if (200..300).contains(&generated.status)
@@ -2589,6 +2591,9 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
+    /// Per resource type, how many list reads of it the contract has whose path has no
+    /// parameter (`/tasks`, `/me/tasks`, `/tasks.list`), by any method.
+    unscoped_lists: HashMap<String, usize>,
     /// Whether a create or an action may mint a value for a client to send back (see
     /// [`minted::may_mint`]).
     mints: bool,
@@ -2802,7 +2807,8 @@ impl BundleIndex {
         // `offers` of a flight search are offers.
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
-        let (single_reads, written_lists) = routes_of(bundle, &read_types, &list_members_of);
+        let (single_reads, written_lists, unscoped_lists) =
+            routes_of(bundle, &read_types, &list_members_of);
         let record_schemas = record_schemas_of(bundle, &detail_reads);
         let mut effect_types: Vec<String> =
             detail_reads.keys().chain(shapes.keys()).cloned().collect();
@@ -2844,6 +2850,7 @@ impl BundleIndex {
             effect_types,
             single_reads,
             written_lists,
+            unscoped_lists,
             mints: bundle
                 .operations
                 .iter()
@@ -2878,6 +2885,18 @@ impl BundleIndex {
 
     fn list_members(&self, op: usize) -> &[String] {
         self.list_members.get(op).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `path`, with no parameter, is the one list read of `resource_type` with
+    /// no path parameter the contract has, and a command of the type shares its path:
+    /// the type's records are all that list's (`POST /tasks` beside `GET /tasks`).
+    fn sole_written_list(&self, path: &str, resource_type: &str) -> bool {
+        !path.contains('{')
+            && self.unscoped_lists.get(resource_type) == Some(&1)
+            && self
+                .written_lists
+                .get(path)
+                .is_some_and(|list| list.resource_type == resource_type)
     }
 
     fn referrers(&self, resource_type: &str) -> &[String] {
@@ -2952,24 +2971,37 @@ fn lookup_members(
     out
 }
 
-/// What routes the contract's operations share: see [`BundleIndex::single_reads`] and
-/// [`BundleIndex::written_lists`].
+/// What routes the contract's operations share: see [`BundleIndex::single_reads`],
+/// [`BundleIndex::written_lists`] and [`BundleIndex::unscoped_lists`].
 fn routes_of(
     bundle: &mb_mcm::Bundle,
     read_types: &HashSet<String>,
     members_of: &[Vec<String>],
-) -> (HashMap<String, usize>, HashMap<String, WrittenList>) {
+) -> (
+    HashMap<String, usize>,
+    HashMap<String, WrittenList>,
+    HashMap<String, usize>,
+) {
     let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
+    let mut unscoped_lists: HashMap<String, usize> = HashMap::new();
     let mut lists: HashMap<&str, WrittenList> = HashMap::new();
     for (i, op) in bundle.operations.iter().enumerate() {
         let Binding::Http { method, path } = &op.binding else {
             continue;
         };
-        if !matches!(op.kind, OperationKind::Query) || *method != mb_mcm::HttpMethod::Get {
+        if !matches!(op.kind, OperationKind::Query) {
             continue;
         }
         let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
         let items = listed_items(bundle, op, read_types, members);
+        if let (Some(_), Some(t)) = (&items, op.resource_type.as_deref())
+            && !path.contains('{')
+        {
+            *unscoped_lists.entry(t.to_string()).or_default() += 1;
+        }
+        if *method != mb_mcm::HttpMethod::Get {
+            continue;
+        }
         if let (Some(items), Some(t), true) = (
             &items,
             op.resource_type.as_deref(),
@@ -2994,7 +3026,7 @@ fn routes_of(
             written_lists.insert(path.clone(), list.clone());
         }
     }
-    (single_reads, written_lists)
+    (single_reads, written_lists, unscoped_lists)
 }
 
 /// The item schema of `op`'s success answer when it is a list: an array, or an object

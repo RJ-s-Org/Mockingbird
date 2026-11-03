@@ -1629,6 +1629,8 @@ const BY_CURSOR: &str = r##"    get:
         - {name: limit, in: query, schema: {type: integer}}
         - {name: cursor, in: query, schema: {type: string}}
         - {name: status, in: query, schema: {type: string, enum: [open, done]}}
+        - {name: kind, in: query, schema: {type: string, enum: [title, other]}}
+        - {name: fields, in: query, schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -1640,6 +1642,7 @@ const BY_CURSOR: &str = r##"    get:
                 properties:
                   data: {type: array, items: {$ref: "#/components/schemas/Task"}}
                   next_cursor: {type: [string, "null"]}
+                  has_more: {type: boolean}
                   total: {type: integer}"##;
 
 const BY_NUMBER: &str = r##"    get:
@@ -1843,4 +1846,74 @@ async fn page_numbers_are_unchanged_by_the_store() {
     assert_eq!(api.get("/tasks?per_page=1&page=1").await, page);
     assert_eq!(api.get("/tasks?per_page=1&page=2").await, next);
     assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A second list of the type with no path parameter (`/me/tasks`, beside `/tasks`)
+/// may hold only some of its records: neither list is paged from the store.
+#[tokio::test]
+async fn a_list_beside_another_unscoped_one_is_not_paged_from_the_store() {
+    let mine = BY_CURSOR.replace("operationId: listTasks", "operationId: listMyTasks");
+    let contract = stored_pages(BY_CURSOR).replace(
+        "  /tasks/{id}:",
+        &format!("  /me/tasks:\n{mine}\n  /tasks/{{id}}:"),
+    );
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&contract, true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/me/tasks?limit=1").await, page);
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+}
+
+/// A token the model gave stays, and so does its count.
+#[tokio::test]
+async fn the_model_s_own_token_stays() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc", "total": 50});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+}
+
+/// A minted token comes with the boolean beside it saying there is more, and the last
+/// page says there is none.
+#[tokio::test]
+async fn a_minted_token_says_there_is_more() {
+    let mut script = created("open");
+    let page =
+        json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null, "has_more": false});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let last = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["t2"], "{last}");
+    assert_eq!(last["has_more"], false, "{last}");
+}
+
+/// A value of a parameter with an `enum` is no list of fields, even when it names a
+/// member (`kind=title`): no stored task shows it, so nothing is paged. A free text
+/// parameter naming members (`fields=title,status`) is one.
+#[tokio::test]
+async fn an_enum_value_naming_a_member_is_no_projection() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1&kind=title").await, page);
+    let body = api.get("/tasks?limit=1&fields=title,status").await;
+    assert!(
+        body["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
+        "{body}"
+    );
 }
