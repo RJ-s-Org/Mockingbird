@@ -44,10 +44,16 @@
 //!
 //! Before any of that, [`overlay_stored`] looks up each item the session holds, by its
 //! identity and its type, as the store has the newest writes (a ticket closed since, a
-//! reply counted). A record whose member a path parameter names (`project_id` under
-//! `/projects/{project_id}/tasks`) holding another value than the path is another
-//! parent's: its item leaves the list. Otherwise the item shows the stored record's
-//! members, each as the item's schema declares it at every depth (see [`projected`]):
+//! reply counted). An item is never removed for what the store holds: when the item
+//! itself holds the path's value under a member tied to a path parameter (`project_id`
+//! under `/projects/{project_id}/tasks`, by the rule owner checks go by), and the stored
+//! record holds another value there, which of the two is right is a guess (a task moved,
+//! a member of two lists), so the item stays exactly as generated. A member that is the
+//! items' identity (`/users/{user_id}/followers`), or that the contract types as the
+//! item's own type, names no parent, and a path value the item does not hold (an alias:
+//! `/users/me/events`) contradicts nothing. Otherwise the item shows the stored
+//! record's members, each as the item's schema declares it at every depth (see
+//! [`projected`]); members several `allOf` parts declare are declared as all of them:
 //! an `owner` the summary declares as `{id, name}` brings no `email`, nor does each
 //! object of an array. The item's own members stay otherwise, and the generated item
 //! whole when the record would not validate in its place. Nothing is stored or added:
@@ -556,7 +562,18 @@ fn projected(
     let (parts, _) = schema_parts(bundle, Some(schema));
     match value {
         Value::Object(members) => {
-            let declared = |name: &str| parts.iter().find_map(|p| p.get("properties")?.get(name));
+            // A member several parts declare (`allOf`) is declared as all of them.
+            let declared = |name: &str| -> Option<Value> {
+                let mut found: Vec<&Value> = parts
+                    .iter()
+                    .filter_map(|p| p.get("properties")?.get(name))
+                    .collect();
+                match found.len() {
+                    0 => None,
+                    1 => found.pop().cloned(),
+                    _ => Some(serde_json::json!({"allOf": found})),
+                }
+            };
             let additional = parts.iter().find_map(|p| p.get("additionalProperties"));
             let declares_members = parts.iter().any(|p| p.get("properties").is_some());
             let closed = matches!(additional, Some(Value::Bool(false)));
@@ -565,11 +582,12 @@ fn projected(
             }
             let mut out = Map::new();
             for (name, member) in members {
-                let schema = declared(name).or(additional.filter(|a| a.is_object()));
+                let schema =
+                    declared(name).or_else(|| additional.filter(|a| a.is_object()).cloned());
                 if let Some(schema) = schema {
                     out.insert(
                         name.clone(),
-                        projected(bundle, Some(schema), member, depth + 1),
+                        projected(bundle, Some(&schema), member, depth + 1),
                     );
                 }
             }
@@ -588,18 +606,10 @@ fn projected(
     }
 }
 
-/// What the store says of one listed item.
-enum Stored {
-    /// Another parent's record: the item leaves the list.
-    Elsewhere,
-    /// The item with the record's members.
-    Overlaid(Value),
-}
-
 /// Has each item of list answer `body` that the session holds, by its identity and its
-/// type, show the stored record's members as the item declares them, and an item whose
-/// record is another parent's leave the list (see the module's doc). The items of type
-/// `t` when their schema names no type of its own.
+/// type, show the stored record's members as the item declares them, but for an item
+/// whose own parent the record contradicts, which stays as generated (see the module's
+/// doc). The items of type `t` when their schema names no type of its own.
 pub(super) async fn overlay_stored(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -613,24 +623,13 @@ pub(super) async fn overlay_stored(
         return;
     };
     let mut held = None;
-    let Some((array_parts, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
+    let Some((_, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
         return;
     };
     let declared = declared_names(&item_parts);
     if declared.is_empty() {
         return;
     }
-    let fewest = declared_count(&array_parts, "minItems").unwrap_or(0);
-    // The members the path's parameters name, and the path's values.
-    let parents: Vec<(&str, String)> = call
-        .path_params
-        .iter()
-        .filter(|(param, _)| !mb_mcm::is_generic_id(param))
-        .filter_map(|(param, value)| {
-            let member = named_member(bundle, &item_parts, param)?;
-            Some((member.name, id_string(value)?))
-        })
-        .collect();
     let Some(item_type) = rt
         .index()
         .item_type(bundle, op, body)
@@ -639,10 +638,29 @@ pub(super) async fn overlay_stored(
         return;
     };
     let field = item_identity(bundle, op, body);
+    // The members tied to the path's parameters, as owner checks tie them, that may
+    // name a parent: not the items' identity, nor one typed as the items' own type.
+    let parents: Vec<(&str, String)> = call
+        .path_params
+        .iter()
+        .filter_map(|(param, value)| Some((param, id_string(value)?)))
+        .flat_map(|(param, value)| {
+            declared
+                .iter()
+                .filter(|member| {
+                    **member != field
+                        && !mb_mcm::is_generic_id(member)
+                        && tied_to_param(member, param)
+                        && !typed_as_own(rt, &item_type, member)
+                })
+                .map(move |member| (*member, value.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     let Some(items) = list_items(body) else {
         return;
     };
-    let mut found: Vec<(usize, Stored)> = Vec::new();
+    let mut overlaid: Vec<(usize, Value)> = Vec::new();
     for (at, item) in items.iter().enumerate().take(MAX_OVERLAID) {
         let (Some(own), Some(id)) = (item.as_object(), item.get(&field).and_then(id_string)) else {
             continue;
@@ -650,15 +668,14 @@ pub(super) async fn overlay_stored(
         let Some(stored) = state.get(&plan.session, &item_type, &id).await else {
             continue;
         };
-        let elsewhere = parents.iter().any(|(member, value)| {
-            stored
-                .data
-                .get(*member)
-                .and_then(id_string)
-                .is_some_and(|held| &held != value)
+        // The item says it is the path's, the record says another's: a guess either
+        // way, so the item stays as generated.
+        let contradicted = parents.iter().any(|(member, value)| {
+            let says = |data: &Value| data.get(*member).and_then(id_string);
+            says(item).as_deref() == Some(value.as_str())
+                && says(&stored.data).is_some_and(|held| &held != value)
         });
-        if elsewhere {
-            found.push((at, Stored::Elsewhere));
+        if contradicted {
             continue;
         }
         let mut merged = own.clone();
@@ -667,20 +684,26 @@ pub(super) async fn overlay_stored(
             let Some(value) = stored.data.get(*name) else {
                 continue;
             };
-            let schema = item_parts
+            let parts: Vec<&Value> = item_parts
                 .iter()
-                .find_map(|p| p.get("properties")?.get(*name));
-            let value = projected(bundle, schema, value, 0);
+                .filter_map(|p| p.get("properties")?.get(*name))
+                .collect();
+            let schema = match parts.as_slice() {
+                [] => None,
+                [one] => Some((*one).clone()),
+                many => Some(serde_json::json!({"allOf": many})),
+            };
+            let value = projected(bundle, schema.as_ref(), value, 0);
             if own.get(*name) != Some(&value) {
                 merged.insert((*name).to_string(), value);
                 changed = true;
             }
         }
         if changed {
-            found.push((at, Stored::Overlaid(Value::Object(merged))));
+            overlaid.push((at, Value::Object(merged)));
         }
     }
-    if found.is_empty() {
+    if overlaid.is_empty() {
         return;
     }
     let valid = |candidate: &Value| {
@@ -688,49 +711,6 @@ pub(super) async fn overlay_stored(
             .serve_stored(bundle, op, candidate, None)
             .is_some()
     };
-    // Another parent's records first, as one step, kept as the filters' are.
-    let gone: Vec<usize> = found
-        .iter()
-        .filter_map(|(at, s)| matches!(s, Stored::Elsewhere).then_some(*at))
-        .collect();
-    let mut dropped = false;
-    if !gone.is_empty() {
-        let was = items.len();
-        let mut kept = body.clone();
-        if let Some(list) = list_items_mut(&mut kept) {
-            for at in gone.iter().rev() {
-                list.remove(*at);
-            }
-            if list.len() as u64 >= fewest && valid(&kept) {
-                if let Some(counted) =
-                    deleted::with_count_corrected(rt, op, body, &kept, was, gone.len() as u64)
-                    && valid(&counted)
-                {
-                    kept = counted;
-                }
-                *body = kept;
-                dropped = true;
-            }
-        }
-    }
-    // Where each overlaid item now is.
-    let overlaid: Vec<(usize, Value)> = found
-        .into_iter()
-        .filter_map(|(at, s)| match s {
-            Stored::Overlaid(item) => {
-                let before = if dropped {
-                    gone.iter().filter(|g| **g < at).count()
-                } else {
-                    0
-                };
-                Some((at - before, item))
-            }
-            Stored::Elsewhere => None,
-        })
-        .collect();
-    if overlaid.is_empty() {
-        return;
-    }
     let with = |base: &Value, changes: &[(usize, Value)]| {
         let mut candidate = base.clone();
         if let Some(items) = list_items_mut(&mut candidate) {
