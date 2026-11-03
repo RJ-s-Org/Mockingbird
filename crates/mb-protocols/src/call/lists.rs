@@ -60,7 +60,7 @@
 //! an item the store holds but the answer does not name stays out of the page, as
 //! which list and page it belongs on is not known well enough. A full page may still
 //! leave such records for a next page ([`stored_rest`]), served by a token as a cut's
-//! rest is.
+//! rest is, or by a later page number or offset ([`runs`]).
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -673,7 +673,8 @@ const MAX_STORED_REST: usize = 100;
 /// out, is not taken. A page is full when it holds as many items as the request's page
 /// size asks. The store is read only when the answer has a place for a token
 /// ([`pages::slot`]), and, with no cut, holds none there that the model gave: a token of
-/// its own goes on to its own next page. A route with no path parameter is read only
+/// its own goes on to its own next page; or else when the request asks for the first
+/// page of a list paged by number or offset ([`runs::starts`]). A route with no path parameter is read only
 /// when it is the type's sole list read with none and a write of the type shares its
 /// path ([`BundleIndex::sole_written_list`]). The records go least recently written
 /// first, as the store orders them by their last write. The items' type `t` when their
@@ -716,17 +717,20 @@ pub(super) async fn stored_rest(
     let Some(served) = list_items(body).filter(|items| size > 0 && items.len() >= size) else {
         return cut;
     };
-    // No place for a token, no token to mint: the store is not read.
-    let Some(slot) = pages::slot(bundle, (op, call), body, size_param) else {
+    // No place for a token, and no first page of a list paged by number or offset: no
+    // next page to serve, and the store is not read.
+    let slot = pages::slot(bundle, (op, call), body, size_param);
+    if slot.is_none() && !runs::starts(bundle, (op, call), size_param) {
         return cut;
-    };
+    }
     // A token the model gave goes on to its own next page.
-    let given = slot
-        .path
-        .iter()
-        .try_fold(body, |at, name| at.get(name))
-        .and_then(Value::as_str)
-        .is_some_and(|token| !token.trim().is_empty());
+    let given = slot.is_some_and(|slot| {
+        slot.path
+            .iter()
+            .try_fold(body, |at, name| at.get(name))
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.trim().is_empty())
+    });
     if cut.is_none() && given {
         return cut;
     }

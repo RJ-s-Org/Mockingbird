@@ -2023,3 +2023,254 @@ async fn a_number_at_its_minimum_constrains_nothing() {
     );
     assert_eq!(api.get("/tasks?limit=1&offset=3").await, page);
 }
+
+/// Zoho's shape: a page number from 1 beside `per_page`, and a `page_context` that
+/// echoes them and says whether more pages follow.
+const BY_PAGE: &str = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 200}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: status, in: query, schema: {type: string, enum: [open, done]}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, data, page_context]
+                properties:
+                  code: {type: integer}
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  page_context:
+                    type: object
+                    required: [page, per_page, has_more_page]
+                    properties:
+                      page: {type: integer}
+                      per_page: {type: integer}
+                      has_more_page: {type: boolean}"##;
+
+/// A page of `tasks` in [`BY_PAGE`]'s shape.
+fn zoho_page(tasks: &[Value], page: u64, more: bool) -> Value {
+    json!({
+        "code": 0,
+        "data": tasks,
+        "page_context": {"page": page, "per_page": 1, "has_more_page": more},
+    })
+}
+
+/// Page 1 of one, while the session holds another task: page 1 says more pages
+/// follow, and page 2 is the other task, served from the store, saying it is page 2
+/// and the last.
+#[tokio::test]
+async fn page_two_by_number_is_the_stored_rest() {
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, false).to_string()
+    ));
+    let api = cached_api_of(&stored_pages(BY_PAGE), script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(ids_in(&first, "data"), ["t1"], "{first}");
+    assert_eq!(first["page_context"]["has_more_page"], true, "{first}");
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(
+        second,
+        zoho_page(&[stored_task("t2", "B", "open")], 2, false),
+        "{second}"
+    );
+    // The first page again is the same page.
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, first);
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A page past what the run holds, and a page with other filter values, are the
+/// model's.
+#[tokio::test]
+async fn a_page_past_the_run_or_of_other_filters_is_the_model_s() {
+    let mut script = created("open");
+    let first = zoho_page(&[stored_task("t1", "A", "open")], 1, false);
+    let past = zoho_page(&[], 3, false);
+    let other = zoho_page(&[stored_task("t9", "Z", "open")], 2, false);
+    script.push(Ok(first.to_string()));
+    script.push(Ok(past.to_string()));
+    script.push(Ok(other.to_string()));
+    let api = api_of(&stored_pages(BY_PAGE), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1").await;
+    assert_eq!(api.get("/tasks?per_page=1&page=3").await, past);
+    assert_eq!(api.get("/tasks?per_page=1&page=2&status=open").await, other);
+    assert_eq!(api.provider.requests().len(), 5);
+}
+
+/// WooCommerce's shape, a bare array: a page cut to its size leaves the rest for later
+/// pages, and a larger page size starts where it says.
+#[tokio::test]
+async fn a_cut_page_by_number_serves_the_rest() {
+    let list = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 10}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Task"}}"##;
+    let answer = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "done"),
+    ]);
+    let api = api_of(&stored_pages(list), true, vec![Ok(answer.to_string())]);
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(first, json!([stored_task("t1", "A", "open")]));
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(second, json!([stored_task("t2", "B", "open")]));
+    let third = api.get("/tasks?page=3&per_page=1").await;
+    assert_eq!(third, json!([stored_task("t3", "C", "done")]));
+    // Two to a page, the second starts at the third item.
+    let wide = api.get("/tasks?per_page=2&page=2").await;
+    assert_eq!(wide, json!([stored_task("t3", "C", "done")]));
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// Box's shape: an offset from 0 beside `limit`, with a total and an echo of both.
+const BY_OFFSET: &str = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: offset, in: query, schema: {type: integer, format: int64, minimum: 0, default: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_count, entries, offset, limit]
+                properties:
+                  total_count: {type: integer}
+                  entries: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  offset: {type: integer}
+                  limit: {type: integer}"##;
+
+/// An offset past the first page is the stored rest, and the total counts both.
+#[tokio::test]
+async fn an_offset_reaches_the_stored_rest() {
+    let mut script = created("open");
+    let page = json!({
+        "total_count": 1,
+        "entries": [stored_task("t1", "A", "open")],
+        "offset": 0,
+        "limit": 1,
+    });
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_OFFSET), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?offset=0&limit=1").await;
+    assert_eq!(ids_in(&first, "entries"), ["t1"], "{first}");
+    assert_eq!(first["total_count"], 2, "{first}");
+    let next = api.get("/tasks?offset=1&limit=1").await;
+    assert_eq!(
+        next,
+        json!({
+            "total_count": 2,
+            "entries": [stored_task("t2", "B", "open")],
+            "offset": 1,
+            "limit": 1,
+        }),
+        "{next}"
+    );
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// Page 2 of `list` by its page parameter `param` is the model's: the parameter is not
+/// known by its schema.
+async fn page_two_is_generated(list: &str, param: &str) {
+    let mut script = created("open");
+    let first = zoho_page(&[stored_task("t1", "A", "open")], 1, false);
+    let second = zoho_page(&[stored_task("t1", "A", "open")], 2, false);
+    script.push(Ok(first.to_string()));
+    script.push(Ok(second.to_string()));
+    let api = api_of(&stored_pages(list), true, script);
+    two_tasks(&api).await;
+    assert_eq!(
+        api.get(&format!("/tasks?per_page=1&{param}=1")).await,
+        first
+    );
+    assert_eq!(
+        api.get(&format!("/tasks?per_page=1&{param}=2")).await,
+        second
+    );
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A page number with a `minimum` but no `default` is not known to be one.
+#[tokio::test]
+async fn a_page_with_no_default_is_unchanged() {
+    let list = BY_PAGE.replace(
+        "{type: integer, minimum: 1, default: 1}",
+        "{type: integer, minimum: 1}",
+    );
+    page_two_is_generated(&list, "page").await;
+}
+
+/// A `page` whose schema counts from 0 (Trello's) says two things: nothing changes.
+#[tokio::test]
+async fn a_page_counting_from_zero_is_unchanged() {
+    let list = BY_PAGE.replace(
+        "{type: integer, minimum: 1, default: 1}",
+        "{type: integer, minimum: 0, default: 0}",
+    );
+    page_two_is_generated(&list, "page").await;
+}
+
+/// A second parameter that could be the page number (`copies`).
+const COPIES: &str = "        - {name: copies, in: query, schema: {type: integer, minimum: 1, default: 1}}\n        - {name: status,";
+
+/// Two parameters that could each be the page number, neither named so: which one is
+/// not known, and nothing changes.
+#[tokio::test]
+async fn two_page_numbers_are_unchanged() {
+    let list = BY_PAGE
+        .replace("name: page,", "name: sheet,")
+        .replace("        - {name: status,", COPIES);
+    page_two_is_generated(&list, "sheet").await;
+}
+
+/// Of two parameters that could be the page number, the one named `page` is.
+#[tokio::test]
+async fn the_one_named_page_is_the_page_number() {
+    let list = BY_PAGE.replace("        - {name: status,", COPIES);
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, false).to_string()
+    ));
+    let api = api_of(&stored_pages(&list), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1&page=1").await;
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// With consistency off, page 2 is the model's.
+#[tokio::test]
+async fn consistency_off_serves_no_page_number() {
+    let answer = json!({
+        "code": 0,
+        "data": [stored_task("t1", "A", "open"), stored_task("t2", "B", "open")],
+        "page_context": {"page": 1, "per_page": 1, "has_more_page": false},
+    });
+    let second = zoho_page(&[stored_task("t1", "A", "open")], 2, false);
+    let api = api_of(
+        &stored_pages(BY_PAGE),
+        false,
+        vec![Ok(answer.to_string()), Ok(second.to_string())],
+    );
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, answer);
+    assert_eq!(api.get("/tasks?per_page=1&page=2").await, second);
+}

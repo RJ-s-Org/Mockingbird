@@ -58,6 +58,9 @@
 //! the first page's by the token, so the response cache never answers it with the
 //! first page; it is not cached itself, as the token already serves it.
 //!
+//! A list paged by number or offset has no place for a token: its first page is kept
+//! as a run instead, and its later pages served from it ([`runs`]).
+//!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says, and plain calls
 //! (no scenario or forced status).
 
@@ -67,10 +70,11 @@ use mb_engine::consistency::{list_items_mut, list_member};
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
 
+use super::runs;
 use super::*;
 
 /// Cuts kept per session, the newest.
-const MAX_CUTS: u64 = 64;
+pub(super) const MAX_CUTS: u64 = 64;
 /// Items left out that a cut keeps, at most.
 const MAX_REST: usize = 500;
 /// Hex digits of a token: the nonce's, the place's and the offset's.
@@ -129,39 +133,48 @@ fn carries(call: &OperationCall, name: &str) -> bool {
     })
 }
 
-/// The member of `op`'s answer that says whether more pages follow the token at `slot`:
-/// the one boolean the response schema declares in the object holding the slot
-/// (`has_more`). With none, or several (`has_more` beside `livemode`), which says so is
-/// not known, and there is none.
-fn more_flag(bundle: &mb_mcm::Bundle, op: &Operation, slot: &[String]) -> Option<String> {
-    let schema = op.success_output()?.schema.as_ref()?;
-    let (_, parents) = slot.split_last()?;
+/// The booleans the response schema of `op` declares in the object at `parents`, each
+/// once.
+fn booleans_at(bundle: &mb_mcm::Bundle, op: &Operation, parents: &[String]) -> Vec<String> {
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return Vec::new();
+    };
     let (mut parts, _) = schema_parts(bundle, Some(schema));
     for name in parents {
-        let member = parts.iter().find_map(|p| p.get("properties")?.get(name))?;
+        let Some(member) = parts.iter().find_map(|p| p.get("properties")?.get(name)) else {
+            return Vec::new();
+        };
         parts = schema_parts(bundle, Some(member)).0;
     }
-    let mut flags: Vec<&String> = Vec::new();
+    let mut flags: Vec<String> = Vec::new();
     for (name, member) in parts
         .iter()
         .filter_map(|p| p.get("properties").and_then(Value::as_object))
         .flatten()
     {
         let (member_parts, _) = schema_parts(bundle, Some(member));
-        if lists::types_of(&member_parts).into_iter().eq(["boolean"]) && !flags.contains(&name) {
-            flags.push(name);
+        if lists::types_of(&member_parts).into_iter().eq(["boolean"]) && !flags.contains(name) {
+            flags.push(name.clone());
         }
     }
-    match flags.as_slice() {
-        [one] => Some((*one).clone()),
+    flags
+}
+
+/// The member of `op`'s answer that says whether more pages follow the token at `slot`:
+/// the one boolean the response schema declares in the object holding the slot
+/// (`has_more`). With none, or several (`has_more` beside `livemode`), which says so is
+/// not known, and there is none.
+fn more_flag(bundle: &mb_mcm::Bundle, op: &Operation, slot: &[String]) -> Option<String> {
+    let (_, parents) = slot.split_last()?;
+    match booleans_at(bundle, op, parents).as_slice() {
+        [one] => Some(one.clone()),
         _ => None,
     }
 }
 
-/// `body` with boolean `flag` beside `slot`, in the same object, set to `value` where
-/// it holds `!value`; `None` when it does not.
-fn flag_set(body: &Value, slot: &[String], flag: &str, value: bool) -> Option<Value> {
-    let (_, parents) = slot.split_last()?;
+/// `body` with boolean `flag` of the object at `parents` set to `value` where it holds
+/// `!value`; `None` when it does not.
+fn flag_set(body: &Value, parents: &[String], flag: &str, value: bool) -> Option<Value> {
     let mut out = body.clone();
     let mut at = &mut out;
     for name in parents {
@@ -175,10 +188,14 @@ fn flag_set(body: &Value, slot: &[String], flag: &str, value: bool) -> Option<Va
     Some(out)
 }
 
-/// `body` with the [`more_flag`] beside `slot` set to `false` when `first` holds it
-/// `true`: a `has_more` the first page set, on the last.
-fn without_more(body: &Value, first: &Value, slot: &[String], flag: &str) -> Option<Value> {
-    let (_, parents) = slot.split_last()?;
+/// `body` with the [`more_flag`] `flag` of the object at `parents` set to `false` when
+/// `first` holds it `true`: a `has_more` the first page set, on the last.
+pub(super) fn without_more(
+    body: &Value,
+    first: &Value,
+    parents: &[String],
+    flag: &str,
+) -> Option<Value> {
     let said = parents
         .iter()
         .try_fold(first, |at, name| at.get(name))
@@ -187,13 +204,19 @@ fn without_more(body: &Value, first: &Value, slot: &[String], flag: &str) -> Opt
     if said != Some(true) {
         return None;
     }
-    flag_set(body, slot, flag, false)
+    flag_set(body, parents, flag, false)
 }
 
-/// `body` with the [`more_flag`] beside `slot` set to `true` where it is `false`: a
-/// `has_more` beside a minted token, as [`without_more`] ends it on the last page.
-fn with_more(body: &Value, slot: &[String], flag: &str) -> Option<Value> {
-    flag_set(body, slot, flag, true)
+/// `body` with the [`more_flag`] `flag` of the object at `parents` set to `true` where it
+/// is `false`: a `has_more` beside a minted token, as [`without_more`] ends it on the
+/// last page.
+pub(super) fn with_more(body: &Value, parents: &[String], flag: &str) -> Option<Value> {
+    flag_set(body, parents, flag, true)
+}
+
+/// The parents of a token at `slot`: the object holding it.
+fn parents_of(slot: &[String]) -> &[String] {
+    slot.split_last().map_or(&[], |(_, parents)| parents)
 }
 
 /// The one place answer `body` to `call` has for a token (see the module's doc).
@@ -271,7 +294,7 @@ pub(super) fn slot(
 
 /// `body` with `value` at `path`, an object made for it where its parent is missing or
 /// `null`; `None` for no value, which takes the member out.
-fn placed(body: &Value, path: &[String], value: Option<Value>) -> Option<Value> {
+pub(super) fn placed(body: &Value, path: &[String], value: Option<Value>) -> Option<Value> {
     let mut out = body.clone();
     let (last, parents) = path.split_last()?;
     let mut at = &mut out;
@@ -343,7 +366,7 @@ fn place_key(place: u64) -> String {
 
 /// The query values a token is bound to: the request's, but the token's and the page
 /// size's.
-fn bound_query(call: &OperationCall, param: &str, size_param: &str) -> Value {
+pub(super) fn bound_query(call: &OperationCall, param: &str, size_param: &str) -> Value {
     let mut query = call.query.clone();
     query.remove(param);
     query.remove(size_param);
@@ -408,12 +431,12 @@ impl Cut {
 }
 
 /// The path's values of `call`, as a cut keeps them.
-fn path_of(call: &OperationCall) -> Value {
+pub(super) fn path_of(call: &OperationCall) -> Value {
     canonical(&Value::Object(call.path_params.clone()))
 }
 
 /// `body` with its list's items `items`.
-fn with_items(body: &Value, items: Vec<Value>) -> Option<Value> {
+pub(super) fn with_items(body: &Value, items: Vec<Value>) -> Option<Value> {
     let mut out = body.clone();
     *list_items_mut(&mut out)? = items;
     Some(out)
@@ -421,7 +444,8 @@ fn with_items(body: &Value, items: Vec<Value>) -> Option<Value> {
 
 /// Writes a token for what `cut` left out of `generated`'s answer, when the answer has
 /// a place for one, keeps the cut and seeds the items left out (see the module's doc).
-/// Items of type `t`.
+/// With no place, a first page of a list paged by number or offset keeps its run
+/// instead ([`runs`]). Items of type `t`.
 pub(super) async fn mint(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -435,9 +459,10 @@ pub(super) async fn mint(
     let Some(body) = generated.body.as_ref() else {
         return;
     };
-    let Some(slot) = slot(rt.bundle(), (op, call), body, &cut.size_param) else {
+    let slot = slot(rt.bundle(), (op, call), body, &cut.size_param);
+    if slot.is_none() && !runs::starts(rt.bundle(), (op, call), &cut.size_param) {
         return;
-    };
+    }
     // What a delete marker covers is no later page's.
     let mut rest = Vec::with_capacity(cut.rest.len().min(MAX_REST));
     // The records the store gave are stored already, as they stand.
@@ -465,29 +490,11 @@ pub(super) async fn mint(
     if rest.is_empty() {
         return;
     }
-    let (nonce, place) = new_cut(session, op);
-    let first = token(&nonce, place, 0);
-    let valid = |candidate: &Value| {
-        plan.engine
-            .serve_stored(rt.bundle(), op, candidate, None)
-            .is_some()
+    let kept = match slot {
+        Some(slot) => tokened(rt, plan, call, body, slot, (cut.size, cut.size_param), rest),
+        None => runs::first_page(rt, (plan, call), body, (cut.size, &cut.size_param), rest),
     };
-    // A count of the list that counts less than the page and the rest counts them.
-    let known = list_items(body).map_or(0, Vec::len) + rest.len();
-    let counted = deleted::with_count_at_least(rt, op, body, known);
-    let flag = more_flag(rt.bundle(), op, &slot.path);
-    let Some(page) = counted
-        .iter()
-        .chain(std::iter::once(body))
-        .filter_map(|base| placed(base, &slot.path, Some(Value::String(first.clone()))))
-        .find_map(|page| {
-            // More to come, where the answer allows saying so.
-            flag.as_deref()
-                .and_then(|flag| with_more(&page, &slot.path, flag))
-                .filter(|more| valid(more))
-                .or_else(|| valid(&page).then_some(page))
-        })
-    else {
+    let Some((page, document)) = kept else {
         return;
     };
     // The items left out are the session's, as a list's items are.
@@ -515,15 +522,55 @@ pub(super) async fn mint(
         )
         .await;
     }
+    // A cut not kept serves no token: the answer keeps the model's.
+    if state.upsert(session, document).await {
+        generated.body = Some(page);
+    }
+}
+
+/// The first page `body` with a token at `slot` for `rest`, and the cut that serves it;
+/// `None` when no such page validates.
+fn tokened(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    body: &Value,
+    slot: Slot,
+    (size, size_param): (usize, String),
+    rest: Vec<Value>,
+) -> Option<(Value, StoredResource)> {
+    let op = plan.op;
+    let (nonce, place) = new_cut(&plan.session, op);
+    let first = token(&nonce, place, 0);
+    let valid = |candidate: &Value| {
+        plan.engine
+            .serve_stored(rt.bundle(), op, candidate, None)
+            .is_some()
+    };
+    // A count of the list that counts less than the page and the rest counts them.
+    let known = list_items(body).map_or(0, Vec::len) + rest.len();
+    let counted = deleted::with_count_at_least(rt, op, body, known);
+    let flag = more_flag(rt.bundle(), op, &slot.path);
+    let page = counted
+        .iter()
+        .chain(std::iter::once(body))
+        .filter_map(|base| placed(base, &slot.path, Some(Value::String(first.clone()))))
+        .find_map(|page| {
+            // More to come, where the answer allows saying so.
+            flag.as_deref()
+                .and_then(|flag| with_more(&page, parents_of(&slot.path), flag))
+                .filter(|more| valid(more))
+                .or_else(|| valid(&page).then_some(page))
+        })?;
     let kept = Cut {
         nonce,
         op: op.id.clone(),
         path: path_of(call),
-        query: bound_query(call, &slot.param, &cut.size_param),
+        query: bound_query(call, &slot.param, &size_param),
         slot: slot.path,
         param: slot.param,
-        size: cut.size,
-        size_param: cut.size_param,
+        size,
+        size_param,
         page: page.clone(),
         rest,
     };
@@ -532,10 +579,7 @@ pub(super) async fn mint(
         id: place_key(place),
         data: kept.to_value(),
     };
-    // A cut not kept serves no token: the answer keeps the model's.
-    if state.upsert(session, document).await {
-        generated.body = Some(page);
-    }
+    Some((page, document))
 }
 
 /// The next page a token `call` carries serves, with no model call (see the module's
@@ -572,7 +616,10 @@ pub(super) async fn serve(
             break;
         }
     }
-    let (cut, place, offset) = found?;
+    let Some((cut, place, offset)) = found else {
+        // No token: a later page of a list paged by number or offset, if any.
+        return runs::serve(state, plan, call).await;
+    };
     let size = call
         .query
         .get(&cut.size_param)
@@ -609,7 +656,9 @@ pub(super) async fn serve(
             .find_map(|candidate| {
                 // No more, as the first page said there was, where the answer allows.
                 flag.as_deref()
-                    .and_then(|flag| without_more(&candidate, &cut.page, &cut.slot, flag))
+                    .and_then(|flag| {
+                        without_more(&candidate, &cut.page, parents_of(&cut.slot), flag)
+                    })
                     .and_then(|done| valid(&done))
                     .or_else(|| valid(&candidate))
             });
