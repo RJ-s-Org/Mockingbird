@@ -1658,7 +1658,13 @@ async fn a_recreate_clears_the_marker() {
     let (status, source, _) = h.call("GET", "/items/i1", None).await;
     assert_eq!((status, source.as_str()), (StatusCode::OK, "state"));
     let markers = h.store.list(&session(), MARKERS, 10).await.unwrap();
-    assert!(markers.iter().all(|m| m.id == INDEX), "{markers:?}");
+    // Only the index documents stay: the id's and its identity text's markers are gone.
+    assert!(
+        markers
+            .iter()
+            .all(|m| [INDEX, VALUES_INDEX].contains(&m.id.as_str())),
+        "{markers:?}"
+    );
 
     h.call("DELETE", "/items/i1", None).await;
     assert_eq!(
@@ -1685,6 +1691,7 @@ async fn a_session_reset_clears_the_marker() {
 /// Where the markers are: not in what a session shows, on no change feed.
 const MARKERS: &str = mb_state::INTERNAL_TYPE;
 const INDEX: &str = "#deleted";
+const VALUES_INDEX: &str = "#deleted-values";
 
 #[tokio::test]
 async fn markers_stay_out_of_what_a_session_shows() {

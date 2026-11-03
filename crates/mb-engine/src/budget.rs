@@ -14,10 +14,13 @@
 //! 2. arrays get a `maxItems`: top-level lists 5, 3, 2, then 1 item, nested
 //!    arrays 3, 2, then 1;
 //! 3. required object and array members below the top level are left out,
-//!    heaviest first, and filled after generation by the faker from the full
-//!    schema (see [`Shaped::fills`]); an array outside any array goes last, as
-//!    the rest of its items' members can go instead (a search's `tracks` is
-//!    nothing without its `items`).
+//!    deepest first and then heaviest, and filled after generation by the faker
+//!    from the full schema (see [`Shaped::fills`]); an array outside any array
+//!    goes last, as the rest of its items' members can go instead (a search's
+//!    `tracks` is nothing without its `items`). An array item's only object
+//!    member with an identity of its own (a required `id` or `uri`) stays, as
+//!    the item is that record (a playlist entry's `track`), unless nothing else
+//!    brings the estimate within budget.
 //!
 //! A request's page size ([`requested_limit`]) holds for the page's item arrays
 //! (arrays of objects, the heaviest in each object), and the estimate counts it: those arrays are not capped below
@@ -111,19 +114,35 @@ pub fn shape(
         .filter(|cap| size.is_some_and(|l| *cap < l))
         .map(Some);
     let last = size.map(|_| None);
-    let mut planned = None;
-    for floor in std::iter::once(size).chain(lower).chain(last) {
-        let plan = plan(doc, requested, selected, budget, Held::at(floor, &pages))?;
-        let fits = plan.tokens <= budget;
-        planned = Some(plan);
-        if fits {
+    let floors: Vec<Option<u64>> = std::iter::once(size).chain(lower).chain(last).collect();
+    let mut planned: Option<Plan> = None;
+    // An item's identity is kept while anything else can go instead; when nothing
+    // else fits the budget, it goes too.
+    'shaping: for spare in [true, false] {
+        if !spare && !planned.as_ref().is_some_and(|p| p.spared) {
             break;
+        }
+        for floor in &floors {
+            let plan = plan(
+                doc,
+                requested,
+                selected,
+                budget,
+                Held::at(*floor, &pages),
+                spare,
+            )?;
+            let fits = plan.tokens <= budget;
+            planned = Some(plan);
+            if fits {
+                break 'shaping;
+            }
         }
     }
     let Plan {
         schema,
         dropped,
         tokens,
+        ..
     } = planned?;
     tracing::debug!(
         estimated = before.round(),
@@ -140,15 +159,19 @@ struct Plan {
     /// See [`Shaped::fills`].
     dropped: HashSet<(String, String)>,
     tokens: f64,
+    /// An item's identity member was kept that could have gone.
+    spared: bool,
 }
 
-/// The steps of shaping, with the page's arrays held as `held` says.
+/// The steps of shaping, with the page's arrays held as `held` says; `spare` keeps
+/// an array item's identity member (see [`Member::identity`]).
 fn plan(
     doc: &Value,
     requested: &HashSet<String>,
     selected: bool,
     budget: f64,
     held: Held<'_>,
+    spare: bool,
 ) -> Option<Plan> {
     let mut doc = doc.clone();
     let mut stats = Stats::of(&doc, held)?;
@@ -181,7 +204,9 @@ fn plan(
             if stats.tokens <= budget || (pages && floor.is_some()) {
                 break;
             }
-            let required = |m: &Member| m.required && m.min_depth >= 2 && (pages || !m.page);
+            let required = |m: &Member| {
+                m.required && m.min_depth >= 2 && (pages || !m.page) && !(spare && m.identity)
+            };
             drop_until(
                 &mut doc,
                 &mut stats,
@@ -192,15 +217,18 @@ fn plan(
             )?;
         }
     }
+    let spared = spare && !selected && stats.members.values().any(|m| m.identity && m.required);
     Some(Plan {
         schema: doc,
         dropped,
         tokens: stats.tokens,
+        spared,
     })
 }
 
 /// Leaves out the members `keep` accepts (heaviest first) until the estimate fits;
-/// `dropped` records them when given. A member's tokens count those of the members
+/// `dropped` records them when given, and then the deepest go first, as each takes
+/// less of what the answer is about. A member's tokens count those of the members
 /// within it, which may go too, so what one pass saves is less than it counts: it
 /// re-estimates and goes on while any are left.
 fn drop_until(
@@ -211,8 +239,9 @@ fn drop_until(
     held: Held<'_>,
     mut dropped: Option<&mut HashSet<(String, String)>>,
 ) -> Option<()> {
+    let deepest_first = dropped.is_some();
     while stats.tokens > budget {
-        let candidates = stats.candidates(&keep);
+        let candidates = stats.candidates(&keep, deepest_first);
         if candidates.is_empty() {
             break;
         }
@@ -291,6 +320,9 @@ struct Member {
     structured: bool,
     /// An array, outside any array in some occurrence.
     page: bool,
+    /// What an array item is: its only object member with an identity of its
+    /// own (see [`Walk::has_identity`]).
+    identity: bool,
 }
 
 /// How an array schema occurs in the estimated answer.
@@ -347,6 +379,7 @@ impl Stats {
                 members: HashMap::new(),
                 arrays: HashMap::new(),
             },
+            as_item: false,
         };
         let chars = walk.visit(doc, String::new(), 1.0, 0, false);
         if walk.visits > MAX_VISITS {
@@ -356,21 +389,33 @@ impl Stats {
         Some(walk.stats)
     }
 
-    /// Members `keep` accepts that are worth leaving out, heaviest first:
-    /// (location, property, tokens).
-    fn candidates(&self, keep: &impl Fn(&Member) -> bool) -> Vec<(String, String, f64)> {
-        let mut out: Vec<(String, String, f64)> = self
+    /// Members `keep` accepts that are worth leaving out, heaviest first (the
+    /// deepest before that, with `deepest_first`): (location, property, tokens).
+    fn candidates(
+        &self,
+        keep: &impl Fn(&Member) -> bool,
+        deepest_first: bool,
+    ) -> Vec<(String, String, f64)> {
+        let mut out: Vec<(String, String, f64, usize)> = self
             .members
             .iter()
             .filter(|(_, m)| m.structured && m.each >= MIN_DROP_TOKENS && keep(m))
-            .map(|((loc, prop), m)| (loc.clone(), prop.clone(), m.tokens))
+            .map(|((loc, prop), m)| (loc.clone(), prop.clone(), m.tokens, m.min_depth))
             .collect();
         out.sort_by(|a, b| {
-            b.2.total_cmp(&a.2)
+            let depth = if deepest_first {
+                b.3.cmp(&a.3)
+            } else {
+                std::cmp::Ordering::Equal
+            };
+            depth
+                .then_with(|| b.2.total_cmp(&a.2))
                 .then_with(|| a.0.cmp(&b.0))
                 .then_with(|| a.1.cmp(&b.1))
         });
-        out
+        out.into_iter()
+            .map(|(loc, prop, tokens, _)| (loc, prop, tokens))
+            .collect()
     }
 }
 
@@ -382,6 +427,9 @@ struct Walk<'a> {
     stack: Vec<String>,
     visits: usize,
     stats: Stats,
+    /// The node visited next is an array's item, through any `$ref` or
+    /// combinator on the way to its object.
+    as_item: bool,
 }
 
 impl Walk<'_> {
@@ -396,6 +444,7 @@ impl Walk<'_> {
         depth: usize,
         in_array: bool,
     ) -> f64 {
+        let as_item = std::mem::take(&mut self.as_item);
         self.visits += 1;
         if self.visits > MAX_VISITS {
             return 0.0;
@@ -411,6 +460,7 @@ impl Walk<'_> {
                 return 16.0;
             };
             self.stack.push(target.clone());
+            self.as_item = as_item;
             let chars = self.visit(def, target, mult, depth, in_array);
             self.stack.pop();
             return chars;
@@ -419,7 +469,10 @@ impl Walk<'_> {
             return members
                 .iter()
                 .enumerate()
-                .map(|(i, m)| self.visit(m, format!("{location}/allOf/{i}"), mult, depth, in_array))
+                .map(|(i, m)| {
+                    self.as_item = as_item;
+                    self.visit(m, format!("{location}/allOf/{i}"), mult, depth, in_array)
+                })
                 .sum();
         }
         for key in ["anyOf", "oneOf"] {
@@ -432,19 +485,22 @@ impl Walk<'_> {
                     .map(|(i, b)| (i, self.cost(b, &format!("{location}/{key}/{i}"))))
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 return match best {
-                    Some((i, _)) => self.visit(
-                        &branches[i],
-                        format!("{location}/{key}/{i}"),
-                        mult,
-                        depth,
-                        in_array,
-                    ),
+                    Some((i, _)) => {
+                        self.as_item = as_item;
+                        self.visit(
+                            &branches[i],
+                            format!("{location}/{key}/{i}"),
+                            mult,
+                            depth,
+                            in_array,
+                        )
+                    }
                     None => 4.0,
                 };
             }
         }
         match schema_type(obj) {
-            Some("object") => self.object(obj, &location, mult, depth, in_array),
+            Some("object") => self.object(obj, &location, mult, depth, in_array, as_item),
             Some("array") => {
                 let top = !in_array && depth <= 1;
                 let page = !in_array && self.held.is_page(&location);
@@ -453,6 +509,7 @@ impl Walk<'_> {
                 entry.page |= page;
                 let n = items(obj, self.held.floor.filter(|_| page));
                 let item = obj.get("items").cloned().unwrap_or(Value::Bool(true));
+                self.as_item = true;
                 2.0 + n
                     * (1.0 + self.visit(&item, format!("{location}/items"), mult * n, depth, true))
             }
@@ -468,6 +525,7 @@ impl Walk<'_> {
         mult: f64,
         depth: usize,
         in_array: bool,
+        as_item: bool,
     ) -> f64 {
         let Some(Value::Object(props)) = obj.get("properties") else {
             return 30.0;
@@ -477,6 +535,19 @@ impl Walk<'_> {
             .and_then(Value::as_array)
             .map(|r| r.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+        // An item's identity, by the schema: its one object member that has its own.
+        let identity = if as_item {
+            let mut carriers = props
+                .iter()
+                .filter(|(_, schema)| self.has_identity(schema, 0))
+                .map(|(name, _)| name.as_str());
+            match (carriers.next(), carriers.next()) {
+                (Some(name), None) => Some(name),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let mut chars = 2.0;
         for (name, schema) in props {
             let child_location = format!("{location}/properties/{}", escape(name));
@@ -502,11 +573,41 @@ impl Walk<'_> {
                 });
             member.min_depth = member.min_depth.min(depth + 1);
             member.page |= page;
+            member.identity |= identity == Some(name.as_str());
             member.tokens += mult * each;
             member.each = member.each.max(each);
             chars += name.len() as f64 + 4.0 + value;
         }
         chars
+    }
+
+    /// Whether `node` is an object schema (through `$ref`s and combinators) that
+    /// requires an `id` or `uri` of its own.
+    fn has_identity(&self, node: &Value, hops: usize) -> bool {
+        let Some(obj) = node.as_object().filter(|_| hops < MAX_DEPTH) else {
+            return false;
+        };
+        if let Some(target) = ref_target(obj) {
+            return self
+                .doc
+                .pointer(&target)
+                .is_some_and(|def| self.has_identity(def, hops + 1));
+        }
+        let branches = ["allOf", "anyOf", "oneOf"]
+            .iter()
+            .filter_map(|k| obj.get(*k).and_then(Value::as_array))
+            .flatten();
+        if branches
+            .into_iter()
+            .any(|branch| self.has_identity(branch, hops + 1))
+        {
+            return true;
+        }
+        schema_type(obj) == Some("object")
+            && obj
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|r| r.iter().any(|n| n == "id" || n == "uri"))
     }
 
     /// Where the array schema `node` (at `location`) is, by its `$ref`s, if it is one.
@@ -698,9 +799,18 @@ impl From<u64> for PageLimit {
     }
 }
 
-/// What a query parameter's name holds, normalized (see [`normalized`]), when it asks
-/// for a page size, as a last resort. Earlier words go first.
-const PAGE_SIZE_WORDS: [&str; 5] = ["limit", "perpage", "size", "first", "top"];
+/// What a query parameter's whole name is, normalized (see [`normalized`]), when it
+/// asks for a page size, as a last resort: never a part of a name, so `topic_id`,
+/// `desktop`, `first_seen` and `image_size` are none. Earlier words go first.
+const PAGE_SIZE_WORDS: [&str; 7] = [
+    "limit",
+    "perpage",
+    "pagesize",
+    "maxresults",
+    "size",
+    "first",
+    "top",
+];
 
 /// Lower case, with only letters and digits.
 fn normalized(name: &str) -> String {
@@ -722,7 +832,8 @@ fn may_be_integer(param: Option<&Value>) -> bool {
 
 /// The page size a request asks for: an integer query parameter whose `maximum` is the
 /// `maxItems` of an array `doc()` holds outside any array, as the contract says so; or
-/// else, as a last resort, one whose name holds `limit`, `per_page`, `size`, `first` or `top`. Zero, or a
+/// else, as a last resort, one named `limit`, `per_page`, `page_size`, `max_results`,
+/// `size`, `first` or `top`, in any case and with any separators. Zero, or a
 /// value that is no number, asks for nothing the budget can keep.
 #[must_use]
 pub fn requested_limit<'a>(
@@ -730,6 +841,16 @@ pub fn requested_limit<'a>(
     doc: impl Fn() -> &'a Value,
     call: &crate::OperationCall,
 ) -> Option<PageLimit> {
+    requested_page(query, doc, call).map(|(_, limit)| limit)
+}
+
+/// [`requested_limit`], with the name of the query parameter that asks for it.
+#[must_use]
+pub fn requested_page<'a, 'c>(
+    query: Option<&Value>,
+    doc: impl Fn() -> &'a Value,
+    call: &'c crate::OperationCall,
+) -> Option<(&'c str, PageLimit)> {
     let declared = query.and_then(|q| q.get("properties"));
     let mut sizes: Vec<(&String, u64, Option<&Value>)> = call
         .query
@@ -746,22 +867,23 @@ pub fn requested_limit<'a>(
         })
         .collect();
     sizes.sort_by_key(|(name, ..)| *name);
-    for (_, items, param) in &sizes {
+    for (name, items, param) in &sizes {
         let maximum = param.and_then(|p| p.get("maximum")).and_then(Value::as_u64);
         if let Some(maximum) = maximum
             && !arrays_up_to(doc(), maximum)?.is_empty()
         {
-            return Some(PageLimit {
+            let limit = PageLimit {
                 items: *items,
                 maximum: Some(maximum),
-            });
+            };
+            return Some((name.as_str(), limit));
         }
     }
     PAGE_SIZE_WORDS.iter().find_map(|word| {
         sizes
             .iter()
-            .find(|(name, ..)| normalized(name).contains(word))
-            .map(|(_, items, _)| PageLimit::from(*items))
+            .find(|(name, ..)| normalized(name) == *word)
+            .map(|(name, items, _)| (name.as_str(), PageLimit::from(*items)))
     })
 }
 
@@ -826,6 +948,7 @@ fn page_arrays(doc: &Value, maximum: Option<u64>) -> Option<HashSet<String>> {
             members: HashMap::new(),
             arrays: HashMap::new(),
         },
+        as_item: false,
     };
     let mut heaviest: HashMap<&str, (f64, &String)> = HashMap::new();
     for at in outer.iter().filter(|at| !any_structured || structured(at)) {
@@ -1083,6 +1206,92 @@ mod tests {
         assert!(shaped.fills("/properties/tracks", "items"));
     }
 
+    /// A playlist's entries: each holds who added it and the track it is, the one
+    /// object with an identity of its own, through a `oneOf` as Spotify's does.
+    fn playlist() -> Value {
+        let mut track = user();
+        track["required"].as_array_mut().unwrap().push(json!("id"));
+        track["properties"]["id"] = json!({"type": "string"});
+        track["properties"]["album"] = user();
+        track["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("album"));
+        json!({
+            "type": "object",
+            "required": ["items"],
+            "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/entry"}}},
+            "$defs": {
+                "track": track,
+                "entry": {
+                    "type": "object",
+                    "required": ["added_at", "added_by", "track"],
+                    "properties": {
+                        "added_at": {"type": "string", "format": "date-time"},
+                        "added_by": user(),
+                        "track": {"oneOf": [{"$ref": "#/$defs/track"}]}
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn an_item_keeps_the_member_that_is_its_identity() {
+        let budget = 250;
+        let shaped = shape(&playlist(), &HashSet::new(), false, budget, None).unwrap();
+        let entry = &shaped.schema["$defs"]["entry"]["properties"];
+        assert!(entry.get("track").is_some(), "{}", shaped.schema);
+        assert!(!shaped.fills("/$defs/entry", "track"));
+        // What is deeper goes first, and what holds no identity before it.
+        assert!(shaped.fills("/$defs/track", "album"), "{}", shaped.schema);
+        assert!(
+            shaped.fills("/$defs/entry", "added_by"),
+            "{}",
+            shaped.schema
+        );
+        let estimate = Stats::of(&shaped.schema, every(None)).unwrap().tokens;
+        assert!(estimate <= f64::from(budget), "{estimate}");
+        // Two members with identities say nothing about which the item is.
+        let mut doc = playlist();
+        doc["$defs"]["entry"]["properties"]["added_by"] = json!({"$ref": "#/$defs/track"});
+        let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
+        assert!(shaped.fills("/$defs/entry", "track") || shaped.fills("/$defs/entry", "added_by"));
+    }
+
+    /// Keeping an item's identity is a preference: a `track` of required scalars that
+    /// nothing within it can shrink goes when the budget needs it to.
+    #[test]
+    fn an_identity_too_heavy_for_the_budget_still_goes() {
+        let mut track = user();
+        track["required"].as_array_mut().unwrap().push(json!("id"));
+        track["properties"]["id"] = json!({"type": "string"});
+        let doc = json!({
+            "type": "object",
+            "required": ["items"],
+            "properties": {"items": {"type": "array", "items": {
+                "type": "object",
+                "required": ["added_at", "track"],
+                "properties": {
+                    "added_at": {"type": "string", "format": "date-time"},
+                    "track": track
+                }
+            }}}
+        });
+        for budget in [100, 200] {
+            let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
+            let estimate = Stats::of(&shaped.schema, every(None)).unwrap().tokens;
+            assert!(estimate <= f64::from(budget), "{budget}: {estimate}");
+        }
+        // At 100 one track alone is over budget.
+        let shaped = shape(&doc, &HashSet::new(), false, 100, None).unwrap();
+        assert!(
+            shaped.fills("/properties/items/items", "track"),
+            "{}",
+            shaped.schema
+        );
+    }
+
     #[test]
     fn a_limit_too_large_to_fit_is_capped_as_far_as_it_must_be() {
         let shaped = shape(&page(), &HashSet::new(), false, 120, at(50)).unwrap();
@@ -1151,6 +1360,12 @@ mod tests {
         assert_eq!(size(json!({"q": "5"})), None);
         assert_eq!(size(json!({"PageSize": 5})), Some(5));
         assert_eq!(size(json!({"per-page": 5})), Some(5));
+        assert_eq!(size(json!({"page_size": 5})), Some(5));
+        assert_eq!(size(json!({"maxResults": 5})), Some(5));
+        // A page-size word inside another name is no page size.
+        for other in ["topic_id", "desktop", "first_seen", "image_size", "limited"] {
+            assert_eq!(size(json!({other: 5})), None, "{other}");
+        }
         // Earlier words go first, whatever the query's order.
         assert_eq!(size(json!({"top": 7, "limit": 5})), Some(5));
         // Declared as text, it is no size.

@@ -494,6 +494,10 @@ pub struct OutputVariant {
     /// with its JSON Schema (`Retry-After`, `X-RateLimit-Remaining`).
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub headers: serde_json::Map<String, Value>,
+    /// What the contract says this response is ("The queued message."), when
+    /// it says more than the status's reason phrase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// How an operation names the resource it acts on.

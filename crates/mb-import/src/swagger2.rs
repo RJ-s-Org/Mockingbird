@@ -6,7 +6,7 @@ use crate::heuristics::{
 use crate::openapi3::{
     CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
     OperationIds, check_defs_refs, check_operation_refs, deref, escape, invalid, is_event_stream,
-    is_json_media, non_json_schema, slug, stream_item_schema, stream_kind,
+    is_json_media, non_json_schema, response_description, slug, stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -217,6 +217,7 @@ fn compile_outputs(doc: &Value, op: &Value, at: &str) -> Result<Vec<OutputVarian
             content_type,
             schema,
             headers,
+            description: response_description(resp, selector),
         });
     }
     Ok(outputs)

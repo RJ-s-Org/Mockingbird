@@ -114,6 +114,29 @@ fn types_to_search(rt: &MockRuntime, session: &SessionKey) -> Vec<String> {
     types
 }
 
+/// Whether the session holds a record of a type other than `own` under `id`, looking
+/// in at most [`MAX_LOOKUPS`] types, those it last wrote first (see
+/// [`types_to_search`]): a new record's id is not another record's, such as the channel
+/// it was posted to. With `consistency: off` nothing is looked up.
+pub(super) async fn held_elsewhere(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    own: &str,
+    id: &str,
+) -> bool {
+    let rt = state.rt;
+    if !rt.consistency {
+        return false;
+    }
+    let types = types_to_search(rt, session);
+    for t in types.iter().filter(|t| t.as_str() != own).take(MAX_LOOKUPS) {
+        if state.get(session, t, id).await.is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Adds to `out`, after what the request names by member, the records a body or query
 /// value is the identity of (see the module's doc), each type a value is found in. They
 /// are not counted among what [`follow_hops`] goes on from.

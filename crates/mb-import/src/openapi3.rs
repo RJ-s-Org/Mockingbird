@@ -143,6 +143,22 @@ impl OperationIds {
     }
 }
 
+/// A response object's `description`, with its whitespace collapsed, when it says
+/// more than the reason phrase of the status it answers (`OK`, `Not Found`), which
+/// the prompt already gives as the status.
+pub(crate) fn response_description(resp: &Value, selector: StatusSelector) -> Option<String> {
+    let text = resp.get("description").and_then(Value::as_str)?;
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reason = match selector {
+        StatusSelector::Code(code) => http::StatusCode::from_u16(code)
+            .ok()
+            .and_then(|s| s.canonical_reason()),
+        StatusSelector::Default => None,
+    };
+    let said = text.is_empty() || reason.is_some_and(|r| r.eq_ignore_ascii_case(&text));
+    (!said).then_some(text)
+}
+
 pub(crate) fn is_json_media(ct: &str) -> bool {
     let base = ct
         .split(';')
@@ -510,6 +526,7 @@ fn output_variant(
         content_type,
         schema,
         headers,
+        description: response_description(resp, selector),
     }
 }
 
