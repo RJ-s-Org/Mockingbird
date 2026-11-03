@@ -1634,8 +1634,10 @@ async fn busy_default_admin_port_is_skipped() {
     assert!(bind_admin(addr, false).await.unwrap().is_none());
     let err = bind_admin(addr, true).await.unwrap_err();
     assert!(format!("{err:#}").contains(&addr.to_string()), "{err:#}");
-    drop(held);
-    assert!(bind_admin(addr, false).await.unwrap().is_some());
+    // A free default port binds. Not `addr` again: once released, another
+    // process may take that ephemeral port before it is rebound.
+    let free = "127.0.0.1:0".parse().unwrap();
+    assert!(bind_admin(free, false).await.unwrap().is_some());
 }
 
 #[test]
@@ -2145,8 +2147,10 @@ async fn busy_default_grpc_port_is_skipped() {
     assert!(bind_grpc(addr, false).await.unwrap().is_none());
     let err = bind_grpc(addr, true).await.unwrap_err();
     assert!(format!("{err:#}").contains(&addr.to_string()), "{err:#}");
-    drop(held);
-    assert!(bind_grpc(addr, false).await.unwrap().is_some());
+    // A free default port binds. Not `addr` again: once released, another
+    // process may take that ephemeral port before it is rebound.
+    let free = "127.0.0.1:0".parse().unwrap();
+    assert!(bind_grpc(free, false).await.unwrap().is_some());
 }
 
 #[test]

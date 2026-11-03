@@ -81,6 +81,14 @@ impl Drop for WatchGuard {
 
 type Debounced = Debouncer<notify::RecommendedWatcher, RecommendedCache>;
 
+/// One debounced batch of file system events: the paths they name, and
+/// whether any asks for a rescan (events were lost, so the paths are not
+/// the whole story).
+struct Batch {
+    paths: Vec<PathBuf>,
+    rescan: bool,
+}
+
 /// The debouncer with the directories it watches and the files of interest.
 struct Watcher {
     debouncer: Debounced,
@@ -101,6 +109,12 @@ impl Watcher {
         }
         self.files.insert(file);
         Ok(())
+    }
+
+    /// Whether `batch` may have changed a file of interest: it names one,
+    /// or it asks for a rescan.
+    fn concerns_batch(&self, batch: &Batch) -> bool {
+        batch.rescan || self.concerns(&batch.paths)
     }
 
     fn concerns(&self, paths: &[PathBuf]) -> bool {
@@ -216,17 +230,22 @@ pub fn spawn_with_status(
     applied: Option<Applied>,
     status: ReloadStatus,
 ) -> anyhow::Result<WatchGuard> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Batch>();
     let debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
         match result {
             Ok(events) => {
+                // A rescan event means the OS dropped or coalesced events
+                // (FSEvents does under heavy file system churn): it names
+                // a directory, not the files that changed, so any of them
+                // may have.
+                let rescan = events.iter().any(|e| e.event.need_rescan());
                 let paths = events
                     .into_iter()
                     .flat_map(|e| e.event.paths)
                     .collect::<Vec<_>>();
-                if !paths.is_empty() {
+                if rescan || !paths.is_empty() {
                     // A closed channel means the watch is being dropped.
-                    let _ = tx.send(paths);
+                    let _ = tx.send(Batch { paths, rescan });
                 }
             }
             Err(errors) => {
@@ -255,9 +274,9 @@ pub fn spawn_with_status(
 
     let shared = Arc::clone(&watcher);
     let task = tokio::spawn(async move {
-        while let Some(paths) = rx.recv().await {
+        while let Some(batch) = rx.recv().await {
             let relevant = match shared.lock() {
-                Ok(w) => w.concerns(&paths),
+                Ok(w) => w.concerns_batch(&batch),
                 Err(_) => return,
             };
             if !relevant {
@@ -351,5 +370,24 @@ mod tests {
         assert!(!w.concerns(&[dir.path().join("..data_tmp")]));
         assert!(!w.concerns(&[dir.path().join("other.yaml")]));
         assert!(!w.concerns(&[other.path().join("..data")]));
+    }
+
+    /// A rescan names the directory, not the file: events were dropped,
+    /// so the config may have changed and is reloaded.
+    #[test]
+    fn a_rescan_concerns_the_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = watcher(dir.path(), "mockingbird.yaml");
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let named = |rescan| Batch {
+            paths: vec![canonical.clone()],
+            rescan,
+        };
+        assert!(!w.concerns_batch(&named(false)));
+        assert!(w.concerns_batch(&named(true)));
+        assert!(w.concerns_batch(&Batch {
+            paths: Vec::new(),
+            rescan: true,
+        }));
     }
 }
