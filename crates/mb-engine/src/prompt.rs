@@ -197,7 +197,10 @@ fn shown_query(
 }
 
 /// The properties of a parameter schema of `op`.
-fn declared<'a>(bundle: &'a Bundle, schema: Option<&'a Value>) -> Option<&'a Map<String, Value>> {
+pub(crate) fn declared<'a>(
+    bundle: &'a Bundle,
+    schema: Option<&'a Value>,
+) -> Option<&'a Map<String, Value>> {
     schema
         .map(|s| deref(bundle, s))
         .and_then(|s| s.get("properties"))
@@ -463,6 +466,7 @@ fn stream_user_message(
         earlier_origins: &[],
         created_since: &[],
         alongside: &[],
+        same_values: &[],
         changes_by_effects: false,
         update_guard: None,
     };
