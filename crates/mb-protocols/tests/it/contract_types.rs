@@ -1199,6 +1199,28 @@ async fn an_issue_is_read_back_by_its_iid() {
     assert_eq!(h.calls(), 1);
 }
 
+/// A generated read by `iid` puts the path's value in `iid`, keeps the answer's own
+/// `id` and is stored under it, so the next read is served from state.
+#[tokio::test]
+async fn a_generated_issue_read_by_its_iid_keeps_its_id() {
+    let h = harness(
+        KEYED_BY_PARAM,
+        vec![json!({"id": 501, "iid": 3, "title": "Login fails"})],
+    );
+    let (status, _, read) = h.call("GET", "/projects/1/issues/7", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["id"], 501, "{read}");
+    assert_eq!(read["iid"], 7, "{read}");
+    assert_eq!(
+        h.exported().await,
+        [("issues".to_owned(), "501".to_owned())]
+    );
+    let (_, source, again) = h.call("GET", "/projects/1/issues/7", None).await;
+    assert_eq!(source, "state", "{again}");
+    assert_eq!(again, read);
+    assert_eq!(h.calls(), 1);
+}
+
 /// Freshdesk's shape: a note created under a ticket is one of its conversations.
 const CONVERSATIONS: &str = r##"
 openapi: 3.0.0
