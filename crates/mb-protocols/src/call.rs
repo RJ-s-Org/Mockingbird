@@ -1174,6 +1174,7 @@ pub(crate) async fn complete(
     async {
         // What the list's query asks for, before its items are seeded or cached. An
         // answer holding one record (`/users/me` answering `{user}`) is no list.
+        let fallback = transient_fallback(&generated);
         if is_query
             && target_id.is_none()
             && answered.is_none()
@@ -1183,10 +1184,14 @@ pub(crate) async fn complete(
         {
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
-            if let Some(cut) = lists::narrow(rt, plan, call, body)
-                && !transient_fallback(&generated)
-            {
-                pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+            let cut = lists::narrow(rt, plan, call, body);
+            if !fallback {
+                // A full page whose rest the model left out, but the store holds.
+                let cut =
+                    lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await;
+                if let Some(cut) = cut {
+                    pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+                }
             }
         }
         if (200..300).contains(&generated.status)
@@ -2592,6 +2597,12 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
+    /// Per type of items, how many list reads of it the contract has whose path has no
+    /// parameter (`/tasks`, `/me/tasks`, `/tasks.list`), by any method: the type their
+    /// `$defs` entry is, else the operation's, as [`BundleIndex::item_type`] finds it.
+    unscoped_lists: HashMap<String, usize>,
+    /// Per path of such a list read, the type of its items, so counted.
+    unscoped_paths: HashMap<String, String>,
     /// Whether a create or an action may mint a value for a client to send back (see
     /// [`minted::may_mint`]).
     mints: bool,
@@ -2805,7 +2816,8 @@ impl BundleIndex {
         // `offers` of a flight search are offers.
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
-        let (single_reads, written_lists) = routes_of(bundle, &read_types, &list_members_of);
+        let (single_reads, written_lists, unscoped_lists) =
+            routes_of(bundle, &read_types, &list_members_of);
         let record_schemas = record_schemas_of(bundle, &detail_reads);
         let mut effect_types: Vec<String> =
             detail_reads.keys().chain(shapes.keys()).cloned().collect();
@@ -2827,6 +2839,18 @@ impl BundleIndex {
             })
             .collect();
         let lookup_members = lookup_members(bundle, &types_by_def, &list_members_of);
+        // Each list counts under its items' type, as [`BundleIndex::item_type`] finds it.
+        let mut unscoped_counts: HashMap<String, usize> = HashMap::new();
+        let mut unscoped_paths: HashMap<String, String> = HashMap::new();
+        for list in unscoped_lists {
+            let t = list
+                .def
+                .as_deref()
+                .and_then(|d| types_by_def.get(d).cloned())
+                .unwrap_or(list.resource_type);
+            *unscoped_counts.entry(t.clone()).or_default() += 1;
+            unscoped_paths.insert(list.path, t);
+        }
         Self {
             by_id,
             #[cfg(any(test, feature = "events"))]
@@ -2847,6 +2871,8 @@ impl BundleIndex {
             effect_types,
             single_reads,
             written_lists,
+            unscoped_lists: unscoped_counts,
+            unscoped_paths,
             mints: bundle
                 .operations
                 .iter()
@@ -2881,6 +2907,16 @@ impl BundleIndex {
 
     fn list_members(&self, op: usize) -> &[String] {
         self.list_members.get(op).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `path`, with no parameter, is the one list read of `resource_type` with
+    /// no path parameter the contract has, and a command of the type shares its path:
+    /// the type's records are all that list's (`POST /tasks` beside `GET /tasks`).
+    fn sole_written_list(&self, path: &str, resource_type: &str) -> bool {
+        !path.contains('{')
+            && self.unscoped_lists.get(resource_type) == Some(&1)
+            && self.unscoped_paths.get(path).map(String::as_str) == Some(resource_type)
+            && self.written_lists.contains_key(path)
     }
 
     fn referrers(&self, resource_type: &str) -> &[String] {
@@ -2955,24 +2991,49 @@ fn lookup_members(
     out
 }
 
-/// What routes the contract's operations share: see [`BundleIndex::single_reads`] and
-/// [`BundleIndex::written_lists`].
+/// A list read whose path has no parameter, by any method: its path, the `$defs` name
+/// of its items, when they are one, and its operation's resource type.
+struct UnscopedList {
+    path: String,
+    def: Option<String>,
+    resource_type: String,
+}
+
+/// What routes the contract's operations share: see [`BundleIndex::single_reads`],
+/// [`BundleIndex::written_lists`] and [`BundleIndex::unscoped_lists`].
 fn routes_of(
     bundle: &mb_mcm::Bundle,
     read_types: &HashSet<String>,
     members_of: &[Vec<String>],
-) -> (HashMap<String, usize>, HashMap<String, WrittenList>) {
+) -> (
+    HashMap<String, usize>,
+    HashMap<String, WrittenList>,
+    Vec<UnscopedList>,
+) {
     let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
+    let mut unscoped_lists: Vec<UnscopedList> = Vec::new();
     let mut lists: HashMap<&str, WrittenList> = HashMap::new();
     for (i, op) in bundle.operations.iter().enumerate() {
         let Binding::Http { method, path } = &op.binding else {
             continue;
         };
-        if !matches!(op.kind, OperationKind::Query) || *method != mb_mcm::HttpMethod::Get {
+        if !matches!(op.kind, OperationKind::Query) {
             continue;
         }
         let members = members_of.get(i).map_or(&[][..], Vec::as_slice);
         let items = listed_items(bundle, op, read_types, members);
+        if let (Some(items), Some(t)) = (&items, op.resource_type.as_deref())
+            && !path.contains('{')
+        {
+            unscoped_lists.push(UnscopedList {
+                path: path.clone(),
+                def: def_name(items).map(str::to_string),
+                resource_type: t.to_string(),
+            });
+        }
+        if *method != mb_mcm::HttpMethod::Get {
+            continue;
+        }
         if let (Some(items), Some(t), true) = (
             &items,
             op.resource_type.as_deref(),
@@ -2997,7 +3058,7 @@ fn routes_of(
             written_lists.insert(path.clone(), list.clone());
         }
     }
-    (single_reads, written_lists)
+    (single_reads, written_lists, unscoped_lists)
 }
 
 /// The item schema of `op`'s success answer when it is a list: an array, or an object

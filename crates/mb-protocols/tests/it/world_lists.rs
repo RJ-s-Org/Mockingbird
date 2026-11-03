@@ -1587,3 +1587,439 @@ async fn an_empty_cursor_is_no_cursor() {
     assert_eq!(ids_in(&last, "data"), ["u3"]);
     assert_eq!(api.provider.requests().len(), 1);
 }
+
+/// Tasks a client creates, then lists one to a page: by a cursor, or by page number.
+fn stored_pages(list: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{title: Stored pages, version: "1"}}
+paths:
+  /tasks:
+{list}
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {{application/json: {{schema: {{type: object, additionalProperties: true}}}}}}
+      responses:
+        "201": {{description: made, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Task"}}}}}}}}
+  /tasks/{{id}}:
+    parameters: [{{name: id, in: path, required: true, schema: {{type: string}}}}]
+    get:
+      operationId: getTask
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Task"}}}}}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, title, status]
+      properties:
+        id: {{type: string}}
+        title: {{type: string}}
+        status: {{type: string, enum: [open, done]}}
+"##
+    )
+}
+
+const BY_CURSOR: &str = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [open, done]}}
+        - {name: kind, in: query, schema: {type: string, enum: [title, other]}}
+        - {name: fields, in: query, schema: {type: string}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  next_cursor: {type: [string, "null"]}
+                  has_more: {type: boolean}
+                  total: {type: integer}"##;
+
+const BY_NUMBER: &str = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer}}
+        - {name: page, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  page: {type: integer}
+                  total_pages: {type: integer}"##;
+
+fn stored_task(id: &str, title: &str, status: &str) -> Value {
+    json!({"id": id, "title": title, "status": status})
+}
+
+/// Creates `t1` and `t2` through the API.
+async fn two_tasks(api: &Api) {
+    for task in [json!({"title": "A"}), json!({"title": "B"})] {
+        let (status, body) = api.call("POST", "/tasks", Some(task)).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+}
+
+/// The answers creating `t1` (open) and `t2` (with status `second`).
+fn created(second: &str) -> Vec<Result<String, LlmError>> {
+    vec![
+        Ok(stored_task("t1", "A", "open").to_string()),
+        Ok(stored_task("t2", "B", second).to_string()),
+    ]
+}
+
+/// A full page of one, with a `null` token, while the session holds another matching
+/// task: the answer gets a token, the total counts both, and the next page is the
+/// other task, served from the store.
+#[tokio::test]
+async fn a_full_page_with_a_stored_rest_mints_a_token() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null, "total": 1});
+    script.push(Ok(page.to_string()));
+    let api = cached_api_of(&stored_pages(BY_CURSOR), script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    assert_eq!(ids_in(&first, "data"), ["t1"], "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    assert_eq!(first["total"], 2, "{first}");
+    let second = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(
+        second["data"],
+        json!([stored_task("t2", "B", "open")]),
+        "{second}"
+    );
+    assert_eq!(second["next_cursor"], Value::Null, "{second}");
+    // The first page again is the same page, its token included.
+    assert_eq!(api.get("/tasks?limit=1").await, first);
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// The model's served item stays, whatever the store holds, and an empty token is no
+/// token either: both stored tasks the page does not show come next.
+#[tokio::test]
+async fn a_made_up_item_stays_and_the_stored_ones_follow() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("x9", "X", "open")], "next_cursor": ""});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1&cursor=").await;
+    assert_eq!(ids_in(&first, "data"), ["x9"], "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    let second = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    let next = second["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!next.is_empty(), "{second}");
+    let third = api.get(&format!("/tasks?limit=1&cursor={next}")).await;
+    let mut seen = [ids_in(&second, "data"), ids_in(&third, "data")].concat();
+    seen.sort_unstable();
+    assert_eq!(seen, ["t1", "t2"]);
+    assert_eq!(third["next_cursor"], Value::Null, "{third}");
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A filter the other stored task does not hold leaves nothing for a next page, and a
+/// page that is not full mints nothing either.
+#[tokio::test]
+async fn a_filter_excluding_the_stored_rest_mints_nothing() {
+    let mut script = created("done");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1&status=open").await, page);
+    assert_eq!(api.get("/tasks?limit=2").await, page);
+}
+
+const PROJECT_PAGES: &str = r##"
+openapi: 3.1.0
+info: {title: Project pages, version: "1"}
+paths:
+  /projects/{project_id}/tasks:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listTasks
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  next_cursor: {type: [string, "null"]}
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, project_id, title]
+      properties: {id: {type: string}, project_id: {type: string}, title: {type: string}}
+"##;
+
+/// A task of another project is no rest of this project's page; one of its own is.
+#[tokio::test]
+async fn a_stored_rest_is_of_the_page_s_parent() {
+    let first = json!({"data": [task("t1", "p1", "A")], "next_cursor": null});
+    let api = api_of(
+        PROJECT_PAGES,
+        true,
+        vec![
+            Ok(task("t1", "p1", "A").to_string()),
+            Ok(task("t2", "p2", "B").to_string()),
+            Ok(first.to_string()),
+            Ok(task("t3", "p1", "C").to_string()),
+            Ok(first.to_string()),
+        ],
+    );
+    for (project, title) in [("p1", "A"), ("p2", "B")] {
+        let (status, _) = api
+            .call(
+                "POST",
+                &format!("/projects/{project}/tasks"),
+                Some(json!({"title": title})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    assert_eq!(api.get("/projects/p1/tasks?limit=1").await, first);
+    let (status, _) = api
+        .call("POST", "/projects/p1/tasks", Some(json!({"title": "C"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/projects/p1/tasks?limit=1&cursor=").await;
+    let cursor = body["next_cursor"].as_str().unwrap_or_default().to_string();
+    assert!(!cursor.is_empty(), "{body}");
+    let next = api
+        .get(&format!("/projects/p1/tasks?limit=1&cursor={cursor}"))
+        .await;
+    assert_eq!(next["data"], json!([task("t3", "p1", "C")]), "{next}");
+}
+
+/// Page numbers have no token to mint: the answer is the model's, and so is the next
+/// page.
+#[tokio::test]
+async fn page_numbers_are_unchanged_by_the_store() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "page": 1, "total_pages": 1});
+    let next = json!({"data": [stored_task("t2", "B", "open")], "page": 2, "total_pages": 2});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(next.to_string()));
+    let api = api_of(&stored_pages(BY_NUMBER), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, page);
+    assert_eq!(api.get("/tasks?per_page=1&page=2").await, next);
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A second list of the type with no path parameter (`/me/tasks`, beside `/tasks`)
+/// may hold only some of its records: neither list is paged from the store.
+#[tokio::test]
+async fn a_list_beside_another_unscoped_one_is_not_paged_from_the_store() {
+    let mine = BY_CURSOR.replace("operationId: listTasks", "operationId: listMyTasks");
+    let contract = stored_pages(BY_CURSOR).replace(
+        "  /tasks/{id}:",
+        &format!("  /me/tasks:\n{mine}\n  /tasks/{{id}}:"),
+    );
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&contract, true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/me/tasks?limit=1").await, page);
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+}
+
+/// A list under another name whose items are the same type (`/todos` of `Task`s) is a
+/// second list of that type: neither is paged from the store.
+#[tokio::test]
+async fn a_list_of_the_same_items_under_another_name_counts() {
+    let todos = BY_CURSOR.replace("operationId: listTasks", "operationId: listTodos");
+    let contract = stored_pages(BY_CURSOR).replace(
+        "  /tasks/{id}:",
+        &format!("  /todos:\n{todos}\n  /tasks/{{id}}:"),
+    );
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&contract, true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+}
+
+/// A token the model gave stays, and so does its count.
+#[tokio::test]
+async fn the_model_s_own_token_stays() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc", "total": 50});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+}
+
+/// A minted token comes with the boolean beside it saying there is more, and the last
+/// page says there is none.
+#[tokio::test]
+async fn a_minted_token_says_there_is_more() {
+    let mut script = created("open");
+    let page =
+        json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null, "has_more": false});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let last = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["t2"], "{last}");
+    assert_eq!(last["has_more"], false, "{last}");
+}
+
+/// A value of a parameter with an `enum` is no list of fields, even when it names a
+/// member (`kind=title`): no stored task shows it, so nothing is paged. A free text
+/// parameter naming members (`fields=title,status`) is one.
+#[tokio::test]
+async fn an_enum_value_naming_a_member_is_no_projection() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1&kind=title").await, page);
+    let body = api.get("/tasks?limit=1&fields=title,status").await;
+    assert!(
+        body["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
+        "{body}"
+    );
+}
+
+/// [`BY_CURSOR`] with a second boolean beside the token.
+fn with_livemode() -> String {
+    stored_pages(&BY_CURSOR.replace(
+        "has_more: {type: boolean}",
+        "has_more: {type: boolean}\n                  livemode: {type: boolean}",
+    ))
+}
+
+/// With two booleans beside the token, which says there is more is not known: a
+/// minted token flips neither, and `livemode` stays `false`.
+#[tokio::test]
+async fn a_minted_token_flips_no_boolean_beside_another() {
+    let mut script = created("open");
+    let page = json!({
+        "data": [stored_task("t1", "A", "open")],
+        "next_cursor": null,
+        "has_more": false,
+        "livemode": false,
+    });
+    script.push(Ok(page.to_string()));
+    let api = api_of(&with_livemode(), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    assert!(
+        first["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
+        "{first}"
+    );
+    assert_eq!(first["livemode"], false, "{first}");
+    assert_eq!(first["has_more"], false, "{first}");
+}
+
+/// The last page leaves two booleans beside its token as the first page had them.
+#[tokio::test]
+async fn the_last_page_flips_no_boolean_beside_another() {
+    let page = json!({
+        "data": [stored_task("t1", "A", "open"), stored_task("t2", "B", "open")],
+        "next_cursor": null,
+        "has_more": true,
+        "livemode": true,
+    });
+    let api = api_of(&with_livemode(), true, vec![Ok(page.to_string())]);
+    let first = api.get("/tasks?limit=1").await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    let last = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["t2"], "{last}");
+    assert_eq!(last["has_more"], true, "{last}");
+    assert_eq!(last["livemode"], true, "{last}");
+}
+
+/// Stripe's shape, a page cut to size: the one boolean beside the token says there is
+/// more, and the last page says there is none.
+#[tokio::test]
+async fn a_cut_page_s_one_boolean_says_there_is_more() {
+    let answer = json!({"data": users(3), "has_more": false, "next_cursor": null});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/feed?limit=2").await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let last = api.get(&format!("/feed?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(last["has_more"], false, "{last}");
+}
+
+/// A number at its parameter's `minimum` (`offset=0`) asks for nothing; another value
+/// leaves the page as the model answered.
+#[tokio::test]
+async fn a_number_at_its_minimum_constrains_nothing() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let body = api.get("/tasks?limit=1&offset=0").await;
+    assert!(
+        body["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
+        "{body}"
+    );
+    assert_eq!(api.get("/tasks?limit=1&offset=3").await, page);
+}
