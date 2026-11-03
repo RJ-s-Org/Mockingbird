@@ -74,6 +74,9 @@ const MIN_SHARED_CHARS: usize = 6;
 /// Longer draws are used as they are: [`overlay`] checks once per character.
 const MAX_OVERLAID_CHARS: usize = 256;
 
+/// Misplaced members [`SchemaValidator::hoist`] moves up in one answer.
+const MAX_HOISTS: usize = 16;
+
 /// JSON Schema (draft 2020-12) validator over a schema that carries its own
 /// `$defs`.
 pub struct SchemaValidator {
@@ -206,7 +209,10 @@ impl SchemaValidator {
     /// [`SchemaValidator::patch`], keeping every value that breaks a format
     /// where `keep` (given its JSON pointer and the value) says so: a value
     /// the request sent (a path id echoed into a `format: uuid` field) is
-    /// not overwritten. `keep` applies to format errors only.
+    /// not overwritten. An integer `keep` accepts that breaks only a numeric
+    /// range is moved to the nearest value the range allows instead of
+    /// being redrawn; when none fits, nothing is patched. One that breaks
+    /// an `enum` or `const` is mended like any other value.
     pub fn patch_keeping(
         &self,
         instance: &Value,
@@ -225,6 +231,8 @@ impl SchemaValidator {
         keep: impl Fn(&str, &Value) -> bool,
         mut fill: impl FnMut(&Value) -> Value,
     ) -> Option<Value> {
+        let hoisted = self.hoist(instance);
+        let instance = hoisted.as_ref().unwrap_or(instance);
         let mut nulls = Vec::new();
         let mut refills = Vec::new();
         // The annotation-only validator never reports a format; the
@@ -247,7 +255,8 @@ impl SchemaValidator {
             self.collect(&e, &mut nulls, &mut refills)?;
         }
         if nulls.is_empty() && refills.is_empty() {
-            return None;
+            // A move alone may be the whole fix.
+            return hoisted.filter(|out| self.is_valid(out) && self.formats_hold(out, &keep));
         }
         let mut out = instance.clone();
         // Shortest first: a value that embeds another (a secret holding its
@@ -261,7 +270,15 @@ impl SchemaValidator {
         let mut replaced = Vec::new();
         for (pointer, expected) in &refills {
             let bad = out.pointer(pointer)?.clone();
-            *out.pointer_mut(pointer)? = mend(&bad, expected, &mut replaced, &mut fill);
+            // An integer the request sent that breaks only its bounds is
+            // brought within them, or the patch fails: never swapped for a
+            // fresh draw. One breaking an `enum` or `const` is mended.
+            *out.pointer_mut(pointer)? = if keep(pointer, &bad) && breaks_only_range(&bad, expected)
+            {
+                clamp(&bad, expected)?
+            } else {
+                mend(&bad, expected, &mut replaced, &mut fill)
+            };
         }
         for (pointer, _) in &nulls {
             let (parent, key) = pointer.rsplit_once('/')?;
@@ -300,6 +317,122 @@ impl SchemaValidator {
             out
         };
         (self.is_valid(&out) && self.formats_hold(&out, &keep)).then_some(out)
+    }
+
+    /// `instance` with members it misplaced moved up: a property a
+    /// `required` error finds missing from an object, held by exactly one
+    /// of that object's direct child objects whose schema does not declare
+    /// it (a closing brace written late), goes back to the object. A move
+    /// is made only when the value then has fewer errors and none it did
+    /// not have. `None` when nothing moved.
+    fn hoist(&self, instance: &Value) -> Option<Value> {
+        let mut wanted = Vec::new();
+        for e in self.inner.iter_errors(instance).take(MAX_SCANNED) {
+            required_properties(&e, &mut wanted);
+        }
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut out = instance.clone();
+        let mut errors = self.error_set(&out);
+        let mut moved = false;
+        for round in 0..MAX_HOISTS {
+            if round > 0 {
+                wanted.clear();
+                for e in self.inner.iter_errors(&out).take(MAX_SCANNED) {
+                    required_properties(&e, &mut wanted);
+                }
+            }
+            let better = wanted.iter().find_map(|(parent, property)| {
+                let next = self.lift(&out, parent, property)?;
+                let after = self.error_set(&next);
+                (after.len() < errors.len() && after.is_subset(&errors)).then_some((next, after))
+            });
+            let Some((next, after)) = better else {
+                break;
+            };
+            (out, errors, moved) = (next, after, true);
+        }
+        moved.then_some(out)
+    }
+
+    /// `instance` with `property` moved from the one child object of the
+    /// object at `parent` that holds it into that object; `None` unless
+    /// exactly one child holds it and that child's schema is known, declares
+    /// `properties` but not this one, and admits no other members it could
+    /// own (no `additionalProperties` other than `false`, no
+    /// `patternProperties` or `unevaluatedProperties`).
+    fn lift(&self, instance: &Value, parent: &str, property: &str) -> Option<Value> {
+        let Value::Object(map) = instance.pointer(parent)? else {
+            return None;
+        };
+        if map.contains_key(property) {
+            return None;
+        }
+        let mut holders = map
+            .iter()
+            .filter(|(_, child)| child.as_object().is_some_and(|c| c.contains_key(property)));
+        let (Some((child, _)), None) = (holders.next(), holders.next()) else {
+            return None;
+        };
+        let child_pointer = format!("{parent}/{}", escape(child));
+        let schemas = self.nodes_at(&child_pointer);
+        // A map (`additionalProperties`, `patternProperties`,
+        // `unevaluatedProperties`) or a free-form object may hold any
+        // member as its own.
+        let open = |node: &&Value| {
+            node.get("additionalProperties")
+                .is_some_and(|a| *a != Value::Bool(false))
+                || node.get("patternProperties").is_some()
+                || node.get("unevaluatedProperties").is_some()
+        };
+        if schemas.is_empty()
+            || !schemas.iter().any(|node| node.get("properties").is_some())
+            || schemas.iter().any(open)
+            || schemas.iter().any(|node| {
+                node.get("properties")
+                    .and_then(|p| p.get(property))
+                    .is_some()
+            })
+        {
+            return None;
+        }
+        let mut out = instance.clone();
+        let value = out
+            .pointer_mut(&child_pointer)?
+            .as_object_mut()?
+            .remove(property)?;
+        out.pointer_mut(parent)?
+            .as_object_mut()?
+            .insert(property.to_string(), value);
+        Some(out)
+    }
+
+    /// Every error of `instance` (of the first [`MAX_SCANNED`]), and inside
+    /// a failed `anyOf`/`oneOf` those of its branches, as instance and
+    /// evaluation paths and the message with the value masked (which still
+    /// names a missing property).
+    fn error_set(&self, instance: &Value) -> HashSet<String> {
+        fn add(e: &jsonschema::ValidationError<'_>, out: &mut HashSet<String>) {
+            out.insert(format!(
+                "{} {} {}",
+                e.instance_path().as_str(),
+                e.evaluation_path().as_str(),
+                e.masked()
+            ));
+            if let ValidationErrorKind::AnyOf { context }
+            | ValidationErrorKind::OneOfNotValid { context } = e.kind()
+            {
+                for e in context.iter().flatten() {
+                    add(e, out);
+                }
+            }
+        }
+        let mut out = HashSet::new();
+        for e in self.inner.iter_errors(instance).take(MAX_SCANNED) {
+            add(&e, &mut out);
+        }
+        out
     }
 
     /// Adds what `e` needs patched to `nulls` and `refills`; `None` when a
@@ -557,6 +690,15 @@ impl SchemaValidator {
     /// Whether any schema reachable for the instance location `pointer`
     /// (through `$ref`, `allOf`, `oneOf`, `anyOf`) declares `maxLength`.
     fn declares_max_length(&self, pointer: &str) -> bool {
+        self.nodes_at(pointer)
+            .iter()
+            .any(|node| node.get("maxLength").is_some())
+    }
+
+    /// Every schema reachable for the instance location `pointer` (through
+    /// `properties`, `items`, `prefixItems`, a schema `additionalProperties`,
+    /// and `$ref`, `allOf`, `oneOf`, `anyOf`); empty when none is.
+    fn nodes_at(&self, pointer: &str) -> Vec<&Value> {
         let mut nodes = self.expand(vec![&self.schema]);
         for segment in pointer.split('/').skip(1).map(unescape) {
             let index = segment.parse::<usize>().ok();
@@ -575,10 +717,10 @@ impl SchemaValidator {
                 .collect();
             nodes = self.expand(next);
             if nodes.is_empty() {
-                return false;
+                break;
             }
         }
-        nodes.iter().any(|node| node.get("maxLength").is_some())
+        nodes
     }
 
     /// `nodes` and every schema they reach through `$ref` (to `$defs`),
@@ -728,6 +870,119 @@ fn required_members(e: &jsonschema::ValidationError<'_>, out: &mut HashSet<Strin
     }
 }
 
+/// Adds the object pointer and property name of every member `e` reports
+/// missing, also inside the branches of a failed `anyOf` or `oneOf`, once.
+fn required_properties(e: &jsonschema::ValidationError<'_>, out: &mut Vec<(String, String)>) {
+    match e.kind() {
+        ValidationErrorKind::Required { property } => {
+            if let Some(name) = property.as_str() {
+                let wanted = (e.instance_path().as_str().to_string(), name.to_string());
+                if !out.contains(&wanted) {
+                    out.push(wanted);
+                }
+            }
+        }
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            for e in context.iter().flatten() {
+                required_properties(e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The integer nearest to `value` that the numeric range of `node`
+/// (`minimum`, `maximum`, their exclusive forms, `multipleOf`) allows,
+/// when it also meets the rest of `node`'s leaf keywords; `None` otherwise.
+fn clamp(value: &Value, node: &Value) -> Option<Value> {
+    let n = whole(value)?;
+    // Integer bounds stay exact; a fractional one is rounded inwards.
+    let bound = |key: &str, round: fn(f64) -> f64| {
+        let b = node.get(key)?;
+        whole(b).or_else(|| b.as_f64().map(|f| round(f) as i128))
+    };
+    let mut low = i128::from(i64::MIN);
+    let mut high = i128::from(u64::MAX);
+    if let Some(min) = bound("minimum", f64::ceil) {
+        low = low.max(min);
+    }
+    if let Some(min) = bound("exclusiveMinimum", f64::floor) {
+        low = low.max(min + 1);
+    }
+    if let Some(max) = bound("maximum", f64::floor) {
+        high = high.min(max);
+    }
+    if let Some(max) = bound("exclusiveMaximum", f64::ceil) {
+        high = high.min(max - 1);
+    }
+    if low > high {
+        return None;
+    }
+    let mut near = n.clamp(low, high);
+    if let Some(step) = node.get("multipleOf") {
+        // Only a whole step can be met by an integer moved in whole steps.
+        let step = whole(step)
+            .or_else(|| {
+                step.as_f64()
+                    .filter(|s| s.fract() == 0.0)
+                    .map(|s| s as i128)
+            })
+            .filter(|s| *s > 0)?;
+        let below = near.div_euclid(step) * step;
+        let above = below + step;
+        near = if below >= low && (near - below <= above - near || above > high) {
+            below
+        } else {
+            above
+        };
+    }
+    let near = i64::try_from(near)
+        .map(Value::from)
+        .or_else(|_| u64::try_from(near).map(Value::from))
+        .ok()?;
+    leaf_valid(&near, node, NUMERIC_KEYWORDS).then_some(near)
+}
+
+/// `value` as a whole number, when it is one held as an integer.
+fn whole(value: &Value) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+/// Whether `value` breaks only the numeric range of `node` (`minimum`,
+/// `maximum`, their exclusive forms, `multipleOf`): its `type`, `enum` and
+/// `const` hold, so [`clamp`] may bring it within bounds.
+fn breaks_only_range(value: &Value, node: &Value) -> bool {
+    whole(value).is_some() && leaf_valid(value, node, &["type", "enum", "const"])
+}
+
+/// Whether `value` meets the `keys` of the schema `node`.
+fn leaf_valid(value: &Value, node: &Value, keys: &[&str]) -> bool {
+    let Value::Object(keywords) = node else {
+        return true;
+    };
+    let leaf: serde_json::Map<String, Value> = keywords
+        .iter()
+        .filter(|(k, _)| keys.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    jsonschema::draft202012::new(&Value::Object(leaf)).is_ok_and(|v| v.is_valid(value))
+}
+
+/// The keywords [`clamp`] checks a moved integer against.
+const NUMERIC_KEYWORDS: &[&str] = &[
+    "type",
+    "enum",
+    "const",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+
 /// `value` with every replaced identifier swapped in its strings, except
 /// where `skip` says so (given the JSON pointer and the value).
 fn carry(
@@ -804,7 +1059,11 @@ fn overlay(text: &str, drawn: &str, fits: &impl Fn(&str) -> bool) -> String {
 /// errors of the branch that got furthest into the value (the deepest
 /// pointer, then the fewest errors).
 fn describe(e: &jsonschema::ValidationError<'_>, depth: usize) -> String {
-    let pointer = e.instance_path().as_str();
+    // The root is named `/`: an empty pointer reads as no location at all.
+    let pointer = match e.instance_path().as_str() {
+        "" => "/",
+        pointer => pointer,
+    };
     let keyword = e.kind().keyword();
     if let ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } =
         e.kind()
@@ -1447,7 +1706,225 @@ mod tests {
     fn long_values_are_not_quoted() {
         let v = SchemaValidator::new(&json!({"type": "integer"})).unwrap();
         let errors = v.validate(&json!({"text": "y".repeat(5_000)})).unwrap_err();
-        assert!(errors[0].starts_with(": type: "), "{errors:?}");
+        assert!(errors[0].starts_with("/: type: "), "{errors:?}");
         assert!(errors[0].len() < 300, "{errors:?}");
+    }
+
+    #[test]
+    fn the_root_is_named_with_a_slash() {
+        let v = validator();
+        let errors = v.validate(&json!({"images": []})).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with("/: required: \"title\""),
+            "{errors:?}"
+        );
+    }
+
+    /// A playlist whose `tracks` paging object does not declare the root's
+    /// `type` and `uri`.
+    fn playlist() -> SchemaValidator {
+        SchemaValidator::new(&json!({
+            "$ref": "#/$defs/Playlist",
+            "$defs": {
+                "Playlist": {
+                    "type": "object",
+                    "required": ["id", "type", "uri", "tracks"],
+                    "properties": {
+                        "id": {"type": "string", "pattern": "^[0-9A-Za-z]{22}$"},
+                        "type": {"type": "string", "enum": ["playlist"]},
+                        "uri": {"type": "string", "pattern": "^spotify:playlist:[0-9A-Za-z]{22}$"},
+                        "tracks": {"$ref": "#/$defs/Paging"}
+                    }
+                },
+                "Paging": {
+                    "type": "object",
+                    "required": ["href", "items", "total"],
+                    "properties": {
+                        "href": {"type": "string"},
+                        "items": {"type": "array", "items": {"type": "object"}},
+                        "total": {"type": "integer"}
+                    }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    const PLAYLIST_ID: &str = "37i9dQZF1DXcBWIGoYBM5M";
+
+    #[test]
+    fn root_members_nested_in_a_child_are_moved_up() {
+        let v = playlist();
+        let uri = format!("spotify:playlist:{PLAYLIST_ID}");
+        let answer = json!({
+            "id": PLAYLIST_ID,
+            "tracks": {
+                "href": "https://api.example/tracks",
+                "items": [{}],
+                "total": 1,
+                "type": "playlist",
+                "uri": uri
+            }
+        });
+        let out = v.patch(&answer, |_| panic!("nothing to fill")).unwrap();
+        assert_eq!(
+            out,
+            json!({
+                "id": PLAYLIST_ID,
+                "type": "playlist",
+                "uri": uri,
+                "tracks": {"href": "https://api.example/tracks", "items": [{}], "total": 1}
+            })
+        );
+        // The other errors are patched as before, after the move.
+        let mut short = answer.clone();
+        short["id"] = json!("37i9dQZF1DXcBWIGoYBM");
+        let out = v.patch(&short, drawing(&[PLAYLIST_ID])).unwrap();
+        assert!(v.is_valid(&out), "{out}");
+        assert_eq!(out["uri"], uri);
+        assert!(out["tracks"].get("type").is_none(), "{out}");
+    }
+
+    #[test]
+    fn a_member_two_children_hold_is_not_moved() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": {"type": "string"},
+                "a": {"type": "object", "properties": {"name": {"type": "string"}}},
+                "b": {"type": "object", "properties": {"name": {"type": "string"}}}
+            }
+        }))
+        .unwrap();
+        let answer = json!({"a": {"type": "x"}, "b": {"type": "y"}});
+        assert_eq!(v.patch(&answer, fill), None);
+        // Held by one of them alone, it is moved.
+        let answer = json!({"a": {"type": "x"}, "b": {"name": "y"}});
+        assert_eq!(
+            v.patch(&answer, fill),
+            Some(json!({"type": "x", "a": {}, "b": {"name": "y"}}))
+        );
+    }
+
+    #[test]
+    fn a_member_a_map_or_free_form_child_may_hold_is_not_moved() {
+        for child in [
+            // A map of strings: `type` is one of its entries.
+            json!({"type": "object", "properties": {"source": {"type": "string"}},
+                   "additionalProperties": {"type": "string"}}),
+            json!({"type": "object", "properties": {"source": {"type": "string"}},
+                   "patternProperties": {"^t": {"type": "string"}}}),
+            json!({"type": "object", "properties": {"source": {"type": "string"}},
+                   "unevaluatedProperties": {"type": "string"}}),
+            // Free-form: declares nothing, so anything may be its own.
+            json!({"type": "object"}),
+        ] {
+            let v = SchemaValidator::new(&json!({
+                "type": "object",
+                "required": ["type"],
+                "properties": {"type": {"type": "string"}, "metadata": child}
+            }))
+            .unwrap();
+            let answer = json!({"metadata": {"type": "x"}});
+            assert_eq!(v.patch(&answer, fill), None, "{child}");
+        }
+    }
+
+    #[test]
+    fn a_member_the_child_declares_is_not_moved() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": {"type": "string"},
+                "owner": {"type": "object", "properties": {"type": {"type": "string"}}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(v.patch(&json!({"owner": {"type": "user"}}), fill), None);
+    }
+
+    #[test]
+    fn a_kept_integer_is_clamped_into_its_range() {
+        let range = json!({"type": "integer", "minimum": 1, "maximum": 300_000});
+        assert_eq!(clamp(&json!(821_766), &range), Some(json!(300_000)));
+        assert_eq!(clamp(&json!(-4), &range), Some(json!(1)));
+        let exclusive = json!({"exclusiveMinimum": 0, "exclusiveMaximum": 10, "multipleOf": 4});
+        assert_eq!(clamp(&json!(25), &exclusive), Some(json!(8)));
+        assert_eq!(clamp(&json!(-3), &exclusive), Some(json!(4)));
+        // No integer fits, or one would break another keyword: no patch.
+        assert_eq!(clamp(&json!(9), &json!({"minimum": 5, "maximum": 4})), None);
+        assert_eq!(clamp(&json!(9), &json!({"maximum": 4, "enum": [7]})), None);
+        // Kept by the patcher: the clamped echo, not a draw.
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"id": range, "n": {"type": "integer", "maximum": 2}}
+        }))
+        .unwrap();
+        let out = v
+            .patch_keeping(
+                &json!({"id": 821_766, "n": 9}),
+                |_, value| *value == json!(821_766),
+                |_| json!(2),
+            )
+            .unwrap();
+        assert_eq!(out, json!({"id": 300_000, "n": 2}));
+        // Beyond 2^53 the bound is met exactly, with no float rounding.
+        let big = json!({"type": "integer", "maximum": 9_007_199_254_740_993_i64});
+        assert_eq!(
+            clamp(&json!(9_007_199_254_740_999_i64), &big),
+            Some(json!(9_007_199_254_740_993_i64))
+        );
+        let unsigned = json!({"type": "integer", "minimum": 18_446_744_073_709_551_000_u64});
+        assert_eq!(
+            clamp(&json!(18_446_744_073_709_550_001_u64), &unsigned),
+            Some(json!(18_446_744_073_709_551_000_u64))
+        );
+        assert_eq!(
+            clamp(
+                &json!(9_007_199_254_740_995_i64),
+                &json!({"maximum": 9_007_199_254_740_999_i64, "multipleOf": 2})
+            ),
+            Some(json!(9_007_199_254_740_994_i64))
+        );
+    }
+
+    #[test]
+    fn a_kept_integer_breaking_more_than_a_range_is_mended() {
+        // `enum` and `const` are not bounds: the echo is refilled as any
+        // other value would be, and the patch still succeeds.
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "integer", "enum": [1, 2, 3]},
+                "version": {"const": 2},
+                "page": {"type": "integer", "maximum": 2}
+            }
+        }))
+        .unwrap();
+        let out = v
+            .patch_keeping(
+                &json!({"status": 5, "version": 5, "page": 5}),
+                |_, value| *value == json!(5),
+                |schema| schema.get("const").cloned().unwrap_or_else(|| json!(1)),
+            )
+            .unwrap();
+        assert_eq!(out, json!({"status": 1, "version": 2, "page": 2}));
+    }
+
+    #[test]
+    fn a_move_that_brings_a_new_error_is_not_made() {
+        let v = playlist();
+        let uri = format!("spotify:playlist:{PLAYLIST_ID}");
+        let answer = json!({
+            "id": PLAYLIST_ID,
+            "uri": uri,
+            "tracks": {"href": "h", "items": [], "total": 0, "type": 7}
+        });
+        // Moved up, `7` would break the root's `type`: no move, and the
+        // missing member stays an error a repair must fix.
+        assert_eq!(v.patch(&answer, fill), None);
     }
 }

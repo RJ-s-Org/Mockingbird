@@ -108,6 +108,7 @@ The `mb-ext` crate follows semantic versioning on its own from 1.0.
 
 ### Fixed
 
+- The local patcher moves a required member the model nested in the one child object whose schema declares other properties but not it, and no map or free-form members (the root's `type` and `uri` inside a playlist's `tracks`), back up when that leaves fewer errors and none new, so the answer is patched instead of repaired; repair messages name the root `/` instead of an empty pointer; and an answer integer repeating the request's integer path or query value that breaks only its bounds is clamped to the bound, not redrawn.
 - A 204 update's remainder tells later reads only what the read's or the request's schema declares, past the wider name checks, as a list read is told of a write. It told every member it could not apply, so an undeclared `code` or `value` reached the next prompt. A remainder with nothing declared is not remembered and costs no catch-up.
 - A `GET` storing nothing adds no session anyone sees. The answer of a route with no parameters is still kept in the shared store, so another node and a restart see it, but a session only a read wrote to is marked `mb_state::UNLISTED_ID` and is not listed or counted until a write or a resource.
 
