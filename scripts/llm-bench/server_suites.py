@@ -830,6 +830,18 @@ def eq(a, b):
     return a is not None and a == b
 
 
+def any_order(values):
+    """`values` sorted so that any mix of types (a missing id is None) sorts
+    without raising; equal lists of values sort the same way."""
+    return sorted(values, key=lambda v: (type(v).__name__, v if isinstance(v, str) else repr(v)))
+
+
+def same_items(got, want):
+    """Whether two lists hold the same values in any order. Unlike comparing
+    `sorted()` lists, a None or mixed-type entry fails the check instead of raising."""
+    return isinstance(got, list) and any_order(got) == any_order(want)
+
+
 class Journey:
     """One journey run: a fresh session, calls through `request()`, and checks
     recorded as rows against the latest call."""
@@ -1200,7 +1212,7 @@ def jira_steps(j):
     j.check("read keeps project, type and priority",
             eq(obj(fields.get("project")).get("key"), "PLNT") and eq(obj(fields.get("issuetype")).get("name"), "Bug")
             and eq(obj(fields.get("priority")).get("name"), "High"))
-    j.check("read keeps the labels", isinstance(fields.get("labels"), list) and sorted(fields["labels"]) == labels)
+    j.check("read keeps the labels", isinstance(fields.get("labels"), list) and same_items(fields["labels"], labels))
     text = "Reproduced on the staging shop as well."
     comment = j.call("POST", f"{issue}/{key}/comment", body={"body": adf(text)})
     j.check("comment keeps its text", adf_text(comment.get("body")) == text)
@@ -1252,7 +1264,7 @@ def zendesk_steps(j):
     read = obj(j.call("GET", path).get("ticket"))
     j.check("read matches the created ticket",
             same(read, ticket, "id", "subject", "description", "status", "priority", "type", "requester_id"))
-    j.check("read keeps the tags", isinstance(read.get("tags"), list) and sorted(read["tags"]) == tags)
+    j.check("read keeps the tags", isinstance(read.get("tags"), list) and same_items(read["tags"], tags))
     replied = obj(j.call("PUT", path, body={"ticket": {"comment": {"body": reply, "public": False}}}).get("ticket"))
     j.check("reply keeps the ticket", eq(replied.get("id"), tid) and eq(replied.get("subject"), subject))
     page = j.call("GET", f"{path}/comments")
@@ -2713,7 +2725,7 @@ def pipedrive_steps(j):
     if isinstance(cursor, str) and cursor:
         query["cursor"] = cursor
     nxt = rows(j.call("GET", "/api/v2/deals", query=query))
-    j.check("cursor reaches the other deal", len(nxt) == 1 and sorted(ids_of(first + nxt)) == sorted([d1, d2]),
+    j.check("cursor reaches the other deal", len(nxt) == 1 and same_items(ids_of(first + nxt), [d1, d2]),
             first=ids_of(first), listed=ids_of(nxt))
     found = dicts(obj(data(j.call("GET", "/api/v2/deals/search", query={"term": word, "fields": "title"}))).get("items"))
     hits = [obj(i.get("item")).get("id") for i in found]
@@ -3137,7 +3149,7 @@ def airtable_steps(j):
     if isinstance(offset, str) and offset:
         query["offset"] = offset
     nxt = dicts(obj(j.call("GET", path, query=query)).get("records"))
-    j.check("offset reaches the other record", len(nxt) == 1 and sorted(ids_of(first + nxt)) == sorted([r1, r2]),
+    j.check("offset reaches the other record", len(nxt) == 1 and same_items(ids_of(first + nxt), [r1, r2]),
             first=ids_of(first), listed=ids_of(nxt))
     j.call("PATCH", f"{path}/{r1}", body={"fields": {f"Colour {tag}": "red"}})
     j.check("an unknown field is refused", j.last["status"] == 422)
@@ -3270,7 +3282,7 @@ def box_steps(j):
     j.check("limit 1 returns one item and the total", len(first) == 1 and eq(page.get("total_count"), 2),
             listed=first, total_count=page.get("total_count"))
     nxt = ids_of(items(c, offset=1, limit=1).get("entries"))
-    j.check("offset 1 reaches the other item", len(nxt) == 1 and sorted(first + nxt) == sorted([l1, l2]),
+    j.check("offset 1 reaches the other item", len(nxt) == 1 and same_items(first + nxt, [l1, l2]),
             first=first, listed=nxt)
     renamed = f"Drafts {tag}"
     answer = call("PUT", f"/2.0/folders/{c}", if_match=etag, body={"name": renamed})
@@ -3564,7 +3576,7 @@ def dropbox_steps(j):
     b = own(obj(rpc("files/create_folder_v2", path=b_path).get("metadata")).get("id"))
     rows = dicts(rpc("files/list_folder", path=top).get("entries"))
     j.check("list_folder holds the children",
-            sorted(ids_of(rows)) == sorted([a, b])
+            same_items(ids_of(rows), [a, b])
             and all(str(r.get("path_lower", "")).startswith(top.lower() + "/") for r in rows), listed=ids_of(rows))
     page = rpc("files/list_folder", path=top, limit=1)
     first, cursor = dicts(page.get("entries")), page.get("cursor")
@@ -3574,7 +3586,7 @@ def dropbox_steps(j):
     nxt = rpc("files/list_folder/continue", cursor=given(cursor, made_up(j, "AAG", 40)))
     rest = dicts(nxt.get("entries"))
     j.check("continue reaches the other entry",
-            len(rest) == 1 and sorted(ids_of(first + rest)) == sorted([a, b]) and nxt.get("has_more") is False,
+            len(rest) == 1 and same_items(ids_of(first + rest), [a, b]) and nxt.get("has_more") is False,
             first=ids_of(first), listed=ids_of(rest), has_more=nxt.get("has_more"))
     to = f"{a_path}/Archive"
     moved = obj(rpc("files/move_v2", from_path=b_path, to_path=to).get("metadata"))
@@ -3673,7 +3685,7 @@ def klaviyo_steps(j):
     if cur:
         query["page[cursor]"] = cur
     rest = rows_of(j.call("GET", "/api/profiles", query=query))
-    j.check("next link reaches the other profile", len(rest) == 1 and sorted(ids_of(first + rest)) == sorted([p1, p2]),
+    j.check("next link reaches the other profile", len(rest) == 1 and same_items(ids_of(first + rest), [p1, p2]),
             first=ids_of(first), listed=ids_of(rest))
     name = f"VIP customers {tag}"
     lst = data(j.call("POST", "/api/lists", body={"data": {"type": "list", "attributes": {"name": name}}}))
@@ -3684,7 +3696,7 @@ def klaviyo_steps(j):
     j.call("POST", f"/api/lists/{lid}/relationships/profiles", body=members)
     added = j.last["status"]
     rows = rows_of(j.call("GET", f"/api/lists/{lid}/profiles"))
-    j.check("list profiles hold the added profiles", sorted(ids_of(rows)) == sorted([p1, p2]),
+    j.check("list profiles hold the added profiles", same_items(ids_of(rows), [p1, p2]),
             add_status=added, listed=ids_of(rows))
     rows = rows_of(j.call("GET", f"/api/profiles/{p1}/lists"))
     j.check("profile's lists hold the list", lid in ids_of(rows), listed=ids_of(rows))
@@ -3737,7 +3749,7 @@ def woocommerce_steps(j):
     first = ids_of(j.call("GET", f"{wc}/products", query={"category": cid, "per_page": 1, "page": 1}))
     j.check("per_page 1 answers one product", len(first) == 1 and first[0] in (pa, pb), listed=first)
     second = ids_of(j.call("GET", f"{wc}/products", query={"category": cid, "per_page": 1, "page": 2}))
-    j.check("page 2 answers the other product", len(second) == 1 and sorted(first + second) == sorted([pa, pb]),
+    j.check("page 2 answers the other product", len(second) == 1 and same_items(first + second, [pa, pb]),
             first=first, listed=second)
     rows = ids_of(j.call("GET", f"{wc}/products", query={"sku": sku}))
     j.check("sku filter finds only the product", rows == [pa], listed=rows)
@@ -3839,7 +3851,7 @@ def statuspage_steps(j):
     first = ids_of(j.call("GET", f"{base}/incidents", query={"q": word, "per_page": 1, "page": 1}))
     j.check("per_page 1 answers one incident", len(first) == 1 and first[0] in (iid, i2), listed=first)
     second = ids_of(j.call("GET", f"{base}/incidents", query={"q": word, "per_page": 1, "page": 2}))
-    j.check("page 2 reaches the other incident", len(second) == 1 and sorted(first + second) == sorted([iid, i2]),
+    j.check("page 2 reaches the other incident", len(second) == 1 and same_items(first + second, [iid, i2]),
             first=first, listed=second)
     j.call("PATCH", f"{base}/incidents/{i2}", body={"incident": {"status": "fixed"}})
     j.check("an unknown status is refused", j.last["status"] == 422)
@@ -3942,7 +3954,7 @@ def zohobooks_steps(j):
             listed=first, has_more_page=more)
     second, more = listed(per_page=1, page=2)
     j.check("page 2 reaches the other invoice",
-            len(second) == 1 and sorted(first + second) == sorted([i1, i2]) and more is False,
+            len(second) == 1 and same_items(first + second, [i1, i2]) and more is False,
             first=first, listed=second, has_more_page=more)
     call("POST", f"/invoices/{i2}/status/sent")
     call("POST", f"/invoices/{i2}/status/void", body={"reason": f"Issued twice, ref {tag}."})

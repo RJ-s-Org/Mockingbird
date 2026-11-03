@@ -485,7 +485,7 @@ components:
       properties:
         object: { type: string, const: page }
         id: { $ref: "#/components/schemas/Id" }
-        created_time: { type: string, format: date-time, description: ISO 8601, minute precision (seconds are 00). }
+        created_time: { type: string, format: date-time, description: "ISO 8601, minute precision (seconds are 00)." }
         last_edited_time: { type: string, format: date-time }
         created_by: { $ref: "#/components/schemas/PartialUser" }
         last_edited_by: { $ref: "#/components/schemas/PartialUser" }

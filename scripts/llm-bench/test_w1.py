@@ -367,5 +367,45 @@ class JourneyTest(unittest.TestCase):
         self.assertFalse(any(r["ok"] for r in sink.rows))
 
 
+class FakeDropbox(FakeStripe):
+    """A Dropbox whose folder listings hold one entry without an `id`."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.reply({"metadata": {"id": "id:aaaaaaaaaaaaaaaaaaaaaa"}, "has_more": False,
+                    "entries": [{"id": "id:aaaaaaaaaaaaaaaaaaaaaa"}, {"name": "no-id"}]})
+
+
+class MissingIdTest(unittest.TestCase):
+    def test_same_items_never_raises(self):
+        self.assertTrue(server_suites.same_items(["b", "a"], ["a", "b"]))
+        self.assertTrue(server_suites.same_items([2, 1], [1, 2]))
+        self.assertFalse(server_suites.same_items(["a", None], ["a", "b"]))
+        self.assertFalse(server_suites.same_items([1, "1"], ["1", "2"]))
+        self.assertFalse(server_suites.same_items(None, ["a"]))
+        self.assertTrue(server_suites.same_items([None, "a"], ["a", None]))
+
+    def test_an_entry_without_an_id_fails_its_check_and_the_journey_goes_on(self):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeDropbox)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys_blind6")
+            server_suites.run_one_journey("dropbox", server_suites.dropbox_steps, Srv, sink, Args, 0)
+        rows = {r["case"]: r for r in sink.rows}
+        listed = rows["dropbox.list_folder holds the children"]
+        self.assertFalse(listed["ok"])
+        self.assertNotEqual(listed["source"], "skipped")
+        self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
