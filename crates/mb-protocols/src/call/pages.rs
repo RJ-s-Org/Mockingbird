@@ -135,7 +135,11 @@ fn carries(call: &OperationCall, name: &str) -> bool {
 
 /// The booleans the response schema of `op` declares in the object at `parents`, each
 /// once.
-fn booleans_at(bundle: &mb_mcm::Bundle, op: &Operation, parents: &[String]) -> Vec<String> {
+pub(super) fn booleans_at(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    parents: &[String],
+) -> Vec<String> {
     let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
         return Vec::new();
     };
@@ -445,26 +449,27 @@ pub(super) fn with_items(body: &Value, items: Vec<Value>) -> Option<Value> {
 /// Writes a token for what `cut` left out of `generated`'s answer, when the answer has
 /// a place for one, keeps the cut and seeds the items left out (see the module's doc).
 /// With no place, a first page of a list paged by number or offset keeps its run
-/// instead ([`runs`]). Items of type `t`.
+/// instead ([`runs`]). Items of type `t`. Whether anything was kept.
 pub(super) async fn mint(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     t: Option<&str>,
     cut: lists::Cut,
     generated: &mut GeneratedResponse,
-) {
+) -> bool {
     let rt = state.rt;
     let op = plan.op;
     let session = &plan.session;
     let Some(body) = generated.body.as_ref() else {
-        return;
+        return false;
     };
     let slot = slot(rt.bundle(), (op, call), body, &cut.size_param);
     if slot.is_none() && !runs::starts(rt.bundle(), (op, call), &cut.size_param) {
-        return;
+        return false;
     }
     // What a delete marker covers is no later page's.
     let mut rest = Vec::with_capacity(cut.rest.len().min(MAX_REST));
+    let mut truncated = cut.truncated;
     // The records the store gave are stored already, as they stand.
     let generated_rest = cut.rest.len().saturating_sub(cut.stored);
     let mut seeded = Vec::new();
@@ -472,6 +477,7 @@ pub(super) async fn mint(
     let scope = deleted::scope(op, call);
     for (at, item) in cut.rest.into_iter().enumerate() {
         if rest.len() >= MAX_REST {
+            truncated = true;
             break;
         }
         let gone = match (t, item.get(&field).and_then(id_string)) {
@@ -488,14 +494,20 @@ pub(super) async fn mint(
         }
     }
     if rest.is_empty() {
-        return;
+        return false;
     }
     let kept = match slot {
         Some(slot) => tokened(rt, plan, call, body, slot, (cut.size, cut.size_param), rest),
-        None => runs::first_page(rt, (plan, call), body, (cut.size, &cut.size_param), rest),
+        None => runs::first_page(
+            rt,
+            (plan, call),
+            body,
+            (cut.size, &cut.size_param),
+            (rest, truncated),
+        ),
     };
     let Some((page, document)) = kept else {
-        return;
+        return false;
     };
     // The items left out are the session's, as a list's items are.
     if let Some(t) = t
@@ -523,9 +535,11 @@ pub(super) async fn mint(
         .await;
     }
     // A cut not kept serves no token: the answer keeps the model's.
-    if state.upsert(session, document).await {
+    let kept = state.upsert(session, document).await;
+    if kept {
         generated.body = Some(page);
     }
+    kept
 }
 
 /// The first page `body` with a token at `slot` for `rest`, and the cut that serves it;

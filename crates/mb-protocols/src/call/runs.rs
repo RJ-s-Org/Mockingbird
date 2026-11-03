@@ -7,45 +7,52 @@
 //! them or as the session's records the page does not show ([`lists::stored_rest`]), is
 //! kept with them as a run, and a later page is the run's next items.
 //!
-//! The parameter is known by its schema alone: an integer query parameter of the list
-//! (no `const` or `enum`, no bare `id`, naming no member of the items) beside the page
-//! size, whose `default` and `minimum` are both `1` (a page number: WooCommerce's,
-//! Zoho's, DigitalOcean's `page`) or both `0` (an offset: Box's `offset`, Contentful's
-//! `skip`). Two such parameters are told apart only by one being named `page` or
-//! `offset`; and one so named whose schema counts the other way (Trello's `page` from
-//! `0`) leaves the list as it was. A request asks for the first page when it carries the
-//! parameter at `1` (or `0`), or not at all.
+//! The parameter is known by the contract's structure: an integer query parameter of the
+//! list (no `const` or `enum`, no bare `id`, naming no member of the items) beside the
+//! page size, whose `default` and `minimum` are both `1` (a page number) or both `0` (an
+//! offset), and that the contract confirms as one: the answer declares one integer member
+//! named as it, beside the list or in an object beside it (Zoho's `page_context.page`,
+//! Box's `offset`), or the parameter is named `page` or `offset` (WooCommerce's bare
+//! array). An integer with such bounds and no such evidence (`min_rating`, `depth`) is
+//! none. Of two confirmed, only one named `page` or `offset` is; and one so named whose
+//! schema counts the other way (Trello's `page` from `0`) leaves the list as it was. A
+//! request asks for the first page when it carries the parameter at `1` (or `0`), or not
+//! at all.
 //!
 //! A run is kept once per route, path values and other query values (the request's but
 //! the page's and the page size's), in one of [`pages::MAX_CUTS`] places those pick,
 //! under the store's reserved type ([`mb_state::INTERNAL_TYPE`]): the page as answered,
-//! and the items after it. A new first page of the same list replaces it; one of another
-//! list whose values pick the same place ends it early, and its later pages go to the
-//! model. A count of the list beside it that counts fewer than the page and the rest is
-//! raised to them, and the more flag (below) that is `false` is `true` where the answer
-//! validates so, as with a token.
+//! and the items after it. Every first page answered replaces it, or ends it when it
+//! leaves nothing out; one of another list whose values pick the same place ends it
+//! early, and its later pages go to the model. A first page holding more items than its
+//! page size (a cut the contract's `minItems` kept from being made) keeps none. A count
+//! of the list beside it that counts fewer than the page and the rest is raised to them.
+//! A value of another number parameter, other than its `default` or `minimum`, keeps no
+//! run and is served none, as [`lists::stored_rest`] says.
 //!
 //! A request on the same route, path and other query values, carrying the page size and
 //! a later page (`page=2`, `offset=1`), is served without a model call: the items at its
-//! place in the run (the first page's, then the rest), as many as its page size asks,
+//! place in the run (the first page's, then the rest, but those deleted since, so a
+//! later page starts where they leave it), as many as its page size asks,
 //! each showing its stored record ([`lists::overlay_stored`]), the query's filters
 //! ([`lists::narrow`]) and the delete markers ([`deleted::drop_from_list`]) applied
-//! again. A page past the run's items is the model's. The one integer member beside the
-//! list, or in an object beside it, named as the parameter and holding the first page's
-//! value (Zoho's `page_context.page`, Box's `offset`) holds the request's; so does one
-//! named as the page size. The more flag is the one boolean the answer declares beside
-//! the list or in an object beside it (Zoho's `page_context.has_more_page`); with none,
-//! or several, there is none. When the first page set it `true`, the last page sets it
-//! `false` where the answer validates so. Such a page is not cached, as the run serves it.
+//! again. A page past the run's items is the model's. The member that confirmed the
+//! parameter holds the request's value where it held the first page's; so does the one
+//! integer member beside the list, or in an object beside it, named as the page size.
+//! The more flag is the one boolean the answer declares in the object holding that
+//! member (`page_context.has_more_page`, as [`pages`]' sits beside its token); with no such
+//! member, or several booleans there, there is none. The first page keeps the model's
+//! value, and the last page sets it `false` where the first said `true`, unless the run
+//! may hold fewer records than the store (a read of it that came back full). Such a page
+//! is not cached, as the run serves it.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says, and plain calls
 //! (no scenario or forced status).
 
-use mb_engine::consistency::list_member;
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
 
-use super::pages::{MAX_CUTS, bound_query, path_of, placed, with_items, with_more, without_more};
+use super::pages::{MAX_CUTS, booleans_at, bound_query, path_of, placed, with_items, without_more};
 use super::*;
 
 /// How a page-start parameter counts.
@@ -82,13 +89,106 @@ impl Style {
     }
 }
 
+/// A list's page-start parameter, confirmed by the contract (see the module's doc).
+struct Position {
+    param: String,
+    style: Style,
+    /// The path of the answer's member echoing it, when there is one.
+    echo: Option<Vec<String>>,
+}
+
+/// The member holding the list in `op`'s answer (`None` for a bare array), and the
+/// schema parts of its items.
+fn answer_lists<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    op: &'a Operation,
+) -> Option<(Option<String>, Vec<&'a Value>)> {
+    let schema = op.success_output()?.schema.as_ref()?;
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    let array = |parts: &[&Value]| lists::types_of(parts).into_iter().eq(["array"]);
+    let (list, array_parts) = if array(&parts) {
+        (None, parts)
+    } else {
+        // As an answer's list is found: an envelope's key first (Box's `entries`
+        // beside `order`), else the only list.
+        let members = mb_engine::consistency::list_members(bundle, schema);
+        let list = mb_engine::consistency::ENVELOPE_KEYS
+            .iter()
+            .find_map(|key| members.iter().find(|m| m == key))
+            .or(match members.as_slice() {
+                [one] => Some(one),
+                _ => None,
+            })?;
+        let member = parts.iter().find_map(|p| p.get("properties")?.get(list))?;
+        (Some(list.clone()), schema_parts(bundle, Some(member)).0)
+    };
+    let items = array_parts.iter().find_map(|p| p.get("items"))?;
+    Some((list, schema_parts(bundle, Some(items)).0))
+}
+
+/// The members `op`'s answer declares beside its list `list`, and those each object
+/// member beside it declares, with their schema parts: each by its path from the top.
+fn beside_list<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    op: &'a Operation,
+    list: &str,
+) -> Vec<(Vec<String>, Vec<&'a Value>)> {
+    let mut out = Vec::new();
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return out;
+    };
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    for (name, member) in parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flatten()
+        .filter(|(name, _)| name.as_str() != list)
+    {
+        let (member_parts, _) = schema_parts(bundle, Some(member));
+        for (inner_name, inner) in member_parts
+            .iter()
+            .filter_map(|p| p.get("properties").and_then(Value::as_object))
+            .flatten()
+        {
+            let (inner_parts, _) = schema_parts(bundle, Some(inner));
+            out.push((vec![name.clone(), inner_name.clone()], inner_parts));
+        }
+        out.push((vec![name.clone()], member_parts));
+    }
+    out
+}
+
+/// The path of the one integer member `op`'s answer declares named `name` beside its
+/// list `list`, or in an object beside it; `None` with none or several.
+fn echo_of(bundle: &mb_mcm::Bundle, op: &Operation, list: &str, name: &str) -> Option<Vec<String>> {
+    let mut found = beside_list(bundle, op, list)
+        .into_iter()
+        .filter(|(path, parts)| {
+            path.last().is_some_and(|last| last == name)
+                && lists::types_of(parts).into_iter().eq(["integer"])
+        })
+        .map(|(path, _)| path);
+    let one = found.next()?;
+    found.next().is_none().then_some(one)
+}
+
 /// The query parameter of `op` that says where a page starts, beside page size
-/// `size_param`, and how it counts (see the module's doc).
-fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option<(String, Style)> {
+/// `size_param`, as the contract confirms it (see the module's doc).
+fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option<Position> {
     let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
-    let mut found: Vec<(&str, Style)> = Vec::new();
+    let (list, item_parts) = answer_lists(bundle, op)?;
+    let named = |name: &str| match mb_mcm::joined_name(name).as_str() {
+        "page" => Some(Style::Number),
+        "offset" => Some(Style::Offset),
+        _ => None,
+    };
+    let mut found: Vec<Position> = Vec::new();
     for (name, schema) in declared {
-        if name == size_param || mb_mcm::is_generic_id(name) {
+        if name == size_param
+            || mb_mcm::is_generic_id(name)
+            // A parameter naming a member of the items filters them.
+            || lists::named_member(bundle, &item_parts, name).is_some()
+        {
             continue;
         }
         let (parts, _) = schema_parts(bundle, Some(schema));
@@ -112,29 +212,28 @@ fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option
             _ => continue,
         };
         // A name saying the other way (Trello's `page` from 0) leaves it unknown.
-        let said = match mb_mcm::joined_name(name).as_str() {
-            "page" => Some(Style::Number),
-            "offset" => Some(Style::Offset),
-            _ => None,
-        };
+        let said = named(name);
         if said.is_some_and(|said| said != style) {
             return None;
         }
-        found.push((name, style));
-    }
-    let named = |name: &str| matches!(mb_mcm::joined_name(name).as_str(), "page" | "offset");
-    let (name, style) = match found.as_slice() {
-        [one] => *one,
-        _ => {
-            let mut by_name = found.iter().filter(|(name, _)| named(name));
-            let one = *by_name.next()?;
-            if by_name.next().is_some() {
-                return None;
-            }
-            one
+        let echo = list
+            .as_deref()
+            .and_then(|list| echo_of(bundle, op, list, name));
+        // Bounds alone (`min_rating`, `depth`) are no evidence.
+        if echo.is_none() && said.is_none() {
+            continue;
         }
-    };
-    Some((name.to_string(), style))
+        found.push(Position {
+            param: name.clone(),
+            style,
+            echo,
+        });
+    }
+    if found.len() > 1 {
+        found.retain(|p| named(&p.param).is_some());
+    }
+    let one = found.pop()?;
+    found.is_empty().then_some(one)
 }
 
 /// A query value as a whole number.
@@ -147,6 +246,44 @@ fn whole(value: &Value) -> Option<usize> {
     usize::try_from(n).ok()
 }
 
+/// Whether every number `call`'s query carries, but under `skip`, is its parameter's
+/// `default` or `minimum`, which asks for nothing: any other (a count, a price) could be
+/// found anywhere, so which items it keeps is not known (as [`lists::stored_rest`] has it).
+fn numbers_ask_nothing(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    call: &OperationCall,
+    skip: [&str; 2],
+) -> bool {
+    let declared = op.input.query.as_ref().and_then(|q| q.get("properties"));
+    call.query
+        .iter()
+        .filter(|(param, _)| !skip.contains(&param.as_str()))
+        .all(|(param, raw)| {
+            let (parts, _) = schema_parts(bundle, declared.and_then(|d| d.get(param.as_str())));
+            let types = lists::types_of(&parts);
+            if !types.contains("integer") && !types.contains("number") {
+                return true;
+            }
+            let text = match raw {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s.trim().to_string(),
+                _ => return false,
+            };
+            if text.is_empty() {
+                return true;
+            }
+            let Ok(n) = text.parse::<f64>() else {
+                return false;
+            };
+            ["default", "minimum"].iter().any(|at| {
+                parts
+                    .iter()
+                    .any(|p| p.get(*at).and_then(Value::as_f64) == Some(n))
+            })
+        })
+}
+
 /// Whether `call` asks for the first page of a list `op` pages by a page number or an
 /// offset beside page size `size_param`: it carries the parameter at its first value, or
 /// not at all.
@@ -155,9 +292,9 @@ pub(super) fn starts(
     (op, call): (&Operation, &OperationCall),
     size_param: &str,
 ) -> bool {
-    position(bundle, op, size_param).is_some_and(|(param, style)| match call.query.get(&param) {
+    position(bundle, op, size_param).is_some_and(|p| match call.query.get(&p.param) {
         None => true,
-        Some(value) => whole(value) == Some(style.first()),
+        Some(value) => whole(value) == Some(p.style.first()),
     })
 }
 
@@ -190,6 +327,8 @@ struct Run {
     /// The first page as answered.
     page: Value,
     rest: Vec<Value>,
+    /// Whether the store may hold more records than `rest`.
+    truncated: bool,
 }
 
 impl Run {
@@ -204,6 +343,7 @@ impl Run {
             "size_param": self.size_param,
             "page": self.page,
             "rest": self.rest,
+            "truncated": self.truncated,
         })
     }
 
@@ -221,116 +361,87 @@ impl Run {
             style: Style::of(value.get("style")?.as_str()?)?,
             size: usize::try_from(value.get("size")?.as_u64()?).ok()?,
             size_param: text(&value, "size_param")?,
+            truncated: value.get("truncated")?.as_bool()?,
             page: value.get_mut("page")?.take(),
             rest,
         })
     }
 }
 
-/// The members `op`'s answer declares beside list answer `body`'s list, and those each
-/// object member beside it declares, with their schema parts: each by its path from the
-/// top.
-fn beside_list<'a>(
-    bundle: &'a mb_mcm::Bundle,
-    op: &'a Operation,
-    body: &Value,
-) -> Vec<(Vec<String>, Vec<&'a Value>)> {
-    let mut out = Vec::new();
-    let (Some(schema), Some(list)) = (
-        op.success_output().and_then(|o| o.schema.as_ref()),
-        list_member(body),
-    ) else {
-        return out;
-    };
-    let (parts, _) = schema_parts(bundle, Some(schema));
-    for (name, member) in parts
-        .iter()
-        .filter_map(|p| p.get("properties").and_then(Value::as_object))
-        .flatten()
-        .filter(|(name, _)| name.as_str() != list)
-    {
-        let (member_parts, _) = schema_parts(bundle, Some(member));
-        for (inner_name, inner) in member_parts
-            .iter()
-            .filter_map(|p| p.get("properties").and_then(Value::as_object))
-            .flatten()
-        {
-            let (inner_parts, _) = schema_parts(bundle, Some(inner));
-            out.push((vec![name.clone(), inner_name.clone()], inner_parts));
-        }
-        out.push((vec![name.clone()], member_parts));
-    }
-    out
-}
-
-/// The one boolean `op`'s answer declares beside list answer `body`'s list, or in an
-/// object member beside it (Zoho's `page_context.has_more_page`): the path of the object
-/// holding it, and its name. With none, or several, which says more pages follow is not
-/// known, and there is none.
-fn flag(bundle: &mb_mcm::Bundle, op: &Operation, body: &Value) -> Option<(Vec<String>, String)> {
-    let mut flags: Vec<Vec<String>> = Vec::new();
-    for (path, parts) in beside_list(bundle, op, body) {
-        if lists::types_of(&parts).into_iter().eq(["boolean"]) && !flags.contains(&path) {
-            flags.push(path);
-        }
-    }
-    let [one] = flags.as_slice() else {
-        return None;
-    };
-    let (name, parents) = one.split_last()?;
-    Some((parents.to_vec(), name.clone()))
-}
-
-/// `body` with the one integer member beside its list, or in an object beside it, named
-/// `name` and holding `was` (Zoho's `page_context.page`, Box's `offset`) holding `now`;
-/// `None` with none or several.
-fn echoed(
+/// The more flag of a list whose page-start parameter is `position`: the one boolean
+/// the answer declares in the object holding its echo, its parents and name.
+fn flag(
     bundle: &mb_mcm::Bundle,
     op: &Operation,
-    body: &Value,
-    name: &str,
-    (was, now): (usize, usize),
-) -> Option<Value> {
-    let found: Vec<Vec<String>> = beside_list(bundle, op, body)
-        .into_iter()
-        .filter(|(path, parts)| {
-            path.last().is_some_and(|last| last == name)
-                && lists::types_of(parts).into_iter().eq(["integer"])
-                && path
-                    .iter()
-                    .try_fold(body, |at, name| at.get(name))
-                    .and_then(whole)
-                    == Some(was)
-        })
-        .map(|(path, _)| path)
-        .collect();
-    let [path] = found.as_slice() else {
-        return None;
+    position: &Position,
+) -> Option<(Vec<String>, String)> {
+    let (_, parents) = position.echo.as_ref()?.split_last()?;
+    match booleans_at(bundle, op, parents).as_slice() {
+        [one] => Some((parents.to_vec(), one.clone())),
+        _ => None,
+    }
+}
+
+/// `body` with the member at `path` holding `now` where it holds `was`.
+fn echoed(body: &Value, path: &[String], (was, now): (usize, usize)) -> Option<Value> {
+    let held = path.iter().try_fold(body, |at, name| at.get(name))?;
+    (whole(held) == Some(was)).then(|| placed(body, path, Some(Value::from(now))))?
+}
+
+/// Forgets the run a first page `call` of a list paged by number or offset replaces,
+/// when the page keeps none.
+pub(super) async fn forget(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+) {
+    let bundle = state.rt.bundle();
+    let op = plan.op;
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
     };
-    placed(body, path, Some(Value::from(now)))
+    let doc = std::cell::OnceCell::new();
+    let Some((size_param, _)) = mb_engine::budget::requested_page(
+        op.input.query.as_ref(),
+        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
+        call,
+    ) else {
+        return;
+    };
+    let Some(position) = position(bundle, op, size_param) else {
+        return;
+    };
+    if !starts(bundle, (op, call), size_param) {
+        return;
+    }
+    let id = key(
+        op,
+        &path_of(call),
+        &bound_query(call, &position.param, size_param),
+    );
+    state.delete(&plan.session, INTERNAL_TYPE, &id).await;
 }
 
 /// The first page `body` of a list paged by number or offset, as it is served with
-/// `rest` after it, and the run that keeps them (see the module's doc); `None` when
-/// `call` asks for no first page, or no such page validates.
+/// `rest` after it (and whether the store may hold more), and the run that keeps them
+/// (see the module's doc); `None` when `call` asks for no first page, or no such page
+/// validates.
 pub(super) fn first_page(
     rt: &MockRuntime,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     body: &Value,
     (size, size_param): (usize, &str),
-    rest: Vec<Value>,
+    (rest, truncated): (Vec<Value>, bool),
 ) -> Option<(Value, StoredResource)> {
     let bundle = rt.bundle();
     let op = plan.op;
-    let (param, style) = position(bundle, op, size_param)?;
-    if !starts(bundle, (op, call), size_param) {
+    let position = position(bundle, op, size_param)?;
+    if !starts(bundle, (op, call), size_param)
+        || !numbers_ask_nothing(bundle, op, call, [&position.param, size_param])
+    {
         return None;
     }
-    // A parameter that names a member of the items filters them.
-    let schema = op.success_output()?.schema.as_ref()?;
-    let mut held = None;
-    let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
-    if lists::named_member(bundle, &item_parts, &param).is_some() {
+    // A page longer than its size shows items a later page would repeat.
+    if list_items(body).map(Vec::len) != Some(size) {
         return None;
     }
     let valid = |candidate: &Value| {
@@ -339,32 +450,24 @@ pub(super) fn first_page(
             .is_some()
     };
     // A count of the list that counts less than the page and the rest counts them.
-    let known = list_items(body).map_or(0, Vec::len) + rest.len();
-    let counted = deleted::with_count_at_least(rt, op, body, known);
-    let more = flag(bundle, op, body);
-    let page = counted
-        .iter()
-        .chain(std::iter::once(body))
-        .find_map(|base| {
-            // More to come, where the answer allows saying so.
-            more.as_ref()
-                .and_then(|(parents, flag)| with_more(base, parents, flag))
-                .filter(|more| valid(more))
-                .or_else(|| valid(base).then(|| base.clone()))
-        })?;
-    let query = bound_query(call, &param, size_param);
+    let known = size + rest.len();
+    let page = deleted::with_count_at_least(rt, op, body, known)
+        .filter(|counted| valid(counted))
+        .or_else(|| valid(body).then(|| body.clone()))?;
+    let query = bound_query(call, &position.param, size_param);
     let path = path_of(call);
     let id = key(op, &path, &query);
     let run = Run {
         op: op.id.clone(),
         path,
         query,
-        param,
-        style,
+        param: position.param,
+        style: position.style,
         size,
         size_param: size_param.to_string(),
         page: page.clone(),
         rest,
+        truncated,
     };
     let document = StoredResource {
         resource_type: INTERNAL_TYPE.to_string(),
@@ -391,10 +494,13 @@ pub(super) async fn serve(
         || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
         call,
     )?;
-    let (param, style) = position(bundle, op, size_param)?;
-    let at = whole(call.query.get(&param)?)?;
+    let position = position(bundle, op, size_param)?;
+    let at = whole(call.query.get(&position.param)?)?;
+    if !numbers_ask_nothing(bundle, op, call, [&position.param, size_param]) {
+        return None;
+    }
     let size = usize::try_from(limit.items).ok()?;
-    let start = match style {
+    let start = match position.style {
         Style::Number => at.checked_sub(1)?.checked_mul(size)?,
         Style::Offset => at,
     };
@@ -402,7 +508,7 @@ pub(super) async fn serve(
         return None;
     }
     let path = path_of(call);
-    let query = bound_query(call, &param, size_param);
+    let query = bound_query(call, &position.param, size_param);
     let found = state
         .get(&plan.session, INTERNAL_TYPE, &key(op, &path, &query))
         .await?;
@@ -410,46 +516,71 @@ pub(super) async fn serve(
     if run.op != op.id
         || run.path != path
         || run.query != query
-        || run.param != param
-        || run.style != style
+        || run.param != position.param
+        || run.style != position.style
         || run.size_param != size_param
     {
         return None;
     }
-    let mut sequence = list_items(&run.page)?.clone();
-    sequence.extend(run.rest);
+    // The run's items, the first page's then the rest, but those deleted since: a later
+    // page starts where they leave it, as the API's would. Read up to one past the page,
+    // which says whether more follow.
+    let t = op.resource_type.as_deref();
+    let field = item_identity(bundle, op, &run.page);
+    let scope = deleted::scope(op, call);
+    let wanted = start.saturating_add(size);
+    let mut live = Vec::new();
+    for item in list_items(&run.page)?.iter().cloned().chain(run.rest) {
+        if live.len() > wanted {
+            break;
+        }
+        let gone = match (t, item.get(&field).and_then(id_string)) {
+            (Some(t), Some(id)) if state.tracks_deleted => {
+                deleted::is_deleted(state, &plan.session, t, scope.as_deref(), &id).await
+            }
+            _ => false,
+        };
+        if !gone {
+            live.push(item);
+        }
+    }
     // Past the items the run knows, the page is the model's.
-    if start >= sequence.len() {
+    if start >= live.len() {
         return None;
     }
-    let end = start.saturating_add(size).min(sequence.len());
-    let mut body = with_items(&run.page, sequence.get(start..end)?.to_vec())?;
+    let more = live.len() > wanted;
+    let end = wanted.min(live.len());
+    let mut body = with_items(&run.page, live.get(start..end)?.to_vec())?;
     // What the session wrote since, and the request's filters, as on a first page.
-    let t = op.resource_type.as_deref();
     lists::overlay_stored(state, (plan, call), t, &mut body).await;
     let _ = lists::narrow(rt, plan, call, &mut body);
     let valid = |candidate: &Value| plan.engine.serve_stored(bundle, op, candidate, None);
     // Where the answer says which page it is, and its size, it says this one's.
-    for (name, was, now) in [
-        (param.as_str(), style.first(), at),
-        (size_param, run.size, size),
+    let list = answer_lists(bundle, op).and_then(|(list, _)| list);
+    let size_echo = list
+        .as_deref()
+        .and_then(|list| echo_of(bundle, op, list, size_param));
+    for (echo, was, now) in [
+        (position.echo.as_ref(), position.style.first(), at),
+        (size_echo.as_ref(), run.size, size),
     ] {
         if was != now
-            && let Some(said) = echoed(bundle, op, &body, name, (was, now))
+            && let Some(said) = echo.and_then(|path| echoed(&body, path, (was, now)))
             && valid(&said).is_some()
         {
             body = said;
         }
     }
-    let mut served = if end < sequence.len() {
-        valid(&body)?
-    } else {
+    let last = !more && !run.truncated;
+    let mut served = if last {
         // The last page: no more, as the first page said there was, where the answer
         // allows.
-        flag(bundle, op, &body)
+        flag(bundle, op, &position)
             .and_then(|(parents, flag)| without_more(&body, &run.page, &parents, &flag))
             .and_then(|done| valid(&done))
             .or_else(|| valid(&body))?
+    } else {
+        valid(&body)?
     };
     if let Some(t) = t
         && state.tracks_deleted

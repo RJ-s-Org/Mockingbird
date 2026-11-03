@@ -1220,13 +1220,22 @@ pub(crate) async fn complete(
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
             let cut = lists::narrow(rt, plan, call, body);
-            if !fallback {
-                // A full page whose rest the model left out, but the store holds.
-                let cut =
-                    lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await;
-                if let Some(cut) = cut {
-                    pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+            // A full page whose rest the model left out, but the store holds.
+            let cut = match fallback {
+                false => {
+                    lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await
                 }
+                true => None,
+            };
+            let kept = match cut {
+                Some(cut) => {
+                    pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await
+                }
+                None => false,
+            };
+            // A first page kept nothing: no run of an earlier one serves its next pages.
+            if !kept {
+                runs::forget(&mut state, (plan, call)).await;
             }
         }
         if (200..300).contains(&generated.status)

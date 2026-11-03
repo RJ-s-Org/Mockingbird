@@ -452,6 +452,9 @@ pub(super) struct Cut {
     /// How many of the last items of `rest` the session's records gave (see
     /// [`stored_rest`]), not the answer: they are stored already.
     pub(super) stored: usize,
+    /// Whether more records may follow `rest` than were read: a read of the store that
+    /// came back full.
+    pub(super) truncated: bool,
 }
 
 /// Applies a list read's equality filters and page size to its generated answer (see
@@ -521,6 +524,7 @@ pub(super) fn narrow(
         size,
         size_param: page.map(|(name, _)| name.to_string())?,
         stored: 0,
+        truncated: false,
     })
 }
 
@@ -831,6 +835,7 @@ pub(super) async fn stored_rest(
             .is_some()
     };
     let mut records = state.list(&plan.session, &item_type, MAX_STORED_REST).await;
+    let full_read = records.len() >= MAX_STORED_REST;
     // The store gives the most recently written first; the least recently written go
     // first here, which for records only created is the order they were made in.
     records.reverse();
@@ -864,9 +869,11 @@ pub(super) async fn stored_rest(
         size,
         size_param: size_param.to_string(),
         stored: 0,
+        truncated: false,
     });
     cut.rest.extend(missing);
     cut.stored = stored;
+    cut.truncated = full_read;
     Some(cut)
 }
 
