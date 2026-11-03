@@ -2145,7 +2145,7 @@ fn an_applied_effect_is_counted() {
 #[test]
 fn an_effect_on_a_missing_resource_is_rejected() {
     rejected(json!({"type": "bookings", "id": "nope", "set": {"status": "cancelled"}}));
-    rejected(json!({"type": "nothing", "id": "b1", "set": {"status": "cancelled"}}));
+    rejected(json!({"type": "nothing", "id": "nope", "set": {"status": "cancelled"}}));
 }
 
 #[test]
@@ -5578,4 +5578,334 @@ async fn a_create_keeps_an_id_another_type_holds_that_the_request_does_not_name(
     assert_eq!(account["id"], "42", "{account}");
     let (_, source, _) = h.call("GET", "/accounts/42", None).await;
     assert_eq!(source, "state");
+}
+
+/// A playlist holding tracks and counts, its tracks, and issues and meeting
+/// registrants that close and approve: for effects whose type, members or keys
+/// are not written as the contract has them.
+const EFFECT_SHAPES: &str = r##"
+openapi: 3.0.0
+info: {title: Effect shapes, version: "1"}
+paths:
+  /playlists/{id}:
+    get:
+      operationId: getPlaylist
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Playlist"}}}}
+  /playlists/{id}/refresh:
+    post:
+      operationId: refreshPlaylist
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}
+  /playlists/{playlist_id}/tracks/{id}/like:
+    post:
+      operationId: likeTrack
+      parameters:
+        - {name: playlist_id, in: path, required: true, schema: {type: string}}
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}
+  /tracks/{id}:
+    get:
+      operationId: getTrack
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Track"}}}}
+  /issues/{id}:
+    get:
+      operationId: getIssue
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}
+  /issues/{id}/close:
+    post:
+      operationId: closeIssue
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}
+  /meeting_registrants/{id}:
+    get:
+      operationId: getMeetingRegistrant
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Registrant"}}}}
+  /meeting_registrants/{id}/approve:
+    post:
+      operationId: approveMeetingRegistrant
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}
+components:
+  schemas:
+    Playlist:
+      type: object
+      required: [id, name, tracks, stats]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        tracks:
+          type: object
+          required: [total, items]
+          properties:
+            total: {type: integer}
+            items: {type: array, items: {$ref: "#/components/schemas/PlaylistTrack"}}
+        stats:
+          type: object
+          required: [member_count, follower_count]
+          properties: {member_count: {type: integer}, follower_count: {type: integer}}
+        sys.version: {type: integer}
+    PlaylistTrack:
+      type: object
+      required: [track]
+      properties: {added_at: {type: string}, track: {$ref: "#/components/schemas/Track"}}
+    Track:
+      type: object
+      required: [id, uri, name]
+      properties: {id: {type: string}, uri: {type: string}, name: {type: string}}
+    Issue:
+      type: object
+      required: [id, state]
+      properties: {id: {type: string}, state: {type: string}}
+    Registrant:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}}
+    Snapshot:
+      type: object
+      required: [snapshot_id]
+      properties: {snapshot_id: {type: string}}
+"##;
+
+fn track(id: &str) -> Value {
+    json!({"id": id, "uri": format!("spotify:track:{id}"), "name": format!("Song {id}")})
+}
+
+/// Playlist `p1` holding track `t1`, with counts and a declared dotted member.
+fn playlist() -> Value {
+    json!({
+        "id": "p1",
+        "name": "Mix",
+        "tracks": {"total": 1, "items": [{"added_at": "2026-01-01", "track": track("t1")}]},
+        "stats": {"member_count": 0, "follower_count": 7},
+        "sys.version": 1,
+    })
+}
+
+/// A store holding [`playlist`], tracks `t1` and `t2`, issue `i1` and meeting
+/// registrant `r1`; a runtime over [`EFFECT_SHAPES`] whose one answer lists
+/// `effects`; and the request log.
+async fn shaped(effects: Value) -> (axum::Router, Arc<MemoryStore>, Arc<crate::support::Records>) {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "playlists", "p1", playlist()).await;
+    store(&state, "tracks", "t1", track("t1")).await;
+    store(&state, "tracks", "t2", track("t2")).await;
+    store(&state, "issues", "i1", json!({"id": "i1", "state": "open"})).await;
+    store(
+        &state,
+        "meeting_registrants",
+        "r1",
+        json!({"id": "r1", "status": "pending"}),
+    )
+    .await;
+    let answer = json!({"response": {"snapshot_id": "s1"}, "effects": effects});
+    let records = Arc::new(crate::support::Records::default());
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(EFFECT_SHAPES.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    (http_rest::router(Arc::new(rt)), state, records)
+}
+
+/// Posts `uri` to a [`shaped`] runtime answering `effect`, and returns the store and
+/// what the request log says became of the effect.
+async fn shaped_effect(uri: &str, effect: Value) -> (Arc<MemoryStore>, Value) {
+    let (router, state, records) = shaped(json!([effect])).await;
+    let req = Request::post(uri).body(Body::empty()).unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let record = records.wait(1).await.remove(0);
+    let outcome = record.request["effects"][0].clone();
+    (state, outcome)
+}
+
+/// An effect naming its type in the singular, or in another case or spelling,
+/// goes to the one shown type of that stem.
+#[tokio::test]
+async fn an_effect_type_resolves_to_the_shown_type_of_its_stem() {
+    for (uri, effect, t, id, member, value) in [
+        (
+            "/playlists/p1/refresh",
+            json!({"type": "playlist", "id": "p1", "set": {"name": "Renamed"}}),
+            "playlists",
+            "p1",
+            "name",
+            "Renamed",
+        ),
+        (
+            "/issues/i1/close",
+            json!({"type": "Issue", "id": "i1", "set": {"state": "closed"}}),
+            "issues",
+            "i1",
+            "state",
+            "closed",
+        ),
+        (
+            "/meeting_registrants/r1/approve",
+            json!({"type": "meetingRegistrant", "id": "r1", "set": {"status": "approved"}}),
+            "meeting_registrants",
+            "r1",
+            "status",
+            "approved",
+        ),
+    ] {
+        let (state, outcome) = shaped_effect(uri, effect.clone()).await;
+        assert_eq!(outcome["outcome"], "applied", "{effect}: {outcome}");
+        assert_eq!(outcome["type"], t, "{outcome}");
+        assert_eq!(stored_data(&state, t, id).await[member], value, "{effect}");
+    }
+}
+
+/// A type matching no shown type's stem goes to the one shown type holding a
+/// record under the effect's id.
+#[tokio::test]
+async fn an_effect_type_resolves_to_the_shown_type_holding_its_id() {
+    let effect = json!({"type": "song", "id": "t1", "set": {"name": "Liked"}});
+    let (state, outcome) = shaped_effect("/playlists/p1/tracks/t1/like", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    assert_eq!(outcome["type"], "tracks");
+    assert_eq!(stored_data(&state, "tracks", "t1").await["name"], "Liked");
+}
+
+/// Two shown types holding the id, and no stem telling them apart: no guess.
+#[tokio::test]
+async fn an_effect_type_held_under_its_id_by_two_shown_types_is_rejected() {
+    let (router, state, records) = shaped(json!([
+        {"type": "thing", "id": "x1", "set": {"name": "Changed"}},
+    ]))
+    .await;
+    let mut both = playlist();
+    both["id"] = json!("x1");
+    store(&state, "playlists", "x1", both.clone()).await;
+    store(&state, "tracks", "x1", track("x1")).await;
+    let req = Request::post("/playlists/x1/tracks/x1/like")
+        .body(Body::empty())
+        .unwrap();
+    router.oneshot(req).await.unwrap();
+    let record = records.wait(1).await.remove(0);
+    let outcome = &record.request["effects"][0];
+    assert_eq!(outcome["outcome"], "rejected", "{outcome}");
+    assert_eq!(outcome["reason"], "no schema to check against");
+    assert_eq!(stored_data(&state, "playlists", "x1").await, both);
+    assert_eq!(stored_data(&state, "tracks", "x1").await, track("x1"));
+}
+
+/// Only a type the prompt showed may be chosen: an issue this call was not shown
+/// stays as it is.
+#[tokio::test]
+async fn an_effect_type_never_resolves_to_a_type_not_shown() {
+    let effect = json!({"type": "issue", "id": "i1", "set": {"state": "closed"}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "rejected", "{outcome}");
+    assert_eq!(
+        stored_data(&state, "issues", "i1").await,
+        json!({"id": "i1", "state": "open"})
+    );
+}
+
+/// A nested object merges into what is stored: the counts it leaves out stay.
+#[tokio::test]
+async fn an_effect_merges_into_a_nested_object() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {"stats": {"member_count": 3}}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    let stored = stored_data(&state, "playlists", "p1").await;
+    assert_eq!(
+        stored["stats"],
+        json!({"member_count": 3, "follower_count": 7})
+    );
+    assert_eq!(stored["tracks"], playlist()["tracks"]);
+}
+
+/// A flat effect that suits the schema applies as it always did.
+#[tokio::test]
+async fn a_flat_effect_applies_as_before() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {"name": "Renamed"}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    let mut expected = playlist();
+    expected["name"] = json!("Renamed");
+    assert_eq!(stored_data(&state, "playlists", "p1").await, expected);
+}
+
+/// Items naming stored tracks by their identity and links alone are those tracks.
+#[tokio::test]
+async fn stub_items_are_filled_from_the_stored_records() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {"tracks": {"total": 2, "items": [
+        {"added_at": "2026-01-01", "track": {"id": "t1", "uri": "spotify:track:t1"}},
+        {"added_at": "2026-02-02", "track": {"id": "t2"}},
+    ]}}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    let stored = stored_data(&state, "playlists", "p1").await;
+    assert_eq!(
+        stored["tracks"],
+        json!({"total": 2, "items": [
+            {"added_at": "2026-01-01", "track": track("t1")},
+            {"added_at": "2026-02-02", "track": track("t2")},
+        ]})
+    );
+}
+
+/// A stub of a record the session does not hold, or one that says otherwise than
+/// the stored record, is not filled: the whole effect is rejected.
+#[tokio::test]
+async fn stub_items_with_no_matching_stored_record_are_rejected() {
+    for stub in [
+        json!({"id": "t9", "uri": "spotify:track:t9"}),
+        json!({"id": "t2", "uri": "spotify:track:other"}),
+    ] {
+        let effect = json!({"type": "playlists", "id": "p1", "set": {
+            "name": "Renamed",
+            "tracks": {"total": 2, "items": [{"track": track("t1")}, {"track": stub}]},
+        }});
+        let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+        assert_eq!(outcome["outcome"], "rejected", "{outcome}");
+        assert_eq!(outcome["reason"], "the merged resource breaks its schema");
+        assert_eq!(stored_data(&state, "playlists", "p1").await, playlist());
+    }
+}
+
+/// A dotted key the schema does not declare is a path into the object member its
+/// first segment names.
+#[tokio::test]
+async fn a_dotted_key_sets_the_nested_member() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {"stats.member_count": 1}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    let stored = stored_data(&state, "playlists", "p1").await;
+    assert_eq!(
+        stored["stats"],
+        json!({"member_count": 1, "follower_count": 7})
+    );
+    assert!(stored.get("stats.member_count").is_none(), "{stored}");
+}
+
+/// A dotted name the schema declares is that member.
+#[tokio::test]
+async fn a_declared_dotted_name_is_kept() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {"sys.version": 2}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    let stored = stored_data(&state, "playlists", "p1").await;
+    assert_eq!(stored["sys.version"], 2);
+    assert!(stored.get("sys").is_none(), "{stored}");
 }
