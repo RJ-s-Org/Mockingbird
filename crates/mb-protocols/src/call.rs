@@ -1758,9 +1758,9 @@ impl<'a> Place<'a> {
     }
 
     /// Whether `new` is of the variant `held` is, at a place that is a union of two or
-    /// more object branches (`oneOf`, `anyOf`): both hold the same value of its
-    /// discriminator, `discriminator.propertyName` or else a member every object branch
-    /// pins (`const`, a one-value `enum`). Anywhere else there is one variant.
+    /// more object branches (`oneOf`, `anyOf`): no two values of its discriminator,
+    /// `discriminator.propertyName` or else a member a part of every object branch pins
+    /// (`const`, a one-value `enum`), tell them apart. Anywhere else there is one variant.
     fn same_variant(
         &self,
         rt: &MockRuntime,
@@ -1781,13 +1781,19 @@ impl<'a> Place<'a> {
         }) else {
             return true;
         };
+        // Any part of a branch may pin it (`allOf: [$ref Base, {...}]`), whatever
+        // the others declare.
         let pins = |key: &str| {
             branches.iter().all(|b| {
-                b.property(key).is_some_and(|s| {
-                    s.get("const").is_some()
-                        || s.get("enum")
-                            .and_then(Value::as_array)
-                            .is_some_and(|e| e.len() == 1)
+                b.parts.iter().any(|p| {
+                    p.get("properties")
+                        .and_then(|members| members.get(key))
+                        .is_some_and(|s| {
+                            s.get("const").is_some()
+                                || s.get("enum")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|e| e.len() == 1)
+                        })
                 })
             })
         };
@@ -1806,7 +1812,10 @@ impl<'a> Place<'a> {
                     .find(|k| pins(k))
                     .cloned()
             });
-        key.is_some_and(|k| matches!((held.get(&k), new.get(&k)), (Some(a), Some(b)) if a == b))
+        // Another variant only when both say which, and differ: a value that leaves
+        // it out says nothing of its variant. With no discriminator to tell, the
+        // variants cannot be told apart, and the value is taken for another one.
+        key.is_some_and(|k| !matches!((held.get(&k), new.get(&k)), (Some(a), Some(b)) if a != b))
     }
 
     /// The resource type the place's `$ref` is a definition of.
@@ -1893,9 +1902,9 @@ fn merge_at(
 
 /// Whether `new` names another object than `held` at `place`. For a place of a
 /// resource type, an identity member of that type (see [`identity_members`]) the place
-/// declares holds another value. For an inline object, a string member that is a
-/// generic id (`id`, `_id`, see [`mb_mcm::is_generic_id`]) or that the place declares
-/// `readOnly` does.
+/// declares holds another value. For an inline object, a scalar member that is a
+/// generic id (`id`, `_id`, see [`mb_mcm::is_generic_id`]) does, of any type, or a
+/// string member the place declares `readOnly`, by its `$ref`s and `allOf`s too.
 fn reassigns(
     rt: &MockRuntime,
     place: &Place<'_>,
@@ -1909,15 +1918,19 @@ fn reassigns(
             .filter(|k| place.property(k).is_some())
             .any(|k| changed(k)),
         None => new.iter().any(|(k, v)| {
-            v.is_string()
-                && held.get(k).is_some_and(Value::is_string)
-                && changed(k)
-                && (mb_mcm::is_generic_id(k)
-                    || place
-                        .property(k)
-                        .and_then(|s| s.get("readOnly"))
-                        .and_then(Value::as_bool)
-                        == Some(true))
+            let scalar = |v: &Value| !v.is_object() && !v.is_array();
+            let read_only = || {
+                Place::of(rt, place.property(k))
+                    .parts
+                    .iter()
+                    .any(|p| p.get("readOnly").and_then(Value::as_bool) == Some(true))
+            };
+            changed(k)
+                && if mb_mcm::is_generic_id(k) {
+                    scalar(v) && held.get(k).is_some_and(scalar)
+                } else {
+                    v.is_string() && held.get(k).is_some_and(Value::is_string) && read_only()
+                }
         }),
     }
 }

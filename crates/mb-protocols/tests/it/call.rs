@@ -5710,6 +5710,30 @@ components:
             - $ref: "#/components/schemas/Email"
             - $ref: "#/components/schemas/Phone"
           discriminator: {propertyName: kind}
+        milestone:
+          type: object
+          properties: {id: {type: integer}, title: {type: string}, due_on: {type: string}}
+        reviewer:
+          type: object
+          properties: {handle: {$ref: "#/components/schemas/Handle"}, note: {type: string}}
+        shipping:
+          oneOf:
+            - $ref: "#/components/schemas/Pickup"
+            - $ref: "#/components/schemas/Courier"
+    Handle: {type: string, readOnly: true}
+    ShipBase:
+      type: object
+      properties: {mode: {type: string}, note: {type: string}}
+    Pickup:
+      allOf:
+        - $ref: "#/components/schemas/ShipBase"
+        - type: object
+          properties: {mode: {type: string, enum: [pickup]}, store: {type: string}}
+    Courier:
+      allOf:
+        - $ref: "#/components/schemas/ShipBase"
+        - type: object
+          properties: {mode: {type: string, enum: [courier]}, carrier: {type: string}}
     Card:
       type: object
       additionalProperties: false
@@ -5722,11 +5746,9 @@ components:
       properties: {type: {type: string, enum: [bank]}, iban: {type: string}}
     Email:
       type: object
-      required: [kind]
       properties: {kind: {type: string}, address: {type: string}}
     Phone:
       type: object
-      required: [kind]
       properties: {kind: {type: string}, digits: {type: string}}
     PlaylistTrack:
       type: object
@@ -5774,6 +5796,9 @@ fn playlist() -> Value {
         "tag": {"_id": "g1", "label": "Chill", "color": "blue"},
         "payment": {"type": "card", "last4": "4242", "brand": "visa"},
         "contact": {"kind": "email", "address": "cy@example.com"},
+        "milestone": {"id": 7, "title": "v1", "due_on": "2026-01-01"},
+        "reviewer": {"handle": "h1", "note": "Old note"},
+        "shipping": {"mode": "pickup", "store": "S1", "note": "Back door"},
     })
 }
 
@@ -6150,6 +6175,70 @@ async fn a_union_of_the_same_variant_merges() {
         payment,
         json!({"type": "card", "last4": "1111", "brand": "visa"})
     );
+}
+
+/// A partial update that leaves the discriminator out is of no other variant: it
+/// merges, keeping the card's `type` and `brand`.
+#[tokio::test]
+async fn a_union_update_without_its_discriminator_merges() {
+    let payment = playlist_member_after(json!({"payment": {"last4": "1111"}}), "payment").await;
+    assert_eq!(
+        payment,
+        json!({"type": "card", "last4": "1111", "brand": "visa"})
+    );
+}
+
+/// A stored value holding no discriminator is of no other variant either: it merges.
+#[tokio::test]
+async fn a_union_value_stored_without_its_discriminator_merges() {
+    let (router, state, records) = shaped(json!([
+        {"type": "playlists", "id": "p1", "set": {"payment": {"type": "card", "last4": "1111"}}},
+    ]))
+    .await;
+    let mut held = playlist();
+    held["payment"] = json!({"last4": "4242", "brand": "visa"});
+    store(&state, "playlists", "p1", held).await;
+    let req = Request::post("/playlists/p1/refresh")
+        .body(Body::empty())
+        .unwrap();
+    router.oneshot(req).await.unwrap();
+    let record = records.wait(1).await.remove(0);
+    assert_eq!(record.request["effects"][0]["outcome"], "applied");
+    assert_eq!(
+        stored_data(&state, "playlists", "p1").await["payment"],
+        json!({"last4": "1111", "brand": "visa", "type": "card"})
+    );
+}
+
+/// Branches made of a shared base and a part pinning the discriminator: the pin
+/// decides, so the same variant merges.
+#[tokio::test]
+async fn a_union_discriminator_pinned_in_an_all_of_part_is_found() {
+    let shipping = playlist_member_after(
+        json!({"shipping": {"mode": "pickup", "store": "S2"}}),
+        "shipping",
+    )
+    .await;
+    assert_eq!(
+        shipping,
+        json!({"mode": "pickup", "store": "S2", "note": "Back door"})
+    );
+}
+
+/// A generic id of any scalar type names the object: milestone 8 is not milestone 7,
+/// and keeps nothing of it.
+#[tokio::test]
+async fn an_inline_object_with_another_numeric_id_is_replaced() {
+    let milestone =
+        playlist_member_after(json!({"milestone": {"id": 8, "title": "v2"}}), "milestone").await;
+    assert_eq!(milestone, json!({"id": 8, "title": "v2"}));
+}
+
+/// A member `readOnly` by its `$ref` is an identity as much as one declared so.
+#[tokio::test]
+async fn a_read_only_identity_through_a_ref_is_found() {
+    let reviewer = playlist_member_after(json!({"reviewer": {"handle": "h2"}}), "reviewer").await;
+    assert_eq!(reviewer, json!({"handle": "h2"}));
 }
 
 /// A redacted value is restored from the record at its own place only: a new owner
