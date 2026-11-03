@@ -51,6 +51,10 @@ Suites (contracts are in-repo, so the bench is reproducible):
   `scripts/llm-bench/contracts/blind5/`: Airtable records, Okta users, Box folders,
   Intercom conversations and Cal.com bookings. Not in the default suites. Same rule;
   no check gates the rest.
+- journeys_blind6: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind6/`: Dropbox folders, Klaviyo profiles and lists,
+  WooCommerce products and orders, Statuspage incidents and Zoho Books invoices. Not
+  in the default suites. Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -86,7 +90,7 @@ from datetime import datetime, timedelta, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
-          "journeys_blind3", "journeys_blind4", "journeys_blind5")
+          "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -3462,6 +3466,513 @@ def run_journeys_blind5(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- sixth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind6/). They were picked for
+# API styles: RPC calls that are all POSTs with JSON arguments, 409 errors as tagged
+# unions and a continue cursor (Dropbox), JSON:API documents with links, relationships,
+# filter expressions and page[cursor] (Klaviyo), integer ids, bare arrays paged by page
+# number and child notes (WooCommerce), resources nested two levels under a page, with
+# wrapped bodies and incident updates (Statuspage), and an invoice state machine driven
+# by status action endpoints and payments, inside a response envelope (Zoho Books). No
+# check gates the rest: a journey goes on with an id of its own when a call gave none. A
+# check asserts only what its contract promises a client. Do not edit a check to suit
+# results.
+BLIND6_CHECKS = {
+    "dropbox": [
+        "folder keeps its path", "a taken path is refused", "metadata reads the folder back",
+        "metadata by id names the path", "list_folder holds the children", "limit 1 returns one entry and a cursor",
+        "continue reaches the other entry", "move answers the new path", "moved folder is gone from its old path",
+        "moved folder keeps its id", "tags list the added tag", "a removed tag is gone",
+        "deleted folder is not found", "deleting a folder removes its children",
+    ],
+    "klaviyo": [
+        "profile keeps its email and names", "profile links to itself", "a taken email names the profile that has it",
+        "read matches the created profile", "patch changes the attribute sent",
+        "patch keeps the attributes it was not sent", "email filter finds only the profile",
+        "page size 1 answers one profile and a next link", "next link reaches the other profile",
+        "list keeps its name", "list profiles hold the added profiles", "profile's lists hold the list",
+        "a removed profile leaves the list", "deleted list is not found",
+    ],
+    "woocommerce": [
+        "product keeps its sku and price", "product names its category", "a taken sku is refused",
+        "read matches the created product", "update changes the fields sent", "update keeps the fields it was not sent",
+        "per_page 1 answers one product", "page 2 answers the other product", "sku filter finds only the product",
+        "order line names the product and quantity", "order line costs the price times the quantity",
+        "order notes list the note", "completed order reads as completed", "deleted product is not found",
+    ],
+    "statuspage": [
+        "component keeps its page, name and status", "incident keeps its name and status",
+        "first update carries the body", "affected component shows the outage",
+        "status change adds an incident update", "edited update keeps its new body",
+        "incident subscribers list the subscriber", "unresolved list holds the incident",
+        "per_page 1 answers one incident", "page 2 reaches the other incident", "an unknown status is refused",
+        "resolved incident leaves the unresolved list", "resolving restores the component",
+        "deleted incident is not found",
+    ],
+    "zohobooks": [
+        "a new invoice is a draft", "invoice total adds its lines", "a taken invoice number is refused",
+        "read matches the created invoice", "update changes the reference and keeps the lines",
+        "marked-sent invoice reads as sent", "payment applies to the invoice", "a part payment leaves the rest owed",
+        "status filter finds the partly paid invoice", "per_page 1 answers one invoice and more pages",
+        "page 2 reaches the other invoice", "voided invoice reads as void", "a void invoice returns to draft",
+        "deleted invoice is not found",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND6_CHECKS)
+BLIND6_DIR = "scripts/llm-bench/contracts/blind6"
+# Contracts alone: no persona.
+BLIND6_MOCKS = {name: (f"{BLIND6_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND6_CHECKS}
+LOWER_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def dropbox_steps(j):
+    # Every call is a POST of JSON arguments. The folder name is mixed case, so
+    # path_lower and path_display differ. Errors the contract declares answer 409 with
+    # an error_summary that starts with the error's tags.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def rpc(route, **args):
+        return obj(j.call("POST", f"/2/{route}", body=args))
+
+    def summary(answer):
+        return answer.get("error_summary") if isinstance(answer.get("error_summary"), str) else ""
+
+    def own(value):
+        return value if isinstance(value, str) and value.startswith("id:") else made_up(j, "id:", 22)
+
+    def tags_of(path):
+        rows = dicts(rpc("files/tags/get", paths=[path]).get("paths_to_tags"))
+        return [t.get("tag_text") for r in rows for t in dicts(r.get("tags"))]
+
+    name = f"Reports-{tag}"
+    top = f"/{name}"
+    made = obj(rpc("files/create_folder_v2", path=top, autorename=False).get("metadata"))
+    j.check("folder keeps its path",
+            j.last["status"] == 200 and eq(made.get("name"), name) and eq(made.get("path_lower"), top.lower()),
+            folder_name=made.get("name"), path_lower=made.get("path_lower"))
+    fid = own(made.get("id"))
+    again = rpc("files/create_folder_v2", path=top, autorename=False)
+    j.check("a taken path is refused", j.last["status"] == 409 and summary(again).startswith("path/conflict"),
+            error_summary=summary(again))
+    read = rpc("files/get_metadata", path=top)
+    j.check("metadata reads the folder back",
+            eq(read.get(".tag"), "folder") and eq(read.get("id"), fid) and eq(read.get("path_display"), top),
+            tag=read.get(".tag"), id=read.get("id"), path_display=read.get("path_display"))
+    read = rpc("files/get_metadata", path=fid)
+    j.check("metadata by id names the path", eq(read.get("path_lower"), top.lower()), path_lower=read.get("path_lower"))
+    a_path, b_path = f"{top}/Drafts", f"{top}/Archive"
+    a = own(obj(rpc("files/create_folder_v2", path=a_path).get("metadata")).get("id"))
+    b = own(obj(rpc("files/create_folder_v2", path=b_path).get("metadata")).get("id"))
+    rows = dicts(rpc("files/list_folder", path=top).get("entries"))
+    j.check("list_folder holds the children",
+            sorted(ids_of(rows)) == sorted([a, b])
+            and all(str(r.get("path_lower", "")).startswith(top.lower() + "/") for r in rows), listed=ids_of(rows))
+    page = rpc("files/list_folder", path=top, limit=1)
+    first, cursor = dicts(page.get("entries")), page.get("cursor")
+    j.check("limit 1 returns one entry and a cursor",
+            len(first) == 1 and page.get("has_more") is True and isinstance(cursor, str) and bool(cursor),
+            listed=ids_of(first), has_more=page.get("has_more"))
+    nxt = rpc("files/list_folder/continue", cursor=given(cursor, made_up(j, "AAG", 40)))
+    rest = dicts(nxt.get("entries"))
+    j.check("continue reaches the other entry",
+            len(rest) == 1 and sorted(ids_of(first + rest)) == sorted([a, b]) and nxt.get("has_more") is False,
+            first=ids_of(first), listed=ids_of(rest), has_more=nxt.get("has_more"))
+    to = f"{a_path}/Archive"
+    moved = obj(rpc("files/move_v2", from_path=b_path, to_path=to).get("metadata"))
+    j.check("move answers the new path", j.last["status"] == 200 and eq(moved.get("path_lower"), to.lower()),
+            path_lower=moved.get("path_lower"))
+    gone = rpc("files/get_metadata", path=b_path)
+    j.check("moved folder is gone from its old path",
+            j.last["status"] == 409 and summary(gone).startswith("path/not_found"), error_summary=summary(gone))
+    read = rpc("files/get_metadata", path=to)
+    j.check("moved folder keeps its id", eq(read.get("id"), b), id=read.get("id"), was=b)
+    word = f"review{tag}"
+    rpc("files/tags/add", path=a_path, tag_text=word)
+    added = j.last["status"]
+    listed = tags_of(a_path)
+    j.check("tags list the added tag", word in listed, add_status=added, tags=listed)
+    rpc("files/tags/remove", path=a_path, tag_text=word)
+    removed = j.last["status"]
+    listed = tags_of(a_path)
+    j.check("a removed tag is gone", removed == 200 and j.last["status"] == 200 and word not in listed,
+            remove_status=removed, tags=listed)
+    rpc("files/delete_v2", path=a_path)
+    deleted = j.last["status"]
+    gone = rpc("files/get_metadata", path=a_path)
+    j.check("deleted folder is not found", j.last["status"] == 409 and summary(gone).startswith("path/not_found"),
+            delete_status=deleted, error_summary=summary(gone))
+    gone = rpc("files/get_metadata", path=to)
+    j.check("deleting a folder removes its children",
+            j.last["status"] == 409 and summary(gone).startswith("path/not_found"), error_summary=summary(gone))
+
+
+def klaviyo_steps(j):
+    # JSON:API documents throughout, with the revision header on every call. Emails
+    # unique to this run make the filters match only this run's profiles, and the list
+    # is new, so its members are the ones added here.
+    j.headers["authorization"] = "Klaviyo-API-Key pk_bench-placeholder"
+    j.headers["revision"] = "2024-10-15"
+    j.headers["accept"] = "application/vnd.api+json"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def data(value):
+        return obj(obj(value).get("data"))
+
+    def rows_of(value):
+        return dicts(obj(value).get("data"))
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_up(j, "01", 24, "0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    def cursor(links):
+        nxt = obj(links).get("next")
+        if not isinstance(nxt, str):
+            return None
+        values = urllib.parse.parse_qs(urllib.parse.urlsplit(nxt).query).get("page[cursor]")
+        return values[0] if values else None
+
+    def profile(attributes, pid=None):
+        res = {"type": "profile", "attributes": attributes}
+        if pid:
+            res["id"] = pid
+        return {"data": res}
+
+    e1, e2 = f"ana.{tag}@example.org", f"rui.{tag}@example.org"
+    sent = {"email": e1, "first_name": "Ana", "last_name": "Silva", "properties": {"plan": "pro", "ref": f"bench-{tag}"}}
+    made = data(j.call("POST", "/api/profiles", body=profile(sent)))
+    j.check("profile keeps its email and names",
+            j.last["status"] == 201 and eq(made.get("type"), "profile")
+            and same(obj(made.get("attributes")), sent, "email", "first_name", "last_name"),
+            attributes=made.get("attributes"))
+    p1 = own(made.get("id"))
+    link = obj(made.get("links")).get("self")
+    j.check("profile links to itself", isinstance(link, str) and p1 in link, self_link=link)
+    dup = obj(j.call("POST", "/api/profiles", body=profile({"email": e1, "first_name": "Ana"})))
+    err = head(dup.get("errors"))
+    j.check("a taken email names the profile that has it",
+            j.last["status"] == 409 and eq(err.get("code"), "duplicate_profile")
+            and eq(obj(err.get("meta")).get("duplicate_profile_id"), p1),
+            code=err.get("code"), meta=err.get("meta"))
+    read = data(j.call("GET", f"/api/profiles/{p1}"))
+    j.check("read matches the created profile",
+            eq(read.get("id"), p1) and same(obj(read.get("attributes")), sent, "email", "first_name", "last_name"))
+    patched = obj(data(j.call("PATCH", f"/api/profiles/{p1}", body=profile({"last_name": "Costa"}, p1))).get("attributes"))
+    j.check("patch changes the attribute sent", eq(patched.get("last_name"), "Costa"), last_name=patched.get("last_name"))
+    read = obj(data(j.call("GET", f"/api/profiles/{p1}")).get("attributes"))
+    j.check("patch keeps the attributes it was not sent",
+            same(read, sent, "email", "first_name") and eq(obj(read.get("properties")).get("plan"), "pro"), attributes=read)
+    p2 = own(data(j.call("POST", "/api/profiles",
+                         body=profile({"email": e2, "first_name": "Rui", "last_name": "Mendes"}))).get("id"))
+    rows = rows_of(j.call("GET", "/api/profiles", query={"filter": f'equals(email,"{e1}")'}))
+    j.check("email filter finds only the profile", ids_of(rows) == [p1], listed=ids_of(rows))
+    both = f'any(email,["{e1}","{e2}"])'
+    page = obj(j.call("GET", "/api/profiles", query={"filter": both, "page[size]": 1}))
+    first, cur = rows_of(page), cursor(page.get("links"))
+    j.check("page size 1 answers one profile and a next link", len(first) == 1 and bool(cur),
+            listed=ids_of(first), next=obj(page.get("links")).get("next"))
+    query = {"filter": both, "page[size]": 1}
+    if cur:
+        query["page[cursor]"] = cur
+    rest = rows_of(j.call("GET", "/api/profiles", query=query))
+    j.check("next link reaches the other profile", len(rest) == 1 and sorted(ids_of(first + rest)) == sorted([p1, p2]),
+            first=ids_of(first), listed=ids_of(rest))
+    name = f"VIP customers {tag}"
+    lst = data(j.call("POST", "/api/lists", body={"data": {"type": "list", "attributes": {"name": name}}}))
+    j.check("list keeps its name",
+            j.last["status"] == 201 and eq(lst.get("type"), "list") and eq(obj(lst.get("attributes")).get("name"), name))
+    lid = given(lst.get("id"), made_up(j, "", 6))
+    members = {"data": [{"type": "profile", "id": p1}, {"type": "profile", "id": p2}]}
+    j.call("POST", f"/api/lists/{lid}/relationships/profiles", body=members)
+    added = j.last["status"]
+    rows = rows_of(j.call("GET", f"/api/lists/{lid}/profiles"))
+    j.check("list profiles hold the added profiles", sorted(ids_of(rows)) == sorted([p1, p2]),
+            add_status=added, listed=ids_of(rows))
+    rows = rows_of(j.call("GET", f"/api/profiles/{p1}/lists"))
+    j.check("profile's lists hold the list", lid in ids_of(rows), listed=ids_of(rows))
+    j.call("DELETE", f"/api/lists/{lid}/relationships/profiles", body={"data": [{"type": "profile", "id": p2}]})
+    removed = j.last["status"]
+    rows = rows_of(j.call("GET", f"/api/lists/{lid}/profiles"))
+    j.check("a removed profile leaves the list", ids_of(rows) == [p1], remove_status=removed, listed=ids_of(rows))
+    j.call("DELETE", f"/api/lists/{lid}")
+    deleted = j.last["status"]
+    j.call("GET", f"/api/lists/{lid}")
+    j.check("deleted list is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def woocommerce_steps(j):
+    # Integer ids, and lists that are bare arrays paged by number. The category is new,
+    # so its products are the two made here. The store has no tax or shipping, so an
+    # order line costs the product's price times its quantity.
+    j.headers["authorization"] = "Basic Y2tfYmVuY2hfcGxhY2Vob2xkZXI6Y3NfYmVuY2hfcGxhY2Vob2xkZXI="
+    tag = j.rng.randrange(10**5, 10**6)
+    wc = "/wp-json/wc/v3"
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**6, 10**7)
+
+    cid = own(obj(j.call("POST", f"{wc}/products/categories", body={"name": f"Desks {tag}"})).get("id"))
+    sku = f"DESK-{tag}"
+    sent = {"name": f"Oak desk {tag}", "type": "simple", "regular_price": "24.50", "sku": sku,
+            "manage_stock": True, "stock_quantity": 12, "categories": [{"id": cid}]}
+    a = obj(j.call("POST", f"{wc}/products", body=sent))
+    j.check("product keeps its sku and price",
+            j.last["status"] == 201 and is_int(a.get("id")) and same(a, sent, "name", "sku", "regular_price"),
+            id=a.get("id"), sku=a.get("sku"), regular_price=a.get("regular_price"))
+    j.check("product names its category", cid in ids_of(a.get("categories")), categories=ids_of(a.get("categories")))
+    pa = own(a.get("id"))
+    dup = obj(j.call("POST", f"{wc}/products", body={"name": f"Pine desk {tag}", "regular_price": "30.00", "sku": sku}))
+    j.check("a taken sku is refused", j.last["status"] == 400 and eq(dup.get("code"), "product_invalid_sku"),
+            code=dup.get("code"))
+    pb = own(obj(j.call("POST", f"{wc}/products", body={
+        "name": f"Walnut desk {tag}", "regular_price": "89.00", "sku": f"DESK-{tag}-W", "categories": [{"id": cid}]})).get("id"))
+    read = obj(j.call("GET", f"{wc}/products/{pa}"))
+    j.check("read matches the created product",
+            eq(read.get("id"), pa) and same(read, sent, "name", "sku", "regular_price", "stock_quantity"))
+    updated = obj(j.call("PUT", f"{wc}/products/{pa}", body={"regular_price": "19.99", "stock_quantity": 8}))
+    j.check("update changes the fields sent",
+            eq(updated.get("regular_price"), "19.99") and eq(updated.get("stock_quantity"), 8),
+            regular_price=updated.get("regular_price"), stock_quantity=updated.get("stock_quantity"))
+    read = obj(j.call("GET", f"{wc}/products/{pa}"))
+    j.check("update keeps the fields it was not sent",
+            same(read, sent, "name", "sku") and cid in ids_of(read.get("categories")))
+    first = ids_of(j.call("GET", f"{wc}/products", query={"category": cid, "per_page": 1, "page": 1}))
+    j.check("per_page 1 answers one product", len(first) == 1 and first[0] in (pa, pb), listed=first)
+    second = ids_of(j.call("GET", f"{wc}/products", query={"category": cid, "per_page": 1, "page": 2}))
+    j.check("page 2 answers the other product", len(second) == 1 and sorted(first + second) == sorted([pa, pb]),
+            first=first, listed=second)
+    rows = ids_of(j.call("GET", f"{wc}/products", query={"sku": sku}))
+    j.check("sku filter finds only the product", rows == [pa], listed=rows)
+    order = obj(j.call("POST", f"{wc}/orders", body={
+        "status": "pending", "currency": "EUR", "set_paid": False,
+        "billing": {"first_name": "Ana", "last_name": "Silva", "email": f"ana.{tag}@example.org", "country": "PT"},
+        "line_items": [{"product_id": pa, "quantity": 2}]}))
+    line = head(order.get("line_items"))
+    j.check("order line names the product and quantity",
+            j.last["status"] == 201 and eq(line.get("product_id"), pa) and eq(line.get("quantity"), 2),
+            product_id=line.get("product_id"), quantity=line.get("quantity"))
+    j.check("order line costs the price times the quantity",
+            eq(line.get("total"), "39.98") and eq(order.get("total"), "39.98"),
+            line_total=line.get("total"), total=order.get("total"))
+    oid = own(order.get("id"))
+    text = f"Packed in two boxes, ref {tag}."
+    nid = own(obj(j.call("POST", f"{wc}/orders/{oid}/notes", body={"note": text, "customer_note": False})).get("id"))
+    rows = j.call("GET", f"{wc}/orders/{oid}/notes")
+    j.check("order notes list the note", eq(by_id(rows, nid).get("note"), text), listed=ids_of(rows))
+    j.call("PUT", f"{wc}/orders/{oid}", body={"status": "completed"})
+    put = j.last["status"]
+    got = obj(j.call("GET", f"{wc}/orders/{oid}"))
+    j.check("completed order reads as completed", eq(got.get("status"), "completed"),
+            put_status=put, order_status=got.get("status"))
+    j.call("DELETE", f"{wc}/products/{pb}", query={"force": "true"})
+    deleted = j.last["status"]
+    j.call("GET", f"{wc}/products/{pb}")
+    j.check("deleted product is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def statuspage_steps(j):
+    # Everything is under the key's first page, and bodies wrap the resource in its
+    # name. Both incidents carry a word unique to this run, so q matches only them.
+    # Incident updates are listed newest first.
+    j.headers["authorization"] = "OAuth bench-placeholder"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_up(j, "", 12, LOWER_ALNUM)
+
+    page = own(head(j.call("GET", "/v1/pages")).get("id"))
+    base = f"/v1/pages/{page}"
+
+    def incident(iid):
+        return obj(j.call("GET", f"{base}/incidents/{iid}"))
+
+    def component(cid):
+        return obj(j.call("GET", f"{base}/components/{cid}"))
+
+    sent = {"name": f"Checkout API {tag}", "description": "Card payments at checkout.", "status": "operational"}
+    comp = obj(j.call("POST", f"{base}/components", body={"component": sent}))
+    j.check("component keeps its page, name and status",
+            j.last["status"] == 201 and eq(comp.get("page_id"), page) and same(comp, sent, "name", "status"),
+            page_id=comp.get("page_id"), component_status=comp.get("status"))
+    cid = own(comp.get("id"))
+    word = f"kestrel{tag}"
+    name, body1 = f"Payments failing {word}", f"We are investigating failed card payments ({word})."
+    made = obj(j.call("POST", f"{base}/incidents", body={"incident": {
+        "name": name, "status": "investigating", "impact_override": "major", "body": body1,
+        "component_ids": [cid], "components": {cid: "major_outage"}, "deliver_notifications": False}}))
+    j.check("incident keeps its name and status",
+            j.last["status"] == 201 and eq(made.get("name"), name) and eq(made.get("status"), "investigating"),
+            incident_status=made.get("status"))
+    updates = dicts(made.get("incident_updates"))
+    j.check("first update carries the body",
+            len(updates) == 1 and eq(updates[0].get("status"), "investigating") and eq(updates[0].get("body"), body1),
+            updates=[(u.get("status"), u.get("body")) for u in updates])
+    iid = own(made.get("id"))
+    now = component(cid).get("status")
+    j.check("affected component shows the outage", eq(now, "major_outage"), component_status=now)
+    body2 = f"The cause is an expired certificate ({word})."
+    j.call("PATCH", f"{base}/incidents/{iid}", body={"incident": {"status": "identified", "body": body2}})
+    patched = j.last["status"]
+    got = incident(iid)
+    updates = dicts(got.get("incident_updates"))
+    j.check("status change adds an incident update",
+            eq(got.get("status"), "identified") and len(updates) == 2
+            and eq(updates[0].get("status"), "identified") and eq(updates[0].get("body"), body2),
+            patch_status=patched, incident_status=got.get("status"),
+            updates=[(u.get("status"), u.get("body")) for u in updates])
+    oldest = own(updates[-1].get("id") if updates else None)
+    fixed = f"We are investigating failed card payments in the EU ({word})."
+    j.call("PATCH", f"{base}/incidents/{iid}/incident_updates/{oldest}", body={"incident_update": {"body": fixed}})
+    edited = j.last["status"]
+    update = by_id(incident(iid).get("incident_updates"), oldest)
+    j.check("edited update keeps its new body",
+            eq(update.get("body"), fixed) and eq(update.get("status"), "investigating"),
+            edit_status=edited, body=update.get("body"))
+    email = f"ops.{tag}@example.org"
+    sid = own(obj(j.call("POST", f"{base}/incidents/{iid}/subscribers",
+                         body={"subscriber": {"email": email, "skip_confirmation_notification": True}})).get("id"))
+    rows = j.call("GET", f"{base}/incidents/{iid}/subscribers")
+    j.check("incident subscribers list the subscriber", eq(by_id(rows, sid).get("email"), email), listed=ids_of(rows))
+    rows = j.call("GET", f"{base}/incidents/unresolved")
+    j.check("unresolved list holds the incident", bool(by_id(rows, iid)), listed=ids_of(rows))
+    i2 = own(obj(j.call("POST", f"{base}/incidents", body={"incident": {
+        "name": f"Slow search {word}", "status": "investigating", "body": f"Search is slow ({word}).",
+        "deliver_notifications": False}})).get("id"))
+    first = ids_of(j.call("GET", f"{base}/incidents", query={"q": word, "per_page": 1, "page": 1}))
+    j.check("per_page 1 answers one incident", len(first) == 1 and first[0] in (iid, i2), listed=first)
+    second = ids_of(j.call("GET", f"{base}/incidents", query={"q": word, "per_page": 1, "page": 2}))
+    j.check("page 2 reaches the other incident", len(second) == 1 and sorted(first + second) == sorted([iid, i2]),
+            first=first, listed=second)
+    j.call("PATCH", f"{base}/incidents/{i2}", body={"incident": {"status": "fixed"}})
+    j.check("an unknown status is refused", j.last["status"] == 422)
+    j.call("PATCH", f"{base}/incidents/{iid}", body={"incident": {
+        "status": "resolved", "body": f"Card payments work again ({word}).", "components": {cid: "operational"}}})
+    resolved = j.last["status"]
+    got = incident(iid)
+    rows = j.call("GET", f"{base}/incidents/unresolved")
+    j.check("resolved incident leaves the unresolved list",
+            eq(got.get("status"), "resolved") and instant(got.get("resolved_at")) is not None and not by_id(rows, iid),
+            resolve_status=resolved, incident_status=got.get("status"), resolved_at=got.get("resolved_at"),
+            listed=ids_of(rows))
+    now = component(cid).get("status")
+    j.check("resolving restores the component", eq(now, "operational"), component_status=now)
+    j.call("DELETE", f"{base}/incidents/{i2}")
+    deleted = j.last["status"]
+    j.call("GET", f"{base}/incidents/{i2}")
+    j.check("deleted incident is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def zohobooks_steps(j):
+    # Every call names the organization. Status changes only through /status/... and a
+    # payment, and each change is read back. No line has a tax_id, so the totals are the
+    # lines' sums: 3 x 120 + 2 x 45.50 = 451.
+    j.headers["authorization"] = "Zoho-oauthtoken bench-placeholder"
+    tag = j.rng.randrange(10**5, 10**6)
+    org = {"organization_id": "10234695"}
+
+    def call(method, path, query=None, **kw):
+        return obj(j.call(method, f"/books/v3{path}", query=dict(org, **(query or {})), **kw))
+
+    def own(value):
+        return value if isinstance(value, str) and value.isdigit() else str(j.rng.randrange(10**14, 10**15))
+
+    def invoice(iid):
+        return obj(call("GET", f"/invoices/{iid}").get("invoice"))
+
+    def listed(**query):
+        page = call("GET", "/invoices", query=dict({"customer_id": cust}, **query))
+        return ids_of(page.get("invoices"), "invoice_id"), obj(page.get("page_context")).get("has_more_page")
+
+    contact = obj(call("POST", "/contacts", body={
+        "contact_name": f"Silva Lda {tag}", "contact_type": "customer",
+        "contact_persons": [{"first_name": "Ana", "last_name": "Silva", "email": f"ana.{tag}@example.org",
+                             "is_primary_contact": True}]}).get("contact"))
+    cust = own(contact.get("contact_id"))
+    number = f"BENCH-{tag}"
+    lines = [{"name": "Consulting", "rate": 120, "quantity": 3}, {"name": "Travel", "rate": 45.5, "quantity": 2}]
+    numbered = {"ignore_auto_number_generation": "true"}
+    made = obj(call("POST", "/invoices", query=numbered, body={
+        "customer_id": cust, "invoice_number": number, "date": "2026-11-02", "due_date": "2026-12-02",
+        "line_items": lines}).get("invoice"))
+    j.check("a new invoice is a draft",
+            j.last["status"] == 201 and eq(made.get("status"), "draft") and eq(made.get("customer_id"), cust),
+            invoice_status=made.get("status"), customer_id=made.get("customer_id"))
+    j.check("invoice total adds its lines",
+            near(made.get("sub_total"), 451, 0.005) and near(made.get("total"), 451, 0.005)
+            and near(made.get("balance"), 451, 0.005),
+            sub_total=made.get("sub_total"), total=made.get("total"), balance=made.get("balance"))
+    i1 = own(made.get("invoice_id"))
+    dup = call("POST", "/invoices", query=numbered,
+               body={"customer_id": cust, "invoice_number": number, "line_items": lines[:1]})
+    j.check("a taken invoice number is refused", j.last["status"] == 400 and eq(dup.get("code"), 1001),
+            code=dup.get("code"))
+    read = invoice(i1)
+    j.check("read matches the created invoice",
+            eq(read.get("invoice_id"), i1) and eq(read.get("invoice_number"), number)
+            and near(read.get("total"), 451, 0.005) and len(dicts(read.get("line_items"))) == 2)
+    ref = f"PO-{tag}"
+    call("PUT", f"/invoices/{i1}", body={"reference_number": ref})
+    put = j.last["status"]
+    read = invoice(i1)
+    j.check("update changes the reference and keeps the lines",
+            eq(read.get("reference_number"), ref) and eq(read.get("invoice_number"), number)
+            and near(read.get("total"), 451, 0.005) and len(dicts(read.get("line_items"))) == 2,
+            put_status=put, reference_number=read.get("reference_number"), total=read.get("total"))
+    call("POST", f"/invoices/{i1}/status/sent")
+    acted = j.last["status"]
+    now = invoice(i1).get("status")
+    j.check("marked-sent invoice reads as sent", eq(now, "sent"), action_status=acted, invoice_status=now)
+    payment = obj(call("POST", "/customerpayments", body={
+        "customer_id": cust, "payment_mode": "banktransfer", "amount": 200, "date": "2026-11-03",
+        "invoices": [{"invoice_id": i1, "amount_applied": 200}]}).get("payment"))
+    applied = head(payment.get("invoices"))
+    j.check("payment applies to the invoice",
+            j.last["status"] == 201 and eq(applied.get("invoice_id"), i1) and near(applied.get("amount_applied"), 200, 0.005),
+            applied=applied)
+    read = invoice(i1)
+    j.check("a part payment leaves the rest owed",
+            eq(read.get("status"), "partially_paid") and near(read.get("balance"), 251, 0.005)
+            and near(read.get("payment_made"), 200, 0.005),
+            invoice_status=read.get("status"), balance=read.get("balance"), payment_made=read.get("payment_made"))
+    rows, _ = listed(status="partially_paid")
+    j.check("status filter finds the partly paid invoice", rows == [i1], listed=rows)
+    i2 = own(obj(call("POST", "/invoices", body={
+        "customer_id": cust, "date": "2026-11-03",
+        "line_items": [{"name": "Workshop", "rate": 300, "quantity": 1}]}).get("invoice")).get("invoice_id"))
+    first, more = listed(per_page=1, page=1)
+    j.check("per_page 1 answers one invoice and more pages", len(first) == 1 and more is True,
+            listed=first, has_more_page=more)
+    second, more = listed(per_page=1, page=2)
+    j.check("page 2 reaches the other invoice",
+            len(second) == 1 and sorted(first + second) == sorted([i1, i2]) and more is False,
+            first=first, listed=second, has_more_page=more)
+    call("POST", f"/invoices/{i2}/status/sent")
+    call("POST", f"/invoices/{i2}/status/void", body={"reason": f"Issued twice, ref {tag}."})
+    acted = j.last["status"]
+    now = invoice(i2).get("status")
+    j.check("voided invoice reads as void", eq(now, "void"), action_status=acted, invoice_status=now)
+    call("POST", f"/invoices/{i2}/status/draft")
+    acted = j.last["status"]
+    now = invoice(i2).get("status")
+    j.check("a void invoice returns to draft", eq(now, "draft"), action_status=acted, invoice_status=now)
+    call("DELETE", f"/invoices/{i2}")
+    deleted = j.last["status"]
+    call("GET", f"/invoices/{i2}")
+    j.check("deleted invoice is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+BLIND6_JOURNEYS = {"dropbox": dropbox_steps, "klaviyo": klaviyo_steps, "woocommerce": woocommerce_steps,
+                   "statuspage": statuspage_steps, "zohobooks": zohobooks_steps}
+
+
+def run_journeys_blind6(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND6_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -3475,6 +3986,7 @@ RUNNERS = {
     "journeys_blind3": (BLIND3_MOCKS, run_journeys_blind3),
     "journeys_blind4": (BLIND4_MOCKS, run_journeys_blind4),
     "journeys_blind5": (BLIND5_MOCKS, run_journeys_blind5),
+    "journeys_blind6": (BLIND6_MOCKS, run_journeys_blind6),
 }
 
 
