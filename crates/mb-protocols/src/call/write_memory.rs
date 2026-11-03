@@ -14,7 +14,10 @@
 //! A create also tells the held records its request refers to by value, by the
 //! matching [`world`] shows a request's references with: a reply the message it
 //! answers, a refund its payment. Those change only by the effects their next read's
-//! answer lists, and that read answers the stored copy (see [`Earlier::by_effects`]). A
+//! answer lists, and that read answers the stored copy (see [`Earlier::by_effects`]). No
+//! generation whose answer replaces the stored copy is told such a request: a direct
+//! update of the record settles as though it were not there, a read with other requests
+//! to catch up on is told only those, and it waits for a read with nothing else. A
 //! parent and those keep, with the request, the record it created, which the read
 //! catching up is shown as new (see [`created_since`]).
 //!
@@ -78,6 +81,8 @@ pub(super) struct Earlier {
     pub(super) own: Option<Value>,
     /// Every request kept only referred to the resource (see [`after_write`]): it
     /// changes only by the effects a read's answer lists, and the stored copy stands.
+    /// Never for a direct update of the resource, nor for a read with other requests to
+    /// catch up on: those are told none of what only referred (see [`recall`]).
     pub(super) by_effects: bool,
     /// Catch-ups that failed since the last write.
     attempts: u64,
@@ -150,8 +155,22 @@ pub(super) async fn recall(
     }
     let key = memory_key(t, id, held);
     let memory = read_memory(state, &plan.session, &key).await;
-    let told = memory
-        .requests
+    let referring = |r: &Value| r.get(REFERENCED) == Some(&Value::Bool(true));
+    let all_referring = !memory.requests.is_empty() && memory.requests.iter().all(referring);
+    // A read, or a direct update of the record (not an action, which is as it was), is
+    // never told what only referred to the record where its answer replaces the stored
+    // copy: those requests change it by effects alone, on a read told of nothing else.
+    // So a read with others to catch up on is told those, a direct update is told only
+    // those, and what only referred stays for the read after them.
+    let op = plan.op;
+    let direct = op.kind == OperationKind::Command(Effect::Update) && !op.is_action();
+    let (shown, by_effects) = if direct || (op.kind == OperationKind::Query && !all_referring) {
+        let ordinary = memory.requests.into_iter().filter(|r| !referring(r));
+        (ordinary.collect::<Vec<_>>(), false)
+    } else {
+        (memory.requests, all_referring)
+    };
+    let told = shown
         .iter()
         .map(|request| {
             let mut told = request.clone();
@@ -163,15 +182,10 @@ pub(super) async fn recall(
             told
         })
         .collect();
-    let by_effects = !memory.requests.is_empty()
-        && memory
-            .requests
-            .iter()
-            .all(|r| r.get(REFERENCED) == Some(&Value::Bool(true)));
     Earlier {
         key: Some(key),
         by_effects,
-        shown: memory.requests,
+        shown,
         told,
         own: memory.own,
         attempts: memory.attempts,
@@ -401,6 +415,7 @@ pub(super) fn note_not_caught_up(
         },
         rejected: Some(reason),
         merged: None,
+        applied: Vec::new(),
     });
 }
 
@@ -457,6 +472,40 @@ pub(super) fn keeps_stored(
     held && generated.body.is_none()
         && applies(rt, plan)
         && plan.op.kind == OperationKind::Command(Effect::Update)
+}
+
+/// What of an update's answer `data` goes onto the record `t` it is stored as. An answer
+/// with the read's schema is the record. One of another schema (an `Ack {ok}`) was laid
+/// over the stored copy `held` (see [`mb_engine`]'s reflection), and a member stays when
+/// the record's read declares it at the top level or `held` already had it: what only
+/// the answer brought adds nothing to the record. Where the read declares no members,
+/// allows more by `additionalProperties`, or has a `oneOf` or `anyOf` that may hold
+/// others, it is as it was.
+pub(super) fn onto_record(
+    rt: &MockRuntime,
+    op: &Operation,
+    (t, held): (&str, Option<&Value>),
+    data: Value,
+    status: u16,
+) -> Value {
+    if is_read_schema(rt, op, op.output_for_status(status)) {
+        return data;
+    }
+    let level = Level::of(rt.bundle(), read_schema(rt, t));
+    let Value::Object(members) = data else {
+        return data;
+    };
+    if level.union || level.properties.is_empty() || level.map.is_some() {
+        return Value::Object(members);
+    }
+    let declared = |key: &str| level.properties.iter().any(|p| p.contains_key(key));
+    let had = |key: &str| held.and_then(|h| h.get(key)).is_some();
+    Value::Object(
+        members
+            .into_iter()
+            .filter(|(k, _)| declared(k) || had(k))
+            .collect(),
+    )
 }
 
 /// What one level of a schema says of its members, by its `$ref`s and `allOf`s. A
@@ -1926,6 +1975,62 @@ pub(super) fn own_effect_members(
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+/// What the applied effects of an update's answer set on `own`, the target it just stored,
+/// shown in the answer the client is served, as the store now has it. An answer settling
+/// on its target keeps only what the request names (see [`mb_engine::UpdateGuard`]), and
+/// a request may name what no member of the read is (`state_event: close` for `state`),
+/// so an effect is how what followed reaches the store; it reaches the answer too. Only
+/// the members an effect applied ([`EffectOutcome::applied`], what [`own_effect_members`]
+/// allowed) go, as they now stand, and only on an answer with the read's schema that
+/// still suits the type with them. A rejected effect shows nothing.
+pub(super) fn serve_own_effects(
+    rt: &MockRuntime,
+    op: &Operation,
+    own: Option<(&str, &str)>,
+    generated: &mut GeneratedResponse,
+) {
+    let Some((t, id)) = own else {
+        return;
+    };
+    if !is_read_schema(rt, op, op.output_for_status(generated.status)) {
+        return;
+    }
+    let mut set = Map::new();
+    for outcome in &generated.effect_outcomes {
+        let (None, Some(Value::Object(merged))) = (&outcome.rejected, &outcome.merged) else {
+            continue;
+        };
+        if outcome.effect.resource_type != t || outcome.effect.id != id {
+            continue;
+        }
+        for key in &outcome.applied {
+            if let Some(value) = merged.get(key) {
+                set.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let Some(Value::Object(body)) = generated.body.as_ref() else {
+        return;
+    };
+    if set.iter().all(|(k, v)| body.get(k) == Some(v)) {
+        return;
+    }
+    let mut served = body.clone();
+    served.extend(set);
+    let served = Value::Object(served);
+    if entity_fits(rt, t, &served) {
+        generated.body = Some(served);
+    } else {
+        // Stored, but not served: the answer and the store now differ.
+        tracing::warn!(
+            mock = %rt.name,
+            operation = %op.id,
+            resource_type = %t,
+            "an update's applied effects on its own target do not fit its answer; served without them"
+        );
+    }
 }
 
 /// Whether `member` is named for path parameter `param`: as [`tied_to_param`] has it,
