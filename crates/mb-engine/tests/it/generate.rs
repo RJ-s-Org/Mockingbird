@@ -583,7 +583,7 @@ async fn update_answer_keeps_a_nested_member_the_request_names_in_part() {
 }
 
 /// The faker invents every value, so its answer to an update still gives way
-/// to the stored resource.
+/// to the stored resource, which is the record its envelope holds.
 #[tokio::test]
 async fn update_fallback_keeps_the_stored_nested_member() {
     let bundle = inline(NESTED_UPDATE);
@@ -591,9 +591,7 @@ async fn update_fallback_keeps_the_stored_nested_member() {
     let target = StoredResource {
         resource_type: "tickets".into(),
         id: "t1".into(),
-        data: json!({
-            "ticket": {"id": "t1", "subject": "Broken", "status": "open"},
-        }),
+        data: json!({"id": "t1", "subject": "Broken", "status": "open"}),
     };
     let mut c = call("updateTicket");
     c.path_params.clear();
@@ -605,7 +603,9 @@ async fn update_fallback_keeps_the_stored_nested_member() {
     };
     let out = offline().generate(&bundle, op, &c, context).await.unwrap();
     assert_eq!(out.source, Source::Fallback);
-    assert_eq!(out.body.unwrap()["ticket"]["subject"], "Broken");
+    let body = out.body.unwrap();
+    assert_eq!(body["ticket"]["subject"], "Broken", "{body}");
+    assert_eq!(body["ticket"]["id"], "t1", "{body}");
 }
 
 /// A contract with a nullable member at each depth, a nested object with no

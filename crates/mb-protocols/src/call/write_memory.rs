@@ -162,6 +162,25 @@ pub(super) async fn recall(
     }
 }
 
+/// Whether a write is remembered that stored `held` does not show yet, or one made to
+/// the path of `call`, which a read of a member of `held` is behind.
+pub(super) async fn is_behind(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &StoredResource,
+) -> bool {
+    if !applies(state.rt, plan) {
+        return false;
+    }
+    let key = memory_key(&held.resource_type, &held.id, true);
+    !read_memory(state, &plan.session, &key)
+        .await
+        .requests
+        .is_empty()
+        || !recall_route(state, plan, call).await.is_empty()
+}
+
 /// One resource's memory, as kept.
 #[derive(Default)]
 struct Memory {

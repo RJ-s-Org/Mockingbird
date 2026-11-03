@@ -817,7 +817,7 @@ pub(crate) async fn prepare<'a>(
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
+        return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
     }
     // Whatever `unknown_ids` says: this one is known to be gone.
     if matches!(op.kind, OperationKind::Query)
@@ -836,7 +836,7 @@ pub(crate) async fn prepare<'a>(
     {
         let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(rt.engine.not_found(&rt.bundle, op, call, &detail));
+        return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
     }
 
     let target_missing = target.is_none();
@@ -854,9 +854,12 @@ pub(crate) async fn prepare<'a>(
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
-        && let Some(mut served) =
-            rt.engine
-                .serve_stored(&rt.bundle, op, &stored.data, response_schema)
+        && let Some(mut served) = rt.engine.serve_stored(
+            &rt.bundle,
+            op,
+            &held_answer(op, &stored.data),
+            response_schema,
+        )
     {
         let mut earlier = write_memory::recall(
             &mut state,
@@ -874,6 +877,14 @@ pub(crate) async fn prepare<'a>(
         }
         earlier.stored_answer = Some(Box::new(served));
         recalled = Some(earlier);
+    }
+    if target.is_none()
+        && let Some(served) = member_read(&mut state, plan, call, response_schema)
+            .instrument(state_span())
+            .await
+    {
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(served);
     }
 
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -985,6 +996,75 @@ pub(crate) async fn prepare<'a>(
     }))
 }
 
+/// A stored record as `op` answers it: in the envelope or the one-item array its
+/// identity says the answer holds it in, else as it is.
+fn held_answer(op: &Operation, record: &Value) -> Value {
+    match op.identity.as_ref().filter(|i| i.record.is_some()) {
+        Some(identity) => identity.answer_holding(record.clone(), None),
+        None => record.clone(),
+    }
+}
+
+/// The answer to a read of a record the session does not hold, or deleted: a read
+/// answering the records an id has as an array has none (`[]`), when its schema allows
+/// that; any other answers its `404`.
+fn nothing_held(
+    rt: &MockRuntime,
+    op: &Operation,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
+    detail: &str,
+) -> GeneratedResponse {
+    let lists = op
+        .identity
+        .as_ref()
+        .is_some_and(|i| i.record == Some(mb_mcm::RecordAt::Item));
+    lists
+        .then(|| {
+            rt.engine
+                .serve_stored(&rt.bundle, op, &Value::Array(Vec::new()), response_schema)
+        })
+        .flatten()
+        .unwrap_or_else(|| rt.engine.not_found(&rt.bundle, op, call, detail))
+}
+
+/// A read of a member of its parent (see [`BundleIndex::member_reads`]), answered by
+/// that member of the stored parent: Spotify's `/playlists/{id}/items` by the stored
+/// playlist's `tracks`. Not while a write the parent's record does not show yet is
+/// remembered for the parent or for this route, as the member is then behind it.
+async fn member_read(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    response_schema: Option<&Value>,
+) -> Option<GeneratedResponse> {
+    let rt = state.rt;
+    let op = plan.op;
+    if !(rt.consistency
+        && matches!(op.kind, OperationKind::Query)
+        && plain(plan)
+        && mb_engine::seed::request_seed(call).is_none())
+    {
+        return None;
+    }
+    let index = rt.index();
+    let read = index.member_reads.get(&index.operation(&op.id)?)?;
+    let parent_type = rt
+        .bundle()
+        .operations
+        .get(read.parent)?
+        .resource_type
+        .as_deref()?;
+    let id = call.path_params.get(&read.param).and_then(id_string)?;
+    let parent = state.get(&plan.session, parent_type, &id).await?;
+    let member = parent.data.get(&read.member)?;
+    if write_memory::is_behind(state, plan, call, &parent).await {
+        return None;
+    }
+    rt.engine
+        .serve_stored(&rt.bundle, op, member, response_schema)
+}
+
 /// Writes a generated answer's state (a 2xx command's resource, a list
 /// read's seeded items), keeps the session alive, sends webhooks and caches
 /// a read's answer.
@@ -1013,6 +1093,27 @@ pub(crate) async fn complete(
     // A new record whose id no draw could free: the answer is served, and
     // nothing else comes of it.
     let mut unstored = false;
+    // What state keeps of an answer holding its record in an envelope or a one-item
+    // array is the record, and of a request the record it holds the same way.
+    let held_in = op.identity.as_ref().filter(|i| i.record.is_some());
+    let mut answered = held_in
+        .filter(|_| (200..300).contains(&generated.status))
+        .and_then(|identity| {
+            let answer = generated.body.take()?;
+            generated.body = identity.record_in(&answer).cloned();
+            Some(answer)
+        });
+    let record_call = match (held_in, call.body.as_ref()) {
+        (Some(identity), Some(request)) if answered.is_some() => Some(OperationCall {
+            body: identity
+                .record_in(request)
+                .cloned()
+                .or(Some(request.clone())),
+            ..call.clone()
+        }),
+        _ => None,
+    };
+    let state_call = record_call.as_ref().unwrap_or(call);
     async {
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
@@ -1030,13 +1131,26 @@ pub(crate) async fn complete(
                 .await;
             }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
-                unique_create_id(rt, &mut state, session, op, t, call, &mut generated).await;
+                unique_create_id(
+                    rt,
+                    &mut state,
+                    (session, op, t, call),
+                    &mut generated,
+                    answered.as_ref(),
+                )
+                .await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
             }
             // An action's new record goes under its own id, not over another's.
             if generated.new_record {
-                unstored =
-                    !place_new_record(rt, &mut state, session, op, t, call, &mut generated).await;
+                unstored = !place_new_record(
+                    rt,
+                    &mut state,
+                    (session, op, t, call),
+                    &mut generated,
+                    answered.as_ref(),
+                )
+                .await;
                 if !unstored {
                     next_numbers(rt, &mut state, session, t, &mut generated).await;
                 }
@@ -1052,7 +1166,28 @@ pub(crate) async fn complete(
                 && rt.consistency
                 && target_id.is_none()
                 && !transient_fallback(&generated);
-            if (!is_query || seeding)
+            // A single answer with an identity of its own is the record, not a list of
+            // what it holds (a weather reading's `weather` conditions). One of a route
+            // with no parameters (`/me`) is an earlier answer (see [`world`]) instead.
+            let single_read = match &op.binding {
+                Binding::Http { path, .. } => rt.index().single_reads.contains_key(path),
+                _ => false,
+            };
+            let own_record = op
+                .identity
+                .as_ref()
+                .filter(|i| seeding && !single_read && i.path_param.is_none())
+                .and_then(|i| generated.body.as_ref()?.get(&i.field).and_then(id_string));
+            if let Some(id) = own_record
+                && let Some(body) = generated.body.clone()
+            {
+                let resource = StoredResource {
+                    resource_type: t.to_string(),
+                    id,
+                    data: body,
+                };
+                state.insert_seeded(session, resource).await;
+            } else if (!is_query || seeding)
                 && !unstored
                 && !write_memory::keeps_stored(rt, plan, &generated, target.is_some())
             {
@@ -1071,7 +1206,7 @@ pub(crate) async fn complete(
                         // key of its own to go under.
                         target_id: target_id.clone().filter(|_| !foreign_key),
                         generated: &generated,
-                        request_body: call.body.as_ref(),
+                        request_body: state_call.body.as_ref(),
                         collection: collection.clone(),
                         origin,
                         held: target.is_some() && !generated.new_record,
@@ -1090,11 +1225,20 @@ pub(crate) async fn complete(
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
         {
+            // The record an envelope holds is stored already, under its identity.
+            let wrapped = answered.as_ref().map(|answer| GeneratedResponse {
+                body: Some(answer.clone()),
+                ..generated.clone()
+            });
+            let own = held_in.and_then(|i| match &i.record {
+                Some(mb_mcm::RecordAt::Member(member)) => Some(member.as_str()),
+                _ => None,
+            });
             store_wrapped(
                 &mut state,
                 session,
-                resource_type,
-                &generated,
+                (resource_type, own),
+                wrapped.as_ref().unwrap_or(&generated),
                 collection.as_ref(),
             )
             .await;
@@ -1154,6 +1298,7 @@ pub(crate) async fn complete(
             let created = resource_type
                 .filter(|_| matches!(op.kind, OperationKind::Command(Effect::Create)))
                 .zip(collection.as_ref());
+            let body = answered.as_ref().unwrap_or(body);
             seed_entities(&mut state, session, rt, body, schema, created).await;
         }
         // Last: an effect on what this call just stored sees it.
@@ -1188,7 +1333,7 @@ pub(crate) async fn complete(
             rt,
             plan,
             &write_memory::Written {
-                call,
+                call: state_call,
                 generated: &generated,
                 acted_on: acted_on.as_deref(),
                 held: target.as_ref(),
@@ -1206,6 +1351,15 @@ pub(crate) async fn complete(
             foreign_key || unstored,
         )
         .await;
+        // Served as it was answered, holding the record as state now has it.
+        if let (Some(identity), Some(mut answer)) = (held_in, answered.take()) {
+            if let (Some(record), Some(slot)) =
+                (generated.body.take(), identity.record_in_mut(&mut answer))
+            {
+                *slot = record;
+            }
+            generated.body = Some(answer);
+        }
         world::after_answer(&mut state, plan, call, &generated).await;
         world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
@@ -1453,16 +1607,41 @@ async fn taken_id(
     .then_some(id)
 }
 
+/// A different identity for `record`, the record a create's answer holds (in
+/// `answer`, when it holds it in an envelope or an array), drawn for `attempt`.
+fn fresh_record(
+    rt: &MockRuntime,
+    op: &Operation,
+    status: u16,
+    (record, answer): (&Value, Option<&Value>),
+    attempt: u32,
+) -> Option<Value> {
+    let Some((identity, answer)) = op
+        .identity
+        .as_ref()
+        .filter(|i| i.record.is_some())
+        .zip(answer)
+    else {
+        return rt
+            .engine
+            .fresh_identity_at(&rt.bundle, op, status, record, attempt);
+    };
+    let mut held = answer.clone();
+    *identity.record_in_mut(&mut held)? = record.clone();
+    let fresh = rt
+        .engine
+        .fresh_identity_at(&rt.bundle, op, status, &held, attempt)?;
+    identity.record_in(&fresh).cloned()
+}
+
 /// Gives a create's answer a fresh identity when the session already holds
 /// a resource under the generated one and the request did not ask for it.
 async fn unique_create_id(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    op: &Operation,
-    resource_type: &str,
-    call: &OperationCall,
+    (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
     generated: &mut GeneratedResponse,
+    answer: Option<&Value>,
 ) {
     if taken_id(state, session, op, resource_type, call, generated)
         .await
@@ -1475,10 +1654,7 @@ async fn unique_create_id(
         return;
     };
     for _ in 0..3 {
-        let Some(fresh) = rt
-            .engine
-            .fresh_identity_at(&rt.bundle, op, generated.status, body, 0)
-        else {
+        let Some(fresh) = fresh_record(rt, op, generated.status, (body, answer), 0) else {
             return;
         };
         let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
@@ -1499,11 +1675,9 @@ async fn unique_create_id(
 async fn place_new_record(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    op: &Operation,
-    resource_type: &str,
-    call: &OperationCall,
+    (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
     generated: &mut GeneratedResponse,
+    answer: Option<&Value>,
 ) -> bool {
     let Some(id) = taken_id(state, session, op, resource_type, call, generated).await else {
         return true;
@@ -1512,9 +1686,7 @@ async fn place_new_record(
     let mut fresh = None;
     if let Some(body) = generated.body.as_ref() {
         for attempt in 0..3 {
-            let draw = rt
-                .engine
-                .fresh_identity_at(&rt.bundle, op, generated.status, body, attempt);
+            let draw = fresh_record(rt, op, generated.status, (body, answer), attempt);
             let drawn = draw.as_ref().and_then(|d| d.get(field)).and_then(id_string);
             let Some(drawn) = drawn else {
                 break;
@@ -1617,6 +1789,99 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
+    /// Per read below a record's read (`GET /playlists/{id}/items` below
+    /// `/playlists/{id}`), by position, when it answers exactly the schema of one of
+    /// that record's members (`tracks`): where to find it (see [`member_read`]).
+    member_reads: HashMap<usize, MemberRead>,
+}
+
+/// Where a read of a member of its parent finds it.
+#[derive(Debug, Clone)]
+struct MemberRead {
+    /// The position of the parent's read.
+    parent: usize,
+    /// The parent's member it answers.
+    member: String,
+    /// The path parameter of this read that holds the parent's id.
+    param: String,
+}
+
+/// The [`BundleIndex::member_reads`] of `bundle`.
+fn member_reads_of(bundle: &mb_mcm::Bundle) -> HashMap<usize, MemberRead> {
+    fn get(op: &Operation) -> Option<Vec<&str>> {
+        match &op.binding {
+            Binding::Http { method, path }
+                if *method == mb_mcm::HttpMethod::Get
+                    && matches!(op.kind, OperationKind::Query) =>
+            {
+                Some(path_segments(path))
+            }
+            _ => None,
+        }
+    }
+    // A route, whatever it names its parameters.
+    let route = |segments: &[&str]| {
+        let shape: Vec<&str> = segments
+            .iter()
+            .map(|s| if segment_param(s).is_some() { "{}" } else { s })
+            .collect();
+        shape.join("/")
+    };
+    let mut records: HashMap<String, usize> = HashMap::new();
+    for (i, op) in bundle.operations.iter().enumerate() {
+        let by_path = op.identity.as_ref().is_some_and(|i| {
+            i.path_param.is_some() && i.path_field.is_none() && i.record.is_none()
+        });
+        if let (Some(segments), true) = (get(op), by_path)
+            && segments.last().is_some_and(|s| segment_param(s).is_some())
+        {
+            records.entry(route(&segments)).or_insert(i);
+        }
+    }
+    let mut reads = HashMap::new();
+    if records.is_empty() {
+        return reads;
+    }
+    for (i, op) in bundle.operations.iter().enumerate() {
+        let (Some(segments), None, Some(schema)) = (
+            get(op),
+            op.identity.as_ref(),
+            op.success_output().and_then(|o| o.schema.as_ref()),
+        ) else {
+            continue;
+        };
+        let [.., param, last] = segments.as_slice() else {
+            continue;
+        };
+        let (Some(param), None) = (segment_param(param), segment_param(last)) else {
+            continue;
+        };
+        let parent_route = route(&segments[..segments.len() - 1]);
+        let Some((parent, read)) = records
+            .get(&parent_route)
+            .and_then(|&p| Some((p, bundle.operations.get(p)?)))
+        else {
+            continue;
+        };
+        let parent_schema = read.success_output().and_then(|o| o.schema.as_ref());
+        let (parts, _) = schema_parts(bundle, parent_schema);
+        let mut members = parts
+            .iter()
+            .filter_map(|part| part.get("properties").and_then(Value::as_object))
+            .flatten()
+            .filter(|(_, member)| *member == schema)
+            .map(|(name, _)| name.clone());
+        let (Some(member), None) = (members.next(), members.next()) else {
+            continue;
+        };
+        let read = MemberRead {
+            parent,
+            member,
+            param: param.to_string(),
+        };
+        reads.insert(i, read);
+    }
+    reads
 }
 
 /// A list read whose path also takes writes.
@@ -1673,8 +1938,11 @@ impl BundleIndex {
                         detail_reads.entry(t.to_string()).or_insert(i);
                     }
                     let lists = list_item_schemas(bundle, op, &members);
-                    rank_defs(op, t, by_path, &lists, &mut ranked_defs);
-                    record_shapes(op, i, t, by_path, &members, &lists, &mut shapes);
+                    // An answer with an identity of its own is one record: the lists it
+                    // holds are not of its type (a weather reading's conditions).
+                    let own = op.identity.as_ref().is_some_and(|i| i.record.is_none());
+                    rank_defs(op, (t, own), by_path, &lists, &mut ranked_defs);
+                    record_shapes(op, i, (t, own), by_path, &members, &lists, &mut shapes);
                 }
             }
             list_members_of.push(members);
@@ -1729,6 +1997,7 @@ impl BundleIndex {
             effect_types,
             single_reads,
             written_lists,
+            member_reads: member_reads_of(bundle),
         }
     }
 
@@ -1920,7 +2189,7 @@ type RankedDefs = HashMap<String, (u8, String, Option<String>)>;
 /// keeping the best-ranked type of each (see [`BundleIndex::types_by_def`]).
 fn rank_defs(
     op: &Operation,
-    t: &str,
+    (t, own): (&str, bool),
     by_path: bool,
     lists: &[(Option<String>, Value)],
     ranked: &mut RankedDefs,
@@ -1943,6 +2212,13 @@ fn rank_defs(
     });
     found.extend(items);
     for (rank, def, member) in found {
+        // A list held by one record is of the type its member names, if any, and
+        // never of the record's.
+        let (t, rank) = match (&member, own && rank == LIST) {
+            (Some(m), true) if mb_mcm::stem(m) == mb_mcm::stem(t) => continue,
+            (Some(m), true) => (m.as_str(), OTHER),
+            _ => (t, rank),
+        };
         let held = ranked
             .entry(def)
             .or_insert_with(|| (rank, t.to_string(), member.clone()));
@@ -1962,7 +2238,7 @@ type TypeShapes = HashMap<String, (u8, usize, Value)>;
 fn record_shapes(
     op: &Operation,
     i: usize,
-    t: &str,
+    (t, own): (&str, bool),
     by_path: bool,
     members: &[String],
     lists: &[(Option<String>, Value)],
@@ -1980,6 +2256,12 @@ fn record_shapes(
     };
     for (member, items) in lists {
         match member.as_deref() {
+            // What a record holds is no shape of its type.
+            Some(m) if own => {
+                if mb_mcm::stem(m) != mb_mcm::stem(t) {
+                    record(m, ITEMS, items);
+                }
+            }
             None => record(t, ITEMS, items),
             Some(m) if ENVELOPE_KEYS.contains(&m) || members.len() == 1 => {
                 record(t, ITEMS, items);
@@ -1990,7 +2272,7 @@ fn record_shapes(
             Some(m) => record(m, ITEMS, items),
         }
     }
-    if lists.is_empty()
+    if (lists.is_empty() || own)
         && !by_path
         && let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref())
     {
@@ -2317,10 +2599,12 @@ const WRAPPED_IDS: [&str; 4] = ["id", "ts", "sid", "uuid"];
 /// Any other is a mention, stored under what [`seed_entities`] requires of
 /// one: it replaces what is held only when that cannot key it, having no
 /// `id` or `number` (Slack's `ts`), and otherwise is stored only when new.
+/// The member `stored`, the record the operation's identity is of, was stored
+/// with the create.
 async fn store_wrapped(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
-    resource_type: Option<&str>,
+    (resource_type, stored): (Option<&str>, Option<&str>),
     generated: &GeneratedResponse,
     collection: Option<&Collection>,
 ) {
@@ -2331,7 +2615,7 @@ async fn store_wrapped(
     let listed = &rt.index().listed;
     for (member, value) in body {
         let plural = format!("{member}s");
-        if !value.is_object() || !listed.contains(&plural) {
+        if !value.is_object() || !listed.contains(&plural) || stored == Some(member.as_str()) {
             continue;
         }
         let Some(id) = WRAPPED_IDS
@@ -4630,8 +4914,8 @@ paths:
             .collect()
     }
 
-    /// A list under a member naming a type read by path is that type, and
-    /// one under any other member stays the type of its read.
+    /// A list under a member naming a type read by path is that type, and one a
+    /// record holds under any other member is the member's, not the record's.
     #[test]
     fn a_listed_def_takes_its_members_type() {
         let path = format!(
@@ -4642,7 +4926,7 @@ paths:
         let index = rt.index();
         assert_eq!(index.types_by_def["Offer"], "offers");
         assert_eq!(index.types_by_def["FlightOffer"], "offers");
-        assert_eq!(index.types_by_def["PassengerRecord"], "bookings");
+        assert_eq!(index.types_by_def["PassengerRecord"], "passengers");
     }
 
     /// GitHub's `repository` is the detail route's type, not a list's.
