@@ -527,7 +527,7 @@ components:
         type:
           type: string
           enum: [enable_backups, disable_backups, change_backup_policy, reboot, power_cycle, shutdown, power_off, power_on, restore, password_reset, resize, rebuild, rename, change_kernel, enable_ipv6, snapshot]
-        name: {type: string, description: The new name for rename, or the snapshot's name.}
+        name: {type: string, description: "The new name for rename, or the snapshot's name."}
         size: {type: string, description: The new size slug for resize.}
         disk: {type: boolean, description: Also grow the disk on resize (cannot be undone).}
         image:
@@ -547,7 +547,7 @@ components:
             type: object
             required: [resource_id, resource_type]
             properties:
-              resource_id: {type: string, description: The resource's id, as a string.}
+              resource_id: {type: string, description: "The resource's id, as a string."}
               resource_type: {type: string, enum: [droplet, image, volume, volume_snapshot]}
     TaggedCount:
       type: object

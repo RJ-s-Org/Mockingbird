@@ -296,7 +296,7 @@ paths:
                   description: A note is seen by admins only.
                 type: {type: string, enum: [admin, user]}
                 admin_id: {type: string, description: Required when type is admin.}
-                intercom_user_id: {type: string, description: The contact's id, when type is user.}
+                intercom_user_id: {type: string, description: "The contact's id, when type is user."}
                 body: {type: string}
                 attachment_urls: {type: array, maxItems: 10, items: {type: string, format: uri}}
       responses:
@@ -328,7 +328,7 @@ paths:
                 type: {type: string, enum: [admin, team]}
                 admin_id: {type: string, description: The admin making the change.}
                 assignee_id: {type: string, description: 'With assignment, the admin or team to assign to; "0" unassigns.'}
-                snoozed_until: {type: integer, description: With snoozed, a Unix time in the future.}
+                snoozed_until: {type: integer, description: "With snoozed, a Unix time in the future."}
                 body: {type: string, description: An optional message to send with close or assignment.}
       responses:
         "200":
@@ -495,7 +495,7 @@ components:
       required: [type, id, name, email]
       properties:
         type: {type: string, enum: [admin]}
-        id: {type: string}
+        id: {type: string, pattern: "^[0-9]+$", description: "The admin's id, digits only; conversations name it as a number."}
         name: {type: string}
         email: {type: string, format: email}
         job_title: {type: string, nullable: true}
@@ -598,7 +598,7 @@ components:
         state: {type: string, enum: [open, closed, snoozed]}
         read: {type: boolean}
         priority: {type: string, enum: [priority, not_priority]}
-        admin_assignee_id: {type: integer, nullable: true, description: The assigned admin's id, as a number.}
+        admin_assignee_id: {type: integer, nullable: true, description: "The assigned admin's id, as a number."}
         team_assignee_id: {type: string, nullable: true}
         tags:
           type: object

@@ -477,8 +477,8 @@ components:
       required: [records]
       properties:
         records: {type: array, items: {$ref: "#/components/schemas/Record"}}
-        createdRecords: {type: array, items: {type: string}, description: With performUpsert, the ids created.}
-        updatedRecords: {type: array, items: {type: string}, description: With performUpsert, the ids updated.}
+        createdRecords: {type: array, items: {type: string}, description: "With performUpsert, the ids created."}
+        updatedRecords: {type: array, items: {type: string}, description: "With performUpsert, the ids updated."}
     Deleted:
       type: object
       required: [id, deleted]
