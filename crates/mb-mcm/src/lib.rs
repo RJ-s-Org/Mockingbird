@@ -516,6 +516,63 @@ pub struct Identity {
     /// `key` (or `field`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_field: Option<String>,
+    /// Where the answer holds the record, when it is not the answer itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<RecordAt>,
+}
+
+/// Where an answer holds the record its operation's identity is of.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordAt {
+    /// A member of an envelope: Square's `{"payment": {...}}`.
+    Member(String),
+    /// The one item of an array: SendGrid's `GET /bounces/{email}` answering
+    /// `[{"email": ...}]`, or none when nothing matches.
+    Item,
+}
+
+impl Identity {
+    /// The record `answer` holds: the answer itself, the member of its envelope, or
+    /// its one item. `None` when it holds none, or an array holds several.
+    #[must_use]
+    pub fn record_in<'a>(&self, answer: &'a Value) -> Option<&'a Value> {
+        match &self.record {
+            None => Some(answer),
+            Some(RecordAt::Member(member)) => answer.get(member).filter(|v| v.is_object()),
+            Some(RecordAt::Item) => match answer.as_array()?.as_slice() {
+                [one] if one.is_object() => Some(one),
+                _ => None,
+            },
+        }
+    }
+
+    /// [`Identity::record_in`], mutably.
+    pub fn record_in_mut<'a>(&self, answer: &'a mut Value) -> Option<&'a mut Value> {
+        match &self.record {
+            None => Some(answer),
+            Some(RecordAt::Member(member)) => answer.get_mut(member).filter(|v| v.is_object()),
+            Some(RecordAt::Item) => match answer.as_array_mut()?.as_mut_slice() {
+                [one] if one.is_object() => Some(one),
+                _ => None,
+            },
+        }
+    }
+
+    /// `record` as the answer holds it: in its envelope, with `rest` (the envelope's
+    /// other members) beside it, or as the one item of an array.
+    #[must_use]
+    pub fn answer_holding(&self, record: Value, rest: Option<&Value>) -> Value {
+        match &self.record {
+            None => record,
+            Some(RecordAt::Member(member)) => {
+                let mut envelope = rest.and_then(Value::as_object).cloned().unwrap_or_default();
+                envelope.insert(member.clone(), record);
+                Value::Object(envelope)
+            }
+            Some(RecordAt::Item) => Value::Array(vec![record]),
+        }
+    }
 }
 
 /// Whether a path parameter's name is a bare id with no resource in it (`id`,

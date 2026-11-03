@@ -29,6 +29,7 @@ fn compiles_orders_30() {
             field: "id".into(),
             input_field: None,
             path_field: None,
+            record: None,
         })
     );
     let create = b.operation("createOrder").unwrap();
@@ -556,6 +557,7 @@ paths:
             field: "id".into(),
             input_field: None,
             path_field: Some("number".into()),
+            record: None,
         })
     );
     let jira = b
@@ -586,6 +588,7 @@ paths:
             field: "sid".into(),
             input_field: None,
             path_field: None,
+            record: None,
         })
     );
 }
@@ -2236,12 +2239,13 @@ fn a_lookup_answering_a_types_items_reads_as_that_type() {
     let type_of = |id: &str| op(&bundle, id).resource_type.as_deref();
     assert_eq!(type_of("usersByEmail"), Some("users"));
     assert_eq!(type_of("peoplePage"), Some("users"));
-    // Under a parent the path decides who is listed.
-    assert_eq!(type_of("teamMembers"), Some("members"));
+    // Under a parent, or beside a route of its own type, items that are exactly a
+    // type's records are that type's.
+    assert_eq!(type_of("teamMembers"), Some("users"));
+    assert_eq!(type_of("listAdmins"), Some("users"));
+    assert_eq!(type_of("createAdmin"), Some("admins"));
     // Not a list: one record, which may not be stored as any.
     assert_eq!(type_of("me"), Some("me"));
-    // Has routes of its own, so it is a type of its own.
-    assert_eq!(type_of("listAdmins"), Some("admins"));
     assert_eq!(type_of("hinted"), Some("chosen"));
 }
 
@@ -2393,4 +2397,249 @@ fn a_lookup_is_retyped_only_if_every_listed_array_holds_the_type() {
     );
     let opaque = format!("{tickets}, other: {{type: array, items: {{type: object}}}}");
     assert_eq!(type_of(&opaque).as_deref(), Some("search"));
+}
+
+/// `/bounces/{param}` answering an array of `member` items, beside a delete.
+fn array_by(param: &str, member: &str, required: bool) -> Bundle {
+    let required = if required {
+        format!("required: [{member}]")
+    } else {
+        "required: []".to_owned()
+    };
+    let contract = format!(
+        r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /bounces/{{{param}}}:
+    parameters: [{{name: {param}, in: path, required: true, schema: {{type: string}}}}]
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: array, items: {{$ref: "#/components/schemas/B"}}}}}}}}}}}}
+    delete:
+      operationId: remove
+      responses: {{"204": {{description: gone}}}}
+components:
+  schemas:
+    B:
+      type: object
+      {required}
+      properties:
+        {member}: {{type: string}}
+        reason: {{type: string}}
+"##
+    );
+    compile(contract.as_bytes()).unwrap()
+}
+
+#[test]
+fn a_path_parameter_naming_a_required_item_member_is_the_identity() {
+    for (param, member) in [("email", "email"), ("emails", "email"), ("Email", "email")] {
+        let bundle = array_by(param, member, true);
+        assert_eq!(
+            op(&bundle, "read").identity,
+            Some(Identity {
+                path_param: Some(param.into()),
+                field: member.into(),
+                input_field: None,
+                path_field: None,
+                record: Some(mb_mcm::RecordAt::Item),
+            }),
+            "{param}"
+        );
+        let remove = op(&bundle, "remove").identity.as_ref();
+        assert_eq!(remove.map(|i| i.field.as_str()), Some(member), "{param}");
+        assert_eq!(remove.and_then(|i| i.record.as_ref()), None, "{param}");
+    }
+    // A member that may be missing, or one the parameter does not name, is not it.
+    assert_eq!(
+        op(&array_by("email", "email", false), "read").identity,
+        None
+    );
+    assert_eq!(
+        op(&array_by("address", "email", true), "read").identity,
+        None
+    );
+}
+
+/// A read answering `{ticket: Ticket}` and a write answering `write`.
+fn enveloped(write: &str) -> Bundle {
+    let contract = format!(
+        r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /tickets:
+    post:
+      operationId: create
+      responses: {{"201": {{description: ok, content: {{application/json: {{schema: {write}}}}}}}}}
+  /tickets/{{ticket_id}}:
+    parameters: [{{name: ticket_id, in: path, required: true, schema: {{type: integer}}}}]
+    get:
+      operationId: read
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{ticket: {{$ref: "#/components/schemas/Ticket"}}}}}}}}}}}}}}
+    put:
+      operationId: update
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {write}}}}}}}}}
+  /tickets/{{ticket_id}}/solve:
+    parameters: [{{name: ticket_id, in: path, required: true, schema: {{type: integer}}}}]
+    post:
+      operationId: solve
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, additionalProperties: false, properties: {{ticket: {{$ref: "#/components/schemas/Ticket"}}}}}}}}}}}}}}
+components:
+  schemas:
+    Ticket: {{type: object, properties: {{id: {{type: integer}}, subject: {{type: string}}}}}}
+    Audit: {{type: object, properties: {{id: {{type: integer}}, ticket_id: {{type: integer}}}}}}
+"##
+    );
+    compile(contract.as_bytes()).unwrap()
+}
+
+#[test]
+fn a_one_record_envelope_is_seen_through() {
+    let in_ticket = Some(mb_mcm::RecordAt::Member("ticket".into()));
+    let with_audit = r##"{type: object, properties: {ticket: {$ref: "#/components/schemas/Ticket"}, audit: {$ref: "#/components/schemas/Audit"}}}"##;
+    let bundle = enveloped(with_audit);
+    assert_eq!(
+        op(&bundle, "read").identity,
+        Some(Identity {
+            path_param: Some("ticket_id".into()),
+            field: "id".into(),
+            input_field: None,
+            path_field: None,
+            record: in_ticket.clone(),
+        })
+    );
+    for id in ["create", "update"] {
+        let identity = op(&bundle, id).identity.as_ref();
+        assert_eq!(identity.map(|i| i.field.as_str()), Some("id"), "{id}");
+        assert_eq!(identity.and_then(|i| i.record.clone()), in_ticket, "{id}");
+    }
+    // An action answering the record in its envelope updates it.
+    let solve = op(&bundle, "solve");
+    assert_eq!(solve.kind, OperationKind::Command(Effect::Update));
+    assert_eq!(solve.resource_type.as_deref(), Some("tickets"));
+    assert_eq!(
+        solve.identity.as_ref().and_then(|i| i.record.clone()),
+        in_ticket
+    );
+
+    // Two members of the record's schema: nothing says which it is.
+    let twice = r##"{type: object, properties: {ticket: {$ref: "#/components/schemas/Ticket"}, merged: {$ref: "#/components/schemas/Ticket"}}}"##;
+    let bundle = enveloped(twice);
+    assert_eq!(op(&bundle, "create").identity, None);
+    assert_eq!(op(&bundle, "update").identity, None);
+    assert!(op(&bundle, "read").identity.is_some());
+}
+
+/// An envelope with another member beside a record no read answers is not opened.
+#[test]
+fn an_envelope_beside_another_member_needs_the_types_schema() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /users:
+    post:
+      operationId: create
+      responses: {"201": {description: ok, content: {application/json: {schema: {type: object, properties: {data: {$ref: "#/components/schemas/User"}, links: {$ref: "#/components/schemas/Links"}}}}}}}
+components:
+  schemas:
+    User: {type: object, properties: {id: {type: string}}}
+    Links: {type: object, properties: {self: {type: string}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    assert_eq!(op(&bundle, "create").identity, None);
+}
+
+/// A query route under another resource, and a search beside a route on its type.
+fn lists() -> Bundle {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /pages/{page_id}:
+    parameters: [{name: page_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getPage
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Page"}}}}}
+  /sources/{source_id}:
+    parameters: [{name: source_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getSource
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Source"}}}}}
+  /sources/{source_id}/query:
+    parameters: [{name: source_id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: query
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {results: {type: array, items: {$ref: "#/components/schemas/Page"}}}}}}}}
+  /sources/{source_id}/summaries:
+    parameters: [{name: source_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: summaries
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/PageSummary"}}}}}}
+  /search/jql:
+    get:
+      operationId: searchGet
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Found"}}}}}
+    post:
+      operationId: searchPost
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Found"}}}}}
+  /mixed:
+    get:
+      operationId: mixed
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {pages: {type: array, items: {$ref: "#/components/schemas/Page"}}, sources: {type: array, items: {$ref: "#/components/schemas/Source"}}}}}}}}
+components:
+  schemas:
+    Page: {type: object, properties: {id: {type: string}, title: {type: string}}}
+    PageSummary:
+      allOf:
+        - $ref: "#/components/schemas/Page"
+        - {type: object, properties: {score: {type: number}}}
+    Source: {type: object, properties: {id: {type: string}, name: {type: string}}}
+    Found: {type: object, properties: {issues: {type: array, items: {$ref: "#/components/schemas/Page"}}}}
+"##;
+    compile(contract.as_bytes()).unwrap()
+}
+
+#[test]
+fn a_list_is_typed_by_its_items_when_they_are_exactly_a_types_record() {
+    let bundle = lists();
+    let type_of = |id: &str| op(&bundle, id).resource_type.clone();
+    assert_eq!(type_of("query").as_deref(), Some("pages"));
+    assert_eq!(type_of("searchGet").as_deref(), Some("pages"));
+    assert_eq!(op(&bundle, "searchGet").kind, OperationKind::Query);
+    // A write is not a list, whatever it answers.
+    assert_eq!(type_of("searchPost").as_deref(), Some("jql"));
+    // A longer form is not exactly the record, and two types are not one.
+    assert_eq!(type_of("summaries").as_deref(), Some("summaries"));
+    assert_eq!(type_of("mixed").as_deref(), Some("mixed"));
+    assert_eq!(type_of("getSource").as_deref(), Some("sources"));
+}
+
+/// An item with an `id` beside the member the path names still goes by that member,
+/// on the `GET` and the `DELETE` alike.
+#[test]
+fn an_items_id_does_not_take_the_place_of_the_member_the_path_names() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /bounces/{email}:
+    parameters: [{name: email, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: read
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/B"}}}}}}
+    delete:
+      operationId: remove
+      responses: {"204": {description: gone}}
+components:
+  schemas:
+    B: {type: object, required: [email], properties: {id: {type: integer}, email: {type: string}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let read = op(&bundle, "read").identity.clone().unwrap();
+    assert_eq!((read.field.as_str(), read.path_field), ("email", None));
+    let remove = op(&bundle, "remove").identity.clone().unwrap();
+    assert_eq!((remove.field.as_str(), remove.path_field), ("email", None));
 }

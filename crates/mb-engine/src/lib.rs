@@ -1177,13 +1177,17 @@ impl Engine {
         // A create reflects the defaults of what its body leaves out; a scenario's
         // `set` still beats them.
         let defaulted = prompt::with_body_defaults(bundle, op, call);
-        let response = reflect(
-            validator,
-            op,
-            defaulted.as_ref().unwrap_or(call),
-            ctx,
-            response,
-        );
+        let reflected = defaulted.as_ref().unwrap_or(call);
+        let response = match self.record_target(bundle, op, schema) {
+            Some((record_op, record_validator)) => reflect_record(
+                (validator, &record_validator),
+                (op, &record_op),
+                reflected,
+                ctx,
+                response,
+            ),
+            None => reflect(validator, op, reflected, ctx, response),
+        };
         let response = self.keep_persona_formats(validator, call, response, draws);
         let response = if matches!(op.kind, OperationKind::Query)
             && ctx.target.is_none()
@@ -1288,6 +1292,26 @@ impl Engine {
         response
     }
 
+    /// For an operation whose answer holds its record (see [`mb_mcm::RecordAt`]):
+    /// the operation as one answering the record itself, and the validator of the
+    /// record's schema in `schema`, so that the record is what reflects the request
+    /// and the stored target.
+    fn record_target(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        schema: &Value,
+    ) -> Option<(Operation, Arc<SchemaValidator>)> {
+        let identity = op.identity.as_ref()?;
+        let record = record_schema(bundle, identity, schema)?;
+        let validator = self.schema_validator(bundle, &record).ok()?;
+        let mut record_op = op.clone();
+        if let Some(identity) = record_op.identity.as_mut() {
+            identity.record = None;
+        }
+        Some((record_op, validator))
+    }
+
     /// `body` (a create's answer) with its identity field (`op`'s, else
     /// `id`) replaced by a different faker value that keeps it valid
     /// against `op`'s success schema; `None` when none is found.
@@ -1309,9 +1333,18 @@ impl Engine {
     ) -> Option<Value> {
         let schema = op.output_for_status(status)?.schema.as_ref()?;
         let validator = self.validator(bundle, op, status, schema).ok()?;
-        let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-        let current = body.get(field)?;
-        let id_schema = consistency::property_schema(bundle, schema, field)?;
+        let identity = op.identity.as_ref();
+        let field = identity.map_or("id", |i| i.field.as_str());
+        let record = match identity {
+            Some(identity) => identity.record_in(body)?,
+            None => body,
+        };
+        let current = record.get(field)?;
+        let record_schema = match identity {
+            Some(identity) if identity.record.is_some() => record_schema(bundle, identity, schema)?,
+            _ => schema.clone(),
+        };
+        let id_schema = consistency::property_schema(bundle, &record_schema, field)?;
         // Seeded by the body whose identity it replaces: the same
         // collision gets the same fresh identity.
         let retry = Value::from(attempt);
@@ -1328,7 +1361,11 @@ impl Engine {
                 return None;
             }
             let mut candidate = body.clone();
-            candidate.as_object_mut()?.insert(field.to_string(), fresh);
+            let record = match identity {
+                Some(identity) => identity.record_in_mut(&mut candidate)?,
+                None => &mut candidate,
+            };
+            record.as_object_mut()?.insert(field.to_string(), fresh);
             validator.is_valid(&candidate).then_some(candidate)
         })
     }
@@ -2613,7 +2650,11 @@ fn force_identity(
     let Some(id) = from_path.or_else(from_body) else {
         return body;
     };
-    if !body.is_object() || body.get(&identity.field) == Some(id) {
+    // The record an envelope or a one-item array holds, else the answer.
+    let Some(record) = identity.record_in(&body) else {
+        return body;
+    };
+    if !record.is_object() || record.get(&identity.field) == Some(id) {
         return body;
     }
     let mut candidates = vec![id.clone()];
@@ -2630,7 +2671,7 @@ fn force_identity(
     }
     for candidate in candidates {
         let mut forced = body.clone();
-        if let Value::Object(obj) = &mut forced {
+        if let Some(Value::Object(obj)) = identity.record_in_mut(&mut forced) {
             obj.insert(identity.field.clone(), candidate);
         }
         if validator.is_valid(&forced) {
@@ -2638,6 +2679,59 @@ fn force_identity(
         }
     }
     body
+}
+
+/// The schema of the record an answer of `schema` holds where `identity` says: its
+/// envelope's member, or its items.
+fn record_schema(bundle: &Bundle, identity: &mb_mcm::Identity, schema: &Value) -> Option<Value> {
+    match identity.record.as_ref()? {
+        mb_mcm::RecordAt::Member(member) => consistency::property_schema(bundle, schema, member),
+        mb_mcm::RecordAt::Item => consistency::deref(bundle, schema).get("items").cloned(),
+    }
+}
+
+/// [`reflect`] for an operation whose answer holds its record: the record reflects the
+/// request (the record a request body holds the same way, else the body) and the stored
+/// target, which is a record, as the answer would were it the record. Then the answer
+/// holds it again, as long as it is valid; an answer holding no record, as an empty
+/// array, is reflected whole.
+fn reflect_record(
+    (validator, record_validator): (&SchemaValidator, &SchemaValidator),
+    (op, record_op): (&Operation, &Operation),
+    call: &OperationCall,
+    ctx: &GenerationContext<'_>,
+    mut response: GeneratedResponse,
+) -> GeneratedResponse {
+    let Some(identity) = op.identity.as_ref() else {
+        return reflect(validator, op, call, ctx, response);
+    };
+    let Some(body) = response.body.take() else {
+        return response;
+    };
+    let Some(record) = identity.record_in(&body).cloned() else {
+        response.body = Some(body);
+        return reflect(validator, op, call, ctx, response);
+    };
+    let mut record_call = call.clone();
+    if let Some(request) = &call.body {
+        record_call.body = identity
+            .record_in(request)
+            .cloned()
+            .or(Some(request.clone()));
+    }
+    response.body = Some(record);
+    let mut reflected = reflect(record_validator, record_op, &record_call, ctx, response);
+    let held = reflected.body.take();
+    let mut answer = body.clone();
+    if let (Some(held), Some(slot)) = (held, identity.record_in_mut(&mut answer)) {
+        *slot = held;
+    }
+    reflected.body = Some(if validator.is_valid(&answer) {
+        answer
+    } else {
+        body
+    });
+    reflected
 }
 
 /// Overlay the stored resource's top-level fields onto a generated object.

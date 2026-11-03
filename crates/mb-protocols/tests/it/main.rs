@@ -18,6 +18,7 @@ mod support;
 mod api;
 mod backends;
 mod call;
+mod contract_types;
 mod data_plane_auth;
 mod data_plane_auth_protocols;
 #[cfg(feature = "amqp")]
