@@ -30,6 +30,7 @@ use crate::{
 
 mod deleted;
 mod lists;
+mod minted;
 mod world;
 mod write_memory;
 
@@ -176,6 +177,9 @@ pub(crate) struct CallPlan<'a> {
     /// to the declared error status it uses; with `forced_status` unset,
     /// the adapter answers its protocol-native error.
     pub chaos: ChaosDecision,
+    /// A hash of the token an `Authorization: Bearer` header sent, never the token (see
+    /// [`minted::bearer_hash`]).
+    pub bearer: Option<String>,
 }
 
 impl CallPlan<'_> {
@@ -469,6 +473,7 @@ pub(crate) async fn plan<'a>(
         tenancy,
         engine,
         chaos,
+        bearer: minted::bearer_hash(headers),
     })
 }
 
@@ -687,6 +692,7 @@ pub(crate) async fn generate_pending(
         earlier_own_body: pending.earlier.own.as_ref(),
         earlier_answers: &pending.earlier_answers,
         earlier_writes: &pending.earlier_writes,
+        earlier_origins: &pending.earlier_origins,
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
@@ -747,6 +753,10 @@ pub(crate) struct Pending<'a> {
     earlier: write_memory::Earlier,
     /// What routes with no parameters answered earlier in the session.
     earlier_answers: Vec<Value>,
+    /// Whether only a read has written to the session (see [`world::list_session`]).
+    unlisted: bool,
+    /// The answers that minted values this call carries, with their requests.
+    earlier_origins: Vec<Value>,
     /// What was written to this list read's own path earlier in the session.
     earlier_writes: Vec<Value>,
 }
@@ -945,7 +955,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    let (earlier_answers, earlier_writes) = async {
+    let ((earlier_answers, unlisted), earlier_writes, earlier_origins) = async {
         parents_by_name(
             &mut state,
             session,
@@ -980,6 +990,7 @@ pub(crate) async fn prepare<'a>(
         (
             world::recall_answers(&mut state, plan).await,
             write_memory::recall_route(&mut state, plan, call).await,
+            minted::recall(&mut state, plan, call).await,
         )
     }
     .instrument(state_span())
@@ -994,7 +1005,9 @@ pub(crate) async fn prepare<'a>(
         cache: since.zip(key),
         earlier,
         earlier_answers,
+        unlisted,
         earlier_writes,
+        earlier_origins,
     }))
 }
 
@@ -1087,6 +1100,7 @@ pub(crate) async fn complete(
         foreign_key,
         cache,
         mut earlier,
+        unlisted,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1383,6 +1397,8 @@ pub(crate) async fn complete(
             }
             generated.body = Some(answer);
         }
+        world::list_session(&mut state, plan, unlisted, &generated).await;
+        minted::after_answer(&mut state, plan, call, &generated).await;
         world::after_answer(&mut state, plan, call, &generated).await;
         world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
@@ -1871,6 +1887,9 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
+    /// Whether a create or an action may mint a value for a client to send back (see
+    /// [`minted::may_mint`]).
+    mints: bool,
     /// Per read below a record's read (`GET /playlists/{id}/items` below
     /// `/playlists/{id}`), by position, when it answers exactly the schema of one of
     /// that record's members (`tracks`): where to find it (see [`member_read`]).
@@ -2123,6 +2142,10 @@ impl BundleIndex {
             effect_types,
             single_reads,
             written_lists,
+            mints: bundle
+                .operations
+                .iter()
+                .any(|op| minted::may_mint(bundle, op)),
             member_reads: member_reads_of(bundle),
             record_schemas,
         }
@@ -4220,6 +4243,16 @@ impl<'a> StateAccess<'a> {
             let r = self.rt.state.touch(s).await;
             self.settle(r);
         }
+    }
+
+    /// Whether the session is live, refreshing it if so. `false` when it is not, or the
+    /// store is unavailable.
+    async fn live(&mut self, s: &SessionKey) -> bool {
+        if !self.open() {
+            return false;
+        }
+        let r = self.rt.state.touch_live(s).await;
+        self.settle(r).unwrap_or(false)
     }
 
     /// Whether the store answered this call's reads: a missing resource is

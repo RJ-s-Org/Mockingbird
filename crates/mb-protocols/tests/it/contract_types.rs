@@ -1076,3 +1076,40 @@ async fn a_deleted_enveloped_ticket_stays_gone() {
     assert_eq!(listed, json!({"tickets": [{"id": 36, "subject": "Desk"}]}));
     assert_eq!(h.calls(), 2);
 }
+
+/// A refusal of an action on a record held in an envelope is the declared error, and
+/// leaves the record as stored; the next answer, in its envelope, stores it as before.
+#[tokio::test]
+async fn a_refused_action_on_an_enveloped_record_changes_nothing() {
+    let contract = PAYMENTS.replace(
+        r##"      operationId: completePayment
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {payment: {$ref: "#/components/schemas/Payment"}}}}}}}"##,
+        r##"      operationId: completePayment
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, additionalProperties: false, properties: {payment: {$ref: "#/components/schemas/Payment"}}}}}}
+        "409": {description: not completable, content: {application/json: {schema: {type: object, required: [code], properties: {code: {type: string}}}}}}"##,
+    );
+    assert_ne!(contract, PAYMENTS);
+    let h = harness(
+        &contract,
+        vec![
+            json!({"payment": payment("APPROVED")}),
+            json!({"effects": [], "response": null, "refusal": 409}),
+            json!({"effects": [], "response": {"payment": payment("COMPLETED")}}),
+        ],
+    );
+    h.call("POST", "/payments", Some(json!({"amount": 500})))
+        .await;
+    let (status, _, body) = h.call("POST", "/payments/p1/complete", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body} {}", h.prompt(1));
+    assert!(body["code"].is_string(), "{body}");
+    assert_eq!(h.stored().await[0].data, payment("APPROVED"));
+    let (_, source, read) = h.call("GET", "/payments/p1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read, json!({"payment": payment("APPROVED")}));
+
+    let (status, _, completed) = h.call("POST", "/payments/p1/complete", None).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed, json!({"payment": payment("COMPLETED")}));
+    assert_eq!(h.stored().await[0].data, payment("COMPLETED"));
+}

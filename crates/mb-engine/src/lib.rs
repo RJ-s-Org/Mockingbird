@@ -158,6 +158,10 @@ pub struct GenerationContext<'a> {
     /// oldest first, which may have changed since. Scrubbed by whoever kept them. For the
     /// prompt only: unlike [`Self::earlier_requests`], no answer has to reflect them.
     pub earlier_writes: &'a [Value],
+    /// The answers earlier in the session that minted a value this request carries, each
+    /// with the request that got it, oldest first, which may have changed since. Scrubbed
+    /// by whoever kept them, the values themselves included. For the prompt only.
+    pub earlier_origins: &'a [Value],
     /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
     /// With none it does not.
     pub update_guard: Option<&'a dyn UpdateGuard>,
@@ -723,6 +727,7 @@ impl Engine {
                     )
                 });
                 let effects_envelope = guards::effects_envelope(op, status, &ctx, &validator);
+                let refusals = guards::refusals(op, status, &ctx, &validator, effects_envelope);
                 // The effects envelope's root is an object already.
                 let items_envelope = !effects_envelope
                     && guards::items_envelope(provider.capabilities(), validator.schema());
@@ -731,6 +736,9 @@ impl Engine {
                         user.content.push_str("\n\n");
                         user.content
                             .push_str(&prompt::effects_note(op, status, &ctx));
+                        if !refusals.is_empty() {
+                            user.content.push_str(&guards::refusal_note(&refusals));
+                        }
                     } else if items_envelope {
                         user.content.push_str("\n\n");
                         user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
@@ -740,7 +748,7 @@ impl Engine {
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
                     schema: if effects_envelope {
-                        guards::effects_schema(prompt_schema)
+                        guards::with_refusal(guards::effects_schema(prompt_schema), &refusals)
                     } else if items_envelope {
                         guards::items_schema(prompt_schema)
                     } else {
@@ -763,11 +771,23 @@ impl Engine {
                             echoes: Echoes::of([call]),
                             items_envelope,
                             effects_envelope,
+                            refusals: &refusals,
                         },
                         &mut usage,
                     )
                     .await
                 {
+                    Ok(LlmAnswer {
+                        source,
+                        effects:
+                            guards::AnswerEffects {
+                                refused: Some(code),
+                                ..
+                            },
+                        ..
+                    }) => {
+                        return Ok(self.refused(bundle, op, call, code, source, usage));
+                    }
                     Ok(answer) => GeneratedResponse {
                         status,
                         content_type: variant.content_type.clone(),
@@ -897,6 +917,7 @@ impl Engine {
                     echoes: Echoes::of(parts.iter().map(|p| p.call)),
                     items_envelope: false,
                     effects_envelope: false,
+                    refusals: &[],
                 },
                 &mut usage,
             )
@@ -1087,6 +1108,51 @@ impl Engine {
         });
         response.source = Source::State;
         response.fallback_reason = None;
+        response
+    }
+
+    /// The declared error `code` an LLM refused a call with (see [`guards::refusals`]),
+    /// rendered as a forced status's is offline: the contract's response for that
+    /// status, faker-filled. Tagged with the LLM's `source`, as the LLM chose it, and
+    /// with no effects; a body the faker could not make valid is tagged `Fallback`, with
+    /// its reason.
+    fn refused(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        code: u16,
+        source: Source,
+        usage: Usage,
+    ) -> GeneratedResponse {
+        let ctx = GenerationContext {
+            forced_status: Some(code),
+            ..GenerationContext::default()
+        };
+        let mut response = match op.output_for_status(code) {
+            Some(variant) => self.fallback(bundle, op, variant, code, call, &ctx),
+            // Not offered: a refusal names only a status the operation declares.
+            None => GeneratedResponse {
+                status: code,
+                content_type: None,
+                body: None,
+                source,
+                usage,
+                fallback_reason: None,
+                effects: Vec::new(),
+                effect_outcomes: Vec::new(),
+                dropped_effects: 0,
+                new_record: false,
+            },
+        };
+        tracing::info!(operation = %op.id, status = code, "the LLM refused the call with a declared error");
+        // A body the faker could not make valid says so, as a fallback's does.
+        if response.fallback_reason.is_none() {
+            response.source = source;
+        } else {
+            response.source = Source::Fallback;
+        }
+        response.usage = usage;
         response
     }
 

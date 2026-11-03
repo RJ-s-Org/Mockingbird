@@ -534,6 +534,9 @@ impl StateStore for BusStateStore {
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch(s).await
     }
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        self.inner.touch_live(s).await
+    }
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
         self.inner.sessions(workspace, mock).await
     }

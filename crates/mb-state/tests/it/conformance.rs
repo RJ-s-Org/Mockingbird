@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mb_state::{ChangeKind, INTERNAL_TYPE, SessionKey, StateChanged, StateStore, StoredResource};
+use mb_state::{
+    ChangeKind, INTERNAL_TYPE, SessionKey, StateChanged, StateStore, StoredResource, UNLISTED_ID,
+};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -34,6 +36,41 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     session_count_default_matches_sessions(&store, ws).await;
     insert_seeded_keeps_an_existing_resource(&store, ws).await;
     the_internal_type_is_no_resource(&store, ws).await;
+    an_unlisted_session_is_left_out(&store, ws).await;
+}
+
+/// A session holding the [`UNLISTED_ID`] marker and no resource is neither listed nor
+/// counted, though it reads; a resource, or deleting the marker, lists it.
+async fn an_unlisted_session_is_left_out(st: &Arc<dyn StateStore>, ws: &str) {
+    let mock = "unlisted";
+    let s = key(ws, mock, "a");
+    let doc = |id: &str| res(INTERNAL_TYPE, id, json!({"answers": []}));
+    st.upsert(&s, doc(UNLISTED_ID)).await.unwrap();
+    st.upsert(&s, doc("#answers")).await.unwrap();
+    assert!(st.sessions(ws, mock).await.unwrap().is_empty());
+    assert_eq!(st.session_count(ws, mock).await.unwrap(), 0);
+    assert!(
+        st.get(&s, INTERNAL_TYPE, "#answers")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(st.touch_live(&s).await.unwrap());
+
+    st.upsert(&s, res("pet", "1", json!({"id": 1})))
+        .await
+        .unwrap();
+    let listed = st.sessions(ws, mock).await.unwrap();
+    assert_eq!((listed.len(), listed[0].resources), (1, 1), "{listed:?}");
+    assert_eq!(st.session_count(ws, mock).await.unwrap(), 1);
+    assert!(st.delete(&s, "pet", "1").await.unwrap());
+    assert!(st.sessions(ws, mock).await.unwrap().is_empty());
+
+    assert!(st.delete(&s, INTERNAL_TYPE, UNLISTED_ID).await.unwrap());
+    let listed = st.sessions(ws, mock).await.unwrap();
+    assert_eq!((listed.len(), listed[0].resources), (1, 0), "{listed:?}");
+    assert_eq!(st.session_count(ws, mock).await.unwrap(), 1);
+    st.reset(&s).await.unwrap();
 }
 
 /// [`INTERNAL_TYPE`] answers reads and writes, and goes with the session, but it
@@ -422,6 +459,12 @@ async fn reads_do_not_create_sessions(st: &Arc<dyn StateStore>, ws: &str) {
     assert!(st.export(&k).await.expect("export").is_empty());
     st.touch(&k).await.expect("touch");
     assert!(st.sessions(ws, "reads").await.expect("sessions").is_empty());
+    assert!(!st.touch_live(&k).await.expect("touch_live"), "not live");
+    assert!(st.sessions(ws, "reads").await.expect("sessions").is_empty());
+    st.upsert(&k, res("order", "1", json!({"n": 1})))
+        .await
+        .expect("upsert");
+    assert!(st.touch_live(&k).await.expect("touch_live"), "live");
 }
 
 async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>, ws: &str) {

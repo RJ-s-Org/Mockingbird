@@ -272,6 +272,16 @@ impl Engine {
         checks: &Checks<'_>,
         fill_missing: bool,
     ) -> (Checked, AnswerEffects) {
+        let value = match take_refusal(value, checks.refusals) {
+            Ok(status) => {
+                let refused = AnswerEffects {
+                    refused: Some(status),
+                    ..AnswerEffects::default()
+                };
+                return (Checked::Valid(Value::Null), refused);
+            }
+            Err(value) => value,
+        };
         if checks.effects_envelope && effects_without_answer(validator, &value) {
             return (
                 Checked::Invalid(vec![NO_RESPONSE.to_string()]),
@@ -444,6 +454,8 @@ pub(crate) struct Checks<'a> {
     /// (see [`effects_envelope`]). The array the schema describes is then
     /// the `response`, never also under `items`.
     pub effects_envelope: bool,
+    /// The declared error statuses the envelope may refuse with (see [`refusals`]).
+    pub refusals: &'a [u16],
 }
 
 /// The member an array answer is asked for under (see [`items_envelope`]).
@@ -462,6 +474,15 @@ const RESPONSE_KEY: &str = "response";
 /// The member an answer's effects are asked for under (see
 /// [`effects_envelope`]).
 const EFFECTS_KEY: &str = "effects";
+
+/// The member of an effects envelope naming the declared error status the call is
+/// refused with (see [`refusals`]).
+const REFUSAL_KEY: &str = "refusal";
+
+/// The statuses a refusal may name, of those a contract declares: an error that says
+/// the request does not suit the state of what it acts on, or its content does not.
+/// Not one of being unauthorized, not found or limited, which say nothing of a record.
+const REFUSAL_STATUSES: [u16; 4] = [400, 409, 412, 422];
 
 /// The most effects one answer applies; the rest are dropped.
 pub(crate) const MAX_EFFECTS: usize = 10;
@@ -690,6 +711,93 @@ pub(crate) fn effects_envelope(
             .is_some_and(|d| d.contains(RESPONSE_KEY) || d.contains(EFFECTS_KEY))
 }
 
+/// The declared error statuses an answer to `op` with status `status` may refuse with,
+/// in its effects envelope (see [`effects_envelope`]): a write, not a create, on the target it was shown, on
+/// an HTTP route, refused as the API would refuse it. Those of [`REFUSAL_STATUSES`] the
+/// operation declares by code, in order, and none with a forced status or a scenario,
+/// which decide the answer, or when the answer itself has a member of that name. Empty
+/// otherwise, and the prompt and the schema sent are then as they were.
+pub(crate) fn refusals(
+    op: &mb_mcm::Operation,
+    status: u16,
+    ctx: &crate::GenerationContext<'_>,
+    validator: &SchemaValidator,
+    effects_envelope: bool,
+) -> Vec<u16> {
+    // What a create would be refused on is not its own target.
+    let usable = effects_envelope
+        && ctx.target.is_some()
+        && op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create)
+        && ctx.forced_status.is_none()
+        && ctx.scenario.is_none()
+        && (200..300).contains(&status)
+        && matches!(op.binding, mb_mcm::Binding::Http { .. })
+        && !validator
+            .declared_property_names()
+            .is_some_and(|d| d.contains(REFUSAL_KEY));
+    if !usable {
+        return Vec::new();
+    }
+    let mut codes: Vec<u16> = op
+        .outputs
+        .iter()
+        .filter_map(|o| match o.status {
+            mb_mcm::StatusSelector::Code(code) if REFUSAL_STATUSES.contains(&code) => Some(code),
+            _ => None,
+        })
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    codes
+}
+
+/// What the prompt adds to the effects envelope's instruction when the call may be
+/// refused with one of `refusals`.
+pub(crate) fn refusal_note(refusals: &[u16]) -> String {
+    let codes: Vec<String> = refusals.iter().map(u16::to_string).collect();
+    format!(
+        "\nIf the resources shown make this call fail, as the API would refuse it, add \
+\"{REFUSAL_KEY}\": <status> to the object, with one of the error statuses the API declares for \
+this call: {}. \"effects\" is then empty, and \"response\" is not used. Leave \"{REFUSAL_KEY}\" \
+out otherwise.",
+        codes.join(", ")
+    )
+}
+
+/// The effects envelope's `schema` (see [`effects_schema`]) with an optional refusal
+/// naming one of `refusals`, when there are any; `schema` as it is otherwise.
+pub(crate) fn with_refusal(mut schema: Value, refusals: &[u16]) -> Value {
+    if refusals.is_empty() {
+        return schema;
+    }
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(REFUSAL_KEY.to_string(), refusal_schema(refusals));
+    }
+    schema
+}
+
+fn refusal_schema(refusals: &[u16]) -> Value {
+    serde_json::json!({"type": "integer", "enum": refusals})
+}
+
+/// The status `value`, an envelope, refuses with when it names one of `refusals`, else
+/// `value` without its refusal: a status not among them is ignored. With no refusals
+/// to name, `value` as it is.
+fn take_refusal(value: Value, refusals: &[u16]) -> Result<u16, Value> {
+    let Value::Object(mut map) = value else {
+        return Err(value);
+    };
+    if refusals.is_empty() {
+        return Err(Value::Object(map));
+    }
+    let named = map
+        .remove(REFUSAL_KEY)
+        .and_then(|v| v.as_u64())
+        .and_then(|code| u16::try_from(code).ok())
+        .filter(|code| refusals.contains(code));
+    named.ok_or(Value::Object(map))
+}
+
 /// The schema of the list of effects in an envelope.
 fn effect_list_schema() -> Value {
     serde_json::json!({
@@ -737,13 +845,18 @@ pub fn without_effects_schema(schema: &Value) -> Value {
         .keys()
         .all(|k| matches!(k.as_str(), "type" | "required" | "properties" | "$defs"));
     let properties = root.get("properties").and_then(Value::as_object);
+    // A refusal's member, when one was offered (see [`with_refusal`]).
+    let refusal = properties
+        .and_then(|p| p.get(REFUSAL_KEY))
+        .is_some_and(|r| r.get("type") == Some(&Value::from("integer")) && r.get("enum").is_some());
     let wrapping = keys_match
         && root.get("required").is_some_and(|required| {
             *required == serde_json::json!([EFFECTS_KEY, RESPONSE_KEY])
                 || *required == serde_json::json!([RESPONSE_KEY])
         })
-        && properties
-            .is_some_and(|p| p.len() == 2 && p.get(EFFECTS_KEY) == Some(&effect_list_schema()));
+        && properties.is_some_and(|p| {
+            p.len() == 2 + usize::from(refusal) && p.get(EFFECTS_KEY) == Some(&effect_list_schema())
+        });
     let Some(mut inner) = properties
         .and_then(|p| p.get(RESPONSE_KEY))
         .filter(|_| wrapping)
@@ -801,6 +914,9 @@ pub(crate) struct AnswerEffects {
     pub kept: Vec<ResourceEffect>,
     /// The effects it listed that are not among them.
     pub dropped: usize,
+    /// The declared error status the answer refused the call with, in place of an
+    /// answer (see [`refusals`]): it then has no effects, and its value is no answer.
+    pub refused: Option<u16>,
 }
 
 impl AnswerEffects {
@@ -809,6 +925,7 @@ impl AnswerEffects {
         Self {
             dropped: self.dropped + self.kept.len(),
             kept: Vec::new(),
+            refused: self.refused,
         }
     }
 
@@ -844,6 +961,7 @@ fn parse_effects(list: Value) -> AnswerEffects {
             return AnswerEffects {
                 kept: Vec::new(),
                 dropped: 1,
+                refused: None,
             };
         }
     };
@@ -856,6 +974,7 @@ fn parse_effects(list: Value) -> AnswerEffects {
     AnswerEffects {
         dropped: listed - kept.len(),
         kept,
+        refused: None,
     }
 }
 

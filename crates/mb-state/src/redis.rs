@@ -28,7 +28,7 @@ use tokio::sync::broadcast;
 
 use crate::{
     CHANGE_CHANNEL_CAPACITY, ChangeKind, INTERNAL_TYPE, SessionInfo, SessionKey, StateChanged,
-    StateError, StateStore, StoredResource,
+    StateError, StateStore, StoredResource, UNLISTED_ID,
 };
 
 /// Prefix of every key this store writes.
@@ -473,6 +473,10 @@ impl StateStore for RedisStateStore {
         Ok(())
     }
 
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        Ok(self.run_refresh_script(&self.touch, s, None).await? == 1)
+    }
+
     /// Like [`StateStore::sessions`], without reading each session's
     /// resource count and timestamp: only whether its meta key still exists.
     async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
@@ -492,11 +496,32 @@ impl StateStore for RedisStateStore {
         }
         let mut pipe = redis::pipe();
         for session in &listed {
-            let [_, _, meta] = session_keys(workspace, mock, session);
+            let [res, _, meta] = session_keys(workspace, mock, session);
             pipe.cmd("EXISTS").arg(meta);
+            pipe.cmd("HEXISTS")
+                .arg(&res)
+                .arg(field(INTERNAL_TYPE, UNLISTED_ID));
+            pipe.cmd("HLEN").arg(res);
         }
-        let exists: Vec<bool> = pipe.query_async(&mut self.con()).await?;
-        Ok(exists.into_iter().filter(|e| *e).count())
+        let details: Vec<i64> = pipe.query_async(&mut self.con()).await?;
+        let mut count = 0;
+        for (session, triple) in listed.iter().zip(details.chunks(3)) {
+            let [exists, unlisted, total] = triple else {
+                continue;
+            };
+            if *exists == 0 {
+                continue;
+            }
+            if *unlisted == 1 {
+                let [res, ..] = session_keys(workspace, mock, session);
+                let total = usize::try_from(*total).unwrap_or(0);
+                if total <= self.internal_fields(&res).await? {
+                    continue;
+                }
+            }
+            count += 1;
+        }
+        Ok(count)
     }
 
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError> {
@@ -521,13 +546,19 @@ impl StateStore for RedisStateStore {
         let mut pipe = redis::pipe();
         for (session, _) in &listed {
             let [res, _, meta] = session_keys(workspace, mock, session);
-            pipe.cmd("HLEN").arg(res);
+            pipe.cmd("HLEN").arg(&res);
             pipe.cmd("HGET").arg(meta).arg(LAST_TOUCHED);
+            pipe.cmd("HEXISTS")
+                .arg(res)
+                .arg(field(INTERNAL_TYPE, UNLISTED_ID));
         }
         let details: Vec<redis::Value> = pipe.query_async(&mut self.con()).await?;
         let mut live: Vec<(f64, SessionInfo)> = Vec::with_capacity(listed.len());
-        for ((session, score), pair) in listed.into_iter().zip(details.chunks(2)) {
-            let [count, touched] = pair else { continue };
+        for ((session, score), triple) in listed.into_iter().zip(details.chunks(3)) {
+            let [count, touched, unlisted] = triple else {
+                continue;
+            };
+            let unlisted: bool = redis::from_redis_value_ref(unlisted)?;
             let touched: Option<String> = redis::from_redis_value_ref(touched)?;
             // No meta: the session expired after the index was read.
             let Some(touched) = touched else { continue };
@@ -538,6 +569,9 @@ impl StateStore for RedisStateStore {
                 let [res, ..] = session_keys(workspace, mock, &session);
                 total.saturating_sub(self.internal_fields(&res).await?)
             };
+            if unlisted && resources == 0 {
+                continue;
+            }
             let last_touched = DateTime::parse_from_rfc3339(&touched)
                 .map(|t| t.with_timezone(&Utc))
                 .ok()

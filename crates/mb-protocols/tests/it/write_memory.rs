@@ -138,7 +138,7 @@ paths:
       operationId: putPet
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+        content: {application/json: {schema: {$ref: "#/components/schemas/PetChange"}}}
       responses:
         "204": {description: replaced}
   /pets/{pet_id}/birthday:
@@ -317,7 +317,7 @@ paths:
       operationId: putGroup
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+        content: {application/json: {schema: {type: object, additionalProperties: true, properties: {extra: {type: string}}}}}
       responses:
         "204": {description: replaced}
   /accounts/{account_id}:
@@ -330,7 +330,7 @@ paths:
       operationId: putAccount
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+        content: {application/json: {schema: {type: object, additionalProperties: true, properties: {extra: {type: string}}}}}
       responses:
         "204": {description: replaced}
   /accounts/{account_id}/refresh:
@@ -515,6 +515,14 @@ components:
         slug: {type: string}
         organization: {type: string}
         name: {type: string}
+    PetChange:
+      type: object
+      additionalProperties: true
+      properties:
+        transition: {type: object, properties: {id: {type: string}}}
+        client_ref: {type: string}
+        alias: {type: string}
+        otp: {type: string}
     Account:
       type: object
       required: [id]
@@ -1742,11 +1750,7 @@ async fn an_actions_body_is_never_overlaid_on_its_target() {
 async fn a_null_on_a_non_nullable_member_is_remembered() {
     let h = things(vec![pet("old")]);
     h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
-    for body in [
-        json!({"name": null}),
-        json!({"meta": null}),
-        json!({"nickname": null}),
-    ] {
+    for body in [json!({"name": null}), json!({"meta": null})] {
         h.call("PUT", "/pets/p1", Some(body.clone())).await;
         let memory = h.memory().await;
         let requests = memory[0].data["requests"].as_array().unwrap();
@@ -1791,9 +1795,9 @@ async fn a_remainder_of_redacted_values_is_not_remembered() {
     assert_eq!(h.calls(), 1, "no call for what cannot be shown");
 }
 
-/// A redacted member beside one that can be shown is told, as redacted.
+/// A redacted member beside one that can be shown is left out of what is told.
 #[tokio::test]
-async fn a_redacted_member_goes_with_what_can_be_told() {
+async fn a_redacted_member_is_left_out_of_what_is_told() {
     let h = things(vec![pet("old")]);
     h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
     h.call(
@@ -1805,8 +1809,54 @@ async fn a_redacted_member_goes_with_what_can_be_told() {
     let memory = h.memory().await;
     assert_eq!(
         memory[0].data["requests"][0]["body"],
-        json!({"password": "[redacted]", "client_ref": "abc"})
+        json!({"client_ref": "abc"})
     );
+}
+
+/// What a 204 update could not apply is told as a list read is told of a write: only
+/// the members the read's or the request's schema declares, past the wider name checks.
+/// An undeclared `code` or `value` may be anything, and a declared `otp` is a credential.
+#[tokio::test]
+async fn a_204_update_tells_only_what_a_schema_declares() {
+    let h = things(vec![pet("old"), pet("new")]);
+    h.call("POST", "/pets", Some(json!({"name": "old"}))).await;
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({
+            "name": "new",
+            "transition": {"id": "31", "note": "hush-note"},
+            "code": "hush-code",
+            "value": "hush-value",
+            "otp": "hush-otp",
+            "pass": "hush-pass",
+        })),
+    )
+    .await;
+    let memory = h.memory().await;
+    assert_eq!(memory.len(), 1, "{memory:?}");
+    assert_eq!(
+        memory[0].data["requests"][0]["body"],
+        json!({"transition": {"id": "31"}}),
+        "{memory:?}"
+    );
+    assert!(!memory[0].data.to_string().contains("hush"), "{memory:?}");
+    h.call("GET", "/pets/p1", None).await;
+    let earlier = block(&h.prompt(1)).map(str::to_owned).unwrap_or_default();
+    assert!(earlier.contains("31"), "{earlier}");
+    assert!(!h.prompt(1).contains("hush"), "{}", h.prompt(1));
+
+    // With nothing declared left, nothing is told and the read costs no call.
+    h.call(
+        "PUT",
+        "/pets/p1",
+        Some(json!({"code": "hush-code", "value": "hush-value"})),
+    )
+    .await;
+    assert!(h.memory().await.is_empty(), "{:?}", h.memory().await);
+    let (_, source, _) = h.call("GET", "/pets/p1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(h.calls(), 2);
 }
 
 /// The last write wins: an older own body cannot stand over what an action did.

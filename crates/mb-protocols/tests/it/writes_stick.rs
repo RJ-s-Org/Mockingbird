@@ -1495,6 +1495,28 @@ async fn a_deleted_record_is_not_found_with_no_llm_call() {
     );
 }
 
+/// A read naming a seed asks for that seed's answer, and a deleted id has none: it is a
+/// 404 with no LLM call too, as `docs/upgrading.md` says.
+#[tokio::test]
+async fn a_seeded_read_of_a_deleted_record_is_not_found() {
+    let h = deleted_item(vec![item("i1")]).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/items/i1")
+        .header(mb_engine::seed::SEED_HEADER, "42")
+        .body(Body::empty())
+        .unwrap();
+    let resp = h.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        resp.headers()
+            .get("x-mockingbird-source")
+            .and_then(|v| v.to_str().ok()),
+        Some("state")
+    );
+    assert_eq!(h.calls(), 1, "no LLM call for the seed's answer");
+}
+
 /// A contract declaring no 404 gets what `unknown_ids: not_found` answers there.
 #[tokio::test]
 async fn a_deleted_record_with_no_declared_404_is_a_problem() {

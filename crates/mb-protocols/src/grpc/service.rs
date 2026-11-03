@@ -840,6 +840,7 @@ impl OwnedPlan {
             tenancy: self.tenancy.clone(),
             engine: self.engine.clone(),
             chaos: self.chaos,
+            bearer: None,
         })
     }
 }
