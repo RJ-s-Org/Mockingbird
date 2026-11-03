@@ -1151,3 +1151,221 @@ async fn parameters_naming_nothing_change_nothing() {
         assert_eq!(body, four(), "{uri}");
     }
 }
+
+/// Lists paged by a token: a top-level one named as its query parameter, one inside
+/// an object beside the list whose name ends with its parameter, a constant one, and
+/// a list with no token at all.
+const PAGES: &str = r##"
+openapi: 3.1.0
+info: {title: Pages, version: "1"}
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer}}
+        - {name: next_page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_token: {type: string}
+                  total_records: {type: integer}
+  /users/{id}:
+    get:
+      operationId: getUser
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /deals:
+    get:
+      operationId: listDeals
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  additional_data:
+                    type: object
+                    properties:
+                      next_cursor: {type: [string, "null"]}
+  /frozen:
+    get:
+      operationId: listFrozen
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  cursor: {type: string, const: ""}
+  /linked:
+    get:
+      operationId: listLinked
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: page, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  links: {type: object, properties: {next: {type: string}}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, name: {type: string}}
+"##;
+
+fn users(n: usize) -> Vec<Value> {
+    (1..=n)
+        .map(|i| json!({"id": format!("u{i}"), "name": format!("N{i}")}))
+        .collect()
+}
+
+fn ids_in<'a>(body: &'a Value, member: &str) -> Vec<&'a str> {
+    body[member]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["id"].as_str().unwrap())
+        .collect()
+}
+
+/// A page cut short gets a token the next request serves the rest by, page by page,
+/// with no model call; the last page has none, and the total is as generated.
+#[tokio::test]
+async fn a_cut_page_mints_a_token_for_the_rest() {
+    let answer = json!({"users": users(5), "next_page_token": "model-token", "total_records": 5});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/users?page_size=2").await;
+    assert_eq!(ids_in(&first, "users"), ["u1", "u2"]);
+    let token = first["next_page_token"].as_str().unwrap().to_string();
+    assert!(!token.is_empty() && token != "model-token", "{first}");
+    let second = api
+        .get(&format!("/users?page_size=2&next_page_token={token}"))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u3", "u4"], "{second}");
+    assert_eq!(second["total_records"], 5);
+    let again = second["next_page_token"].as_str().unwrap().to_string();
+    assert!(!again.is_empty() && again != token, "{second}");
+    // No size asked: the first page's.
+    let last = api.get(&format!("/users?next_page_token={again}")).await;
+    assert_eq!(ids_in(&last, "users"), ["u5"], "{last}");
+    assert!(
+        last.get("next_page_token")
+            .is_none_or(|t| t.as_str() == Some("")),
+        "{last}"
+    );
+    // The first page again is the same page, with a token that still serves.
+    assert_eq!(api.get("/users?page_size=2").await, first);
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// The rest of a cut page is the session's: a read of one of its items is answered
+/// from state.
+#[tokio::test]
+async fn the_rest_of_a_cut_page_is_stored() {
+    let answer = json!({"users": users(3)});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    api.get("/users?page_size=1").await;
+    let user = api.get("/users/u3").await;
+    assert_eq!(user["name"], "N3");
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A token inside an object beside the list, named `next_cursor` for `cursor`, and a
+/// last page whose token is `null`.
+#[tokio::test]
+async fn a_nested_cursor_pages_the_rest() {
+    let answer = json!({"data": users(3), "additional_data": {"next_cursor": null}});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/deals?limit=2").await;
+    assert_eq!(ids_in(&first, "data"), ["u1", "u2"]);
+    let cursor = first["additional_data"]["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let last = api.get(&format!("/deals?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(
+        last["additional_data"]["next_cursor"],
+        Value::Null,
+        "{last}"
+    );
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A token the session did not mint is the model's to answer.
+#[tokio::test]
+async fn an_unknown_token_is_generated() {
+    let page = json!({"users": users(1)});
+    let api = api_of(
+        PAGES,
+        true,
+        vec![Ok(page.to_string()), Ok(page.to_string())],
+    );
+    api.get("/users?page_size=2&next_page_token=0123456789abcdef0123456789abcdef01234567")
+        .await;
+    api.get("/users?page_size=2&next_page_token=elsewhere")
+        .await;
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A page that is not cut keeps the model's token, a token the schema holds constant
+/// is not minted, and a list with no token member pairing a parameter only is cut.
+#[tokio::test]
+async fn no_token_where_the_contract_has_no_place_for_one() {
+    let whole = json!({"users": users(2), "next_page_token": "model-token"});
+    let frozen = json!({"items": users(3), "cursor": ""});
+    let linked = json!({"items": users(3), "links": {"next": "/linked?page=2"}});
+    let api = api_of(
+        PAGES,
+        true,
+        vec![
+            Ok(whole.to_string()),
+            Ok(frozen.to_string()),
+            Ok(linked.to_string()),
+        ],
+    );
+    assert_eq!(api.get("/users?page_size=2").await, whole);
+    let body = api.get("/frozen?limit=2").await;
+    assert_eq!(body["cursor"], "");
+    assert_eq!(ids_in(&body, "items"), ["u1", "u2"]);
+    let body = api.get("/linked?limit=2").await;
+    assert_eq!(ids_in(&body, "items"), ["u1", "u2"]);
+    assert_eq!(body["links"], json!({"next": "/linked?page=2"}));
+}
+
+/// With consistency off, nothing is cut or minted.
+#[tokio::test]
+async fn consistency_off_mints_nothing() {
+    let answer = json!({"users": users(3), "next_page_token": "model-token"});
+    let api = api_of(PAGES, false, vec![Ok(answer.to_string())]);
+    assert_eq!(api.get("/users?page_size=2").await, answer);
+}
