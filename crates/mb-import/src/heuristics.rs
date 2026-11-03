@@ -685,6 +685,187 @@ fn apply_envelopes(operations: &mut [Operation], defs: &Map<String, Value>, keys
     }
 }
 
+/// The record of an envelope of several members that only its structure tells: the
+/// one member whose schema is an object with members, every other member a single
+/// value (`{code, message, invoice: {...}}`, `{success, data: {...}}`,
+/// `{item: {...}, request_id}`). Two objects, or a list beside it, leave it unknown.
+fn wrapped_member(
+    schema: &Value,
+    defs: &Map<String, Value>,
+) -> Option<(String, Value, Map<String, Value>)> {
+    let props = schema_properties(Some(schema), defs)?;
+    if props.len() < 2 {
+        return None;
+    }
+    let mut objects = props
+        .iter()
+        .filter(|(_, inner)| !is_scalar_member(inner, defs));
+    let (Some((member, inner)), None) = (objects.next(), objects.next()) else {
+        return None;
+    };
+    let inner = resolve(inner, defs)?;
+    if array_items(inner, defs).is_some() {
+        return None;
+    }
+    let record = schema_properties(Some(inner), defs)?.into_owned();
+    (!record.is_empty()).then(|| (member.clone(), inner.clone(), record))
+}
+
+/// The [`mb_mcm::stem`] of the words of `name` before a last `id` (`invoice_id`,
+/// `invoiceId`, `InvoiceID`: `invoice`), when it ends in one after other words.
+fn id_owner(name: &str) -> Option<String> {
+    let words = mb_mcm::words(name);
+    let (last, owner) = words.split_last()?;
+    (last.eq_ignore_ascii_case("id") && !owner.is_empty())
+        .then(|| mb_mcm::stem(&mb_mcm::joined_name(&owner.concat())))
+}
+
+/// The one scalar member of `record` named as the key of one of `owners` (the
+/// envelope's member, the route's type): an `<x>_id` or `<x>Id` whose `<x>` has the
+/// [`mb_mcm::stem`] of an owner. `invoice_id` under `invoice`, `item_id` under `item`;
+/// `customer_id` there refers to another record.
+fn owned_key<'a>(
+    record: &'a Map<String, Value>,
+    owners: &[&str],
+    defs: &Map<String, Value>,
+) -> Option<&'a str> {
+    let owners: Vec<String> = owners
+        .iter()
+        .map(|o| mb_mcm::stem(&mb_mcm::joined_name(o)))
+        .collect();
+    let mut keyed = record.iter().filter(|(member, schema)| {
+        id_owner(member).is_some_and(|owner| owners.contains(&owner))
+            && is_scalar_member(schema, defs)
+    });
+    let (Some((key, _)), None) = (keyed.next(), keyed.next()) else {
+        return None;
+    };
+    Some(key.as_str())
+}
+
+/// The identity of a route ending in path parameter `param` whose answer holds
+/// `record` under `member` ([`wrapped_member`]). The record goes by its `id` when it
+/// has one, else by the member `param` names ([`param_field`]) or, for a bare `{id}`,
+/// by its [`owned_key`]. A parameter naming the `id` only by its last word
+/// (`{environment_id}`) says it is the `environment`'s: a record under another member
+/// (`{name, sys: {id}}`) is a part of the answer, not that record, so it has none.
+fn wrapped_by_path(
+    param: &str,
+    member: &str,
+    resource_type: &str,
+    record: &Map<String, Value>,
+    defs: &Map<String, Value>,
+) -> Option<Identity> {
+    let has_id = record.get("id").is_some_and(|s| is_scalar_member(s, defs));
+    let (field, named) = if mb_mcm::is_generic_id(param) {
+        let field = if has_id {
+            "id"
+        } else {
+            owned_key(record, &[member, resource_type], defs)?
+        };
+        (field, None)
+    } else {
+        let full = property(record, param).filter(|m| {
+            record
+                .get(*m)
+                .is_some_and(|schema| is_scalar_member(schema, defs))
+        });
+        let named = match (full, id_owner(param)) {
+            (Some(full), _) => Some(full),
+            (None, Some(owner)) if owner == mb_mcm::stem(&mb_mcm::joined_name(member)) => {
+                param_field(param, record, defs)
+            }
+            (None, Some(_)) => return None,
+            (None, None) => param_field(param, record, defs),
+        };
+        let field = if has_id { "id" } else { named? };
+        (field, named)
+    };
+    Some(Identity {
+        path_param: Some(param.to_owned()),
+        field: field.to_owned(),
+        input_field: None,
+        path_field: named.filter(|n| *n != field).map(str::to_owned),
+        record: None,
+    })
+}
+
+/// Gives a route that still has no identity, answering its record in an envelope of
+/// several members that only structure tells ([`wrapped_member`]), the record's key,
+/// with the member it is under. A route ending in a path parameter goes by what
+/// [`wrapped_by_path`] finds. One with none goes by the key the type's routes by path
+/// read the same schema under the same member by; when they find none, or disagree,
+/// it has none either. With no such route, the record's `id`, else its [`owned_key`].
+/// So `{code, message, invoice: {invoice_id}}`, `{success, data: {id}}` and
+/// `{item: {item_id}, request_id}` are stored by their record's key, and a record with
+/// no key changes nothing.
+fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>) {
+    let applies = |op: &Operation| {
+        op.identity.is_none()
+            && !is_stream(op)
+            && http_path(op).is_some()
+            && matches!(
+                op.kind,
+                OperationKind::Query | OperationKind::Command(Effect::Create | Effect::Update)
+            )
+    };
+    let wrapped = |op: &Operation| {
+        let (member, inner, record) = answer(op).and_then(|a| wrapped_member(a, defs))?;
+        let t = op.resource_type.clone().unwrap_or_default();
+        let param = http_path(op)
+            .and_then(|(_, path)| trailing_param(path))
+            .map(str::to_owned);
+        Some((t, param, member, inner.to_string(), record))
+    };
+    // What each type's routes by path read the record of an envelope by, per member
+    // and schema; `None` where one finds no key or two disagree.
+    let mut taught: HashMap<(String, String, String), Option<String>> = HashMap::new();
+    for op in operations.iter().filter(|op| applies(op)) {
+        let Some((t, Some(param), member, inner, record)) = wrapped(op) else {
+            continue;
+        };
+        let field = wrapped_by_path(&param, &member, &t, &record, defs).map(|i| i.field);
+        taught
+            .entry((t, member, inner))
+            .and_modify(|known| {
+                if *known != field {
+                    *known = None;
+                }
+            })
+            .or_insert(field);
+    }
+    for op in operations.iter_mut().filter(|op| applies(op)) {
+        let Some((t, param, member, inner, record)) = wrapped(op) else {
+            continue;
+        };
+        let identity = match param {
+            Some(param) => wrapped_by_path(&param, &member, &t, &record, defs),
+            None => {
+                let field = match taught.get(&(t.clone(), member.clone(), inner)) {
+                    Some(learned) => learned.clone(),
+                    None => record
+                        .get("id")
+                        .filter(|s| is_scalar_member(s, defs))
+                        .map(|_| "id")
+                        .or_else(|| owned_key(&record, &[&member, &t], defs))
+                        .map(str::to_owned),
+                };
+                field.map(|field| Identity {
+                    path_param: None,
+                    field,
+                    input_field: None,
+                    path_field: None,
+                    record: None,
+                })
+            }
+        };
+        if let Some(mut identity) = identity {
+            identity.record = Some(mb_mcm::RecordAt::Member(member));
+            op.identity = Some(identity);
+        }
+    }
+}
+
 /// Whether a schema is of a value with no members to compare: a string, a number.
 fn is_scalar_schema(schema: &Value) -> bool {
     matches!(
@@ -1519,6 +1700,7 @@ pub(crate) fn apply_action_routes(
     }
     apply_shared_identities(operations);
     apply_lookups(operations, hints, defs);
+    apply_wrapped_records(operations, defs);
 }
 
 /// Makes `field` the identity of the operation at `index`, unless it does
@@ -1802,5 +1984,156 @@ mod tests {
         assert_eq!(resource_from_name("addAddress").as_deref(), Some("address"));
         assert_eq!(resource_from_name("search"), None);
         assert_eq!(kind_from_name("ébauche", other()), other());
+    }
+
+    /// A contract of `paths` over `schemas`, compiled.
+    fn compiled(paths: &Value, schemas: &Value) -> mb_mcm::Bundle {
+        let doc = json!({
+            "openapi": "3.0.3",
+            "info": {"title": "T", "version": "1"},
+            "paths": paths,
+            "components": {"schemas": schemas},
+        });
+        crate::compile(doc.to_string().as_bytes()).unwrap()
+    }
+
+    fn answering(id: &str, schema: &Value) -> Value {
+        json!({
+            "operationId": id,
+            "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": schema}}}},
+        })
+    }
+
+    fn path_param(name: &str) -> Value {
+        json!([{"name": name, "in": "path", "required": true, "schema": {"type": "string"}}])
+    }
+
+    fn identity_of(bundle: &mb_mcm::Bundle, id: &str) -> Option<Identity> {
+        bundle
+            .operations
+            .iter()
+            .find(|op| op.id == id)
+            .and_then(|op| op.identity.clone())
+    }
+
+    fn wrapped(path_param: Option<&str>, field: &str, member: &str) -> Option<Identity> {
+        Some(Identity {
+            path_param: path_param.map(str::to_owned),
+            field: field.to_owned(),
+            input_field: None,
+            path_field: None,
+            record: Some(mb_mcm::RecordAt::Member(member.to_owned())),
+        })
+    }
+
+    #[test]
+    fn a_record_beside_status_scalars_goes_by_its_own_key() {
+        let envelope = json!({"type": "object", "properties": {
+            "code": {"type": "integer"},
+            "message": {"type": "string"},
+            "widget": {"$ref": "#/components/schemas/Widget"},
+        }});
+        let bundle = compiled(
+            &json!({
+                "/widgets": {"post": answering("create", &envelope)},
+                "/widgets/{widget_id}": {
+                    "parameters": path_param("widget_id"),
+                    "get": answering("read", &envelope),
+                    "put": answering("update", &envelope),
+                },
+            }),
+            &json!({"Widget": {"type": "object", "properties": {
+                "widget_id": {"type": "string"},
+                "owner_id": {"type": "string"},
+                "total": {"type": "number"},
+            }}}),
+        );
+        assert_eq!(
+            identity_of(&bundle, "create"),
+            wrapped(None, "widget_id", "widget")
+        );
+        for id in ["read", "update"] {
+            assert_eq!(
+                identity_of(&bundle, id),
+                wrapped(Some("widget_id"), "widget_id", "widget"),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_under_a_generic_member_goes_by_its_id() {
+        let envelope = json!({"type": "object", "properties": {
+            "success": {"type": "boolean"},
+            "data": {"$ref": "#/components/schemas/Gadget"},
+        }});
+        let bundle = compiled(
+            &json!({
+                "/gadgets": {"post": answering("create", &envelope)},
+                "/gadgets/{id}": {"parameters": path_param("id"), "get": answering("read", &envelope)},
+            }),
+            &json!({"Gadget": {"type": "object", "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "owner_id": {"type": "integer"},
+            }}}),
+        );
+        assert_eq!(identity_of(&bundle, "create"), wrapped(None, "id", "data"));
+        assert_eq!(
+            identity_of(&bundle, "read"),
+            wrapped(Some("id"), "id", "data")
+        );
+    }
+
+    #[test]
+    fn a_record_beside_a_request_id_goes_by_the_key_named_for_its_member() {
+        let envelope = json!({"type": "object", "properties": {
+            "link": {"$ref": "#/components/schemas/Link"},
+            "request_id": {"type": "string"},
+        }});
+        let bundle = compiled(
+            &json!({"/link/get": {"post": answering("linkGet", &envelope)}}),
+            &json!({"Link": {"type": "object", "properties": {
+                "link_id": {"type": "string"},
+                "partner_id": {"type": "string"},
+                "products": {"type": "array", "items": {"type": "string"}},
+            }}}),
+        );
+        assert_eq!(
+            identity_of(&bundle, "linkGet"),
+            wrapped(None, "link_id", "link")
+        );
+    }
+
+    #[test]
+    fn an_envelope_whose_record_structure_does_not_tell_stays_unknown() {
+        let record = |key: &str| json!({"type": "object", "properties": {key: {"type": "string"}, "name": {"type": "string"}}});
+        // Two objects: either could be the record.
+        let two = json!({"type": "object", "properties": {
+            "code": {"type": "integer"},
+            "order": record("order_id"),
+            "customer": record("customer_id"),
+        }});
+        // A part of the record, named for something else than what the path reads.
+        let part = json!({"type": "object", "properties": {
+            "name": {"type": "string"},
+            "meta": record("id"),
+        }});
+        // A key that refers to another record.
+        let other = json!({"type": "object", "properties": {
+            "ok": {"type": "boolean"},
+            "receipt": record("customer_id"),
+        }});
+        let bundle = compiled(
+            &json!({
+                "/orders": {"post": answering("two", &two)},
+                "/stages/{stage_id}": {"parameters": path_param("stage_id"), "get": answering("part", &part)},
+                "/receipts": {"post": answering("other", &other)},
+            }),
+            &json!({}),
+        );
+        for id in ["two", "part", "other"] {
+            assert_eq!(identity_of(&bundle, id), None, "{id}");
+        }
     }
 }
