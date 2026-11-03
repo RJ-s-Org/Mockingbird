@@ -322,6 +322,54 @@ pub struct GeneratedResponse {
     /// not the target (see `reflect`): it is stored under its own
     /// identity and the target is left as it is.
     pub new_record: bool,
+    /// For a [`Source::Patched`] answer, the top-level members its local patch
+    /// touched, when the model's own answer could be read to tell; `None` otherwise.
+    pub patched: Option<PatchedMembers>,
+}
+
+/// The top-level members of an answer a local patch touched, against the model's own
+/// answer (see [`GeneratedResponse::patched`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PatchedMembers {
+    /// Members the patch filled, removed or replaced whole: one the model left out or
+    /// that held something else than an object.
+    pub replaced: Vec<String>,
+    /// Object members the patch changed inside: a record whose timestamp broke its
+    /// format.
+    pub changed_inside: Vec<String>,
+}
+
+impl PatchedMembers {
+    /// What a local patch made of `answer`, the model's own answer `raw` (its
+    /// `response` when the model answered in the effects envelope). `None` when either
+    /// is no object.
+    #[must_use]
+    pub fn between(raw: &Value, answer: &Value) -> Option<Self> {
+        let raw = match (raw, answer) {
+            (Value::Object(r), Value::Object(a))
+                if r.contains_key("response") && !a.contains_key("response") =>
+            {
+                r.get("response")?
+            }
+            _ => raw,
+        };
+        let (Value::Object(raw), Value::Object(answer)) = (raw, answer) else {
+            return None;
+        };
+        let mut out = Self::default();
+        for (name, value) in answer {
+            match raw.get(name) {
+                Some(was) if was == value => {}
+                Some(was) if was.is_object() && value.is_object() => {
+                    out.changed_inside.push(name.clone());
+                }
+                _ => out.replaced.push(name.clone()),
+            }
+        }
+        out.replaced
+            .extend(raw.keys().filter(|k| !answer.contains_key(*k)).cloned());
+        Some(out)
+    }
 }
 
 /// How an [`Engine`] generates; [`Default`] gives the documented defaults.
@@ -695,6 +743,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -816,6 +865,7 @@ impl Engine {
                         effect_outcomes: Vec::new(),
                         dropped_effects: answer.effects.dropped,
                         new_record: false,
+                        patched: answer.patched,
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -959,6 +1009,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             };
             let schema = part
                 .ctx
@@ -1002,6 +1053,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -1086,6 +1138,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         })
     }
 
@@ -1171,6 +1224,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1209,6 +1263,7 @@ impl Engine {
                 effect_outcomes: Vec::new(),
                 dropped_effects: 0,
                 new_record: false,
+                patched: None,
             },
         };
         tracing::info!(operation = %op.id, status = code, "the LLM refused the call with a declared error");
@@ -1459,6 +1514,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         }
     }
 
@@ -1507,6 +1563,7 @@ impl Engine {
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         }
     }
 
@@ -1751,13 +1808,17 @@ impl Engine {
                     value,
                     source: Source::Llm,
                     effects,
+                    patched: None,
                 });
             }
             Checked::Patched(value) => {
+                let patched = extract::extract_json(&first.text)
+                    .and_then(|raw| PatchedMembers::between(&raw, &value));
                 return Ok(LlmAnswer {
                     value,
                     source: Source::Patched,
                     effects,
+                    patched,
                 });
             }
             Checked::Rejected(reason) => return Err(with_cause(truncated.as_deref(), reason)),
@@ -1798,6 +1859,7 @@ impl Engine {
                     value,
                     source: Source::Repaired,
                     effects,
+                    patched: None,
                 }),
                 Checked::Rejected(reason) => Err(with_cause(cause.as_deref(), reason)),
                 Checked::Invalid(errors) => Err(with_cause(
@@ -1891,6 +1953,8 @@ struct LlmAnswer {
     value: Value,
     source: Source,
     effects: guards::AnswerEffects,
+    /// For a `Patched` answer, what its patch touched (see [`PatchedMembers`]).
+    patched: Option<PatchedMembers>,
 }
 
 /// An LLM reply: its text, and, when the provider stopped it at
@@ -3038,6 +3102,23 @@ components:
             op.identity
         );
         engine.held_answer(bundle, op, &json!({"id": 7}), kept, None)
+    }
+
+    #[test]
+    fn patched_members_tell_a_patch_inside_from_one_of_a_member() {
+        let raw = json!({"response": {"ok": "yes", "data": {"at": "now"}, "gone": 1}});
+        let answer = json!({"ok": true, "data": {"at": "2026-01-01T00:00:00Z"}, "new": 2});
+        let patched = PatchedMembers::between(&raw, &answer).unwrap();
+        assert_eq!(patched.changed_inside, ["data"]);
+        let mut replaced = patched.replaced.clone();
+        replaced.sort();
+        assert_eq!(replaced, ["gone", "new", "ok"]);
+        let same = json!({"ok": true, "data": {}});
+        assert_eq!(
+            PatchedMembers::between(&same, &same),
+            Some(PatchedMembers::default())
+        );
+        assert_eq!(PatchedMembers::between(&json!([1]), &answer), None);
     }
 
     #[test]

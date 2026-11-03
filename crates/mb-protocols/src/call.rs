@@ -976,6 +976,7 @@ pub(crate) async fn prepare<'a>(
             effect_outcomes: Vec::new(),
             dropped_effects: 0,
             new_record: false,
+            patched: None,
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.

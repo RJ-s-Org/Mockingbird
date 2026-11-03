@@ -224,8 +224,15 @@ pub(crate) fn example_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
 }
 
 /// The values `schema` allows, through `$ref`s, when it is an `enum`.
-pub fn enum_values<'a>(bundle: &'a Bundle, schema: &'a Value) -> Option<&'a Vec<Value>> {
+fn enum_values<'a>(bundle: &'a Bundle, schema: &'a Value) -> Option<&'a Vec<Value>> {
     deref(bundle, schema).get("enum").and_then(Value::as_array)
+}
+
+/// Whether `schema`, through `$ref`s, names `value` itself: its `const`, or one of its
+/// `enum` values.
+pub fn enumerates(bundle: &Bundle, schema: &Value, value: &Value) -> bool {
+    deref(bundle, schema).get("const") == Some(value)
+        || enum_values(bundle, schema).is_some_and(|values| values.contains(value))
 }
 
 /// The schema of `field` in object `schema`, looking through `$ref`s and

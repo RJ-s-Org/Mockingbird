@@ -10,14 +10,22 @@
 //! member and the other members it requires):
 //!
 //! - for the operation that answered, all of them: a read answers again what it
-//!   answered before;
-//! - for every operation of the shape, only booleans, numbers and values of an `enum`:
-//!   a create's `success: true` is what a read says too, while its
-//!   `message: "Deal created"` or a request id is that call's and stays with it.
+//!   answered before. Its strings too (a `message`, a `request_id`), which a read of
+//!   another record of the operation then answers as well: what one call said is
+//!   replayed across the operation's records;
+//! - for every other operation of the shape, only a string or `enum` value that the
+//!   reading operation's own schema names at that member (its `enum` or `const`): a
+//!   create's `status: "success"` is what a Cal.com read says too, as its `status`
+//!   enumerates it. A number or a free boolean (a create's `code: 201`, `total`,
+//!   `created: true`, Pipedrive's `success`) and a free string (`message: "Deal
+//!   created"`) stay with the operation that answered them, so a Pipedrive read is
+//!   generated the first time in a session and answered from state after.
 //!
-//! Nothing is kept of an answer holding no record (`{success: false, data: null}`), of
-//! a faker stand-in or of an answer a local patch completed, which say nothing of what
-//! the API answers around a record. Only small values are kept ([`MAX_VALUE_BYTES`]),
+//! Nothing is kept of an answer holding no record (`{success: false, data: null}`) or
+//! of a faker stand-in, which say nothing of what the API answers around a record, nor
+//! of an answer whose local patch replaced or filled the record's member or changed one
+//! of the envelope's other members (see [`mb_engine::PatchedMembers`]). A patch inside
+//! the record (a timestamp that broke its format) leaves the rest as the model said it. Only small values are kept ([`MAX_VALUE_BYTES`]),
 //! never the record, and nothing [`write_memory::redact_credentials`] would hide, at
 //! any depth. A session keeps the newest [`MAX_ENTRIES`] entries.
 //!
@@ -47,6 +55,7 @@ const SHARED: &str = "*";
 /// An envelope's shape and the members it requires beside its record.
 struct Shape {
     key: String,
+    member: String,
     siblings: Vec<String>,
 }
 
@@ -73,6 +82,7 @@ fn shape(rt: &MockRuntime, op: &Operation) -> Option<Shape> {
     siblings.sort();
     Some(Shape {
         key: format!("{t} {member} {}", siblings.join(",")),
+        member: member.clone(),
         siblings,
     })
 }
@@ -100,11 +110,14 @@ pub(super) async fn remember(
     let op = plan.op;
     let (true, false, Some(shape)) = (
         (200..300).contains(&generated.status),
-        matches!(generated.source, Source::Fallback | Source::Patched),
+        generated.source == Source::Fallback,
         shape(rt, op),
     ) else {
         return;
     };
+    if generated.source == Source::Patched && !patch_spares(generated, &shape) {
+        return;
+    }
     let holds_a_record = op
         .identity
         .as_ref()
@@ -129,7 +142,7 @@ pub(super) async fn remember(
         .collect();
     let shared: Map<String, Value> = own
         .iter()
-        .filter(|(name, value)| shared_value(rt, schema, name, value))
+        .filter(|(name, value)| may_share(rt, schema, name, value))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
     let mut entries = vec![(entry_key(&op.id, &shape), own)];
@@ -168,24 +181,40 @@ pub(super) async fn remember(
         .await;
 }
 
-/// Whether what member `name` said may be told to every operation of its shape: a
-/// boolean, a number or one of the values its schema enumerates, which say how the API
-/// answers, not what one call was.
-fn shared_value(rt: &MockRuntime, schema: Option<&Value>, name: &str, value: &Value) -> bool {
-    if value.is_boolean() || value.is_number() {
-        return true;
-    }
+/// Whether a local patch of `generated` left the envelope as the model said it: it
+/// replaced or filled neither the record's member nor another member of `shape`, and
+/// changed none of those inside. Inside the record it may have.
+fn patch_spares(generated: &GeneratedResponse, shape: &Shape) -> bool {
+    let Some(patched) = generated.patched.as_ref() else {
+        return false;
+    };
+    let touches = |name: &String| *name == shape.member || shape.siblings.contains(name);
+    !patched.replaced.iter().any(touches)
+        && !patched
+            .changed_inside
+            .iter()
+            .any(|name| shape.siblings.contains(name))
+}
+
+/// Whether what member `name` said may be told to another operation of its shape, when
+/// that operation's schema names it (see [`recall`]): a string, or a value the
+/// answering schema enumerates. A number or a free boolean says what one call was.
+fn may_share(rt: &MockRuntime, schema: Option<&Value>, name: &str, value: &Value) -> bool {
+    value.is_string() || enumerated(rt, schema, name, value)
+}
+
+/// Whether `schema` names `value` itself at member `name` (an `enum` or `const`).
+fn enumerated(rt: &MockRuntime, schema: Option<&Value>, name: &str, value: &Value) -> bool {
     let bundle = rt.bundle();
-    let member_schema =
-        schema.and_then(|s| mb_engine::consistency::property_schema(bundle, s, name));
-    member_schema.is_some_and(|s| {
-        mb_engine::consistency::enum_values(bundle, &s).is_some_and(|values| values.contains(value))
-    })
+    schema
+        .and_then(|s| mb_engine::consistency::property_schema(bundle, s, name))
+        .is_some_and(|s| mb_engine::consistency::enumerates(bundle, &s, value))
 }
 
 /// What the session's answers said of the members `plan`'s envelope requires beside its
-/// record: what its own operation answered, over what every operation of the shape
-/// shares. `None` when nothing is kept, or its answer requires nothing else.
+/// record: what its own operation answered, over what other operations of the shape
+/// shared that the read's own schema names at that member. `None` when nothing is kept,
+/// or its answer requires nothing else.
 pub(super) async fn recall(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -199,7 +228,13 @@ pub(super) async fn recall(
             .map(|(_, members)| members.clone())
     };
     let own = find(&plan.op.id);
-    let mut kept = find(SHARED);
+    let schema = plan.op.success_output().and_then(|o| o.schema.as_ref());
+    let mut kept = find(SHARED).map(|shared| {
+        shared
+            .into_iter()
+            .filter(|(name, value)| enumerated(state.rt, schema, name, value))
+            .collect::<Map<String, Value>>()
+    });
     match (&mut kept, own) {
         (Some(kept), Some(own)) => kept.extend(own),
         (None, own) => kept = own,
