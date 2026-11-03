@@ -345,6 +345,7 @@ fn bundle(compiled: &Compiled, source_digest: String) -> Bundle {
         id: slug(&title),
         title,
         version: "0".into(),
+        description: None,
         source_digest,
         operations: operations(&services),
         defs: defs(compiled, &services),

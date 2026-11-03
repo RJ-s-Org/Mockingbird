@@ -34,7 +34,7 @@
 //! off, are as they were. Not GraphQL, which stores what its answers hold under their
 //! own types.
 
-use mb_engine::consistency::list_items_mut;
+use mb_engine::consistency::{list_items_mut, list_member};
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
 
@@ -458,6 +458,46 @@ pub(super) fn with_count_corrected(
         let shorter = value.as_array()?.len() != new.get(key)?.as_array()?.len();
         shorter.then_some(key.as_str())
     })?;
+    let (name, value) = list_count(rt, op, old, list, was)?;
+    let mut corrected = new.clone();
+    corrected.insert(name.to_string(), Value::from(value.checked_sub(removed)?));
+    Some(Value::Object(corrected))
+}
+
+/// `body` with the count of its list raised to `known`, when it counts less: the one
+/// member [`with_count_corrected`] would lower. With none, nothing says what it counts.
+pub(super) fn with_count_at_least(
+    rt: &MockRuntime,
+    op: &Operation,
+    body: &Value,
+    known: usize,
+) -> Option<Value> {
+    let Value::Object(members) = body else {
+        return None;
+    };
+    let list = list_member(body)?;
+    let was = members.get(list)?.as_array()?.len();
+    let (name, value) = list_count(rt, op, members, list, was)?;
+    let known = u64::try_from(known).ok()?;
+    if value >= known {
+        return None;
+    }
+    let mut raised = members.clone();
+    raised.insert(name.to_string(), Value::from(known));
+    Some(Value::Object(raised))
+}
+
+/// The count of list member `list` of answer `members`, which holds `was` items: the
+/// one member beside it that the contract declares an integer, is named as a count of
+/// it (`total`, `<list>_count`) and is at least what the list holds, with its value.
+fn list_count<'a>(
+    rt: &MockRuntime,
+    op: &Operation,
+    members: &'a Map<String, Value>,
+    list: &str,
+    was: usize,
+) -> Option<(&'a str, u64)> {
+    let old = members;
     let plain = |name: &str| name.to_ascii_lowercase().replace('_', "");
     let own = [
         format!("{}count", plain(list)),
@@ -488,7 +528,5 @@ pub(super) fn with_count_corrected(
     if counts.next().is_some() {
         return None;
     }
-    let mut corrected = new.clone();
-    corrected.insert(name.clone(), Value::from(value.as_u64()? - removed));
-    Some(Value::Object(corrected))
+    Some((name.as_str(), value.as_u64()?))
 }

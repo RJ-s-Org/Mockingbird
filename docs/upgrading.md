@@ -30,6 +30,18 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Prompts carry the contract's API description
+
+No migration or configuration. The importer keeps an OpenAPI 3, Swagger 2 or AsyncAPI contract's `info.description` in the compiled bundle, and every generation shows it in an `<api_description>` block of the system message, framed as facts about how the API behaves across operations, never directions to the model.
+
+- **Bundle format**: `Bundle` gains an optional `description`. A bundle stored before this release loads with none and serializes byte for byte as before; one compiled with a description writes it as a top-level `description` member, which an older node ignores during a rolling upgrade.
+- **Recompile to show it**: a stored bundle has no description, so its prompts stay as they were until the contract is imported again (for a mock from the config file with a persistent control store, change a byte of the contract, as for [action routes](#action-routes-act-on-their-parent-resource)). `source_digest` is unchanged: it hashes the source, which already held the description, so response cache keys stay correct.
+- **More prompt tokens**: a contract with a description adds about 40 tokens plus up to 2000 characters of it to every system message. It comes right after the `API:` line, before anything per operation, so the cached prefix is shared across the contract's operations. A contract without one gets the prompt it did.
+- **Credentials are redacted in contract text**: the API description, response descriptions, parameter descriptions, refusal-status descriptions and the descriptions inside the prompt's JSON Schema (also sent as the structured-output schema) now replace what looks like a credential with `[redacted]` ([what counts](concepts.md#how-an-answer-is-made)). A description that showed an example key or token now shows `[redacted]` in its place. Scope names, plain words and small numbers under a credential's name are kept. Each block is also cut after escaping, so a description full of `<` or `&` is now shorter than before in characters it covers. `mb_mcm::credentials::is_token_shaped` is new and shareable; nothing else uses it yet.
+- **Joint GraphQL prompts** show the `API:` line once, before the fields, where each field repeated it.
+- **Recorded prompts**: the system message changed for contracts with a description, so a snapshot or recording keyed on the exact prompt and taken before this release no longer replays for them.
+- **Rust API**: `mb_mcm::Bundle` gains `description`, which breaks code constructing it in full.
+
 ### Creates can be refused, and prompts show declared headers and parameter descriptions
 
 No migration or configuration.

@@ -77,6 +77,7 @@ fn message_bundle() -> Bundle {
         id: "contacts".into(),
         title: "Contacts".into(),
         version: "1".into(),
+        description: None,
         source_digest: "d1".into(),
         operations: Vec::new(),
         defs: Map::new(),

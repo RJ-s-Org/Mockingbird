@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use super::{
     Ctx, MessageInput, MessageSet, address_params, apply_traits_under, binding, bundle_info,
     channel_protocol, check_replies, collect_messages, digest, escape, extensions, finish_defs,
-    invalid, payload_schema, ref_name, resolve, slug, str_of, tag_names,
+    info_description, invalid, payload_schema, ref_name, resolve, slug, str_of, tag_names,
 };
 use crate::ImportError;
 
@@ -326,6 +326,7 @@ pub(crate) fn compile_v3(doc: &Value, bytes: &[u8]) -> Result<Bundle, ImportErro
         id: slug(&title),
         title,
         version,
+        description: info_description(doc),
         source_digest: digest(bytes),
         operations: Vec::new(),
         defs,

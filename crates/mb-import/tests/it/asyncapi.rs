@@ -23,6 +23,20 @@ fn orders() -> Bundle {
     compile(&fixture("orders-amqp-2.6.yaml")).unwrap()
 }
 
+/// An AsyncAPI contract's `info.description` is kept, in 2.x and 3.0 alike.
+#[test]
+fn info_description_is_kept() {
+    assert_eq!(
+        orders().description.as_deref(),
+        Some("Order lifecycle events exchanged over RabbitMQ.")
+    );
+    let d = streetlights_30().description.unwrap();
+    assert!(
+        d.starts_with("The Smartylighting Streetlights API allows you to remotely manage"),
+        "{d}"
+    );
+}
+
 fn invalid(src: &str) -> (String, String) {
     match compile(src.as_bytes()) {
         Err(ImportError::Invalid { pointer, message }) => (pointer, message),

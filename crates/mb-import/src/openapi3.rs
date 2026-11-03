@@ -75,6 +75,15 @@ pub(crate) fn deref<'a>(
     Err(invalid(at, "$ref chain too deep"))
 }
 
+/// The document's `info.description` as written, or `None` when it has none or
+/// only whitespace. OpenAPI 3, Swagger 2 and AsyncAPI all put it there.
+pub(crate) fn info_description(doc: &Value) -> Option<String> {
+    doc.pointer("/info/description")
+        .and_then(Value::as_str)
+        .filter(|d| !d.trim().is_empty())
+        .map(str::to_owned)
+}
+
 pub(crate) fn slug(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -867,6 +876,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
         id: slug(&title),
         title,
         version,
+        description: info_description(doc),
         source_digest,
         operations,
         defs,
