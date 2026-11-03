@@ -476,14 +476,15 @@ pub(super) fn keeps_stored(
 
 /// What of an update's answer `data` goes onto the record `t` it is stored as. An answer
 /// with the read's schema is the record. One of another schema (an `Ack {ok}`) was laid
-/// over the stored copy (see [`mb_engine`]'s reflection), and only the members the
-/// record's read declares at the top level stay: its own add nothing to the record.
-/// Where the read declares no members, or has a `oneOf` or `anyOf` that may hold
+/// over the stored copy `held` (see [`mb_engine`]'s reflection), and a member stays when
+/// the record's read declares it at the top level or `held` already had it: what only
+/// the answer brought adds nothing to the record. Where the read declares no members,
+/// allows more by `additionalProperties`, or has a `oneOf` or `anyOf` that may hold
 /// others, it is as it was.
 pub(super) fn onto_record(
     rt: &MockRuntime,
     op: &Operation,
-    t: &str,
+    (t, held): (&str, Option<&Value>),
     data: Value,
     status: u16,
 ) -> Value {
@@ -494,11 +495,17 @@ pub(super) fn onto_record(
     let Value::Object(members) = data else {
         return data;
     };
-    if level.union || level.properties.is_empty() {
+    if level.union || level.properties.is_empty() || level.map.is_some() {
         return Value::Object(members);
     }
     let declared = |key: &str| level.properties.iter().any(|p| p.contains_key(key));
-    Value::Object(members.into_iter().filter(|(k, _)| declared(k)).collect())
+    let had = |key: &str| held.and_then(|h| h.get(key)).is_some();
+    Value::Object(
+        members
+            .into_iter()
+            .filter(|(k, _)| declared(k) || had(k))
+            .collect(),
+    )
 }
 
 /// What one level of a schema says of its members, by its `$ref`s and `allOf`s. A

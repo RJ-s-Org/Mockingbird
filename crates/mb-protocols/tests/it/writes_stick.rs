@@ -968,6 +968,120 @@ async fn an_answer_of_another_schema_leaves_the_resource() {
     assert_eq!(read["count"], 12, "{read}");
 }
 
+/// Records whose reads allow more members than they declare, by `additionalProperties`
+/// or by saying nothing, updated and acted on by calls answering an acknowledgement.
+const OPEN: &str = r##"
+openapi: 3.0.0
+info: {title: Open, version: "1"}
+paths:
+  /things/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
+    patch:
+      operationId: patchThing
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ok"}}}}
+  /plains/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getPlain
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Plain"}}}}
+    patch:
+      operationId: patchPlain
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ok"}}}}
+  /plains/{id}/void:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: voidPlain
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ok"}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      required: [id, status]
+      additionalProperties: true
+      properties:
+        id: {type: string}
+        status: {type: string}
+    Plain:
+      type: object
+      required: [id, status]
+      properties:
+        id: {type: string}
+        status: {type: string}
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+"##;
+
+/// Reads `uri` (answered `record`), calls `method` on `call` (answered `{"ok": true}`),
+/// and returns the stored record of type `t` and id `id`.
+async fn stored_after_an_ack(uri: &str, record: Value, method: &str, call: &str) -> Value {
+    let h = harness_with(OPEN.as_bytes(), vec![record, json!({"ok": true})], |_| {});
+    let (status, _, _) = h.call("GET", uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = (method == "PATCH").then(|| json!({"status": "off"}));
+    let (status, _, ack) = h.call(method, call, body).await;
+    assert_eq!(status, StatusCode::OK, "{ack}");
+    let mut parts = uri.trim_start_matches('/').split('/');
+    let (t, id) = (parts.next().unwrap(), parts.next().unwrap());
+    h.store.get(&session(), t, id).await.unwrap().unwrap().data
+}
+
+/// A read allowing more by `additionalProperties` keeps a member the record had, and
+/// may take the answer's.
+#[tokio::test]
+async fn an_acknowledged_update_keeps_a_member_an_open_map_allows() {
+    let held = stored_after_an_ack(
+        "/things/t1",
+        json!({"id": "t1", "status": "on", "color": "red"}),
+        "PATCH",
+        "/things/t1",
+    )
+    .await;
+    assert_eq!(held["color"], "red", "{held}");
+    assert_eq!(held["id"], "t1", "{held}");
+}
+
+/// A read saying nothing of more members keeps one the record had, but not the
+/// answer's own.
+#[tokio::test]
+async fn an_acknowledged_update_keeps_a_member_the_record_had() {
+    let held = stored_after_an_ack(
+        "/plains/p1",
+        json!({"id": "p1", "status": "on", "color": "red"}),
+        "PATCH",
+        "/plains/p1",
+    )
+    .await;
+    assert_eq!(held["color"], "red", "{held}");
+    assert!(held.get("ok").is_none(), "{held}");
+}
+
+/// An action answering an acknowledgement stores the same way.
+#[tokio::test]
+async fn an_acknowledged_action_keeps_a_member_the_record_had() {
+    let held = stored_after_an_ack(
+        "/plains/p1",
+        json!({"id": "p1", "status": "on", "color": "red"}),
+        "POST",
+        "/plains/p1/void",
+    )
+    .await;
+    assert_eq!(held["color"], "red", "{held}");
+    assert!(held.get("ok").is_none(), "{held}");
+}
+
 /// An answer of another schema lays onto the stored record only what the record's own
 /// schema declares: the acknowledgement's `message` is no gadget's.
 #[tokio::test]

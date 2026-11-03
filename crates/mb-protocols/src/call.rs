@@ -5673,7 +5673,9 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             // An answer of another schema adds nothing of its own to the held record.
             let data = match &generated.body {
                 Some(_) if was_held && !generated.new_record => {
-                    write_memory::onto_record(rt, op, resource_type, data, generated.status)
+                    let held = state.get(session, resource_type, &id).await;
+                    let on = (resource_type, held.as_ref().map(|h| &h.data));
+                    write_memory::onto_record(rt, op, on, data, generated.status)
                 }
                 _ => data,
             };
