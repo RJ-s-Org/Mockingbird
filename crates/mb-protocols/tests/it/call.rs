@@ -5425,6 +5425,28 @@ paths:
       parameters: [{name: message_id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Message"}}}}
+  /users:
+    post:
+      operationId: createUser
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /users/{user_id}:
+    get:
+      operationId: getUser
+      parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /accounts:
+    post:
+      operationId: createAccount
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /accounts/{account_id}:
+    get:
+      operationId: getAccount
+      parameters: [{name: account_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
   /buckets:
     post:
       operationId: createBucket
@@ -5454,9 +5476,9 @@ components:
       properties: {id: {type: string}, name: {type: string}}
 "##;
 
-/// A new message's id is no id the path carries, nor another record's the session
-/// holds: an answer reusing its channel's id, from the path or from a body member,
-/// gets a fresh one, under which it reads back.
+/// A new message's id is not that of a held record its request names: an answer
+/// reusing its channel's id, named in the path or in a body member, gets a fresh one,
+/// under which it reads back.
 #[tokio::test]
 async fn a_create_id_equal_to_a_path_value_or_a_held_record_is_redrawn() {
     let message = |id: &str, content: &str| {
@@ -5517,4 +5539,19 @@ async fn a_create_keeps_an_id_its_body_named_otherwise() {
     assert_eq!(bucket["id"], "my-bucket", "{bucket}");
     let (_, source, read) = h.call("GET", "/buckets/my-bucket", None).await;
     assert_eq!(source, "state", "{read}");
+}
+
+/// Another type's record under the same id says nothing when the request does not
+/// name it: with user `42` held, a new account answered `42` keeps it.
+#[tokio::test]
+async fn a_create_keeps_an_id_another_type_holds_that_the_request_does_not_name() {
+    let named = |id: &str| Ok(json!({"id": id, "name": "n"}).to_string());
+    let h = actions_of(CHANNEL_MESSAGES, vec![named("42"), named("42")]);
+    let (_, _, user) = h.call("POST", "/users", None).await;
+    assert_eq!(user["id"], "42");
+    let (status, _, account) = h.call("POST", "/accounts", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(account["id"], "42", "{account}");
+    let (_, source, _) = h.call("GET", "/accounts/42", None).await;
+    assert_eq!(source, "state");
 }

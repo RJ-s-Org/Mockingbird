@@ -82,7 +82,7 @@ No migration or configuration.
 - **A create can answer differently**: a body member it leaves out that declares a `default` now answers the default, where the model or the faker picked any value. An update's body is never defaulted.
 - **Lists can be empty**: a search that nothing matches can now answer an empty array where the model gave 3 to 5 invented items.
 - **The output budget can fill different members**: deeper required members go first, and an array item's only object member with a required `id` or `uri` stays in the schema while anything else can go, so a shaped answer may keep more of each item and fill more of what lies below it. The estimate fits the budget wherever it did before.
-- **New ids avoid the call's path and other held records**: a create's id equal to a path value, or to the id of a record of another type the session holds, is redrawn, so an answer that reused one is stored under a fresh id. A create can cost up to 32 more store reads with `consistency: on`. Body values do not count.
+- **New ids avoid the held records a request names**: a create's id equal to a value of its path or body that is the id of a record of another type the session holds is redrawn, so an answer that reused its channel's id is stored under a fresh one. Such a create can cost up to 32 more store reads with `consistency: on`. An id that the request does not carry, or that no held record has, is kept.
 - **Recorded prompts**: the system message changed for every call, so a snapshot or recording keyed on the exact prompt and taken before this release no longer replays.
 - **Rust API**: `mb_mcm::OutputVariant` gains `description`, which breaks code constructing it in full.
 
