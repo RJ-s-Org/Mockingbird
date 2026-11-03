@@ -266,6 +266,36 @@ async fn a_plain_text_filter_keeps_what_holds_the_value() {
     assert_eq!(ids(&body), ["i1", "i3"]);
 }
 
+/// A plain-text value holding a digit (an id, a phone number, a code) matches whole,
+/// ignoring case: `u1` keeps `U1`, not `u10`.
+#[tokio::test]
+async fn a_plain_text_value_with_a_digit_matches_whole() {
+    let answer = json!([issue("i1", "opened", "U1"), issue("i2", "opened", "u10")]);
+    let api = api_of(ISSUES, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/issues?name=u1").await;
+    assert_eq!(ids(&body), ["i1"]);
+}
+
+/// An unencoded `+` decodes to a space: the value is trimmed and read as the client
+/// meant, `+1555` and not `+15550`. A value only of spaces is no filter.
+#[tokio::test]
+async fn a_value_is_trimmed_and_an_unencoded_plus_kept() {
+    let answer = json!([
+        issue("i1", "opened", "+1555"),
+        issue("i2", "opened", "+15550"),
+        issue("i3", "opened", "1555"),
+    ]);
+    let api = api_of(
+        ISSUES,
+        true,
+        vec![Ok(answer.to_string()), Ok(answer.to_string())],
+    );
+    let body = api.get("/issues?name=+1555").await;
+    assert_eq!(ids(&body), ["i1", "i3"]);
+    let body = api.get("/issues?name=%20%20").await;
+    assert_eq!(ids(&body), ["i1", "i2", "i3"]);
+}
+
 /// Deleting an `opened` issue marks only its identity: an optional filter's value is
 /// no key, so other opened issues stay.
 #[tokio::test]
