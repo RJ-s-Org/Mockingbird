@@ -1,0 +1,572 @@
+openapi: 3.0.3
+info:
+  title: DigitalOcean API (droplets, droplet actions, tags)
+  version: "2.0"
+  description: |
+    A subset of the DigitalOcean API v2, written from its public documentation.
+    Every answer wraps its record under a key named for it: `{"droplet": {...}}`,
+    `{"droplets": [...]}`, `{"action": {...}}`, `{"tag": {...}}`. Lists page with
+    `page` and `per_page` and carry `links.pages` (first, prev, next, last URLs, each
+    present only when it applies) and `meta.total`. A tag is addressed by its name.
+    Creating a droplet is asynchronous: it answers 202 with the droplet in status
+    `new` and a link to the `create` action. Droplet actions (power, reboot, resize
+    and the rest) are records of their own with an id and a status.
+servers:
+  - url: https://api.digitalocean.com
+security:
+  - bearer: []
+tags:
+  - name: Droplets
+  - name: Droplet Actions
+  - name: Actions
+  - name: Tags
+paths:
+  /v2/droplets:
+    get:
+      tags: [Droplets]
+      operationId: droplets_list
+      summary: List all droplets
+      parameters:
+        - $ref: "#/components/parameters/per_page"
+        - $ref: "#/components/parameters/page"
+        - name: tag_name
+          in: query
+          description: Only droplets with this tag. Not combinable with `name` or `type`.
+          schema: {type: string}
+        - name: name
+          in: query
+          description: Only droplets with exactly this name (case-insensitive).
+          schema: {type: string}
+        - name: type
+          in: query
+          schema: {type: string, enum: [droplets, gpus]}
+      responses:
+        "200":
+          description: A page of droplets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [droplets, links, meta]
+                properties:
+                  droplets: {type: array, items: {$ref: "#/components/schemas/Droplet"}}
+                  links: {$ref: "#/components/schemas/PageLinks"}
+                  meta: {$ref: "#/components/schemas/Meta"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+    post:
+      tags: [Droplets]
+      operationId: droplets_create
+      summary: Create a new droplet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DropletCreate"}
+      responses:
+        "202":
+          description: The droplet is being created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [droplet, links]
+                properties:
+                  droplet: {$ref: "#/components/schemas/Droplet"}
+                  links:
+                    type: object
+                    required: [actions]
+                    properties:
+                      actions:
+                        type: array
+                        items: {$ref: "#/components/schemas/ActionLink"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+    delete:
+      tags: [Droplets]
+      operationId: droplets_destroy_byTag
+      summary: Delete every droplet with a tag
+      parameters:
+        - name: tag_name
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "204":
+          description: The droplets are being deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/droplets/{droplet_id}:
+    parameters:
+      - $ref: "#/components/parameters/droplet_id"
+    get:
+      tags: [Droplets]
+      operationId: droplets_get
+      summary: Retrieve an existing droplet
+      responses:
+        "200":
+          description: The droplet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [droplet]
+                properties:
+                  droplet: {$ref: "#/components/schemas/Droplet"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Droplets]
+      operationId: droplets_destroy
+      summary: Delete an existing droplet
+      responses:
+        "204":
+          description: The droplet was deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/droplets/{droplet_id}/actions:
+    parameters:
+      - $ref: "#/components/parameters/droplet_id"
+    get:
+      tags: [Droplet Actions]
+      operationId: dropletActions_list
+      summary: List actions for a droplet
+      parameters:
+        - $ref: "#/components/parameters/per_page"
+        - $ref: "#/components/parameters/page"
+      responses:
+        "200":
+          description: The droplet's actions, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [actions, links, meta]
+                properties:
+                  actions: {type: array, items: {$ref: "#/components/schemas/Action"}}
+                  links: {$ref: "#/components/schemas/PageLinks"}
+                  meta: {$ref: "#/components/schemas/Meta"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Droplet Actions]
+      operationId: dropletActions_post
+      summary: Initiate a droplet action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DropletActionRequest"}
+      responses:
+        "201":
+          description: The action that was started.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action]
+                properties:
+                  action: {$ref: "#/components/schemas/Action"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v2/actions/{action_id}:
+    get:
+      tags: [Actions]
+      operationId: actions_get
+      summary: Retrieve an existing action
+      parameters:
+        - name: action_id
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: The action.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action]
+                properties:
+                  action: {$ref: "#/components/schemas/Action"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/tags:
+    get:
+      tags: [Tags]
+      operationId: tags_list
+      summary: List all tags
+      parameters:
+        - $ref: "#/components/parameters/per_page"
+        - $ref: "#/components/parameters/page"
+      responses:
+        "200":
+          description: A page of tags.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tags, links, meta]
+                properties:
+                  tags: {type: array, items: {$ref: "#/components/schemas/Tag"}}
+                  links: {$ref: "#/components/schemas/PageLinks"}
+                  meta: {$ref: "#/components/schemas/Meta"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Tags]
+      operationId: tags_create
+      summary: Create a new tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  maxLength: 255
+                  pattern: "^[a-zA-Z0-9_\\-\\:]+$"
+                  description: Letters, numbers, colons, dashes and underscores.
+      responses:
+        "201":
+          description: The created tag.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tag]
+                properties:
+                  tag: {$ref: "#/components/schemas/Tag"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v2/tags/{tag_id}:
+    parameters:
+      - $ref: "#/components/parameters/tag_id"
+    get:
+      tags: [Tags]
+      operationId: tags_get
+      summary: Retrieve a tag
+      responses:
+        "200":
+          description: The tag with counts of what it is applied to.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tag]
+                properties:
+                  tag: {$ref: "#/components/schemas/Tag"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Tags]
+      operationId: tags_delete
+      summary: Delete a tag
+      description: Removes the tag from every resource it is applied to.
+      responses:
+        "204":
+          description: The tag was deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/tags/{tag_id}/resources:
+    parameters:
+      - $ref: "#/components/parameters/tag_id"
+    post:
+      tags: [Tags]
+      operationId: tags_assign_resources
+      summary: Tag resources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TagResources"}
+      responses:
+        "204":
+          description: The resources were tagged.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+    delete:
+      tags: [Tags]
+      operationId: tags_unassign_resources
+      summary: Untag resources
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TagResources"}
+      responses:
+        "204":
+          description: The tag was removed from the resources.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A personal access token or an OAuth token.
+  parameters:
+    droplet_id:
+      name: droplet_id
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    tag_id:
+      name: tag_id
+      in: path
+      required: true
+      description: The tag's name.
+      schema: {type: string}
+    per_page:
+      name: per_page
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 20}
+    page:
+      name: page
+      in: query
+      schema: {type: integer, minimum: 1, default: 1}
+  responses:
+    BadRequest:
+      description: bad_request
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: unauthorized, the token is missing or not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: not_found
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unprocessable:
+      description: unprocessable_entity, the body is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    TooManyRequests:
+      description: too_many_requests
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [id, message]
+      properties:
+        id: {type: string, enum: [bad_request, unauthorized, not_found, unprocessable_entity, too_many_requests, server_error], example: not_found}
+        message: {type: string, example: "The resource you were accessing could not be found."}
+        request_id: {type: string}
+    PageLinks:
+      type: object
+      properties:
+        pages:
+          type: object
+          properties:
+            first: {type: string, format: uri}
+            prev: {type: string, format: uri}
+            next: {type: string, format: uri}
+            last: {type: string, format: uri}
+    Meta:
+      type: object
+      required: [total]
+      properties:
+        total: {type: integer, minimum: 0}
+    Region:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: {type: string, example: nyc3}
+        name: {type: string, example: New York 3}
+        features: {type: array, items: {type: string}}
+        available: {type: boolean}
+        sizes: {type: array, items: {type: string}}
+    Size:
+      type: object
+      required: [slug, memory, vcpus, disk]
+      properties:
+        slug: {type: string, example: s-1vcpu-1gb}
+        memory: {type: integer, description: MB}
+        vcpus: {type: integer}
+        disk: {type: integer, description: GB}
+        transfer: {type: number, description: TB}
+        price_monthly: {type: number}
+        price_hourly: {type: number}
+        regions: {type: array, items: {type: string}}
+        available: {type: boolean}
+        description: {type: string}
+    Image:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        type: {type: string, enum: [base, snapshot, backup, custom, admin]}
+        distribution: {type: string}
+        slug: {type: string, nullable: true, example: ubuntu-24-04-x64}
+        public: {type: boolean}
+        regions: {type: array, items: {type: string}}
+        min_disk_size: {type: integer}
+        size_gigabytes: {type: number}
+        created_at: {type: string, format: date-time}
+        status: {type: string, enum: [NEW, available, pending, deleted, retired]}
+    NetworkV4:
+      type: object
+      properties:
+        ip_address: {type: string, format: ipv4}
+        netmask: {type: string}
+        gateway: {type: string}
+        type: {type: string, enum: [public, private]}
+    NetworkV6:
+      type: object
+      properties:
+        ip_address: {type: string, format: ipv6}
+        netmask: {type: integer}
+        gateway: {type: string}
+        type: {type: string, enum: [public]}
+    Droplet:
+      type: object
+      required: [id, name, memory, vcpus, disk, locked, status, created_at, features, backup_ids, snapshot_ids, image, volume_ids, size, size_slug, networks, region, tags]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        memory: {type: integer}
+        vcpus: {type: integer}
+        disk: {type: integer}
+        locked: {type: boolean}
+        status: {type: string, enum: [new, active, off, archive]}
+        created_at: {type: string, format: date-time}
+        features: {type: array, items: {type: string, example: monitoring}}
+        backup_ids: {type: array, items: {type: integer}}
+        next_backup_window:
+          type: object
+          nullable: true
+          properties:
+            start: {type: string, format: date-time}
+            end: {type: string, format: date-time}
+        snapshot_ids: {type: array, items: {type: integer}}
+        image: {$ref: "#/components/schemas/Image"}
+        volume_ids: {type: array, items: {type: string}}
+        size: {$ref: "#/components/schemas/Size"}
+        size_slug: {type: string}
+        networks:
+          type: object
+          properties:
+            v4: {type: array, items: {$ref: "#/components/schemas/NetworkV4"}}
+            v6: {type: array, items: {$ref: "#/components/schemas/NetworkV6"}}
+        region: {$ref: "#/components/schemas/Region"}
+        tags: {type: array, items: {type: string}}
+        vpc_uuid: {type: string, format: uuid}
+    DropletCreate:
+      type: object
+      required: [name, size, image]
+      properties:
+        name: {type: string, pattern: "^[a-zA-Z0-9.-]+$", description: Used as the hostname.}
+        region: {type: string, description: A region slug; any region when omitted.}
+        size: {type: string, description: A size slug.}
+        image:
+          description: An image slug or id.
+          oneOf:
+            - {type: string}
+            - {type: integer}
+        ssh_keys:
+          type: array
+          items:
+            oneOf:
+              - {type: string}
+              - {type: integer}
+        backups: {type: boolean, default: false}
+        backup_policy:
+          type: object
+          properties:
+            plan: {type: string, enum: [daily, weekly]}
+            weekday: {type: string, enum: [SUN, MON, TUE, WED, THU, FRI, SAT]}
+            hour: {type: integer, enum: [0, 4, 8, 12, 16, 20]}
+        ipv6: {type: boolean, default: false}
+        monitoring: {type: boolean, default: false}
+        tags: {type: array, nullable: true, items: {type: string}}
+        user_data: {type: string, maxLength: 65536}
+        volumes: {type: array, items: {type: string}}
+        vpc_uuid: {type: string, format: uuid}
+        with_droplet_agent: {type: boolean}
+    ActionLink:
+      type: object
+      required: [id, rel, href]
+      properties:
+        id: {type: integer}
+        rel: {type: string, example: create}
+        href: {type: string, format: uri}
+    Action:
+      type: object
+      required: [id, status, type, started_at, resource_id, resource_type]
+      properties:
+        id: {type: integer}
+        status: {type: string, enum: [in-progress, completed, errored], default: in-progress}
+        type:
+          type: string
+          example: power_off
+          description: create, destroy, or the type of the droplet action asked for.
+        started_at: {type: string, format: date-time}
+        completed_at: {type: string, format: date-time, nullable: true}
+        resource_id: {type: integer}
+        resource_type: {type: string, enum: [droplet, image, volume, floating_ip, reserved_ip, backend]}
+        region: {allOf: [{$ref: "#/components/schemas/Region"}], nullable: true}
+        region_slug: {type: string, nullable: true}
+    DropletActionRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [enable_backups, disable_backups, change_backup_policy, reboot, power_cycle, shutdown, power_off, power_on, restore, password_reset, resize, rebuild, rename, change_kernel, enable_ipv6, snapshot]
+        name: {type: string, description: The new name for rename, or the snapshot's name.}
+        size: {type: string, description: The new size slug for resize.}
+        disk: {type: boolean, description: Also grow the disk on resize (cannot be undone).}
+        image:
+          description: The image for restore or rebuild.
+          oneOf:
+            - {type: string}
+            - {type: integer}
+        kernel: {type: integer, description: The kernel id for change_kernel.}
+    TagResources:
+      type: object
+      required: [resources]
+      properties:
+        resources:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [resource_id, resource_type]
+            properties:
+              resource_id: {type: string, description: The resource's id, as a string.}
+              resource_type: {type: string, enum: [droplet, image, volume, volume_snapshot]}
+    TaggedCount:
+      type: object
+      properties:
+        count: {type: integer, minimum: 0}
+        last_tagged_uri: {type: string, format: uri}
+    Tag:
+      type: object
+      required: [name, resources]
+      properties:
+        name: {type: string}
+        resources:
+          type: object
+          required: [count]
+          properties:
+            count: {type: integer, minimum: 0, description: Resources of every kind with this tag.}
+            last_tagged_uri: {type: string, format: uri}
+            droplets: {$ref: "#/components/schemas/TaggedCount"}
+            images: {$ref: "#/components/schemas/TaggedCount"}
+            volumes: {$ref: "#/components/schemas/TaggedCount"}
+            volume_snapshots: {$ref: "#/components/schemas/TaggedCount"}
+            databases: {$ref: "#/components/schemas/TaggedCount"}
