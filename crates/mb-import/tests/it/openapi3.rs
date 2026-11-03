@@ -2643,3 +2643,211 @@ components:
     let remove = op(&bundle, "remove").identity.clone().unwrap();
     assert_eq!((remove.field.as_str(), remove.path_field), ("email", None));
 }
+
+/// Asana's and GitLab's shapes: records keyed by `gid` with no `id`, in a `{data}`
+/// envelope, and issues read by `iid` beside their `id`.
+const KEYS_FROM_PARAMS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tasks:
+    post:
+      operationId: createTask
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+  /tasks/{task_gid}:
+    parameters: [{name: task_gid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTask
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+    put:
+      operationId: updateTask
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+  /projects/{id}/issues:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: createIssue
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /projects/{id}/issues/{issue_iid}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+      - {name: issue_iid, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getIssue
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /boards/{board_kind}:
+    parameters: [{name: board_kind, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getBoard
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Board"}}}}}
+components:
+  schemas:
+    TaskData: {type: object, properties: {data: {$ref: "#/components/schemas/Task"}}}
+    Task:
+      type: object
+      properties:
+        gid: {type: string}
+        name: {type: string}
+        project: {type: object, properties: {gid: {type: string}}}
+    Issue: {type: object, properties: {id: {type: integer}, iid: {type: integer}, title: {type: string}}}
+    Board: {type: object, properties: {name: {type: string}, kind: {type: object, properties: {label: {type: string}}}}}
+"##;
+
+#[test]
+fn a_path_parameter_names_its_key_by_its_trailing_words() {
+    let bundle = compile(KEYS_FROM_PARAMS.as_bytes()).unwrap();
+    let by_gid = |path_param: Option<&str>| Identity {
+        path_param: path_param.map(str::to_owned),
+        field: "gid".into(),
+        input_field: None,
+        path_field: None,
+        record: Some(mb_mcm::RecordAt::Member("data".into())),
+    };
+    assert_eq!(
+        op(&bundle, "getTask").identity,
+        Some(by_gid(Some("task_gid")))
+    );
+    assert_eq!(
+        op(&bundle, "updateTask").identity,
+        Some(by_gid(Some("task_gid")))
+    );
+    // A create goes by the key its type's read by path uses.
+    assert_eq!(op(&bundle, "createTask").identity, Some(by_gid(None)));
+    assert_eq!(
+        op(&bundle, "getIssue").identity,
+        Some(Identity {
+            path_param: Some("issue_iid".into()),
+            field: "id".into(),
+            input_field: None,
+            path_field: Some("iid".into()),
+            record: None,
+        })
+    );
+    let create = op(&bundle, "createIssue").identity.clone().unwrap();
+    assert_eq!((create.path_param, create.field.as_str()), (None, "id"));
+    // An object member is no key, whatever the parameter's words say.
+    assert_eq!(op(&bundle, "getBoard").identity, None);
+}
+
+/// Freshdesk's and Trello's shapes: notes and replies created under a ticket are its
+/// conversations, and a comment created under a card is one of its actions. A subtask
+/// created under a task is a task, as the read by path serves it.
+const TYPED_BY_RECORD: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tickets/{id}/notes:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: addNote
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /tickets/{id}/reply:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: reply
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /tickets/{id}/conversations:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: listConversations
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Conversation"}}}}}}
+  /cards/{id}/actions:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getActions
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Action"}}}}}}
+  /cards/{id}/actions/comments:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: addComment
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Action"}}}}}
+  /tasks/{task_id}:
+    parameters: [{name: task_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTask
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}}
+  /tasks/{task_id}/subtasks:
+    parameters: [{name: task_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getSubtasks
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/TaskCompact"}}}}}}
+    post:
+      operationId: createSubtask
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}}
+  /posts/{id}/likes:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: like
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Event"}}}}}
+  /feed:
+    get:
+      operationId: feed
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Event"}}}}}}
+  /audit:
+    get:
+      operationId: audit
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Event"}}}}}}
+components:
+  schemas:
+    Conversation: {type: object, properties: {id: {type: integer}, body: {type: string}, ticket_id: {type: integer}}}
+    Action: {type: object, properties: {id: {type: string}, type: {type: string}, data: {type: object}}}
+    Task: {type: object, properties: {id: {type: string}, name: {type: string}, notes: {type: string}}}
+    TaskCompact: {type: object, properties: {id: {type: string}, name: {type: string}}}
+    Event: {type: object, properties: {id: {type: string}, kind: {type: string}}}
+"##;
+
+#[test]
+fn a_created_record_takes_the_type_that_reads_its_schema() {
+    let bundle = compile(TYPED_BY_RECORD.as_bytes()).unwrap();
+    let type_of = |id: &str| op(&bundle, id).resource_type.clone();
+    for id in ["addNote", "reply", "listConversations"] {
+        assert_eq!(type_of(id).as_deref(), Some("conversations"), "{id}");
+    }
+    for id in ["addComment", "getActions"] {
+        assert_eq!(type_of(id).as_deref(), Some("actions"), "{id}");
+    }
+    // The read by path serves exactly what the create answers.
+    assert_eq!(type_of("createSubtask").as_deref(), Some("tasks"));
+    assert_eq!(type_of("getSubtasks").as_deref(), Some("subtasks"));
+    // Lists of two other types are not one type.
+    assert_eq!(type_of("like").as_deref(), Some("likes"));
+    let note = op(&bundle, "addNote");
+    assert_eq!(note.kind, OperationKind::Command(Effect::Create));
+    let identity = note.identity.clone().unwrap();
+    assert_eq!((identity.path_param, identity.field.as_str()), (None, "id"));
+}
+
+#[test]
+fn a_version_segment_is_never_a_type() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /3.0/search-members:
+    get:
+      operationId: searchMembers
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+  /v2/query:
+    post:
+      operationId: query
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+  /2024-01-01/accounts/get:
+    post:
+      operationId: getAccounts
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+  /1/search:
+    get:
+      operationId: search
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+  /users/v1beta2:
+    get:
+      operationId: users
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {total: {type: integer}}}}}}}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let type_of = |id: &str| op(&bundle, id).resource_type.clone();
+    assert_eq!(type_of("searchMembers").as_deref(), Some("search-members"));
+    assert_eq!(type_of("query").as_deref(), Some("query"));
+    assert_eq!(type_of("getAccounts").as_deref(), Some("accounts"));
+    assert_eq!(type_of("search").as_deref(), Some("search"));
+    assert_eq!(type_of("users").as_deref(), Some("users"));
+}

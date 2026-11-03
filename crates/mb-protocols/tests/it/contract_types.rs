@@ -1113,3 +1113,137 @@ async fn a_refused_action_on_an_enveloped_record_changes_nothing() {
     assert_eq!(completed, json!({"payment": payment("COMPLETED")}));
     assert_eq!(h.stored().await[0].data, payment("COMPLETED"));
 }
+
+/// Asana's shape: a task has a `gid` and no `id`, in a `{data}` envelope, and the
+/// path names it `{task_gid}`. GitLab's: an issue has an `id` and is read by its `iid`.
+const KEYED_BY_PARAM: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tasks:
+    post:
+      operationId: createTask
+      requestBody: {content: {application/json: {schema: {type: object, properties: {data: {type: object, properties: {name: {type: string}}}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+  /tasks/{task_gid}:
+    parameters: [{name: task_gid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTask
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/TaskData"}}}}}
+  /projects/{id}/issues:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: createIssue
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+  /projects/{id}/issues/{issue_iid}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer}}
+      - {name: issue_iid, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getIssue
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Issue"}}}}}
+components:
+  schemas:
+    TaskData:
+      type: object
+      required: [data]
+      properties: {data: {$ref: "#/components/schemas/Task"}}
+    Task:
+      type: object
+      required: [gid, name]
+      properties: {gid: {type: string}, name: {type: string}}
+    Issue:
+      type: object
+      required: [id, iid, title]
+      properties: {id: {type: integer}, iid: {type: integer}, title: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_task_keyed_by_its_gid_is_read_back() {
+    let task = json!({"gid": "1201", "name": "Write the brief"});
+    let h = harness(KEYED_BY_PARAM, vec![json!({"data": task.clone()})]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/tasks",
+            Some(json!({"data": {"name": "Write the brief"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        h.exported().await,
+        [("tasks".to_owned(), "1201".to_owned())]
+    );
+    let (_, source, read) = h.call("GET", "/tasks/1201", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, json!({"data": task}));
+    assert_eq!(h.calls(), 1);
+}
+
+#[tokio::test]
+async fn an_issue_is_read_back_by_its_iid() {
+    let issue = json!({"id": 501, "iid": 3, "title": "Login fails"});
+    let h = harness(KEYED_BY_PARAM, vec![issue.clone()]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/projects/7/issues",
+            Some(json!({"title": "Login fails"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (_, source, read) = h.call("GET", "/projects/7/issues/3", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read, issue);
+    assert_eq!(h.calls(), 1);
+}
+
+/// Freshdesk's shape: a note created under a ticket is one of its conversations.
+const CONVERSATIONS: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tickets/{id}/notes:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    post:
+      operationId: addNote
+      requestBody: {content: {application/json: {schema: {type: object, properties: {body: {type: string}}}}}}
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /tickets/{id}/conversations:
+    parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+    get:
+      operationId: listConversations
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Conversation"}}}}}}
+components:
+  schemas:
+    Conversation:
+      type: object
+      required: [id, body, ticket_id]
+      properties: {id: {type: integer}, body: {type: string}, ticket_id: {type: integer}}
+"##;
+
+#[tokio::test]
+async fn a_note_appears_in_its_tickets_conversations() {
+    let note = json!({"id": 77, "body": "Called the customer back", "ticket_id": 9});
+    let h = harness(CONVERSATIONS, vec![note.clone(), json!([note.clone()])]);
+    let (status, _, created) = h
+        .call(
+            "POST",
+            "/tickets/9/notes",
+            Some(json!({"body": "Called the customer back"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        h.exported().await,
+        [("conversations".to_owned(), "77".to_owned())]
+    );
+    let (status, _, listed) = h.call("GET", "/tickets/9/conversations", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(
+        h.prompt(1).contains("Called the customer back"),
+        "{}",
+        h.prompt(1)
+    );
+}
