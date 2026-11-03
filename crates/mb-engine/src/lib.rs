@@ -1089,6 +1089,61 @@ impl Engine {
         })
     }
 
+    /// Stored `record` as `op` answers it: in the envelope or the one-item array its
+    /// identity says the answer holds it in, else as it is. An envelope also gets the
+    /// other members its schema (the narrowed `response_schema` when given) requires,
+    /// as Cal.com's `{status, data}` does its `status`: the value `kept` holds for it
+    /// (what the API answered in an envelope of this shape before), else the value the
+    /// member's schema fixes (a `const`, a one-value `enum`, a `default`, else the
+    /// first `enum` value or example), else a faker value drawn the same way for every
+    /// read of `op`. The record is not changed; whether the answer suits its schema is
+    /// for [`Engine::serve_stored`] to say.
+    #[must_use]
+    pub fn held_answer(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        record: &Value,
+        kept: Option<&Map<String, Value>>,
+        response_schema: Option<&Value>,
+    ) -> Value {
+        let Some(identity) = op.identity.as_ref().filter(|i| i.record.is_some()) else {
+            return record.clone();
+        };
+        let mut answer = identity.answer_holding(record.clone(), None);
+        let (Some(mb_mcm::RecordAt::Member(member)), Some(envelope), Some(schema)) = (
+            identity.record.as_ref(),
+            answer.as_object_mut(),
+            response_schema.or_else(|| op.success_output()?.schema.as_ref()),
+        ) else {
+            return answer;
+        };
+        let mut draws = None;
+        for name in consistency::required_members(bundle, schema) {
+            if &name == member || envelope.contains_key(&name) {
+                continue;
+            }
+            let Some(member_schema) = consistency::property_schema(bundle, schema, &name) else {
+                continue;
+            };
+            let earlier = kept.and_then(|k| k.get(&name)).cloned();
+            let value = earlier
+                .or_else(|| consistency::fixed_value(bundle, &member_schema))
+                .unwrap_or_else(|| {
+                    let draws = draws.get_or_insert_with(|| {
+                        seed::Draws::seeded(
+                            self.faker_seed.unwrap_or(seed::DEFAULT_FAKER_SEED),
+                            &[&bundle.source_digest, &op.id, "envelope"],
+                            &[],
+                        )
+                    });
+                    self.fake_field(bundle, &name, &member_schema, draws)
+                });
+            envelope.insert(name, value);
+        }
+        answer
+    }
+
     /// A `404` for a resource the session does not hold: the operation's
     /// declared `404` response, faker-filled, else a problem+json body with
     /// `detail`. Always tagged `State`.

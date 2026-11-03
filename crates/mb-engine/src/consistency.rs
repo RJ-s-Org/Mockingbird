@@ -161,6 +161,56 @@ pub(crate) fn deref<'a>(bundle: &'a Bundle, mut schema: &'a Value) -> &'a Value 
     schema
 }
 
+/// The members object `schema` requires, looking through `$ref`s and `allOf`
+/// members (which all apply), in order and once each.
+pub fn required_members(bundle: &Bundle, schema: &Value) -> Vec<String> {
+    fn collect(bundle: &Bundle, schema: &Value, depth: usize, out: &mut Vec<String>) {
+        if depth > 8 {
+            return;
+        }
+        let schema = deref(bundle, schema);
+        let names = schema.get("required").and_then(Value::as_array);
+        for name in names.into_iter().flatten().filter_map(Value::as_str) {
+            if !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+        for member in schema
+            .get("allOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            collect(bundle, member, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    collect(bundle, schema, 0, &mut out);
+    out
+}
+
+/// The value `schema` fixes or names first, through `$ref`s: its `const`, its one
+/// `enum` value, its `default`, else its first `enum` value or example. `None` when
+/// it names none.
+pub(crate) fn fixed_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let schema = deref(bundle, schema);
+    let values = schema.get("enum").and_then(Value::as_array);
+    let only = values.filter(|v| v.len() == 1).and_then(|v| v.first());
+    schema
+        .get("const")
+        .or(only)
+        .or_else(|| schema.get("default"))
+        .or_else(|| values.and_then(|v| v.first()))
+        .or_else(|| schema.get("example"))
+        .or_else(|| {
+            schema
+                .get("examples")
+                .and_then(Value::as_array)
+                .and_then(|v| v.first())
+        })
+        .cloned()
+}
+
 /// The schema of `field` in object `schema`, looking through `$ref`s and
 /// `allOf`/`oneOf`/`anyOf` members.
 pub fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<Value> {

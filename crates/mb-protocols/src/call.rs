@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod deleted;
+mod envelopes;
 mod lists;
 mod minted;
 mod pages;
@@ -883,12 +884,9 @@ pub(crate) async fn prepare<'a>(
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
-        && let Some(mut served) = rt.engine.serve_stored(
-            &rt.bundle,
-            op,
-            &held_answer(op, &stored.data),
-            response_schema,
-        )
+        && let Some(mut served) = serve_held(&mut state, plan, stored, response_schema)
+            .instrument(state_span())
+            .await
     {
         let mut earlier = write_memory::recall(
             &mut state,
@@ -1047,12 +1045,37 @@ pub(crate) async fn prepare<'a>(
     }))
 }
 
-/// A stored record as `op` answers it: in the envelope or the one-item array its
-/// identity says the answer holds it in, else as it is.
-fn held_answer(op: &Operation, record: &Value) -> Value {
-    match op.identity.as_ref().filter(|i| i.record.is_some()) {
-        Some(identity) => identity.answer_holding(record.clone(), None),
-        None => record.clone(),
+/// Stored `stored` served as `plan`'s answer, in the envelope its read holds it in (see
+/// [`mb_engine::Engine::held_answer`]): with what the session's answers of that envelope
+/// said besides the record ([`envelopes`]), else, when that does not suit the schema,
+/// with what the schema gives. `None` when neither suits it.
+async fn serve_held(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    stored: &StoredResource,
+    response_schema: Option<&Value>,
+) -> Option<GeneratedResponse> {
+    let rt = state.rt;
+    let op = plan.op;
+    let enveloped = op
+        .identity
+        .as_ref()
+        .is_some_and(|i| matches!(i.record, Some(mb_mcm::RecordAt::Member(_))));
+    let kept = if enveloped {
+        envelopes::recall(state, plan).await
+    } else {
+        None
+    };
+    let serve = |kept: Option<&Map<String, Value>>| {
+        let answer = rt
+            .engine
+            .held_answer(&rt.bundle, op, &stored.data, kept, response_schema);
+        rt.engine
+            .serve_stored(&rt.bundle, op, &answer, response_schema)
+    };
+    match kept {
+        Some(kept) => serve(Some(&kept)).or_else(|| serve(None)),
+        None => serve(None),
     }
 }
 
@@ -1302,6 +1325,10 @@ pub(crate) async fn complete(
                     deleted::mark(&mut state, session, (op, call), t, id, target.as_ref()).await;
                 }
             }
+        }
+        // What else the envelope said, for a stored record to be answered the same.
+        if let Some(answer) = answered.as_ref().filter(|_| !unstored) {
+            envelopes::remember(&mut state, plan, answer, &generated).await;
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
@@ -5596,17 +5623,14 @@ fn references_in(
             if let Some(t) = global_id_type(id) {
                 out.push((vec![t], id.clone()));
             } else if let Some(prefix) = reference_prefix(field) {
-                out.push((vec![format!("{prefix}s"), prefix.to_string()], id.clone()));
+                out.push((reference_types(index, prefix), id.clone()));
             } else if let Some(t) = index.and_then(|i| entity_type(i, None, field)) {
                 out.push((vec![t], id.clone()));
             }
         }
         Value::Number(id) if index.is_some() => {
             if let Some(prefix) = reference_prefix(field) {
-                out.push((
-                    vec![format!("{prefix}s"), prefix.to_string()],
-                    id.to_string(),
-                ));
+                out.push((reference_types(index, prefix), id.to_string()));
             }
         }
         Value::Array(items) => {
@@ -5621,6 +5645,34 @@ fn references_in(
         }
         _ => {}
     }
+}
+
+/// The types a `<prefix>Id` member refers to: `<prefix>s` and `<prefix>`, then, with
+/// `index`, each type of the contract of the same stem ([`type_stem`]), so that
+/// `eventTypeId` and `event_type_id` find `event-types`. Sorted after the first two.
+fn reference_types(index: Option<&BundleIndex>, prefix: &str) -> Vec<String> {
+    let mut types = vec![format!("{prefix}s"), prefix.to_string()];
+    let Some(index) = index else {
+        return types;
+    };
+    let stem = type_stem(prefix);
+    let mut known: Vec<&String> = index
+        .read_types
+        .iter()
+        .chain(index.detail_reads.keys())
+        .chain(&index.effect_types)
+        .chain(
+            index
+                .listed
+                .iter()
+                .filter(|t| !ENVELOPE_KEYS.contains(&t.as_str())),
+        )
+        .filter(|t| !types.contains(t) && type_stem(t) == stem)
+        .collect();
+    known.sort();
+    known.dedup();
+    types.extend(known.into_iter().cloned());
+    types
 }
 
 /// The type of a global id (`gid://shopify/ProductVariant/42` →
@@ -6213,6 +6265,46 @@ paths:
         assert_eq!(entity_type(index, None, "items"), None);
         assert_eq!(entity_type(index, None, "nothing"), None);
         assert_eq!(entity_type(index, None, ""), None);
+    }
+
+    /// A `<x>Id` finds a type of the contract whatever case either is named in, and
+    /// only one of the same stem.
+    #[test]
+    fn references_find_types_of_the_same_stem() {
+        let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /event-types/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getEventType
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}}
+  /events/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getEvent
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}}
+"##;
+        let rt = runtime_of(mb_import::compile(contract.as_bytes()).unwrap());
+        let index = Some(rt.index());
+        for field in ["eventTypeId", "event_type_id", "EventTypeId"] {
+            let mut out = Vec::new();
+            references_in(field, &json!("et_1"), 0, index, &mut out);
+            let [(types, id)] = out.as_slice() else {
+                panic!("{field}: {out:?}");
+            };
+            assert_eq!(id, "et_1");
+            assert!(
+                types.iter().any(|t| t == "event-types"),
+                "{field}: {types:?}"
+            );
+            assert!(!types.iter().any(|t| t == "events"), "{field}: {types:?}");
+        }
+        assert_eq!(
+            reference_types(None, "eventType"),
+            ["eventTypes", "eventType"]
+        );
     }
 
     /// What an LLM wrote into a log field is bounded, in characters.
