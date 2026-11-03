@@ -1,0 +1,659 @@
+openapi: 3.0.3
+info:
+  title: Intercom REST API (contacts, conversations, assignment, tags)
+  version: "2.11"
+  description: |
+    A subset of the Intercom REST API 2.11, written from its public documentation.
+    A contact (role `user` or `lead`) starts a conversation with a message; the
+    answer is that message, which names the conversation it opened in
+    `conversation_id`. A conversation lists its contacts, keeps the first message
+    as its `source`, and collects every later reply, note, assignment and state
+    change as a conversation part, oldest first.
+
+    A conversation's `state` is `open`, `closed` or `snoozed`, and `open` is true
+    exactly when the state is open. It changes only through `POST
+    /conversations/{id}/parts`: `close` closes it, `open` reopens it, `snoozed`
+    snoozes it until `snoozed_until`, and `assignment` sets `admin_assignee_id` (or
+    `team_assignee_id`) to `assignee_id`. Each of these answers the whole
+    conversation after the change.
+
+    Search takes a query of `{field, operator, value}`, or `{operator: AND|OR,
+    value: [queries]}` to combine them; operators are `=`, `!=`, `IN`, `NIN`, `<`,
+    `>`, `~` (contains), `!~`, `^` (starts with) and `$` (ends with). Lists and
+    searches report `total_count` and page with `pages.next.starting_after`.
+    Creating a contact with the email or external_id of an existing one is refused
+    with 409. Timestamps are Unix seconds. Unknown ids are 404 `not_found`.
+servers:
+  - url: https://api.intercom.io
+security:
+  - bearer: []
+tags:
+  - name: Admins
+  - name: Contacts
+  - name: Conversations
+  - name: Tags
+paths:
+  /admins:
+    get:
+      tags: [Admins]
+      operationId: listAdmins
+      summary: List the workspace's admins
+      parameters:
+        - $ref: "#/components/parameters/version"
+      responses:
+        "200":
+          description: The admins.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, admins]
+                properties:
+                  type: {type: string, enum: [admin.list]}
+                  admins: {type: array, items: {$ref: "#/components/schemas/Admin"}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /contacts:
+    post:
+      tags: [Contacts]
+      operationId: createContact
+      summary: Create a contact
+      parameters:
+        - $ref: "#/components/parameters/version"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one of email, external_id or role is required.
+              properties:
+                role: {type: string, enum: [user, lead], default: user}
+                external_id: {type: string, description: Your own id for a user.}
+                email: {type: string, format: email}
+                phone: {type: string, nullable: true}
+                name: {type: string, nullable: true}
+                avatar: {type: string, format: uri, nullable: true}
+                signed_up_at: {type: integer, nullable: true}
+                last_seen_at: {type: integer, nullable: true}
+                owner_id: {type: integer, nullable: true}
+                unsubscribed_from_emails: {type: boolean, nullable: true}
+                custom_attributes: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: The created contact.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contact"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: A contact with this email or external_id already exists (code `conflict`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorList"}
+  /contacts/{contact_id}:
+    parameters:
+      - $ref: "#/components/parameters/version"
+      - name: contact_id
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Contacts]
+      operationId: getContact
+      summary: Get a contact
+      responses:
+        "200":
+          description: The contact.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contact"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Contacts]
+      operationId: deleteContact
+      summary: Delete a contact
+      responses:
+        "200":
+          description: The contact was deleted; reading it again is 404.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, object, deleted]
+                properties:
+                  id: {type: string}
+                  external_id: {type: string, nullable: true}
+                  object: {type: string, enum: [contact]}
+                  deleted: {type: boolean}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /contacts/search:
+    post:
+      tags: [Contacts]
+      operationId: searchContacts
+      summary: Search contacts
+      parameters:
+        - $ref: "#/components/parameters/version"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SearchRequest"}
+      responses:
+        "200":
+          description: The contacts that match.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type, data, total_count]
+                properties:
+                  type: {type: string, enum: [list]}
+                  data: {type: array, items: {$ref: "#/components/schemas/Contact"}}
+                  total_count: {type: integer}
+                  pages: {$ref: "#/components/schemas/Pages"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      summary: List conversations, most recently updated first
+      parameters:
+        - $ref: "#/components/parameters/version"
+        - name: per_page
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 150, default: 20}
+        - name: starting_after
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of conversations.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ConversationList"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Conversations]
+      operationId: createConversation
+      summary: Start a conversation from a contact
+      parameters:
+        - $ref: "#/components/parameters/version"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, body]
+              properties:
+                from:
+                  type: object
+                  required: [type, id]
+                  properties:
+                    type: {type: string, enum: [user, lead, contact]}
+                    id: {type: string, description: The contact's id.}
+                body: {type: string, description: The message's text; HTML is allowed.}
+                created_at: {type: integer}
+      responses:
+        "200":
+          description: The contact's message, naming the conversation it opened.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Message"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /conversations/search:
+    post:
+      tags: [Conversations]
+      operationId: searchConversations
+      summary: Search conversations
+      description: |
+        Fields include id, created_at, updated_at, source.type, source.author.id,
+        source.body, contact_ids, admin_assignee_id, team_assignee_id, open, state,
+        read, priority and tag_ids.
+      parameters:
+        - $ref: "#/components/parameters/version"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SearchRequest"}
+      responses:
+        "200":
+          description: The conversations that match.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ConversationList"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /conversations/{conversation_id}:
+    parameters:
+      - $ref: "#/components/parameters/version"
+      - $ref: "#/components/parameters/conversation_id"
+    get:
+      tags: [Conversations]
+      operationId: getConversation
+      summary: Get a conversation, with its parts
+      parameters:
+        - name: display_as
+          in: query
+          description: plaintext returns message bodies as plain text.
+          schema: {type: string, enum: [plaintext]}
+      responses:
+        "200":
+          description: The conversation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Conversation"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Conversations]
+      operationId: updateConversation
+      summary: Update a conversation's title, read flag or attributes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: {type: string}
+                read: {type: boolean}
+                custom_attributes: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: The updated conversation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Conversation"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /conversations/{conversation_id}/reply:
+    post:
+      tags: [Conversations]
+      operationId: replyConversation
+      summary: Reply to a conversation as an admin or a contact
+      parameters:
+        - $ref: "#/components/parameters/version"
+        - $ref: "#/components/parameters/conversation_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_type, type]
+              properties:
+                message_type:
+                  type: string
+                  enum: [comment, note, quick_reply]
+                  description: A note is seen by admins only.
+                type: {type: string, enum: [admin, user]}
+                admin_id: {type: string, description: Required when type is admin.}
+                intercom_user_id: {type: string, description: The contact's id, when type is user.}
+                body: {type: string}
+                attachment_urls: {type: array, maxItems: 10, items: {type: string, format: uri}}
+      responses:
+        "200":
+          description: The conversation with the reply as its newest part.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Conversation"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /conversations/{conversation_id}/parts:
+    post:
+      tags: [Conversations]
+      operationId: manageConversation
+      summary: Close, reopen, snooze or assign a conversation
+      parameters:
+        - $ref: "#/components/parameters/version"
+        - $ref: "#/components/parameters/conversation_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_type, type, admin_id]
+              properties:
+                message_type: {type: string, enum: [close, open, snoozed, assignment]}
+                type: {type: string, enum: [admin, team]}
+                admin_id: {type: string, description: The admin making the change.}
+                assignee_id: {type: string, description: 'With assignment, the admin or team to assign to; "0" unassigns.'}
+                snoozed_until: {type: integer, description: With snoozed, a Unix time in the future.}
+                body: {type: string, description: An optional message to send with close or assignment.}
+      responses:
+        "200":
+          description: The conversation after the change.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Conversation"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /conversations/{conversation_id}/tags:
+    post:
+      tags: [Tags]
+      operationId: attachTagToConversation
+      summary: Tag a conversation
+      parameters:
+        - $ref: "#/components/parameters/version"
+        - $ref: "#/components/parameters/conversation_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, admin_id]
+              properties:
+                id: {type: string, description: The tag's id.}
+                admin_id: {type: string}
+      responses:
+        "200":
+          description: The tag, now on the conversation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Tag"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /tags:
+    post:
+      tags: [Tags]
+      operationId: createTag
+      summary: Create a tag, or rename one when id is sent
+      parameters:
+        - $ref: "#/components/parameters/version"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                id: {type: string, description: An existing tag to rename.}
+      responses:
+        "200":
+          description: The tag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Tag"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: An access token of the workspace.
+  parameters:
+    version:
+      name: Intercom-Version
+      in: header
+      description: The API version; this contract describes 2.11.
+      schema: {type: string, enum: ["2.11"]}
+    conversation_id:
+      name: conversation_id
+      in: path
+      required: true
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid (code `parameter_invalid` or `parameter_not_found`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorList"}
+    Unauthorized:
+      description: The token is not valid (code `unauthorized`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorList"}
+    NotFound:
+      description: The resource is not found (code `not_found`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorList"}
+  schemas:
+    ErrorList:
+      type: object
+      required: [type, errors]
+      properties:
+        type: {type: string, enum: [error.list]}
+        request_id: {type: string, nullable: true}
+        errors:
+          type: array
+          items:
+            type: object
+            required: [code]
+            properties:
+              code: {type: string, enum: [unauthorized, not_found, conflict, parameter_invalid, parameter_not_found, action_forbidden]}
+              message: {type: string}
+              field: {type: string}
+    Pages:
+      type: object
+      properties:
+        type: {type: string, enum: [pages]}
+        page: {type: integer}
+        per_page: {type: integer}
+        total_pages: {type: integer}
+        next:
+          type: object
+          nullable: true
+          properties:
+            per_page: {type: integer}
+            starting_after: {type: string}
+    SingleFilter:
+      type: object
+      required: [field, operator, value]
+      properties:
+        field: {type: string}
+        operator: {type: string, enum: ["=", "!=", "IN", "NIN", "<", ">", "~", "!~", "^", "$"]}
+        value:
+          oneOf:
+            - {type: string}
+            - {type: integer}
+            - {type: boolean}
+            - {type: array, items: {type: string}}
+    MultipleFilter:
+      type: object
+      required: [operator, value]
+      properties:
+        operator: {type: string, enum: [AND, OR]}
+        value:
+          type: array
+          items: {$ref: "#/components/schemas/SingleFilter"}
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          oneOf:
+            - {$ref: "#/components/schemas/SingleFilter"}
+            - {$ref: "#/components/schemas/MultipleFilter"}
+        pagination:
+          type: object
+          properties:
+            per_page: {type: integer, minimum: 1, maximum: 150, default: 20}
+            starting_after: {type: string, nullable: true}
+        sort:
+          type: object
+          properties:
+            field: {type: string}
+            order: {type: string, enum: [ascending, descending]}
+    Admin:
+      type: object
+      required: [type, id, name, email]
+      properties:
+        type: {type: string, enum: [admin]}
+        id: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        job_title: {type: string, nullable: true}
+        away_mode_enabled: {type: boolean}
+        away_mode_reassign: {type: boolean}
+        has_inbox_seat: {type: boolean}
+        team_ids: {type: array, items: {type: integer}}
+    Contact:
+      type: object
+      required: [type, id, workspace_id, role, created_at, updated_at]
+      properties:
+        type: {type: string, enum: [contact]}
+        id: {type: string}
+        workspace_id: {type: string}
+        external_id: {type: string, nullable: true}
+        role: {type: string, enum: [user, lead]}
+        email: {type: string, format: email, nullable: true}
+        phone: {type: string, nullable: true}
+        name: {type: string, nullable: true}
+        owner_id: {type: integer, nullable: true}
+        has_hard_bounced: {type: boolean}
+        unsubscribed_from_emails: {type: boolean}
+        created_at: {type: integer}
+        updated_at: {type: integer}
+        signed_up_at: {type: integer, nullable: true}
+        last_seen_at: {type: integer, nullable: true}
+        custom_attributes: {type: object, additionalProperties: true}
+        tags:
+          type: object
+          properties:
+            type: {type: string, enum: [list]}
+            data: {type: array, items: {type: object}}
+            total_count: {type: integer}
+    Message:
+      type: object
+      required: [type, id, created_at, body, message_type, conversation_id]
+      properties:
+        type: {type: string, enum: [user_message, admin_message]}
+        id: {type: string}
+        created_at: {type: integer}
+        subject: {type: string}
+        body: {type: string}
+        message_type: {type: string, enum: [email, inapp, facebook, twitter]}
+        conversation_id: {type: string, description: The conversation this message opened.}
+    Author:
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [admin, user, lead, bot, team]}
+        id: {type: string}
+        name: {type: string, nullable: true}
+        email: {type: string, nullable: true}
+    Tag:
+      type: object
+      required: [type, id, name]
+      properties:
+        type: {type: string, enum: [tag]}
+        id: {type: string}
+        name: {type: string}
+        applied_at: {type: integer}
+        applied_by:
+          type: object
+          properties:
+            type: {type: string}
+            id: {type: string}
+    ConversationPart:
+      type: object
+      required: [type, id, part_type, created_at, author]
+      properties:
+        type: {type: string, enum: [conversation_part]}
+        id: {type: string}
+        part_type:
+          type: string
+          enum: [comment, note, assignment, close, open, snoozed, unsnoozed, away_mode_assignment, quick_reply]
+        body: {type: string, nullable: true}
+        created_at: {type: integer}
+        updated_at: {type: integer}
+        notified_at: {type: integer}
+        assigned_to:
+          type: object
+          nullable: true
+          properties:
+            type: {type: string, enum: [admin, team, nobody_admin]}
+            id: {type: string}
+        author: {$ref: "#/components/schemas/Author"}
+        attachments: {type: array, items: {type: object}}
+        redacted: {type: boolean}
+    Conversation:
+      type: object
+      required: [type, id, created_at, updated_at, open, state, read, source, contacts]
+      properties:
+        type: {type: string, enum: [conversation]}
+        id: {type: string}
+        title: {type: string, nullable: true}
+        created_at: {type: integer}
+        updated_at: {type: integer}
+        waiting_since: {type: integer, nullable: true}
+        snoozed_until: {type: integer, nullable: true}
+        open: {type: boolean, description: True exactly when state is open.}
+        state: {type: string, enum: [open, closed, snoozed]}
+        read: {type: boolean}
+        priority: {type: string, enum: [priority, not_priority]}
+        admin_assignee_id: {type: integer, nullable: true, description: The assigned admin's id, as a number.}
+        team_assignee_id: {type: string, nullable: true}
+        tags:
+          type: object
+          required: [type, tags]
+          properties:
+            type: {type: string, enum: [tag.list]}
+            tags: {type: array, items: {$ref: "#/components/schemas/Tag"}}
+        source:
+          type: object
+          required: [type, id, delivered_as, body, author]
+          properties:
+            type: {type: string, enum: [conversation, email, facebook, instagram, phone_call, push, sms, twitter, whatsapp]}
+            id: {type: string}
+            delivered_as: {type: string, enum: [customer_initiated, admin_initiated, automated]}
+            subject: {type: string}
+            body: {type: string, description: The first message.}
+            author: {$ref: "#/components/schemas/Author"}
+            url: {type: string, nullable: true}
+            redacted: {type: boolean}
+        contacts:
+          type: object
+          required: [type, contacts]
+          properties:
+            type: {type: string, enum: [contact.list]}
+            contacts:
+              type: array
+              items:
+                type: object
+                required: [type, id]
+                properties:
+                  type: {type: string, enum: [contact]}
+                  id: {type: string}
+                  external_id: {type: string, nullable: true}
+        teammates:
+          type: object
+          properties:
+            type: {type: string, enum: [admin.list]}
+            admins: {type: array, items: {$ref: "#/components/schemas/Author"}}
+        custom_attributes: {type: object, additionalProperties: true}
+        statistics: {type: object, nullable: true}
+        conversation_parts:
+          type: object
+          required: [type, conversation_parts, total_count]
+          properties:
+            type: {type: string, enum: [conversation_part.list]}
+            conversation_parts:
+              type: array
+              description: Oldest first.
+              items: {$ref: "#/components/schemas/ConversationPart"}
+            total_count: {type: integer}
+    ConversationList:
+      type: object
+      required: [type, conversations, total_count]
+      properties:
+        type: {type: string, enum: [conversation.list]}
+        conversations: {type: array, items: {$ref: "#/components/schemas/Conversation"}}
+        total_count: {type: integer}
+        pages: {$ref: "#/components/schemas/Pages"}

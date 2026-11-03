@@ -1,0 +1,502 @@
+openapi: 3.0.3
+info:
+  title: Box Platform API (folders, web links, trash)
+  version: "2.0"
+  description: |
+    A subset of the Box Platform API, written from its public documentation. Items
+    form a tree: every folder and web link has one `parent` folder, and the root
+    folder has the id `"0"`. `path_collection` lists a folder's ancestors from the
+    root down to its parent. Two items in one folder cannot share a name: creating
+    or renaming into a taken name is refused with 409 `item_name_in_use`.
+
+    Moving an item is an update of its `parent.id`; renaming is an update of its
+    `name`. Every change to a folder gives it a new `etag`. An update or delete that
+    sends `If-Match` with an etag that is no longer the folder's current one is
+    refused with 412 `precondition_failed` and changes nothing.
+
+    Deleting a folder or web link moves it to the trash: it leaves its folder's
+    items, reads from `/trash`, appears in `GET /folders/trash/items`, and can be
+    restored to its old parent with a POST to the item. Lists page with `offset`
+    and `limit` and report `total_count`, the number of items across all pages.
+servers:
+  - url: https://api.box.com
+security:
+  - bearer: []
+tags:
+  - name: Folders
+  - name: Web links
+  - name: Trash
+paths:
+  /2.0/folders:
+    post:
+      tags: [Folders]
+      operationId: createFolder
+      summary: Create a folder
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, parent]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 255}
+                parent: {$ref: "#/components/schemas/ParentInput"}
+                folder_upload_email:
+                  type: object
+                  properties:
+                    access: {type: string, enum: [open, collaborators]}
+                sync_state: {type: string, enum: [synced, not_synced, partially_synced]}
+      responses:
+        "201":
+          description: The created folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Folder"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NameInUse"}
+  /2.0/folders/{folder_id}:
+    parameters:
+      - $ref: "#/components/parameters/folder_id"
+    get:
+      tags: [Folders]
+      operationId: getFolder
+      summary: Get a folder
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: The folder, with the first page of its items in item_collection.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Folder"}
+        "404":
+          description: The folder is not found, or is in the trash (code `trashed`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    put:
+      tags: [Folders]
+      operationId: updateFolder
+      summary: Rename, move or describe a folder
+      parameters:
+        - $ref: "#/components/parameters/if_match"
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, minLength: 1, maxLength: 255}
+                description: {type: string, maxLength: 256}
+                parent: {$ref: "#/components/schemas/ParentInput"}
+                tags: {type: array, items: {type: string}}
+                sync_state: {type: string, enum: [synced, not_synced, partially_synced]}
+      responses:
+        "200":
+          description: The updated folder, with a new etag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Folder"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NameInUse"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+    delete:
+      tags: [Folders]
+      operationId: deleteFolder
+      summary: Move a folder to the trash
+      parameters:
+        - $ref: "#/components/parameters/if_match"
+        - name: recursive
+          in: query
+          description: Required to delete a folder that is not empty.
+          schema: {type: boolean, default: false}
+      responses:
+        "204":
+          description: The folder is in the trash.
+        "400":
+          description: The folder is not empty and recursive was not set (code `folder_not_empty`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+    post:
+      tags: [Trash]
+      operationId: restoreFolder
+      summary: Restore a folder from the trash
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, description: A new name, when the old one is taken.}
+                parent: {$ref: "#/components/schemas/ParentInput"}
+      responses:
+        "201":
+          description: The restored folder, back in its parent (or the one sent).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Folder"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NameInUse"}
+  /2.0/folders/{folder_id}/items:
+    get:
+      tags: [Folders]
+      operationId: listFolderItems
+      summary: List the items in a folder
+      parameters:
+        - $ref: "#/components/parameters/folder_id"
+        - $ref: "#/components/parameters/fields"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/limit"
+        - name: sort
+          in: query
+          schema: {type: string, enum: [id, name, date, size]}
+        - name: direction
+          in: query
+          schema: {type: string, enum: [ASC, DESC]}
+      responses:
+        "200":
+          description: A page of the folder's items, trashed items left out.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Items"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /2.0/folders/{folder_id}/trash:
+    get:
+      tags: [Trash]
+      operationId: getTrashedFolder
+      summary: Get a folder in the trash
+      parameters:
+        - $ref: "#/components/parameters/folder_id"
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: The trashed folder; item_status is trashed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Folder"}
+        "404":
+          description: The folder is not in the trash.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /2.0/folders/trash/items:
+    get:
+      tags: [Trash]
+      operationId: listTrash
+      summary: List the items in the trash
+      parameters:
+        - $ref: "#/components/parameters/fields"
+        - $ref: "#/components/parameters/offset"
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [name, date, size]}
+        - name: direction
+          in: query
+          schema: {type: string, enum: [ASC, DESC]}
+      responses:
+        "200":
+          description: A page of trashed items.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Items"}
+  /2.0/web_links:
+    post:
+      tags: [Web links]
+      operationId: createWebLink
+      summary: Create a web link in a folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, parent]
+              properties:
+                url: {type: string, format: uri, description: "Must start with http:// or https://."}
+                parent: {$ref: "#/components/schemas/ParentInput"}
+                name: {type: string, description: Defaults to the URL.}
+                description: {type: string}
+      responses:
+        "201":
+          description: The created web link.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WebLink"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NameInUse"}
+  /2.0/web_links/{web_link_id}:
+    parameters:
+      - $ref: "#/components/parameters/web_link_id"
+    get:
+      tags: [Web links]
+      operationId: getWebLink
+      summary: Get a web link
+      responses:
+        "200":
+          description: The web link.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WebLink"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Web links]
+      operationId: updateWebLink
+      summary: Change, rename or move a web link
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: {type: string, format: uri}
+                parent: {$ref: "#/components/schemas/ParentInput"}
+                name: {type: string}
+                description: {type: string}
+      responses:
+        "200":
+          description: The updated web link.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WebLink"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NameInUse"}
+    delete:
+      tags: [Web links]
+      operationId: deleteWebLink
+      summary: Move a web link to the trash
+      responses:
+        "204":
+          description: The web link is in the trash.
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Trash]
+      operationId: restoreWebLink
+      summary: Restore a web link from the trash
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, description: A new name, when the old one is taken.}
+                parent: {$ref: "#/components/schemas/ParentInput"}
+      responses:
+        "201":
+          description: The restored web link, back in its parent (or the one sent).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WebLink"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NameInUse"}
+  /2.0/web_links/{web_link_id}/trash:
+    get:
+      tags: [Trash]
+      operationId: getTrashedWebLink
+      summary: Get a web link in the trash
+      parameters:
+        - $ref: "#/components/parameters/web_link_id"
+      responses:
+        "200":
+          description: The trashed web link; item_status is trashed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WebLink"}
+        "404":
+          description: The web link is not in the trash.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: An OAuth 2.0 access token or a developer token.
+  parameters:
+    folder_id:
+      name: folder_id
+      in: path
+      required: true
+      description: The folder's id; "0" is the root folder.
+      schema: {type: string, pattern: "^[0-9]+$"}
+    web_link_id:
+      name: web_link_id
+      in: path
+      required: true
+      schema: {type: string, pattern: "^[0-9]+$"}
+    fields:
+      name: fields
+      in: query
+      description: Comma-separated attributes to return besides the standard ones.
+      schema: {type: string}
+    offset:
+      name: offset
+      in: query
+      description: The index of the first item to return.
+      schema: {type: integer, format: int64, minimum: 0, default: 0}
+    limit:
+      name: limit
+      in: query
+      schema: {type: integer, format: int64, minimum: 1, maximum: 1000, default: 100}
+    if_match:
+      name: If-Match
+      in: header
+      description: The folder's current etag; when it is not, the request is refused with 412.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid (code `bad_request`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: The item is not found (code `not_found`), or is in the trash (code `trashed`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NameInUse:
+      description: An item with this name is already in the folder (code `item_name_in_use`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    PreconditionFailed:
+      description: The If-Match etag is not the folder's current one (code `precondition_failed`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [type, status, code, message]
+      properties:
+        type: {type: string, enum: [error]}
+        status: {type: integer}
+        code:
+          type: string
+          enum: [bad_request, not_found, trashed, item_name_in_use, precondition_failed, folder_not_empty,
+                 item_name_invalid, access_denied_insufficient_permissions, unauthorized]
+        message: {type: string}
+        context_info:
+          type: object
+          properties:
+            conflicts:
+              type: array
+              items: {$ref: "#/components/schemas/ItemMini"}
+        help_url: {type: string}
+        request_id: {type: string}
+    ParentInput:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string, description: 'The parent folder''s id; "0" for the root.'}
+    UserMini:
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [user]}
+        id: {type: string}
+        name: {type: string}
+        login: {type: string, format: email}
+    ItemMini:
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [folder, file, web_link]}
+        id: {type: string}
+        sequence_id: {type: string, nullable: true}
+        etag: {type: string, nullable: true}
+        name: {type: string}
+        url: {type: string, description: Web links only.}
+    PathCollection:
+      type: object
+      required: [total_count, entries]
+      properties:
+        total_count: {type: integer}
+        entries:
+          type: array
+          description: The ancestors, from the root ("0") down to the parent.
+          items: {$ref: "#/components/schemas/ItemMini"}
+    Items:
+      type: object
+      required: [total_count, entries, offset, limit]
+      properties:
+        total_count: {type: integer, description: The number of items across all pages.}
+        entries: {type: array, items: {$ref: "#/components/schemas/ItemMini"}}
+        offset: {type: integer}
+        limit: {type: integer}
+        order:
+          type: array
+          items:
+            type: object
+            properties:
+              by: {type: string}
+              direction: {type: string, enum: [ASC, DESC]}
+    ItemStatus:
+      type: string
+      enum: [active, trashed, deleted]
+    Folder:
+      type: object
+      required: [type, id, etag, sequence_id, name, created_at, modified_at, path_collection, parent, item_status]
+      properties:
+        type: {type: string, enum: [folder]}
+        id: {type: string}
+        etag: {type: string, nullable: true, description: Changes with every change to the folder.}
+        sequence_id: {type: string, nullable: true}
+        name: {type: string}
+        description: {type: string}
+        size: {type: integer}
+        created_at: {type: string, format: date-time, nullable: true}
+        modified_at: {type: string, format: date-time, nullable: true}
+        trashed_at: {type: string, format: date-time, nullable: true}
+        purged_at: {type: string, format: date-time, nullable: true}
+        content_created_at: {type: string, format: date-time, nullable: true}
+        content_modified_at: {type: string, format: date-time, nullable: true}
+        created_by: {$ref: "#/components/schemas/UserMini"}
+        modified_by: {$ref: "#/components/schemas/UserMini"}
+        owned_by: {$ref: "#/components/schemas/UserMini"}
+        path_collection: {$ref: "#/components/schemas/PathCollection"}
+        parent:
+          allOf: [{$ref: "#/components/schemas/ItemMini"}]
+          nullable: true
+          description: Null for the root folder.
+        item_status: {$ref: "#/components/schemas/ItemStatus"}
+        item_collection: {$ref: "#/components/schemas/Items"}
+        tags: {type: array, items: {type: string}}
+    WebLink:
+      type: object
+      required: [type, id, etag, sequence_id, name, url, parent, path_collection, item_status, created_at, modified_at]
+      properties:
+        type: {type: string, enum: [web_link]}
+        id: {type: string}
+        etag: {type: string}
+        sequence_id: {type: string}
+        name: {type: string}
+        url: {type: string, format: uri}
+        description: {type: string}
+        parent: {$ref: "#/components/schemas/ItemMini"}
+        path_collection: {$ref: "#/components/schemas/PathCollection"}
+        created_at: {type: string, format: date-time}
+        modified_at: {type: string, format: date-time}
+        trashed_at: {type: string, format: date-time, nullable: true}
+        purged_at: {type: string, format: date-time, nullable: true}
+        created_by: {$ref: "#/components/schemas/UserMini"}
+        modified_by: {$ref: "#/components/schemas/UserMini"}
+        owned_by: {$ref: "#/components/schemas/UserMini"}
+        shared_link: {type: object, nullable: true}
+        item_status: {$ref: "#/components/schemas/ItemStatus"}

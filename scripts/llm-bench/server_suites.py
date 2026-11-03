@@ -47,6 +47,10 @@ Suites (contracts are in-repo, so the bench is reproducible):
   `scripts/llm-bench/contracts/blind4/`: Pipedrive deals, Zoom meetings, Sentry
   projects, Contentful entries and DigitalOcean droplets. Not in the default suites.
   Same rule; no check gates the rest.
+- journeys_blind5: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind5/`: Airtable records, Okta users, Box folders,
+  Intercom conversations and Cal.com bookings. Not in the default suites. Same rule;
+  no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -78,11 +82,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
-          "journeys_blind3", "journeys_blind4")
+          "journeys_blind3", "journeys_blind4", "journeys_blind5")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -3012,6 +3016,452 @@ def run_journeys_blind4(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- fifth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind5/). Between them they
+# keep typed `fields` maps that are filtered by formula and sorted (Airtable), move a
+# user through a lifecycle state machine with action endpoints (Okta), keep a folder
+# tree with parents, moves, a trash and If-Match etags, and page with offset, limit and
+# total_count (Box), assign, close and reopen conversations and search them with
+# structured queries (Intercom), and book, reschedule and cancel against slots in a
+# date range, with a version header per endpoint (Cal.com). No check gates the rest: a
+# journey goes on with an id of its own when a call gave none. A check asserts only
+# what its contract promises a client. Do not edit a check to suit results.
+BLIND5_CHECKS = {
+    "airtable": [
+        "table keeps its fields", "create answers a record per record sent", "created records keep their fields",
+        "read matches the created record", "patch changes the field sent", "patch keeps the fields it was not sent",
+        "formula filter holds only matching records", "sort orders the records by the field",
+        "pageSize 1 returns one record and an offset", "offset reaches the other record",
+        "an unknown field is refused", "put clears the fields it was not sent", "comments list the comment",
+        "deleted record is gone",
+    ],
+    "okta": [
+        "a user created without activation is staged", "user keeps its profile", "read by login matches the user",
+        "activation answers a token", "activated user is active", "partial update changes the field sent",
+        "partial update keeps the rest of the profile", "search finds the user by department",
+        "suspended user reads as suspended", "unsuspended user reads as active", "group members list the user",
+        "user's groups list the group", "deactivated user is deprovisioned", "deleted user is not found",
+    ],
+    "box": [
+        "folder lives in its parent", "child folder's path ends at its parent", "a taken name is refused",
+        "web link keeps its url and parent", "read matches the created web link",
+        "limit 1 returns one item and the total", "offset 1 reaches the other item",
+        "a matching etag renames the folder", "a stale etag is refused", "a refused update changes nothing",
+        "moved web link names its new parent", "trashed web link reads from the trash",
+        "trash lists the trashed web link", "restored web link returns to its folder",
+    ],
+    "intercom": [
+        "contact keeps its email and external id", "a second contact with the same email is refused",
+        "contact search finds the contact by email", "message names the conversation it opened",
+        "conversation lists its contact", "conversation source is the first message", "a new conversation is open",
+        "assignment sets the admin assignee", "admin reply shows as a conversation part",
+        "close sets the state to closed", "search by state and contact finds the conversation",
+        "reopen sets the state to open", "tag shows on the conversation", "deleted contact is gone",
+    ],
+    "calcom": [
+        "event type keeps its slug and length", "event type is owned by the caller", "patch changes the length",
+        "patch keeps the title and slug", "slots fall inside the asked range",
+        "booking keeps its start and event type", "booking lasts the event type's new length",
+        "booking lists its attendee", "read by uid matches the booking", "date-range list holds the booking",
+        "reschedule names the original booking", "original booking points to its reschedule",
+        "cancelled booking reads as cancelled", "unknown booking is not found",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND5_CHECKS)
+BLIND5_DIR = "scripts/llm-bench/contracts/blind5"
+# Contracts alone: no persona.
+BLIND5_MOCKS = {name: (f"{BLIND5_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND5_CHECKS}
+ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def made_up(j, prefix, n, alphabet=ALNUM):
+    return prefix + "".join(j.rng.choice(alphabet) for _ in range(n))
+
+
+def given(value, fallback):
+    """`value` when it is a non-empty string, else `fallback`."""
+    return value if isinstance(value, str) and value else fallback
+
+
+def airtable_steps(j):
+    # Records are addressed by table id; the table is new, so its records are the two
+    # made here. Empty fields are left out of `fields`, which is what PUT is checked by.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    base = made_up(j, "app", 14)
+    fields = [{"name": "Name", "type": "singleLineText"},
+              {"name": "Status", "type": "singleSelect",
+               "options": {"choices": [{"name": "Todo"}, {"name": "In progress"}, {"name": "Done"}]}},
+              {"name": "Quantity", "type": "number", "options": {"precision": 0}},
+              {"name": "Due date", "type": "date", "options": {"dateFormat": {"name": "iso"}}}]
+    table = obj(j.call("POST", f"/v0/meta/bases/{base}/tables", body={"name": f"Orders {tag}", "fields": fields}))
+    j.check("table keeps its fields", j.last["status"] == 200 and ids_of(table.get("fields"), "name") == ids_of(fields, "name"),
+            fields=ids_of(table.get("fields"), "name"))
+    path = f"/v0/{base}/{given(table.get('id'), made_up(j, 'tbl', 14))}"
+    word = f"walnut{tag}"
+    a = {"Name": f"Desk {word}", "Status": "Todo", "Quantity": 3, "Due date": "2026-12-01"}
+    b = {"Name": f"Chair {tag}", "Status": "Done", "Quantity": 1}
+    made = dicts(obj(j.call("POST", path, body={"records": [{"fields": a}, {"fields": b}]})).get("records"))
+    j.check("create answers a record per record sent",
+            j.last["status"] == 200 and len(made) == 2 and all(str(r.get("id", "")).startswith("rec") for r in made),
+            listed=ids_of(made))
+    j.check("created records keep their fields",
+            len(made) == 2 and eq(made[0].get("fields"), a) and eq(made[1].get("fields"), b),
+            fields=[r.get("fields") for r in made])
+    r1 = given(made[0].get("id") if made else None, made_up(j, "rec", 14))
+    r2 = given(made[1].get("id") if len(made) > 1 else None, made_up(j, "rec", 14))
+    read = obj(j.call("GET", f"{path}/{r1}"))
+    j.check("read matches the created record", eq(read.get("id"), r1) and eq(read.get("fields"), a),
+            fields=read.get("fields"))
+    patched = obj(j.call("PATCH", f"{path}/{r1}", body={"fields": {"Status": "In progress"}}))
+    j.check("patch changes the field sent", eq(obj(patched.get("fields")).get("Status"), "In progress"),
+            fields=patched.get("fields"))
+    read = obj(obj(j.call("GET", f"{path}/{r1}")).get("fields"))
+    j.check("patch keeps the fields it was not sent", same(read, a, "Name", "Quantity", "Due date"), fields=read)
+    rows = dicts(obj(j.call("GET", path, query={"filterByFormula": "{Status} = 'Done'"})).get("records"))
+    j.check("formula filter holds only matching records",
+            bool(by_id(rows, r2)) and not by_id(rows, r1)
+            and all(eq(obj(r.get("fields")).get("Status"), "Done") for r in rows), listed=ids_of(rows))
+    rows = dicts(obj(j.call("GET", path, query={"sort[0][field]": "Quantity", "sort[0][direction]": "desc"})).get("records"))
+    j.check("sort orders the records by the field", ids_of(rows) == [r1, r2], listed=ids_of(rows))
+    page = obj(j.call("GET", path, query={"pageSize": 1}))
+    first = dicts(page.get("records"))
+    offset = page.get("offset")
+    j.check("pageSize 1 returns one record and an offset", len(first) == 1 and isinstance(offset, str) and bool(offset),
+            listed=ids_of(first), offset=offset)
+    query = {"pageSize": 1}
+    if isinstance(offset, str) and offset:
+        query["offset"] = offset
+    nxt = dicts(obj(j.call("GET", path, query=query)).get("records"))
+    j.check("offset reaches the other record", len(nxt) == 1 and sorted(ids_of(first + nxt)) == sorted([r1, r2]),
+            first=ids_of(first), listed=ids_of(nxt))
+    j.call("PATCH", f"{path}/{r1}", body={"fields": {f"Colour {tag}": "red"}})
+    j.check("an unknown field is refused", j.last["status"] == 422)
+    j.call("PUT", f"{path}/{r1}", body={"fields": {"Name": a["Name"], "Status": "Done"}})
+    replaced = j.last["status"]
+    read = obj(obj(j.call("GET", f"{path}/{r1}")).get("fields"))
+    j.check("put clears the fields it was not sent",
+            eq(read.get("Name"), a["Name"]) and "Quantity" not in read and "Due date" not in read,
+            put_status=replaced, fields=read)
+    text = f"Shipped in two boxes, ref {tag}."
+    comment = obj(j.call("POST", f"{path}/{r1}/comments", body={"text": text}))
+    cid = given(comment.get("id"), made_up(j, "com", 14))
+    rows = dicts(obj(j.call("GET", f"{path}/{r1}/comments")).get("comments"))
+    j.check("comments list the comment", eq(by_id(rows, cid).get("text"), text), listed=ids_of(rows))
+    j.call("DELETE", f"{path}/{r2}")
+    deleted = j.last["status"]
+    j.call("GET", f"{path}/{r2}")
+    j.check("deleted record is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def okta_steps(j):
+    # Status changes only through the lifecycle operations, so each one is read back.
+    # The user has a password, so activation makes it ACTIVE rather than PROVISIONED.
+    # A department unique to this run lets search find exactly this user.
+    j.headers["authorization"] = "SSWS bench-placeholder"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def status(uid):
+        return obj(j.call("GET", f"/api/v1/users/{uid}")).get("status")
+
+    login = f"ana.silva.{tag}@example.org"
+    profile = {"firstName": "Ana", "lastName": "Silva", "email": login, "login": login,
+               "department": "Finance", "title": "Analyst"}
+    user = obj(j.call("POST", "/api/v1/users", query={"activate": "false"}, body={
+        "profile": profile, "credentials": {"password": {"value": f"bench-placeholder-{tag}"}}}))
+    j.check("a user created without activation is staged", j.last["status"] == 200 and eq(user.get("status"), "STAGED"),
+            user_status=user.get("status"))
+    j.check("user keeps its profile", same(obj(user.get("profile")), profile, "firstName", "lastName", "email", "login"))
+    uid = given(user.get("id"), made_up(j, "00u", 17))
+    read = obj(j.call("GET", f"/api/v1/users/{login}"))
+    j.check("read by login matches the user", eq(read.get("id"), uid), id=read.get("id"))
+    token = obj(j.call("POST", f"/api/v1/users/{uid}/lifecycle/activate", query={"sendEmail": "false"}))
+    j.check("activation answers a token",
+            j.last["status"] == 200 and isinstance(token.get("activationToken"), str) and bool(token["activationToken"]))
+    now = status(uid)
+    j.check("activated user is active", eq(now, "ACTIVE"), user_status=now)
+    dept = f"Treasury {tag}"
+    updated = obj(j.call("POST", f"/api/v1/users/{uid}", body={"profile": {"department": dept}}))
+    j.check("partial update changes the field sent", eq(obj(updated.get("profile")).get("department"), dept))
+    read = obj(obj(j.call("GET", f"/api/v1/users/{uid}")).get("profile"))
+    j.check("partial update keeps the rest of the profile",
+            same(read, profile, "firstName", "lastName", "login", "title"), profile=read)
+    rows = dicts(j.call("GET", "/api/v1/users", query={"search": f'profile.department eq "{dept}"'}))
+    j.check("search finds the user by department",
+            bool(by_id(rows, uid)) and all(eq(obj(r.get("profile")).get("department"), dept) for r in rows),
+            listed=ids_of(rows))
+    j.call("POST", f"/api/v1/users/{uid}/lifecycle/suspend")
+    acted = j.last["status"]
+    now = status(uid)
+    j.check("suspended user reads as suspended", eq(now, "SUSPENDED"), action_status=acted, user_status=now)
+    j.call("POST", f"/api/v1/users/{uid}/lifecycle/unsuspend")
+    acted = j.last["status"]
+    now = status(uid)
+    j.check("unsuspended user reads as active", eq(now, "ACTIVE"), action_status=acted, user_status=now)
+    group = obj(j.call("POST", "/api/v1/groups", body={
+        "profile": {"name": f"Treasury team {tag}", "description": "Everyone in treasury."}}))
+    gid = given(group.get("id"), made_up(j, "00g", 17))
+    j.call("PUT", f"/api/v1/groups/{gid}/users/{uid}")
+    added = j.last["status"]
+    rows = j.call("GET", f"/api/v1/groups/{gid}/users")
+    j.check("group members list the user", bool(by_id(rows, uid)), add_status=added, listed=ids_of(rows))
+    rows = j.call("GET", f"/api/v1/users/{uid}/groups")
+    j.check("user's groups list the group", bool(by_id(rows, gid)), listed=ids_of(rows))
+    j.call("POST", f"/api/v1/users/{uid}/lifecycle/deactivate")
+    acted = j.last["status"]
+    now = status(uid)
+    j.check("deactivated user is deprovisioned", eq(now, "DEPROVISIONED"), action_status=acted, user_status=now)
+    j.call("DELETE", f"/api/v1/users/{uid}")
+    deleted = j.last["status"]
+    j.call("GET", f"/api/v1/users/{uid}")
+    j.check("deleted user is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def box_steps(j):
+    # Folders are made under the root, "0". Only folder writes carry If-Match. The
+    # child folder holds the two web links, so its total_count is 2 while paging.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def own(value):
+        return value if isinstance(value, str) and value.isdigit() else str(j.rng.randrange(10**11, 10**12))
+
+    def call(method, path, if_match=None, **kw):
+        if if_match is not None:
+            j.headers["If-Match"] = if_match
+        try:
+            return obj(j.call(method, path, **kw))
+        finally:
+            j.headers.pop("If-Match", None)
+
+    def items(folder, **query):
+        return call("GET", f"/2.0/folders/{folder}/items", query=query or None)
+
+    name = f"Projects {tag}"
+    top = call("POST", "/2.0/folders", body={"name": name, "parent": {"id": "0"}})
+    j.check("folder lives in its parent",
+            j.last["status"] == 201 and eq(top.get("name"), name) and eq(obj(top.get("parent")).get("id"), "0"))
+    p = own(top.get("id"))
+    child = call("POST", "/2.0/folders", body={"name": "Drafts", "parent": {"id": p}})
+    path = ids_of(obj(child.get("path_collection")).get("entries"))
+    j.check("child folder's path ends at its parent", len(path) >= 2 and path[0] == "0" and path[-1] == p, path=path)
+    c = own(child.get("id"))
+    etag = given(child.get("etag"), "0")
+    call("POST", "/2.0/folders", body={"name": "Drafts", "parent": {"id": p}})
+    j.check("a taken name is refused", j.last["status"] == 409)
+    url = f"https://example.org/specs/{tag}"
+    link = call("POST", "/2.0/web_links", body={"url": url, "parent": {"id": c}, "name": f"Spec {tag}",
+                                                 "description": "The launch spec."})
+    j.check("web link keeps its url and parent",
+            j.last["status"] == 201 and eq(link.get("url"), url) and eq(obj(link.get("parent")).get("id"), c))
+    l1 = own(link.get("id"))
+    read = call("GET", f"/2.0/web_links/{l1}")
+    j.check("read matches the created web link",
+            eq(read.get("id"), l1) and eq(read.get("url"), url) and eq(read.get("name"), f"Spec {tag}"))
+    other = call("POST", "/2.0/web_links", body={"url": f"https://example.org/notes/{tag}", "parent": {"id": c},
+                                                  "name": f"Notes {tag}"})
+    l2 = own(other.get("id"))
+    page = items(c, offset=0, limit=1)
+    first = ids_of(page.get("entries"))
+    j.check("limit 1 returns one item and the total", len(first) == 1 and eq(page.get("total_count"), 2),
+            listed=first, total_count=page.get("total_count"))
+    nxt = ids_of(items(c, offset=1, limit=1).get("entries"))
+    j.check("offset 1 reaches the other item", len(nxt) == 1 and sorted(first + nxt) == sorted([l1, l2]),
+            first=first, listed=nxt)
+    renamed = f"Drafts {tag}"
+    answer = call("PUT", f"/2.0/folders/{c}", if_match=etag, body={"name": renamed})
+    j.check("a matching etag renames the folder", j.last["status"] == 200 and eq(answer.get("name"), renamed),
+            sent_etag=etag, etag=answer.get("etag"))
+    call("PUT", f"/2.0/folders/{c}", if_match=etag, body={"name": f"Drafts {tag} old"})
+    j.check("a stale etag is refused", j.last["status"] == 412, sent_etag=etag)
+    read = call("GET", f"/2.0/folders/{c}")
+    j.check("a refused update changes nothing", eq(read.get("name"), renamed), folder_name=read.get("name"))
+    call("PUT", f"/2.0/web_links/{l2}", body={"parent": {"id": p}})
+    moved = j.last["status"]
+    read = call("GET", f"/2.0/web_links/{l2}")
+    j.check("moved web link names its new parent", eq(obj(read.get("parent")).get("id"), p),
+            move_status=moved, parent=obj(read.get("parent")).get("id"))
+    call("DELETE", f"/2.0/web_links/{l1}")
+    trashed = j.last["status"]
+    read = call("GET", f"/2.0/web_links/{l1}/trash")
+    j.check("trashed web link reads from the trash", eq(read.get("id"), l1) and eq(read.get("item_status"), "trashed"),
+            delete_status=trashed, item_status=read.get("item_status"))
+    listed = ids_of(call("GET", "/2.0/folders/trash/items", query={"limit": 1000}).get("entries"))
+    j.check("trash lists the trashed web link", l1 in listed, listed=listed)
+    call("POST", f"/2.0/web_links/{l1}", body={})
+    restored = j.last["status"]
+    listed = ids_of(items(c).get("entries"))
+    j.check("restored web link returns to its folder", l1 in listed, restore_status=restored, listed=listed)
+
+
+def intercom_steps(j):
+    # The conversation is started by the contact; its state then changes only through
+    # /parts, and each change is read back. The admin is the workspace's first one.
+    j.headers.update(HELDOUT_AUTH)
+    j.headers["Intercom-Version"] = "2.11"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def conversation(cid):
+        return obj(j.call("GET", f"/conversations/{cid}"))
+
+    def manage(conv, admin, kind, **extra):
+        return obj(j.call("POST", f"/conversations/{conv}/parts",
+                          body=dict({"message_type": kind, "type": "admin", "admin_id": admin}, **extra)))
+
+    admin = given(head(obj(j.call("GET", "/admins")).get("admins")).get("id"), str(j.rng.randrange(10**6, 10**7)))
+    email, external = f"ana.{tag}@example.org", f"cust-{tag}"
+    contact = obj(j.call("POST", "/contacts", body={"role": "user", "external_id": external, "email": email,
+                                                    "name": "Ana Silva"}))
+    j.check("contact keeps its email and external id",
+            j.last["status"] == 200 and eq(contact.get("email"), email) and eq(contact.get("external_id"), external))
+    cid = given(contact.get("id"), made_up(j, "", 24, "0123456789abcdef"))
+    j.call("POST", "/contacts", body={"role": "user", "email": email, "name": "Ana S."})
+    j.check("a second contact with the same email is refused", j.last["status"] == 409)
+    rows = dicts(obj(j.call("POST", "/contacts/search",
+                            body={"query": {"field": "email", "operator": "=", "value": email}})).get("data"))
+    j.check("contact search finds the contact by email",
+            bool(by_id(rows, cid)) and all(eq(r.get("email"), email) for r in rows), listed=ids_of(rows))
+    text = f"My order {tag} arrived damaged."
+    message = obj(j.call("POST", "/conversations", body={"from": {"type": "user", "id": cid}, "body": text}))
+    j.check("message names the conversation it opened",
+            j.last["status"] == 200 and isinstance(message.get("conversation_id"), str) and bool(message["conversation_id"]),
+            conversation_id=message.get("conversation_id"))
+    conv = given(message.get("conversation_id"), str(j.rng.randrange(10**11, 10**12)))
+    got = conversation(conv)
+    j.check("conversation lists its contact", cid in ids_of(obj(got.get("contacts")).get("contacts")),
+            contacts=ids_of(obj(got.get("contacts")).get("contacts")))
+    body = obj(got.get("source")).get("body")
+    j.check("conversation source is the first message", isinstance(body, str) and text in body, body=body)
+    j.check("a new conversation is open", eq(got.get("state"), "open"), state=got.get("state"))
+    assigned = manage(conv, admin, "assignment", assignee_id=admin)
+    j.check("assignment sets the admin assignee",
+            assigned.get("admin_assignee_id") is not None and str(assigned.get("admin_assignee_id")) == admin,
+            admin_assignee_id=assigned.get("admin_assignee_id"), admin=admin)
+    reply = f"Sorry about order {tag}; a replacement ships today."
+    j.call("POST", f"/conversations/{conv}/reply",
+           body={"message_type": "comment", "type": "admin", "admin_id": admin, "body": reply})
+    replied = j.last["status"]
+    parts = dicts(obj(conversation(conv).get("conversation_parts")).get("conversation_parts"))
+    j.check("admin reply shows as a conversation part",
+            any(eq(p.get("part_type"), "comment") and isinstance(p.get("body"), str) and reply in p["body"]
+                and str(obj(p.get("author")).get("id")) == admin for p in parts),
+            reply_status=replied, parts=ids_of(parts, "part_type"))
+    manage(conv, admin, "close")
+    closed = j.last["status"]
+    got = conversation(conv)
+    j.check("close sets the state to closed", eq(got.get("state"), "closed"), close_status=closed, state=got.get("state"))
+    query = {"operator": "AND", "value": [{"field": "state", "operator": "=", "value": "closed"},
+                                          {"field": "contact_ids", "operator": "=", "value": cid}]}
+    rows = dicts(obj(j.call("POST", "/conversations/search", body={"query": query})).get("conversations"))
+    j.check("search by state and contact finds the conversation",
+            bool(by_id(rows, conv)) and all(eq(r.get("state"), "closed") for r in rows), listed=ids_of(rows))
+    reopened = manage(conv, admin, "open")
+    j.check("reopen sets the state to open", eq(reopened.get("state"), "open"), state=reopened.get("state"))
+    label = obj(j.call("POST", "/tags", body={"name": f"damaged-{tag}"}))
+    tid = given(label.get("id"), str(j.rng.randrange(10**6, 10**7)))
+    j.call("POST", f"/conversations/{conv}/tags", body={"id": tid, "admin_id": admin})
+    tagged = j.last["status"]
+    listed = ids_of(obj(conversation(conv).get("tags")).get("tags"))
+    j.check("tag shows on the conversation", tid in listed, tag_status=tagged, listed=listed)
+    j.call("DELETE", f"/contacts/{cid}")
+    deleted = j.last["status"]
+    j.call("GET", f"/contacts/{cid}")
+    j.check("deleted contact is gone", j.last["status"] == 404, delete_status=deleted)
+
+
+def calcom_steps(j):
+    # Each endpoint gets the cal-api-version its contract names. The booking takes the
+    # first free slot answered, or a weekday morning when there was none, and is made
+    # after the length changed, so it lasts the new length.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    event_types, slots_v, bookings, listing = "2024-06-14", "2024-09-04", "2026-02-25", "2026-05-01"
+
+    def call(method, path, version=None, **kw):
+        if version:
+            j.headers["cal-api-version"] = version
+        try:
+            return obj(j.call(method, path, **kw))
+        finally:
+            j.headers.pop("cal-api-version", None)
+
+    def data(value):
+        return obj(obj(value).get("data"))
+
+    def utc(moment):
+        return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    me = data(call("GET", "/v2/me"))
+    sent = {"title": f"Intro call {tag}", "slug": f"intro-{tag}", "lengthInMinutes": 30,
+            "description": "A first talk about the project.", "minimumBookingNotice": 0}
+    made = data(call("POST", "/v2/event-types", event_types, body=sent))
+    j.check("event type keeps its slug and length", j.last["status"] == 201 and same(made, sent, "slug", "lengthInMinutes"))
+    j.check("event type is owned by the caller", is_int(me.get("id")) and eq(made.get("ownerId"), me.get("id")),
+            ownerId=made.get("ownerId"), me=me.get("id"))
+    etid = made.get("id") if is_int(made.get("id")) else j.rng.randrange(10**5, 10**6)
+    patched = data(call("PATCH", f"/v2/event-types/{etid}", event_types, body={"lengthInMinutes": 45}))
+    j.check("patch changes the length", eq(patched.get("lengthInMinutes"), 45), lengthInMinutes=patched.get("lengthInMinutes"))
+    read = data(call("GET", f"/v2/event-types/{etid}", event_types))
+    j.check("patch keeps the title and slug", same(read, sent, "title", "slug"))
+    days = data(call("GET", "/v2/slots", slots_v, query={"eventTypeId": etid, "start": "2026-12-07",
+                                                         "end": "2026-12-11", "timeZone": "UTC"}))
+    starts = [s.get("start") for day in days.values() for s in dicts(day)]
+    lo, hi = datetime(2026, 12, 7, tzinfo=timezone.utc), datetime(2026, 12, 12, tzinfo=timezone.utc)
+    inside = [s for s in starts if instant(s) and instant(s).tzinfo and lo <= instant(s) < hi]
+    j.check("slots fall inside the asked range", bool(starts) and len(inside) == len(starts), starts=starts[:5])
+    start = utc(instant(inside[0])) if inside else "2026-12-08T10:00:00Z"
+    email = f"ana.{tag}@example.org"
+    booking = data(call("POST", "/v2/bookings", bookings, body={
+        "start": start, "eventTypeId": etid, "attendee": {"name": "Ana Silva", "email": email, "timeZone": "Europe/Lisbon"},
+        "metadata": {"ref": f"bench-{tag}"}}))
+    j.check("booking keeps its start and event type",
+            j.last["status"] == 201 and eq(instant(booking.get("start")), instant(start))
+            and eq(booking.get("eventTypeId"), etid), start=booking.get("start"), eventTypeId=booking.get("eventTypeId"))
+    began, ended = instant(booking.get("start")), instant(booking.get("end"))
+    j.check("booking lasts the event type's new length",
+            began is not None and ended is not None and ended - began == timedelta(minutes=45),
+            start=booking.get("start"), end=booking.get("end"))
+    j.check("booking lists its attendee", email in ids_of(booking.get("attendees"), "email"),
+            attendees=ids_of(booking.get("attendees"), "email"))
+    uid = given(booking.get("uid"), made_up(j, "", 22))
+    read = data(call("GET", f"/v2/bookings/{uid}", bookings))
+    j.check("read by uid matches the booking", eq(read.get("uid"), uid) and eq(instant(read.get("start")), instant(start)))
+    rows = dicts(call("GET", "/v2/bookings", listing, query={"attendeeEmail": email, "afterStart": "2026-12-07",
+                                                              "beforeEnd": "2026-12-12"}).get("data"))
+    j.check("date-range list holds the booking", uid in ids_of(rows, "uid"), listed=ids_of(rows, "uid"))
+    later = utc(instant(start) + timedelta(days=1))
+    moved = data(call("POST", f"/v2/bookings/{uid}/reschedule", bookings,
+                      body={"start": later, "reschedulingReason": "A clash with a board meeting."}))
+    j.check("reschedule names the original booking",
+            j.last["status"] == 201 and eq(moved.get("rescheduledFromUid"), uid)
+            and eq(instant(moved.get("start")), instant(later)), rescheduledFromUid=moved.get("rescheduledFromUid"))
+    new_uid = given(moved.get("uid"), made_up(j, "", 22))
+    old = data(call("GET", f"/v2/bookings/{uid}", bookings))
+    j.check("original booking points to its reschedule", eq(old.get("rescheduledToUid"), new_uid),
+            rescheduledToUid=old.get("rescheduledToUid"), new_uid=new_uid)
+    reason = f"No longer needed, ref {tag}."
+    call("POST", f"/v2/bookings/{new_uid}/cancel", bookings, body={"cancellationReason": reason})
+    cancelled = j.last["status"]
+    got = data(call("GET", f"/v2/bookings/{new_uid}", bookings))
+    j.check("cancelled booking reads as cancelled",
+            eq(got.get("status"), "cancelled") and eq(got.get("cancellationReason"), reason),
+            cancel_status=cancelled, booking_status=got.get("status"))
+    call("GET", f"/v2/bookings/{made_up(j, '', 22)}", bookings)
+    j.check("unknown booking is not found", j.last["status"] == 404)
+
+
+BLIND5_JOURNEYS = {"airtable": airtable_steps, "okta": okta_steps, "box": box_steps,
+                   "intercom": intercom_steps, "calcom": calcom_steps}
+
+
+def run_journeys_blind5(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND5_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -3024,6 +3474,7 @@ RUNNERS = {
     "journeys_blind2": (BLIND2_MOCKS, run_journeys_blind2),
     "journeys_blind3": (BLIND3_MOCKS, run_journeys_blind3),
     "journeys_blind4": (BLIND4_MOCKS, run_journeys_blind4),
+    "journeys_blind5": (BLIND5_MOCKS, run_journeys_blind5),
 }
 
 
