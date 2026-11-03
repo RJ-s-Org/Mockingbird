@@ -61,6 +61,21 @@ fn orders20() -> Bundle {
     compile(&read("swagger", "orders-2.0.json")).unwrap()
 }
 
+/// A Swagger 2 contract's `info.description` is kept as an OpenAPI 3 one is.
+#[test]
+fn info_description_is_kept() {
+    let b = compile(
+        br#"{"swagger": "2.0", "info": {"title": "Bookings", "version": "1",
+            "description": "Rescheduling makes a new booking and cancels the old."}, "paths": {}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        b.description.as_deref(),
+        Some("Rescheduling makes a new booking and cancels the old.")
+    );
+    assert_eq!(orders20().description, None);
+}
+
 #[test]
 fn compiles_orders_20_like_30() {
     let a = compile(&read("openapi", "orders-3.0.yaml")).unwrap();

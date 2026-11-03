@@ -41,6 +41,7 @@ fn message_bundle() -> Bundle {
         id: "orders-events".into(),
         title: "Orders Events".into(),
         version: "1.0.0".into(),
+        description: None,
         source_digest: "d1".into(),
         operations: Vec::new(),
         defs: Map::new(),
@@ -162,6 +163,22 @@ fn message_prompt_blocks() {
     assert!(system.contains("Summary: Order events"), "{system}");
     assert!(system.contains("Persona: a pirate"), "{system}");
     assert!(system.contains("- status a means accepted"), "{system}");
+    assert!(!system.contains("api_description"), "{system}");
+    let mut described = bundle.clone();
+    described.description = Some("Events arrive at least once.".into());
+    let with = mb_engine::prompt::build_message_messages(
+        &described,
+        &described.channels[0],
+        &ctx,
+        Some("a pirate"),
+    );
+    assert!(
+        with[0]
+            .content
+            .contains("<api_description>Events arrive at least once.</api_description>"),
+        "{}",
+        with[0].content
+    );
     let user = &messages[1].content;
     assert_eq!(messages[1].role, Role::User);
     assert!(
