@@ -43,6 +43,11 @@ pub struct Bundle {
     pub title: String,
     /// The contract's `info.version`.
     pub version: String,
+    /// The contract's API-level description (`info.description`), where it
+    /// often states rules that hold across operations; absent when it has none
+    /// and in bundles compiled before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Hex sha256 of the source bytes.
     pub source_digest: String,
     /// The request/response operations.

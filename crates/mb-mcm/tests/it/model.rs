@@ -70,6 +70,7 @@ fn bundle_round_trips_through_json() {
         id: "orders-api".into(),
         title: "Orders API".into(),
         version: "1.0.0".into(),
+        description: None,
         source_digest: "abc".into(),
         operations: vec![
             op(
@@ -171,6 +172,7 @@ fn with_defs_attaches_definitions() {
         id: "x".into(),
         title: "x".into(),
         version: "1".into(),
+        description: None,
         source_digest: "d".into(),
         operations: vec![],
         defs,
@@ -204,6 +206,7 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
         id: "x".into(),
         title: "x".into(),
         version: "1".into(),
+        description: None,
         source_digest: "d".into(),
         operations: vec![],
         defs,
@@ -247,6 +250,22 @@ fn p2_bundle_without_payload_deserializes() {
     let text = serde_json::to_string(&bundle).unwrap();
     assert_eq!(text, P2_ORDERS);
     assert!(!text.contains("\"channels\""));
+}
+
+/// A bundle stored before the API description was kept loads with none, and
+/// one without a description serializes as it did; one with a description keeps
+/// it through a round trip.
+#[test]
+fn bundle_without_description_loads_and_round_trips() {
+    let mut bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    assert_eq!(bundle.description, None);
+    assert_eq!(serde_json::to_string(&bundle).unwrap(), P2_ORDERS);
+    bundle.description = Some("Names are unique within a folder.".into());
+    let text = serde_json::to_string(&bundle).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["description"], "Names are unique within a folder.");
+    let back: Bundle = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, bundle);
 }
 
 #[test]
@@ -679,6 +698,7 @@ fn grpc_services_lists_full_service_names() {
         id: "b".into(),
         title: "b".into(),
         version: "1".into(),
+        description: None,
         source_digest: String::new(),
         operations: vec![
             grpc("routeguide", "RouteGuide", "GetFeature"),

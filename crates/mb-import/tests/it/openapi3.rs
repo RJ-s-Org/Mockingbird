@@ -15,6 +15,36 @@ fn orders30() -> Bundle {
     compile(&fixture("orders-3.0.yaml")).unwrap()
 }
 
+/// The contract's `info.description`, where it often states rules that hold
+/// across operations, is kept in the bundle as written; a contract without one,
+/// or with a blank one, has none.
+#[test]
+fn info_description_is_kept() {
+    let b = compile(
+        br#"
+openapi: 3.0.3
+info:
+  title: Files
+  version: "1"
+  description: |
+    Names are unique within a folder.
+    A stale version is refused with 409.
+paths: {}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        b.description.as_deref(),
+        Some("Names are unique within a folder.\nA stale version is refused with 409.\n")
+    );
+    assert_eq!(orders30().description, None);
+    let b = compile(
+        br#"{"openapi": "3.1.0", "info": {"title": "T", "version": "1", "description": "  "}, "paths": {}}"#,
+    )
+    .unwrap();
+    assert_eq!(b.description, None);
+}
+
 #[test]
 fn compiles_orders_30() {
     let b = orders30();

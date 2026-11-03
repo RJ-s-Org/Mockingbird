@@ -245,6 +245,7 @@ fn bundle(title: &str) -> Bundle {
         id: title.to_lowercase(),
         title: title.to_string(),
         version: "1.0.0".into(),
+        description: None,
         source_digest: "abc".into(),
         operations: vec![],
         defs: serde_json::Map::new(),

@@ -707,6 +707,7 @@ fn compile_text(sdl: &str, bytes: &[u8], title: Option<String>) -> Result<Bundle
         id: slug(&title),
         title,
         version: "0".into(),
+        description: None,
         source_digest: digest.iter().map(|b| format!("{b:02x}")).collect(),
         operations,
         defs,

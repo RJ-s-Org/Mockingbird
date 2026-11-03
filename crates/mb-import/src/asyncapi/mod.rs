@@ -66,7 +66,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-pub(crate) use crate::openapi3::{escape, slug};
+pub(crate) use crate::openapi3::{escape, info_description, slug};
 
 /// `info.title` (required) and `info.version` (`0.0.0` when absent).
 pub(crate) fn bundle_info(doc: &Value) -> Result<(String, String), ImportError> {

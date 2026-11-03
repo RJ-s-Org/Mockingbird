@@ -5,6 +5,7 @@ expression: orders()
 id: orders-events
 title: Orders Events
 version: 1.0.0
+description: Order lifecycle events exchanged over RabbitMQ.
 source_digest: "[digest]"
 operations: []
 defs:

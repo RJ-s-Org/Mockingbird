@@ -5,6 +5,7 @@ expression: sensors()
 id: sensors
 title: Sensors
 version: 1.0.0
+description: Temperature sensors that report readings and accept commands over MQTT.
 source_digest: "[digest]"
 operations: []
 defs:

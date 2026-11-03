@@ -283,6 +283,7 @@ fn compile_root(
         id: slug(&title),
         title,
         version: "0".into(),
+        description: None,
         source_digest,
         operations,
         defs,

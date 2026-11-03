@@ -5,8 +5,9 @@ use crate::heuristics::{
 };
 use crate::openapi3::{
     CONTENT_TYPE_EXT, EVENT_STREAM, FORM_CONTENT_TYPE, METHODS, MULTIPART_CONTENT_TYPE,
-    OperationIds, check_defs_refs, check_operation_refs, deref, escape, invalid, is_event_stream,
-    is_json_media, non_json_schema, response_description, slug, stream_item_schema, stream_kind,
+    OperationIds, check_defs_refs, check_operation_refs, deref, escape, info_description, invalid,
+    is_event_stream, is_json_media, non_json_schema, response_description, slug,
+    stream_item_schema, stream_kind,
 };
 use crate::schema::normalize_schema;
 use crate::security::compile_security;
@@ -321,6 +322,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
         id: slug(&title),
         title,
         version,
+        description: info_description(doc),
         source_digest,
         operations,
         defs,
