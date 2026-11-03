@@ -991,3 +991,30 @@ components:
     assert_eq!(source, "state", "{read}");
     assert_eq!(h.calls(), 1);
 }
+
+/// A bounce with an `id` is one record, under the address its type goes by: deleted
+/// by address, no list read is shown it again.
+#[tokio::test]
+async fn a_deleted_bounce_with_an_id_leaves_no_copy() {
+    let contract = BOUNCES.replace(
+        "        created: {type: integer}\n",
+        "        created: {type: integer}\n        id: {type: integer}\n",
+    );
+    let listed = json!({
+        "id": 7,
+        "created": 1_790_000_000,
+        "email": "ann@example.com",
+        "reason": "550 no such user"
+    });
+    let h = harness(&contract, vec![json!([listed]), json!([])]);
+    h.call("GET", "/bounces", None).await;
+    assert_eq!(
+        h.exported().await,
+        [("bounces".to_owned(), "ann@example.com".to_owned())]
+    );
+    let (status, _, _) = h.call("DELETE", "/bounces/ann@example.com", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(h.exported().await.is_empty(), "{:?}", h.exported().await);
+    h.call("GET", "/bounces?email=x", None).await;
+    assert!(!h.prompt(1).contains("ann@example.com"), "{}", h.prompt(1));
+}
