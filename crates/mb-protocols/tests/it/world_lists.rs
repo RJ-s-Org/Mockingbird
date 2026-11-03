@@ -590,7 +590,8 @@ async fn a_second_refund_sees_the_first() {
 }
 
 /// Tickets: a list beside a create, a read and an update, with array members, a
-/// nullable reference and a range bound that names no member.
+/// nullable reference, nested objects the summary declares less of, and parameters
+/// that name no member.
 const TICKETS: &str = r##"
 openapi: 3.1.0
 info: {title: Tickets, version: "1"}
@@ -602,6 +603,9 @@ paths:
         - {name: status, in: query, schema: {type: string, enum: [open, closed, all]}}
         - {name: labels, in: query, schema: {type: string}}
         - {name: tag_name, in: query, schema: {type: string}}
+        - {name: exclude_labels, in: query, schema: {type: string}}
+        - {name: without_tags, in: query, schema: {type: string}}
+        - {name: tag_ids, in: query, schema: {type: string}}
         - {name: assignee_id, in: query, schema: {type: integer}}
         - {name: before, in: query, schema: {type: string}}
         - {name: inclusive, in: query, schema: {type: boolean}}
@@ -643,6 +647,15 @@ components:
         assignee_id: {type: [integer, "null"]}
         reply_count: {type: integer}
         internal_note: {type: string}
+        owner: {$ref: "#/components/schemas/Person"}
+        watchers: {type: array, items: {$ref: "#/components/schemas/Person"}}
+    Person:
+      type: object
+      properties: {id: {type: string}, name: {type: string}, email: {type: string}}
+    PersonSummary:
+      type: object
+      additionalProperties: false
+      properties: {id: {type: string}, name: {type: string}}
     TicketItem:
       type: object
       required: [id, status, title]
@@ -654,6 +667,8 @@ components:
         tags: {type: array, items: {type: string}}
         assignee_id: {type: [integer, "null"]}
         reply_count: {type: integer}
+        owner: {$ref: "#/components/schemas/PersonSummary"}
+        watchers: {type: array, items: {$ref: "#/components/schemas/PersonSummary"}}
 "##;
 
 fn ticket(id: &str, status: &str) -> Value {
@@ -677,13 +692,21 @@ async fn created_then_updated(api: &Api, to: &str) {
     assert_eq!(status, StatusCode::OK);
 }
 
+fn person(id: &str) -> Value {
+    json!({"id": id, "name": format!("P {id}"), "email": format!("{id}@example.com")})
+}
+
 fn updated_script(list: Value) -> Vec<Result<String, LlmError>> {
-    let created = with(ticket("t1", "open"), "internal_note", json!("secret"));
-    let updated = with(
-        with(ticket("t1", "closed"), "reply_count", json!(3)),
-        "internal_note",
-        json!("secret"),
+    let created = with(
+        with(
+            with(ticket("t1", "open"), "internal_note", json!("secret")),
+            "owner",
+            person("o1"),
+        ),
+        "watchers",
+        json!([person("w1"), person("w2")]),
     );
+    let updated = with(created.clone(), "status", json!("closed"));
     vec![
         Ok(created.to_string()),
         Ok(updated.to_string()),
@@ -709,6 +732,26 @@ async fn a_listed_item_shows_its_stored_record() {
     // The list changed no stored record.
     assert_eq!(api.get("/tickets/t1").await, held);
     assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// What a nested object or an array's objects declare is all an overlay brings, at any
+/// depth: the owner's and watchers' `email` stays out, under `additionalProperties:
+/// false`, and the rest of the overlay still holds.
+#[tokio::test]
+async fn an_overlay_brings_no_nested_member_the_item_does_not_declare() {
+    let list = json!([ticket("t1", "open")]);
+    let api = api_of(TICKETS, true, updated_script(list));
+    created_then_updated(&api, "closed").await;
+    let held = api.get("/tickets/t1").await;
+    assert_eq!(held["owner"]["email"], "o1@example.com", "{held}");
+    let body = api.get("/tickets").await;
+    assert_eq!(body[0]["status"], "closed", "{body}");
+    assert_eq!(body[0]["owner"], json!({"id": "o1", "name": "P o1"}), "{body}");
+    assert_eq!(
+        body[0]["watchers"],
+        json!([{"id": "w1", "name": "P w1"}, {"id": "w2", "name": "P w2"}]),
+        "{body}"
+    );
 }
 
 /// A stored record the item's schema does not allow (`pending` is no item status)
@@ -746,41 +789,119 @@ async fn consistency_off_overlays_nothing() {
     assert_eq!(body, json!([ticket("t1", "open")]));
 }
 
+/// Tasks created under a project, listed under a project.
+const TASKS: &str = r##"
+openapi: 3.1.0
+info: {title: Tasks, version: "1"}
+paths:
+  /projects/{project_id}/tasks:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listTasks
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Task"}}}}}
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+  /tasks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTask
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, project_id, title]
+      properties: {id: {type: string}, project_id: {type: string}, title: {type: string}}
+"##;
+
+fn task(id: &str, project: &str, title: &str) -> Value {
+    json!({"id": id, "project_id": project, "title": title})
+}
+
+/// A stored record whose member a path parameter names holds another value than the
+/// path is another parent's: its list item goes, and is not overlaid. Under its own
+/// parent it is overlaid.
+#[tokio::test]
+async fn a_stored_record_of_another_parent_leaves_the_list() {
+    let listed = json!([
+        task("tk-0001", "p2", "made up"),
+        task("tk-0002", "p2", "B")
+    ]);
+    let api = api_of(
+        TASKS,
+        true,
+        vec![
+            Ok(task("tk-0001", "p1", "A").to_string()),
+            Ok(listed.to_string()),
+            Ok(json!([task("tk-0001", "p1", "made up")]).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/projects/p1/tasks", Some(json!({"title": "A"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/projects/p2/tasks").await;
+    assert_eq!(body, json!([task("tk-0002", "p2", "B")]));
+    let body = api.get("/projects/p1/tasks").await;
+    assert_eq!(body, json!([task("tk-0001", "p1", "A")]));
+}
+
 fn labelled() -> Value {
     json!([
         with(ticket("t1", "open"), "labels", json!(["bug", "Urgent"])),
-        with(ticket("t2", "open"), "labels", json!(["bug"])),
+        with(ticket("t2", "open"), "labels", json!([" bug "])),
         with(ticket("t3", "open"), "labels", json!(["bugfix", "urgent"])),
         ticket("t4", "open"),
+        with(ticket("t5", "open"), "labels", json!(["docs"])),
     ])
 }
 
-/// A text parameter naming an array of strings keeps the items whose array holds each
-/// comma-separated part, whole and ignoring case; an item without the array stays.
+/// A text parameter naming an array of strings keeps the items whose array holds any
+/// of its comma-separated parts, as an `enum` set keeps any of its values: whole,
+/// trimmed and ignoring case. An item without the array stays.
 #[tokio::test]
-async fn an_array_filter_keeps_items_holding_each_part() {
+async fn an_array_filter_keeps_items_holding_any_part() {
     let api = api_of(
         TICKETS,
         true,
         vec![Ok(labelled().to_string()), Ok(labelled().to_string())],
     );
     let body = api.get("/tickets?labels=bug,urgent").await;
-    assert_eq!(ids(&body), ["t1", "t4"]);
+    assert_eq!(ids(&body), ["t1", "t2", "t3", "t4"]);
     let body = api.get("/tickets?labels=bug").await;
     assert_eq!(ids(&body), ["t1", "t2", "t4"]);
 }
 
-/// A parameter whose word names an array member (`tag_name`, `tags`) filters it.
+/// Only a parameter whose whole name names an array filters it: `tag_name`,
+/// `exclude_labels`, `without_tags` and `tag_ids` change nothing.
 #[tokio::test]
-async fn a_word_of_a_parameter_names_an_array() {
+async fn a_word_of_a_parameter_names_no_array() {
     let list = json!([
-        with(ticket("t1", "open"), "tags", json!(["prod"])),
+        with(
+            with(ticket("t1", "open"), "tags", json!(["prod"])),
+            "labels",
+            json!(["bug"])
+        ),
         with(ticket("t2", "open"), "tags", json!(["staging"])),
         with(ticket("t3", "open"), "tags", json!([])),
     ]);
-    let api = api_of(TICKETS, true, vec![Ok(list.to_string())]);
-    let body = api.get("/tickets?tag_name=prod").await;
-    assert_eq!(ids(&body), ["t1"]);
+    let script = (0..4).map(|_| Ok(list.to_string())).collect();
+    let api = api_of(TICKETS, true, script);
+    for uri in [
+        "/tickets?tag_name=prod",
+        "/tickets?exclude_labels=bug",
+        "/tickets?without_tags=prod",
+        "/tickets?tag_ids=prod",
+    ] {
+        assert_eq!(api.get(uri).await, list, "{uri}");
+    }
 }
 
 /// A reference filter drops an item whose reference is `null`; one without the member
@@ -807,58 +928,24 @@ fn four() -> Value {
     ])
 }
 
-/// A bound naming an item's identity, under a parameter naming no member, leaves that
-/// item out, and only it: `tk-001` is not `tk-0010`.
-#[tokio::test]
-async fn a_bound_naming_an_item_leaves_it_out() {
-    let api = api_of(TICKETS, true, vec![Ok(four().to_string())]);
-    let body = api.get("/tickets?before=tk-001").await;
-    assert_eq!(ids(&body), ["tk-002", "tk-0010", "2"]);
-}
-
-/// A boolean parameter that is true (`inclusive`) keeps the bound's item.
-#[tokio::test]
-async fn an_inclusive_flag_keeps_the_bound() {
-    let api = api_of(
-        TICKETS,
-        true,
-        vec![Ok(four().to_string()), Ok(four().to_string())],
-    );
-    let body = api.get("/tickets?before=tk-001&inclusive=true").await;
-    assert_eq!(ids(&body), ["tk-001", "tk-002", "tk-0010", "2"]);
-    let body = api.get("/tickets?before=tk-001&inclusive=false").await;
-    assert_eq!(ids(&body), ["tk-002", "tk-0010", "2"]);
-}
-
-/// A number parameter (`page=2`), a search (`q`), a value naming no item and one too
-/// short or plain to be an id (`2`, as a search for a word is no bound) are no bound,
-/// and a parameter's own `enum` word (`status=all`) no filter: nothing changes.
+/// A parameter naming no member changes nothing, whatever its value: a bound naming an
+/// item (`before=tk-001`, with or without `inclusive`), a number (`page=2`), a search
+/// (`q`, even for an item's id), and a parameter's own `enum` word (`status=all`).
 #[tokio::test]
 async fn parameters_naming_nothing_change_nothing() {
-    let script = (0..6).map(|_| Ok(four().to_string())).collect();
-    let api = api_of(TICKETS, true, script);
-    for uri in [
+    let uris = [
+        "/tickets?before=tk-001",
+        "/tickets?before=tk-001&inclusive=true",
         "/tickets?page=2",
         "/tickets?q=bug",
-        "/tickets?before=zz9",
-        "/tickets?before=2",
+        "/tickets?q=tk-001",
         "/tickets?status=all",
         "/tickets?labels=",
-    ] {
+    ];
+    let script = uris.iter().map(|_| Ok(four().to_string())).collect();
+    let api = api_of(TICKETS, true, script);
+    for uri in uris {
         let body = api.get(uri).await;
         assert_eq!(body, four(), "{uri}");
     }
-}
-
-/// A parameter the route requires (a search's `q`, a scope) is what the list is of, no
-/// bound: an item it names stays.
-#[tokio::test]
-async fn a_required_parameter_is_no_bound() {
-    let contract = TICKETS.replace(
-        "{name: q, in: query, schema: {type: string}}",
-        "{name: q, in: query, required: true, schema: {type: string}}",
-    );
-    let api = api_of(&contract, true, vec![Ok(four().to_string())]);
-    let body = api.get("/tickets?q=tk-001").await;
-    assert_eq!(body, four());
 }
