@@ -5,6 +5,12 @@
 //! made up: the request repeats the first's, or names a token no list knows, and the
 //! answer is the first page again (from the cache) or a list made up anew. So when a cut
 //! leaves items out, and the contract has a place for a token, the engine mints one.
+//! A page the model answered full, at the size asked, whatever its token, while the session
+//! holds records the query asks for that it does not show, is a cut too: those records
+//! are its rest ([`lists::stored_rest`]), after any the page size cut. They are stored
+//! already, so they are not seeded again. A count of the list beside it that counts
+//! fewer than the page and its rest (see [`deleted::with_count_at_least`]) is raised to
+//! them.
 //!
 //! The place is one text member of the answer (no `const` or `enum`), at its top level
 //! or inside an object member beside the list, whose name is, or ends with the words
@@ -393,9 +399,12 @@ pub(super) async fn mint(
     };
     // What a delete marker covers is no later page's.
     let mut rest = Vec::with_capacity(cut.rest.len().min(MAX_REST));
+    // The records the store gave are stored already, as they stand.
+    let generated_rest = cut.rest.len().saturating_sub(cut.stored);
+    let mut seeded = Vec::new();
     let field = item_identity(rt.bundle(), op, body);
     let scope = deleted::scope(op, call);
-    for item in cut.rest {
+    for (at, item) in cut.rest.into_iter().enumerate() {
         if rest.len() >= MAX_REST {
             break;
         }
@@ -406,6 +415,9 @@ pub(super) async fn mint(
             _ => false,
         };
         if !gone {
+            if at < generated_rest {
+                seeded.push(item.clone());
+            }
             rest.push(item);
         }
     }
@@ -414,19 +426,26 @@ pub(super) async fn mint(
     }
     let (nonce, place) = new_cut(session, op);
     let first = token(&nonce, place, 0);
-    let Some(page) = placed(body, &slot.path, Some(Value::String(first))) else {
+    let valid = |candidate: &Value| {
+        plan.engine
+            .serve_stored(rt.bundle(), op, candidate, None)
+            .is_some()
+    };
+    // A count of the list that counts less than the page and the rest counts them.
+    let known = list_items(body).map_or(0, Vec::len) + rest.len();
+    let counted = deleted::with_count_at_least(rt, op, body, known);
+    let Some(page) = counted
+        .iter()
+        .chain(std::iter::once(body))
+        .filter_map(|base| placed(base, &slot.path, Some(Value::String(first.clone()))))
+        .find(|page| valid(page))
+    else {
         return;
     };
-    let valid = plan
-        .engine
-        .serve_stored(rt.bundle(), op, &page, None)
-        .is_some();
-    if !valid {
-        return;
-    }
     // The items left out are the session's, as a list's items are.
     if let Some(t) = t
-        && let Some(seeded) = with_items(&page, rest.clone())
+        && !seeded.is_empty()
+        && let Some(seeded) = with_items(&page, seeded)
     {
         let seeding = GeneratedResponse {
             body: Some(seeded),

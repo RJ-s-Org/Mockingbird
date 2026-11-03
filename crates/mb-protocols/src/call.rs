@@ -1177,7 +1177,10 @@ pub(crate) async fn complete(
         {
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
-            if let Some(cut) = lists::narrow(rt, plan, call, body)
+            let cut = lists::narrow(rt, plan, call, body);
+            // A full page whose rest the model left out, but the store holds.
+            let cut = lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await;
+            if let Some(cut) = cut
                 && !transient_fallback(&generated)
             {
                 pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;

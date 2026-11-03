@@ -57,8 +57,10 @@
 //! an `owner` the summary declares as `{id, name}` brings no `email`, nor does each
 //! object of an array. The item's own members stay otherwise, and the generated item
 //! whole when the record would not validate in its place. Nothing is stored or added:
-//! an item the store holds but the answer does not name stays out, as which list and
-//! page it belongs on is not known well enough.
+//! an item the store holds but the answer does not name stays out of the page, as
+//! which list and page it belongs on is not known well enough. A full page may still
+//! leave such records for a next page ([`stored_rest`]), served by a token as a cut's
+//! rest is.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -66,7 +68,7 @@
 use std::collections::BTreeSet;
 
 use mb_engine::SchemaValidator;
-use mb_engine::budget::requested_page;
+use mb_engine::budget::{PageLimit, requested_page};
 use mb_engine::consistency::{list_items_mut, list_member};
 
 /// Items of one list answer looked up in the store, at most: one read each, as
@@ -447,6 +449,9 @@ pub(super) struct Cut {
     pub(super) size: usize,
     /// The query parameter that asked for it.
     pub(super) size_param: String,
+    /// How many of the last items of `rest` the session's records gave (see
+    /// [`stored_rest`]), not the answer: they are stored already.
+    pub(super) stored: usize,
 }
 
 /// Applies a list read's equality filters and page size to its generated answer (see
@@ -473,36 +478,10 @@ pub(super) fn narrow(
         || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
         call,
     );
-    let mut filters: Vec<Filter<'_>> = Vec::new();
-    for (param, raw) in &call.query {
-        if page.is_some_and(|(name, _)| name == param) {
-            continue;
-        }
-        if let Some(member) = filtered_member(bundle, query, &item_parts, param) {
-            let Some(values) = wanted(&member, raw) else {
-                continue;
-            };
-            // `name=Ann` keeps `Anna`; `owner_id=u1` does not keep `u10`.
-            let loose = member.is_free_text()
-                && !values.iter().any(|v| v.as_str().is_some_and(holds_a_digit));
-            filters.push(Filter {
-                member: member.name,
-                values,
-                test: Test::Equal {
-                    loose,
-                    reference: is_reference(member.name),
-                },
-            });
-        } else if let Some(element) = array_filter_member(bundle, query, &item_parts, param)
-            && let Some(values) = wanted_parts(&element, raw)
-        {
-            filters.push(Filter {
-                member: element.name,
-                values,
-                test: Test::HoldsAny,
-            });
-        }
-    }
+    let filters: Vec<Filter<'_>> = filters_of(bundle, query, &item_parts, call, page)
+        .into_iter()
+        .map(|(_, filter)| filter)
+        .collect();
     let valid = |candidate: &Value| {
         plan.engine
             .serve_stored(bundle, op, candidate, None)
@@ -526,19 +505,9 @@ pub(super) fn narrow(
         }
     }
     let (_, limit) = page?;
-    // A size the contract ties to another array is not this one's.
-    if limit
-        .maximum
-        .is_some_and(|maximum| declared_count(&array_parts, "maxItems") != Some(maximum))
-        || limit.items < fewest
-    {
-        return None;
-    }
+    let size = page_size(limit, &array_parts)?;
     let mut capped = body.clone();
     let items = list_items_mut(&mut capped)?;
-    let Ok(size) = usize::try_from(limit.items) else {
-        return None;
-    };
     if items.len() <= size {
         return None;
     }
@@ -551,7 +520,286 @@ pub(super) fn narrow(
         rest,
         size,
         size_param: page.map(|(name, _)| name.to_string())?,
+        stored: 0,
     })
+}
+
+/// The page size `limit` asks of the list whose array `array_parts` describe: none when
+/// the contract ties it to another array, or it is under the array's `minItems`.
+fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
+    let fewest = declared_count(array_parts, "minItems").unwrap_or(0);
+    // A size the contract ties to another array is not this one's.
+    if limit
+        .maximum
+        .is_some_and(|maximum| declared_count(array_parts, "maxItems") != Some(maximum))
+        || limit.items < fewest
+    {
+        return None;
+    }
+    usize::try_from(limit.items).ok()
+}
+
+/// The equality filters `call`'s query asks of the items `item_parts` describe, each
+/// with its parameter: all but the page size's `page`.
+fn filters_of<'a, 'c>(
+    bundle: &'a mb_mcm::Bundle,
+    query: Option<&'a Value>,
+    item_parts: &[&'a Value],
+    call: &'c OperationCall,
+    page: Option<(&str, PageLimit)>,
+) -> Vec<(&'c str, Filter<'a>)> {
+    let mut filters = Vec::new();
+    for (param, raw) in &call.query {
+        if page.is_some_and(|(name, _)| name == param) {
+            continue;
+        }
+        if let Some(member) = filtered_member(bundle, query, item_parts, param) {
+            let Some(values) = wanted(&member, raw) else {
+                continue;
+            };
+            // `name=Ann` keeps `Anna`; `owner_id=u1` does not keep `u10`.
+            let loose = member.is_free_text()
+                && !values.iter().any(|v| v.as_str().is_some_and(holds_a_digit));
+            filters.push((
+                param.as_str(),
+                Filter {
+                    member: member.name,
+                    values,
+                    test: Test::Equal {
+                        loose,
+                        reference: is_reference(member.name),
+                    },
+                },
+            ));
+        } else if let Some(element) = array_filter_member(bundle, query, item_parts, param)
+            && let Some(values) = wanted_parts(&element, raw)
+        {
+            filters.push((
+                param.as_str(),
+                Filter {
+                    member: element.name,
+                    values,
+                    test: Test::HoldsAny,
+                },
+            ));
+        }
+    }
+    filters
+}
+
+/// Whether `item` holds what `filter` asks, as a member of the same shape: a missing
+/// member or `null` holds nothing.
+fn holds_wanted(item: &Value, filter: &Filter<'_>) -> bool {
+    let Some(held) = item.get(filter.member).filter(|held| !held.is_null()) else {
+        return false;
+    };
+    match filter.test {
+        Test::Equal { loose, .. } => is_wanted(held, &filter.values, loose),
+        Test::HoldsAny => held.is_array() && !contradicts(item, filter),
+    }
+}
+
+/// Whether `value` holds `wanted` whole, as text or a number, at any depth up to
+/// [`MAX_PROJECTED_DEPTH`].
+fn mentions(value: &Value, wanted: &str, depth: usize) -> bool {
+    if depth >= MAX_PROJECTED_DEPTH {
+        return false;
+    }
+    match value {
+        Value::Object(members) => members.values().any(|v| mentions(v, wanted, depth + 1)),
+        Value::Array(items) => items.iter().any(|v| mentions(v, wanted, depth + 1)),
+        other => id_string(other).is_some_and(|held| held.trim() == wanted),
+    }
+}
+
+/// Whether stored `r` shows it is in the collection `call`'s path names: as recorded
+/// there by this runtime, or, for each path parameter, by a member tied to it holding
+/// its value (as [`overlay_stored`] ties them), or an object holding it. A route with no
+/// path parameter is one collection.
+fn in_collection(
+    rt: &MockRuntime,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    item_type: &str,
+    field: &str,
+    r: &StoredResource,
+) -> bool {
+    if call.path_params.is_empty() {
+        return true;
+    }
+    if let Some(collection) = collection_of(plan.op, call)
+        && rt.collections().get(&plan.session, r) == Some(collection)
+    {
+        return true;
+    }
+    let Some(members) = r.data.as_object() else {
+        return false;
+    };
+    call.path_params.iter().all(|(param, value)| {
+        let Some(value) = id_string(value) else {
+            return false;
+        };
+        members.iter().any(|(member, held)| {
+            member != field
+                && !mb_mcm::is_generic_id(member)
+                && tied_to_param(member, param)
+                && !typed_as_own(rt, item_type, member)
+                && match held {
+                    Value::Object(inner) => inner
+                        .values()
+                        .any(|v| id_string(v).as_deref() == Some(value.as_str())),
+                    held => id_string(held).as_deref() == Some(value.as_str()),
+                }
+        })
+    })
+}
+
+/// Records of the list's item type a list read looks at for what a full page left out,
+/// at most.
+const MAX_STORED_REST: usize = 100;
+
+/// `cut` with, after the items it left out, the records the session holds that a full
+/// page of list answer `body` does not show but that its query asks for: of the items'
+/// type, in the route's collection (see [`in_collection`]), holding what each of the
+/// query's filters asks, and showing the request's every other value, unless all of
+/// that value's comma-separated words name members of the items (`fields=name,notes`).
+/// A value outside all of that (a search the items do not hold) leaves `cut` as it is.
+/// Each record shows as the items declare it ([`projected`]), and only where it
+/// validates as one; one with no identity, or the identity of an item served or left
+/// out, is not taken. A page is full when it holds as many items as the request's page
+/// size asks. The items' type `t` when their schema names no type of its own. Nothing is
+/// written.
+pub(super) async fn stored_rest(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: Option<&str>,
+    body: &Value,
+    cut: Option<Cut>,
+) -> Option<Cut> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let op = plan.op;
+    if !plain(plan) {
+        return cut;
+    }
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return cut;
+    };
+    let mut held = None;
+    let Some((array_parts, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
+        return cut;
+    };
+    let Some(items_schema) = array_parts.iter().find_map(|p| p.get("items")) else {
+        return cut;
+    };
+    let query = op.input.query.as_ref();
+    let doc = std::cell::OnceCell::new();
+    let page = requested_page(
+        query,
+        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
+        call,
+    );
+    let Some((size_param, size)) =
+        page.and_then(|(name, limit)| Some((name, page_size(limit, &array_parts)?)))
+    else {
+        return cut;
+    };
+    let Some(served) = list_items(body).filter(|items| size > 0 && items.len() >= size) else {
+        return cut;
+    };
+    let filters = filters_of(bundle, query, &item_parts, call, page);
+    let declared = declared_names(&item_parts);
+    let mut shown: Vec<String> = Vec::new();
+    for (param, raw) in &call.query {
+        if param == size_param || filters.iter().any(|(name, _)| name == param) {
+            continue;
+        }
+        let texts: Vec<String> = match raw {
+            Value::Array(values) => values.iter().filter_map(id_string).collect(),
+            other => id_string(other).into_iter().collect(),
+        };
+        let texts: Vec<String> = texts
+            .into_iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if texts.is_empty() {
+            // `cursor=` asks for nothing; a value of another kind is not known.
+            if matches!(raw, Value::Bool(_) | Value::Object(_)) {
+                return cut;
+            }
+            continue;
+        }
+        let names_members = texts.iter().all(|text| {
+            text.split(',').all(|word| {
+                let word = word.trim();
+                let head = word.split('.').next().unwrap_or(word);
+                declared.contains(&head)
+            })
+        });
+        if !names_members {
+            shown.extend(texts);
+        }
+    }
+    let Some(item_type) = rt
+        .index()
+        .item_type(bundle, op, body)
+        .or_else(|| t.map(str::to_string))
+    else {
+        return cut;
+    };
+    let field = item_identity(bundle, op, body);
+    let identity = |item: &Value| item.get(&field).and_then(id_string);
+    let mut known: Vec<String> = served.iter().filter_map(identity).collect();
+    if let Some(cut) = &cut {
+        known.extend(cut.rest.iter().filter_map(identity));
+    }
+    let valid = |item: &Value| {
+        let mut candidate = body.clone();
+        let Some(slot) = list_items_mut(&mut candidate).and_then(|items| items.first_mut()) else {
+            return false;
+        };
+        *slot = item.clone();
+        plan.engine
+            .serve_stored(bundle, op, &candidate, None)
+            .is_some()
+    };
+    let mut records = state.list(&plan.session, &item_type, MAX_STORED_REST).await;
+    // Oldest first, as a list goes on.
+    records.reverse();
+    let mut missing = Vec::new();
+    for r in &records {
+        if !in_collection(rt, (plan, call), &item_type, &field, r) {
+            continue;
+        }
+        let item = projected(bundle, Some(items_schema), &r.data, 0);
+        let Some(id) = identity(&item) else {
+            continue;
+        };
+        if known.contains(&id)
+            || !filters
+                .iter()
+                .all(|(_, filter)| holds_wanted(&item, filter))
+            || !shown.iter().all(|value| mentions(&r.data, value, 0))
+            || !valid(&item)
+        {
+            continue;
+        }
+        known.push(id);
+        missing.push(item);
+    }
+    if missing.is_empty() {
+        return cut;
+    }
+    let stored = missing.len();
+    let mut cut = cut.unwrap_or_else(|| Cut {
+        rest: Vec::new(),
+        size,
+        size_param: size_param.to_string(),
+        stored: 0,
+    });
+    cut.rest.extend(missing);
+    cut.stored = stored;
+    Some(cut)
 }
 
 /// `value` as `schema` declares it, at every depth: of an object, the members its parts
