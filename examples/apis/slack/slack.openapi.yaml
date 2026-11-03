@@ -344,7 +344,7 @@ components:
       required: [channel, name, timestamp]
       properties:
         channel: { $ref: "#/components/schemas/defs_channel" }
-        name: { type: string, description: Emoji name without colons, e.g. thumbsup. }
+        name: { type: string, description: "Emoji name without colons, e.g. thumbsup." }
         timestamp: { $ref: "#/components/schemas/defs_ts" }
     objs_message:
       type: object

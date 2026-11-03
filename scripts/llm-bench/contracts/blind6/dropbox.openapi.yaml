@@ -530,7 +530,7 @@ components:
       type: object
       required: [name, id, path_lower, path_display]
       properties:
-        name: {type: string, description: The last part of the path, in its displayed case.}
+        name: {type: string, description: "The last part of the path, in its displayed case."}
         id: {type: string, pattern: "^id:.+", description: Stays the same when the folder moves.}
         path_lower: {type: string}
         path_display: {type: string}

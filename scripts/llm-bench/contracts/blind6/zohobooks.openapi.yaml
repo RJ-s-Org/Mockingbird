@@ -452,7 +452,7 @@ paths:
               required: [customer_id, payment_mode, amount, date]
               properties:
                 customer_id: {type: string}
-                payment_mode: {type: string, description: Such as cash, check, creditcard or banktransfer.}
+                payment_mode: {type: string, description: "Such as cash, check, creditcard or banktransfer."}
                 amount: {type: number, exclusiveMinimum: true, minimum: 0}
                 date: {type: string, format: date}
                 reference_number: {type: string}
@@ -621,7 +621,7 @@ components:
         discount: {type: number}
         tax_id: {type: string}
         tax_percentage: {type: number}
-        item_total: {type: number, description: rate times quantity, less the discount.}
+        item_total: {type: number, description: "rate times quantity, less the discount."}
     InvoiceInput:
       type: object
       properties:

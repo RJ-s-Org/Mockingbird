@@ -541,7 +541,7 @@ components:
         description: {type: string}
         short_description: {type: string}
         sku: {type: string}
-        price: {type: string, description: The current price, the sale price while there is one.}
+        price: {type: string, description: "The current price, the sale price while there is one."}
         regular_price: {type: string}
         sale_price: {type: string}
         on_sale: {type: boolean}
@@ -608,7 +608,7 @@ components:
         shipping: {$ref: "#/components/schemas/Address"}
         payment_method: {type: string}
         payment_method_title: {type: string}
-        set_paid: {type: boolean, default: false, description: Mark the order paid, which makes it processing.}
+        set_paid: {type: boolean, default: false, description: "Mark the order paid, which makes it processing."}
         line_items:
           type: array
           items: {$ref: "#/components/schemas/LineItemInput"}
@@ -645,7 +645,7 @@ components:
         date_completed: {type: string, format: date-time, nullable: true}
         discount_total: {type: string}
         shipping_total: {type: string}
-        total: {type: string, description: The sum of the line totals here, as there is no tax or shipping.}
+        total: {type: string, description: "The sum of the line totals here, as there is no tax or shipping."}
         total_tax: {type: string}
         customer_id: {type: integer}
         customer_note: {type: string}

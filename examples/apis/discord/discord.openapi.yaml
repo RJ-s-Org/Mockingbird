@@ -139,7 +139,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/InteractionCallbackRequest" }
       responses:
-        "204": { description: Acknowledged (with_response=true, not covered here, answers 200 with the callback resource). }
+        "204": { description: "Acknowledged (with_response=true, not covered here, answers 200 with the callback resource)." }
         "400": { $ref: "#/components/responses/ClientErrorResponse" }
         "404": { $ref: "#/components/responses/ClientErrorResponse" }
         "429": { $ref: "#/components/responses/ClientRatelimitedResponse" }
@@ -176,7 +176,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: integer, description: Discord JSON error code, e.g. 10003 Unknown Channel. }
+        code: { type: integer, description: "Discord JSON error code, e.g. 10003 Unknown Channel." }
         message: { type: string }
     ErrorResponse:
       type: object
@@ -261,7 +261,7 @@ components:
       required: [id, type, flags, guild_id, name, position, parent_id, nsfw, permission_overwrites]
       properties:
         id: { $ref: "#/components/schemas/SnowflakeType" }
-        type: { type: integer, enum: [0, 2, 4, 5, 15], description: 0 text, 2 voice, 4 category, 5 announcement, 15 forum. }
+        type: { type: integer, enum: [0, 2, 4, 5, 15], description: "0 text, 2 voice, 4 category, 5 announcement, 15 forum." }
         flags: { type: integer, const: 0 }
         guild_id: { $ref: "#/components/schemas/SnowflakeType" }
         name: { type: string, enum: [welcome, announcements, general, help, show-and-tell, events, Lounge, Stage] }
@@ -277,7 +277,7 @@ components:
       required: [id, type, content, channel_id, author, attachments, embeds, mentions, mention_roles, pinned, mention_everyone, tts, timestamp, edited_timestamp, flags, components]
       properties:
         id: { $ref: "#/components/schemas/SnowflakeType" }
-        type: { type: integer, enum: [0, 19], description: 0 default, 19 reply. }
+        type: { type: integer, enum: [0, 19], description: "0 default, 19 reply." }
         content: { type: string, maxLength: 2000 }
         channel_id: { $ref: "#/components/schemas/SnowflakeType" }
         author: { $ref: "#/components/schemas/UserResponse" }
@@ -331,7 +331,7 @@ components:
       type: object
       required: [type]
       properties:
-        type: { type: integer, enum: [1, 4, 5, 6, 7, 8, 9, 10, 12], description: 4 CHANNEL_MESSAGE_WITH_SOURCE, 5 DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, 9 MODAL. }
+        type: { type: integer, enum: [1, 4, 5, 6, 7, 8, 9, 10, 12], description: "4 CHANNEL_MESSAGE_WITH_SOURCE, 5 DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, 9 MODAL." }
         data:
           type: object
           properties:
