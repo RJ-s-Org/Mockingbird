@@ -1922,7 +1922,11 @@ paths:
         - {name: X-Sealed, in: header, description: Sealed., schema: {$ref: "#/components/schemas/Sealed"}}
         - {name: X-Spare-Ident, in: header, description: The spare scheme's., schema: {type: string}}
         - {name: X-Note, in: header, description: A note., schema: {type: string}}
+        - {name: X-Wrapped, in: header, description: Wrapped., schema: {$ref: "#/components/schemas/Str", writeOnly: true}}
+        - {name: X-Masked, in: header, description: Masked., schema: {$ref: "#/components/schemas/Str", format: password}}
         - {name: filter, in: query, description: "`deleted` lists only deleted entries.", schema: {type: string}}
+        - {name: pin, in: query, description: The pin., schema: {type: string, format: password}}
+        - {name: hush, in: query, description: Hushed., schema: {type: string, writeOnly: true}}
         - {name: access, in: query, description: The query scheme's., schema: {type: string}}
         - {name: unsent, in: query, description: Never sent., schema: {type: string}}
       requestBody: {content: {application/json: {schema: {type: object}}}}
@@ -1937,6 +1941,7 @@ components:
   schemas:
     Entry: {type: object, required: [id], properties: {id: {type: string}, version: {type: integer}}}
     Sealed: {type: string, writeOnly: true}
+    Str: {type: string}
 "##;
 
 /// [`ENTRIES`] with `Authorization` declared as a header parameter too, which the
@@ -2009,13 +2014,20 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
             ("x-sealed", "sealed-secret-5"),
             ("x-spare-ident", "spare-secret-6"),
             ("x-note", &long_note),
+            ("x-wrapped", "wrapped-secret-9"),
+            ("x-masked", "masked-secret-10"),
             ("content-length", "12"),
             ("x-entry-version", "3"),
             ("x-entry-kind", "post"),
             ("x-undeclared", "zzz"),
             ("x-mockingbird-seed", "7"),
         ],
-        &[("filter", "deleted"), ("access", "query-secret-7")],
+        &[
+            ("filter", "deleted"),
+            ("access", "query-secret-7"),
+            ("pin", "pin-secret-11"),
+            ("hush", "hush-secret-12"),
+        ],
     );
     engine.generate(&bundle, op, &c, ctx()).await.unwrap();
     let messages = &provider.requests()[0].messages;
@@ -2043,6 +2055,10 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
         "sealed-secret-5",
         "spare-secret-6",
         "query-secret-7",
+        "wrapped-secret-9",
+        "masked-secret-10",
+        "pin-secret-11",
+        "hush-secret-12",
         "zzz",
     ] {
         assert!(!user.contains(secret), "{secret}: {user}");
@@ -2058,6 +2074,8 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
         "x-hold",
         "x-sealed",
         "x-spare-ident",
+        "x-wrapped",
+        "x-masked",
         "content-length",
         "x-undeclared",
     ] {
@@ -2089,9 +2107,40 @@ async fn declared_headers_and_parameter_descriptions_reach_the_prompt() {
         "Sealed",
         "spare scheme",
         "query scheme",
+        "Wrapped.",
+        "Masked.",
+        "The pin.",
+        "Hushed.",
     ] {
         assert!(!user.contains(unsaid), "{unsaid}: {user}");
     }
+}
+
+/// A bundle compiled before the importers kept every API-key name cannot tell which
+/// headers a scheme it never compiled uses: it shows no request header at all, and
+/// its query loses what its compiled requirements name, as before.
+#[tokio::test]
+async fn a_bundle_without_api_key_names_shows_no_header() {
+    let mut bundle = entries();
+    bundle.api_key_names = None;
+    let op = bundle.operation("putEntry").unwrap();
+    let answer = json!({"id": "e1", "version": 4}).to_string();
+    let (provider, engine) = scripted(vec![Ok(answer)]);
+    let c = entry_call(
+        &[
+            ("x-entry-version", "3"),
+            ("x-spare-ident", "spare-secret-6"),
+        ],
+        &[("filter", "deleted"), ("X-Client-Ident", "ident-secret-1")],
+    );
+    engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let user = provider.requests()[0].messages[1].content.clone();
+    let request: Value = serde_json::from_str(tagged(&user, "request").unwrap()).unwrap();
+    assert!(request.get("headers").is_none(), "{user}");
+    assert_eq!(request["query"], json!({"filter": "deleted"}), "{user}");
+    assert!(!user.contains("spare-secret-6"), "{user}");
+    assert!(!user.contains("ident-secret-1"), "{user}");
+    assert!(!user.contains("header `"), "{user}");
 }
 
 /// Each description is cut as the schema's are, and the block as a whole is capped;

@@ -214,7 +214,7 @@ fn is_secret_url(word: &str) -> bool {
 const MAX_SCHEMA_PARTS: usize = 32;
 
 /// Whether the contract marks a value of `schema` secret: `writeOnly` or
-/// `format: password` on it or on what it is made of, its `$ref`s (into
+/// `format: password` on it (beside a `$ref` too) or on what it is made of, its `$ref`s (into
 /// `bundle`'s definitions) followed and its `anyOf`/`oneOf`/`allOf` branches
 /// flattened, at most 8 deep and 32 parts.
 #[must_use]
@@ -228,18 +228,19 @@ pub fn schema_marks_secret(bundle: &crate::Bundle, schema: &serde_json::Value) -
         if depth > 8 || parts.len() >= MAX_SCHEMA_PARTS {
             return;
         }
+        // The schema's own keys count before its reference is followed: `writeOnly`
+        // or `format: password` written beside a `$ref` marks it as well.
+        parts.push(schema);
         if let Some(def) = schema
             .get("$ref")
             .and_then(serde_json::Value::as_str)
             .and_then(|r| r.strip_prefix("#/$defs/"))
         {
-            // A sibling of the reference (a description) is no part of its own.
             if let Some(target) = bundle.defs.get(def) {
                 visit(bundle, target, depth + 1, parts);
             }
             return;
         }
-        parts.push(schema);
         for key in ["anyOf", "oneOf", "allOf"] {
             for branch in schema
                 .get(key)

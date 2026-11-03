@@ -155,21 +155,38 @@ pub(crate) fn request_notes(bundle: &Bundle, op: &Operation, call: &OperationCal
     let descriptions = parameter_descriptions(bundle, op, call, &headers);
     RequestNotes {
         defaults: request_defaults(bundle, op, call),
-        query: shown_query(bundle, call),
+        query: shown_query(bundle, op, call),
         headers,
         descriptions,
     }
 }
 
-/// `call`'s query without what a security scheme of the contract carries a key under,
-/// when it holds such a parameter; `None` when all of it may be shown. The request
-/// itself is left as it is.
-fn shown_query(bundle: &Bundle, call: &OperationCall) -> Option<Map<String, Value>> {
-    if !call.query.keys().any(|name| bundle.is_security_name(name)) {
+/// `call`'s query without the values [`hides_parameter`] keeps out, by the parameter's
+/// declared schema when there is one, when it holds any; `None` when all of it may be
+/// shown. A name hidden only by a word as often an identity's (`project_key`, see
+/// [`mb_mcm::credentials::may_be_an_identity`]) is still shown, as it was: it is what a
+/// list is filtered by. The request itself is left as it is.
+fn shown_query(
+    bundle: &Bundle,
+    op: &Operation,
+    call: &OperationCall,
+) -> Option<Map<String, Value>> {
+    let props = declared(bundle, op.input.query.as_ref());
+    let hidden = |name: &str| {
+        let identity_only = mb_mcm::credentials::may_be_an_identity(name)
+            && !mb_mcm::credentials::is_credential_name(name);
+        hides_parameter(bundle, name, props.and_then(|p| p.get(name)))
+            && !(identity_only
+                && !bundle.is_security_name(name)
+                && !props
+                    .and_then(|p| p.get(name))
+                    .is_some_and(|s| mb_mcm::credentials::schema_marks_secret(bundle, s)))
+    };
+    if !call.query.keys().any(|name| hidden(name)) {
         return None;
     }
     let mut query = call.query.clone();
-    query.retain(|name, _| !bundle.is_security_name(name));
+    query.retain(|name, _| !hidden(name));
     Some(query)
 }
 
@@ -195,11 +212,13 @@ fn hides_parameter(bundle: &Bundle, name: &str, schema: Option<&Value>) -> bool 
 /// `<request>` block shows of them, so what a read's cached answer depends on too.
 /// Never a header a security scheme of the contract names, one whose name or schema
 /// marks a credential, or whose value is shaped like one, a transport header or
-/// Mockingbird's own.
+/// Mockingbird's own. None at all from a bundle that does not know every API-key
+/// name its contract declares ([`Bundle::knows_api_key_names`]: one compiled before
+/// they were kept), as a header an unreferenced scheme uses could not be told apart.
 #[must_use]
 pub fn shown_headers(bundle: &Bundle, op: &Operation, call: &OperationCall) -> Map<String, Value> {
     let mut out = Map::new();
-    if call.headers.is_empty() {
+    if call.headers.is_empty() || !bundle.knows_api_key_names() {
         return out;
     }
     let Some(props) = declared(bundle, op.input.headers.as_ref()) else {

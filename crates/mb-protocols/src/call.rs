@@ -3602,6 +3602,7 @@ fn safe_headers(rt: &MockRuntime, headers: &HeaderMap, keep_overrides: bool) -> 
 #[cfg(feature = "events")]
 pub(crate) fn is_recordable_header(rt: &MockRuntime, name: &str) -> bool {
     !is_sensitive(name)
+        && !rt.bundle.declares_api_key(name)
         && !rt
             .credential_names()
             .headers
@@ -3622,9 +3623,26 @@ pub(crate) fn forwarded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<St
     out
 }
 
-/// Headers kept in the request record (overrides included).
+/// Headers kept in the request record (overrides included): never one any API-key
+/// scheme of the contract names ([`mb_mcm::Bundle::declares_api_key`]), whatever the
+/// data-plane auth mode, as the record is stored and exported.
 pub(crate) fn recorded_headers(rt: &MockRuntime, headers: &HeaderMap) -> Map<String, Value> {
-    safe_headers(rt, headers, true)
+    let mut out = safe_headers(rt, headers, true);
+    out.retain(|name, _| !rt.bundle.declares_api_key(name));
+    out
+}
+
+/// [`public_query`] as the request record keeps it: also without a parameter any
+/// API-key scheme of the contract names, whatever the data-plane auth mode. The call
+/// itself keeps those, for its validation.
+pub(crate) fn recorded_public_query(
+    rt: &MockRuntime,
+    pairs: &[(String, String)],
+) -> Vec<(String, String)> {
+    public_query(rt, pairs)
+        .into_iter()
+        .filter(|(k, _)| !rt.bundle.declares_api_key(k))
+        .collect()
 }
 
 /// The target (when `target_id` is set), the related resources before any
@@ -4772,12 +4790,14 @@ async fn created_alongside(
         if target.is_some_and(shown) {
             continue;
         }
-        if let Some(held) = related.iter().find(|r| shown(r)) {
-            // Already shown, by value: still one this collection holds.
+        if related.iter().any(shown) {
+            // Already shown, by value, as a scrubbed copy: whether this collection
+            // still holds it is the stored copy's to say.
             if create
+                && let Some(held) = state.get(session, &t, &id).await
                 && rt
                     .collections()
-                    .get(session, held)
+                    .get(session, &held)
                     .is_some_and(|c| fits(&c))
             {
                 marked.push((t.clone(), id.clone()));

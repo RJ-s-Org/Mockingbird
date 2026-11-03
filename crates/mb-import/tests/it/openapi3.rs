@@ -29,6 +29,8 @@ components:
     let bundle = compile(contract.as_bytes()).unwrap();
     let mut names: Vec<(mb_mcm::ApiKeyLocation, &str)> = bundle
         .api_key_names
+        .as_deref()
+        .unwrap_or_default()
         .iter()
         .map(|k| (k.location, k.name.as_str()))
         .collect();

@@ -2644,6 +2644,46 @@ async fn a_record_only_the_body_names_offers_a_create_no_refusal() {
     assert_eq!(status, StatusCode::CONFLICT, "{body} {prompt}");
 }
 
+/// A comment the request names by value that a create also put in the same
+/// collection still counts as created alongside, though what the prompt shows of it is
+/// a scrubbed copy: the next create is offered the declared 409.
+#[tokio::test]
+async fn a_record_created_alongside_counts_when_also_named_by_value() {
+    let first = json!({
+        "id": "cmt-000201",
+        "text": "me too",
+        "access_token": "tok-kept-out-1",
+    });
+    let h = harness_with(
+        COMMENTS.as_bytes(),
+        vec![
+            first,
+            json!({"effects": [], "response": null, "refusal": 409}),
+        ],
+        |_| {},
+    );
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = h
+        .call(
+            "POST",
+            "/posts/p-100/comments",
+            Some(json!({"text": "me too", "in_reply_to": "cmt-000201"})),
+        )
+        .await;
+    let prompt = h.prompt(1);
+    assert!(prompt.contains("cmt-000201"), "{prompt}");
+    assert!(!prompt.contains("tok-kept-out-1"), "scrubbed: {prompt}");
+    assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body} {prompt}");
+}
+
 /// Entries listed in the language a header names.
 const LOCALIZED: &str = r##"
 openapi: 3.0.0

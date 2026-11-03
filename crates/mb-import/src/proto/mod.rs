@@ -353,7 +353,7 @@ fn bundle(compiled: &Compiled, source_digest: String) -> Bundle {
         }),
         channels: Vec::new(),
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     }
 }
 

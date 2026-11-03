@@ -296,7 +296,7 @@ fn compile_root(
         }),
         channels: Vec::new(),
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     })
 }
 

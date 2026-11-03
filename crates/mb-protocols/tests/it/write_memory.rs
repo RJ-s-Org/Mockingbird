@@ -183,6 +183,8 @@ paths:
               properties:
                 passphrase: {type: string, format: password}
                 recovery: {type: string, writeOnly: true}
+                sealed: {$ref: "#/components/schemas/Plain", writeOnly: true}
+                masked: {$ref: "#/components/schemas/Plain", format: password}
       responses:
         "204": {description: revoked}
   /captures/{id}/refunds/{refund_id}:
@@ -387,6 +389,7 @@ paths:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
 components:
   schemas:
+    Plain: {type: string}
     Created:
       type: object
       additionalProperties: false
@@ -2651,6 +2654,22 @@ async fn a_path_value_is_not_stored() {
     let all = format!("{memory:?}");
     assert!(!all.contains("sk_live_abc123"), "{all}");
     assert!(all.contains("/tokens/{token_value}/revoke"), "{all}");
+}
+
+/// A member whose schema marks it secret beside a `$ref` goes, as one marked on its
+/// own schema does.
+#[tokio::test]
+async fn a_secret_marked_beside_a_ref_is_not_kept() {
+    let h = things(vec![]);
+    h.call(
+        "POST",
+        "/tokens/t1/revoke",
+        Some(json!({"sealed": "kept-out-s1", "masked": "kept-out-s2", "note": "kept-in-s3"})),
+    )
+    .await;
+    let stored = h.memory().await[0].data.to_string();
+    assert!(!stored.contains("kept-out"), "{stored}");
+    assert!(stored.contains("kept-in-s3"), "{stored}");
 }
 
 /// What the body says is a credential goes, however it says so; what only looks

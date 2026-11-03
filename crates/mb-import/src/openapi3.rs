@@ -873,7 +873,10 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
         protocol_payload: None,
         channels: Vec::new(),
         webhooks,
-        api_key_names: crate::security::api_key_names(doc, "/components/securitySchemes"),
+        api_key_names: Some(crate::security::api_key_names(
+            doc,
+            "/components/securitySchemes",
+        )),
     })
 }
 

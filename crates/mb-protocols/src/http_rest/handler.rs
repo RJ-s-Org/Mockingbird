@@ -1118,12 +1118,12 @@ fn message_path(
         })
 }
 
-/// The raw query as recorded (without credential parameters): repeated keys
-/// become arrays of strings.
+/// The raw query as recorded (without credential parameters, the contract's API keys
+/// included): repeated keys become arrays of strings.
 fn recorded_query(rt: &MockRuntime, uri: &Uri) -> Value {
     let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or(""))
         .unwrap_or_default();
-    Value::Object(string_params(public_query(rt, &pairs)))
+    Value::Object(string_params(call::recorded_public_query(rt, &pairs)))
 }
 
 /// `pairs` as an object of strings; repeated keys become arrays of strings.

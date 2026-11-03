@@ -18,6 +18,8 @@ fn every_api_key_name_a_definition_declares_is_kept() {
     let bundle = compile(contract).unwrap();
     let mut names: Vec<&str> = bundle
         .api_key_names
+        .as_deref()
+        .unwrap_or_default()
         .iter()
         .map(|k| k.name.as_str())
         .collect();

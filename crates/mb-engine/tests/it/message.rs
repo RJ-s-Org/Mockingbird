@@ -47,7 +47,7 @@ fn message_bundle() -> Bundle {
         protocol_payload: None,
         channels: vec![channel],
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     }
 }
 

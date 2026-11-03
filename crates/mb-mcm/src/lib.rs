@@ -63,9 +63,13 @@ pub struct Bundle {
     /// Every name an API-key security scheme of the contract declares
     /// (`securitySchemes`, `securityDefinitions`), whether or not a requirement
     /// the mock compiled references it: what carries a credential, wherever it
-    /// appears.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub api_key_names: Vec<ApiKeyName>,
+    /// appears. `None` for a bundle compiled before the importers kept them (or by
+    /// one that has no such schemes to keep): nothing then says which names an
+    /// unreferenced scheme uses, and what depends on knowing them stays cautious
+    /// (see [`Bundle::knows_api_key_names`]). `Some`, possibly empty, once an
+    /// OpenAPI 3 or Swagger 2.0 import looked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_names: Option<Vec<ApiKeyName>>,
 }
 
 /// A name an API-key security scheme carries a key under.
@@ -79,16 +83,29 @@ pub struct ApiKeyName {
 }
 
 impl Bundle {
+    /// Whether the bundle knows every API-key name its contract declares
+    /// ([`Bundle::api_key_names`] is set), not only those its compiled requirements use.
+    #[must_use]
+    pub fn knows_api_key_names(&self) -> bool {
+        self.api_key_names.is_some()
+    }
+
+    /// Whether an API-key scheme of the contract declares `name` (any case), at any
+    /// location, by [`Bundle::api_key_names`] alone; `false` when it is `None`.
+    #[must_use]
+    pub fn declares_api_key(&self, name: &str) -> bool {
+        self.api_key_names
+            .iter()
+            .flatten()
+            .any(|k| k.name.eq_ignore_ascii_case(name))
+    }
+
     /// Whether a security scheme of the contract carries a credential under `name`
     /// (any case): an API-key name it declares, or one a compiled requirement of any
     /// operation uses, at any location.
     #[must_use]
     pub fn is_security_name(&self, name: &str) -> bool {
-        let declared = self
-            .api_key_names
-            .iter()
-            .any(|k| k.name.eq_ignore_ascii_case(name));
-        declared
+        self.declares_api_key(name)
             || self
                 .operations
                 .iter()

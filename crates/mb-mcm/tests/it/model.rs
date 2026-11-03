@@ -87,13 +87,32 @@ fn bundle_round_trips_through_json() {
         protocol_payload: None,
         channels: Vec::new(),
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     };
     let value = serde_json::to_value(&bundle).unwrap();
+    // A bundle compiled before the field existed has none, and says so.
+    assert!(value.get("api_key_names").is_none(), "{value}");
     let back: Bundle = serde_json::from_value(value).unwrap();
     assert_eq!(bundle, back);
     assert!(bundle.operation("getOrder").is_some());
     assert!(bundle.operation("nope").is_none());
+    // One compiled since keeps what it found, nothing included.
+    for names in [
+        Vec::new(),
+        vec![mb_mcm::ApiKeyName {
+            location: mb_mcm::ApiKeyLocation::Header,
+            name: "X-Tenant-Ident".into(),
+        }],
+    ] {
+        let newer = Bundle {
+            api_key_names: Some(names),
+            ..bundle.clone()
+        };
+        let value = serde_json::to_value(&newer).unwrap();
+        assert!(value.get("api_key_names").is_some(), "{value}");
+        let back: Bundle = serde_json::from_value(value).unwrap();
+        assert_eq!(newer, back);
+    }
 }
 
 #[test]
@@ -178,7 +197,7 @@ fn with_defs_attaches_definitions() {
         protocol_payload: None,
         channels: Vec::new(),
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     };
     let v = bundle.with_defs(&json!({"$ref":"#/$defs/Order"}));
     assert_eq!(v["$defs"]["Order"], order);
@@ -212,7 +231,7 @@ fn with_reachable_defs_attaches_only_the_ref_closure() {
         protocol_payload: None,
         channels: Vec::new(),
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     };
 
     let v = bundle.with_reachable_defs(&json!({"$ref": "#/$defs/Order"}));
@@ -693,7 +712,7 @@ fn grpc_services_lists_full_service_names() {
         protocol_payload: None,
         channels: vec![],
         webhooks: Vec::new(),
-        api_key_names: Vec::new(),
+        api_key_names: None,
     };
     let services: Vec<String> = bundle.grpc_services().into_iter().collect();
     assert_eq!(services, ["Bare", "routeguide.RouteGuide"]);
