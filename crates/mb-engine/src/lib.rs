@@ -735,7 +735,8 @@ impl Engine {
                     )
                 });
                 let effects_envelope = guards::effects_envelope(op, status, &ctx, &validator);
-                let refusals = guards::refusals(op, status, &ctx, &validator, effects_envelope);
+                let refusals =
+                    guards::refusals(op, status, &ctx, call, &validator, effects_envelope);
                 // The effects envelope's root is an object already.
                 let items_envelope = !effects_envelope
                     && guards::items_envelope(provider.capabilities(), validator.schema());
@@ -745,7 +746,7 @@ impl Engine {
                         user.content
                             .push_str(&prompt::effects_note(op, status, &ctx));
                         if !refusals.is_empty() {
-                            user.content.push_str(&guards::refusal_note(&refusals));
+                            user.content.push_str(&guards::refusal_note(op, &refusals));
                         }
                     } else if items_envelope {
                         user.content.push_str("\n\n");

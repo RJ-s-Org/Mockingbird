@@ -3,6 +3,47 @@ use mb_import::{ImportError, compile};
 use mb_mcm::{Bundle, Effect, Identity, OperationKind, StatusSelector};
 use serde_json::json;
 
+/// A parameter's own description is kept on its schema, where the engine finds it;
+/// one its schema describes keeps that, and one with no description gets none. A
+/// referenced schema is left as it is.
+#[test]
+fn a_parameter_description_is_kept_on_its_schema() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - {name: completed_since, in: query, description: "Only tasks completed since then, or `now`.", schema: {type: string}}
+        - {name: page, in: query, schema: {type: integer, description: The schema's own.}, description: The parameter's.}
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: X-Item-Version, in: header, description: The current version., schema: {type: integer}}
+        - {name: kind, in: query, description: A referenced one., schema: {$ref: "#/components/schemas/Kind"}}
+      responses:
+        "200": {description: ok}
+components:
+  schemas:
+    Kind: {type: string}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let op = bundle.operation("listTasks").unwrap();
+    let query = &op.input.query.as_ref().unwrap()["properties"];
+    assert_eq!(
+        query["completed_since"],
+        json!({"type": "string", "description": "Only tasks completed since then, or `now`."})
+    );
+    assert_eq!(query["page"]["description"], "The schema's own.");
+    assert_eq!(query["limit"], json!({"type": "integer"}));
+    assert!(query["kind"].get("description").is_none(), "{query}");
+    let headers = &op.input.headers.as_ref().unwrap()["properties"];
+    assert_eq!(
+        headers["X-Item-Version"]["description"],
+        "The current version."
+    );
+}
+
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!(
         "{}/../../fixtures/openapi/{name}",

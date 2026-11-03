@@ -3,6 +3,31 @@ use mb_import::{SourceFormat, compile, compile_with_warnings, sniff};
 use mb_mcm::{Bundle, Effect, OperationKind};
 use serde_json::json;
 
+/// A parameter's own description is kept on its schema, where the engine finds it.
+#[test]
+fn a_parameter_description_is_kept_on_its_schema() {
+    let contract = br#"{
+  "swagger": "2.0",
+  "info": {"title": "T", "version": "1"},
+  "paths": {"/tasks": {"get": {
+    "operationId": "listTasks",
+    "parameters": [
+      {"name": "completed_since", "in": "query", "type": "string", "description": "Only tasks completed since then."},
+      {"name": "limit", "in": "query", "type": "integer"}
+    ],
+    "responses": {"200": {"description": "ok"}}
+  }}}
+}"#;
+    let bundle = compile(contract).unwrap();
+    let op = bundle.operation("listTasks").unwrap();
+    let query = &op.input.query.as_ref().unwrap()["properties"];
+    assert_eq!(
+        query["completed_since"],
+        json!({"type": "string", "description": "Only tasks completed since then."})
+    );
+    assert_eq!(query["limit"], json!({"type": "integer"}));
+}
+
 fn read(dir: &str, name: &str) -> Vec<u8> {
     let path = format!("{}/../../fixtures/{dir}/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read(path).unwrap()
