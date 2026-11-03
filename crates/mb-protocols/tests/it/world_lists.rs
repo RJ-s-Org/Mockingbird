@@ -588,3 +588,272 @@ async fn a_second_refund_sees_the_first() {
     assert!(!prompt.contains("\"R1\""), "{prompt}");
     assert!(!prompt.contains("\"R2\""), "{prompt}");
 }
+
+/// Tickets: a list beside a create, a read and an update, with array members, a
+/// nullable reference and a range bound that names no member.
+const TICKETS: &str = r##"
+openapi: 3.1.0
+info: {title: Tickets, version: "1"}
+paths:
+  /tickets:
+    get:
+      operationId: listTickets
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [open, closed, all]}}
+        - {name: labels, in: query, schema: {type: string}}
+        - {name: tag_name, in: query, schema: {type: string}}
+        - {name: assignee_id, in: query, schema: {type: integer}}
+        - {name: before, in: query, schema: {type: string}}
+        - {name: inclusive, in: query, schema: {type: boolean}}
+        - {name: page, in: query, schema: {type: integer}}
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/TicketItem"}}}}}
+    post:
+      operationId: createTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+  /tickets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTicket
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+    patch:
+      operationId: updateTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+components:
+  schemas:
+    Ticket:
+      type: object
+      required: [id, status, title]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [open, closed, pending]}
+        title: {type: string}
+        labels: {type: array, items: {type: string}}
+        tags: {type: array, items: {type: string}}
+        assignee_id: {type: [integer, "null"]}
+        reply_count: {type: integer}
+        internal_note: {type: string}
+    TicketItem:
+      type: object
+      required: [id, status, title]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [open, closed]}
+        title: {type: string}
+        labels: {type: array, items: {type: string}}
+        tags: {type: array, items: {type: string}}
+        assignee_id: {type: [integer, "null"]}
+        reply_count: {type: integer}
+"##;
+
+fn ticket(id: &str, status: &str) -> Value {
+    json!({"id": id, "status": status, "title": format!("T {id}"), "reply_count": 0})
+}
+
+fn with(mut item: Value, member: &str, value: Value) -> Value {
+    item[member] = value;
+    item
+}
+
+/// Creates ticket `t1` and updates it to `closed` with three replies.
+async fn created_then_updated(api: &Api) {
+    let (status, _) = api
+        .call("POST", "/tickets", Some(json!({"title": "T t1"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = api
+        .call("PATCH", "/tickets/t1", Some(json!({"status": "closed"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+fn updated_script(list: Value) -> Vec<Result<String, LlmError>> {
+    let created = with(ticket("t1", "open"), "internal_note", json!("secret"));
+    let updated = with(
+        with(ticket("t1", "closed"), "reply_count", json!(3)),
+        "internal_note",
+        json!("secret"),
+    );
+    vec![
+        Ok(created.to_string()),
+        Ok(updated.to_string()),
+        Ok(list.to_string()),
+    ]
+}
+
+/// A list item the session holds shows the stored record's members, those the item
+/// declares only; another item is as generated, and the store is not changed.
+#[tokio::test]
+async fn a_listed_item_shows_its_stored_record() {
+    let list = json!([ticket("t1", "open"), ticket("t2", "open")]);
+    let api = api_of(TICKETS, true, updated_script(list));
+    created_then_updated(&api).await;
+    let body = api.get("/tickets").await;
+    assert_eq!(body[0]["status"], "closed", "{body}");
+    assert_eq!(body[0]["reply_count"], 3, "{body}");
+    assert!(body[0].get("internal_note").is_none(), "{body}");
+    assert_eq!(body[1], ticket("t2", "open"));
+    let held = api.get("/tickets/t1").await;
+    assert_eq!(held["internal_note"], "secret");
+    assert_eq!(held["status"], "closed");
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A stored record the item's schema does not allow (`pending` is no item status)
+/// leaves the item as generated.
+#[tokio::test]
+async fn a_stored_record_the_item_does_not_allow_changes_nothing() {
+    let list = json!([ticket("t1", "open")]);
+    let mut script = updated_script(list);
+    script[1] = Ok(ticket("t1", "pending").to_string());
+    let api = api_of(TICKETS, true, script);
+    created_then_updated(&api).await;
+    let body = api.get("/tickets").await;
+    assert_eq!(body, json!([ticket("t1", "open")]));
+}
+
+/// A stored record is overlaid before the filters: `status=open` drops the ticket the
+/// session closed.
+#[tokio::test]
+async fn a_filter_sees_the_stored_record() {
+    let list = json!([ticket("t1", "open"), ticket("t2", "open")]);
+    let api = api_of(TICKETS, true, updated_script(list));
+    created_then_updated(&api).await;
+    let body = api.get("/tickets?status=open").await;
+    assert_eq!(ids(&body), ["t2"]);
+}
+
+/// With consistency off, a list is as the model wrote it.
+#[tokio::test]
+async fn consistency_off_overlays_nothing() {
+    let list = json!([ticket("t1", "open")]);
+    let api = api_of(TICKETS, false, updated_script(list));
+    created_then_updated(&api).await;
+    let body = api.get("/tickets").await;
+    assert_eq!(body, json!([ticket("t1", "open")]));
+}
+
+fn labelled() -> Value {
+    json!([
+        with(ticket("t1", "open"), "labels", json!(["bug", "Urgent"])),
+        with(ticket("t2", "open"), "labels", json!(["bug"])),
+        with(ticket("t3", "open"), "labels", json!(["bugfix", "urgent"])),
+        ticket("t4", "open"),
+    ])
+}
+
+/// A text parameter naming an array of strings keeps the items whose array holds each
+/// comma-separated part, whole and ignoring case; an item without the array stays.
+#[tokio::test]
+async fn an_array_filter_keeps_items_holding_each_part() {
+    let api = api_of(
+        TICKETS,
+        true,
+        vec![Ok(labelled().to_string()), Ok(labelled().to_string())],
+    );
+    let body = api.get("/tickets?labels=bug,urgent").await;
+    assert_eq!(ids(&body), ["t1", "t4"]);
+    let body = api.get("/tickets?labels=bug").await;
+    assert_eq!(ids(&body), ["t1", "t2", "t4"]);
+}
+
+/// A parameter whose word names an array member (`tag_name`, `tags`) filters it.
+#[tokio::test]
+async fn a_word_of_a_parameter_names_an_array() {
+    let list = json!([
+        with(ticket("t1", "open"), "tags", json!(["prod"])),
+        with(ticket("t2", "open"), "tags", json!(["staging"])),
+        with(ticket("t3", "open"), "tags", json!([])),
+    ]);
+    let api = api_of(TICKETS, true, vec![Ok(list.to_string())]);
+    let body = api.get("/tickets?tag_name=prod").await;
+    assert_eq!(ids(&body), ["t1"]);
+}
+
+/// A reference filter drops an item whose reference is `null`; one without the member
+/// stays.
+#[tokio::test]
+async fn a_null_reference_contradicts_a_value() {
+    let list = json!([
+        with(ticket("t1", "open"), "assignee_id", json!(7)),
+        with(ticket("t2", "open"), "assignee_id", Value::Null),
+        with(ticket("t3", "open"), "assignee_id", json!(8)),
+        ticket("t4", "open"),
+    ]);
+    let api = api_of(TICKETS, true, vec![Ok(list.to_string())]);
+    let body = api.get("/tickets?assignee_id=7").await;
+    assert_eq!(ids(&body), ["t1", "t4"]);
+}
+
+fn four() -> Value {
+    json!([
+        ticket("t1", "open"),
+        ticket("t2", "open"),
+        ticket("t10", "open"),
+        ticket("2", "open"),
+    ])
+}
+
+/// A bound naming an item's identity, under a parameter naming no member, leaves that
+/// item out, and only it: `t1` is not `t10`.
+#[tokio::test]
+async fn a_bound_naming_an_item_leaves_it_out() {
+    let api = api_of(TICKETS, true, vec![Ok(four().to_string())]);
+    let body = api.get("/tickets?before=t1").await;
+    assert_eq!(ids(&body), ["t2", "t10", "2"]);
+}
+
+/// A boolean parameter that is true (`inclusive`) keeps the bound's item.
+#[tokio::test]
+async fn an_inclusive_flag_keeps_the_bound() {
+    let api = api_of(
+        TICKETS,
+        true,
+        vec![Ok(four().to_string()), Ok(four().to_string())],
+    );
+    let body = api.get("/tickets?before=t1&inclusive=true").await;
+    assert_eq!(ids(&body), ["t1", "t2", "t10", "2"]);
+    let body = api.get("/tickets?before=t1&inclusive=false").await;
+    assert_eq!(ids(&body), ["t2", "t10", "2"]);
+}
+
+/// A number parameter (`page=2`), a search (`q`) and a value naming no item are no
+/// bound, and a parameter's own `enum` word (`status=all`) no filter: nothing changes.
+#[tokio::test]
+async fn parameters_naming_nothing_change_nothing() {
+    let script = (0..5).map(|_| Ok(four().to_string())).collect();
+    let api = api_of(TICKETS, true, script);
+    for uri in [
+        "/tickets?page=2",
+        "/tickets?q=bug",
+        "/tickets?before=zz9",
+        "/tickets?status=all",
+        "/tickets?labels=",
+    ] {
+        let body = api.get(uri).await;
+        assert_eq!(body, four(), "{uri}");
+    }
+}
+
+/// A parameter the route requires (a search's `q`, a scope) is what the list is of, no
+/// bound: an item it names stays.
+#[tokio::test]
+async fn a_required_parameter_is_no_bound() {
+    let contract = TICKETS.replace(
+        "{name: q, in: query, schema: {type: string}}",
+        "{name: q, in: query, required: true, schema: {type: string}}",
+    );
+    let api = api_of(&contract, true, vec![Ok(four().to_string())]);
+    let body = api.get("/tickets?q=t1").await;
+    assert_eq!(body, four());
+}
