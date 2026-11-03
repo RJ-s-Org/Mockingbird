@@ -22,35 +22,37 @@
 //! (`person_id`, `ownerId`: a name of more than one word whose last is `id`) holding
 //! `null` refers to nothing, which the requested value contradicts.
 //!
-//! A text parameter naming an array of strings (`labels` for `labels`; or, when the
-//! parameter names no member, one array whose stem a word of its name shares, `tags`
-//! for `tag_name`) keeps the items whose array holds each of its comma-separated parts,
-//! whole and ignoring case: `labels=bug,urgent` keeps `["bug", "Urgent"]`, not `["bug"]`
-//! or `["bugfix"]`. The same guards hold: no `const`, parts the items' `enum` allows, and
-//! a parameter's own `enum` only beside one on the items.
+//! A text parameter whose whole name names an array of strings (`labels` for
+//! `labels`, as [`named_member`] names: exactly, by case, by stem) keeps the items whose
+//! array holds any of its comma-separated parts, as an `enum` set keeps any of its
+//! values: whole, trimmed and ignoring case, so `labels=bug,urgent` keeps `["bug"]` and
+//! `[" Urgent"]`, not `["bugfix"]`. A word of a name is no name: `tag_name`,
+//! `exclude_labels`, `without_tags` and `tag_ids` change nothing. The same guards hold:
+//! no `const`, parts the items' `enum` allows, and a parameter's own `enum` only beside
+//! one on the items.
 //!
-//! A bound by identity: an optional text parameter with no `enum` that names no member
-//! (`before`, `oldest`), whose value is the identity of an item of the answer and could
-//! be an id by [`world`]'s rule (a word such as `hello` is a search's as often), leaves
-//! that item out, as the item a cursor or bound is at is the page's edge, not in it,
-//! unless a boolean parameter of the route is `true` in the request (`inclusive`). Which
-//! side of the bound the rest is on is not said by the contract, so nothing else goes.
-//! A required parameter is what the list is of (a search, a scope), so it is no bound.
-//! The list's main array is then cut to the page size a parameter asks for, by the
-//! signal [`mb_engine::budget::requested_limit`] goes by.
+//! A parameter that names no member changes nothing, whatever its value: a bound
+//! (`before`, `oldest`) or a search naming an item's id leaves it in, as which side of
+//! the bound the rest is on, and whether the bound is in it, is not said by the
+//! contract. The list's main array is then cut to the page size a parameter asks for,
+//! by the signal [`mb_engine::budget::requested_limit`] goes by.
 //!
 //! Each step is kept only when the answer still validates and keeps its `minItems`, and
 //! a count beside the list that is clearly its own loses what the filter removed (as
 //! [`deleted`] does for a deleted id); a page size leaves it, as a total counts every
 //! page.
 //!
-//! Before any of that, [`overlay_stored`] has each item the session holds, by its
-//! identity and its type, show the stored record's members that the item declares, as
-//! the store has the newest writes (a ticket closed since, a reply counted): the item's
-//! own members otherwise, and the generated item whole when the record would not
-//! validate in its place. Nothing is stored or added: an item the store holds but the
-//! answer does not name stays out, as which list, parent and page it belongs on is not
-//! known well enough.
+//! Before any of that, [`overlay_stored`] looks up each item the session holds, by its
+//! identity and its type, as the store has the newest writes (a ticket closed since, a
+//! reply counted). A record whose member a path parameter names (`project_id` under
+//! `/projects/{project_id}/tasks`) holding another value than the path is another
+//! parent's: its item leaves the list. Otherwise the item shows the stored record's
+//! members, each as the item's schema declares it at every depth (see [`projected`]):
+//! an `owner` the summary declares as `{id, name}` brings no `email`, nor does each
+//! object of an array. The item's own members stay otherwise, and the generated item
+//! whole when the record would not validate in its place. Nothing is stored or added:
+//! an item the store holds but the answer does not name stays out, as which list and
+//! page it belongs on is not known well enough.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -61,8 +63,11 @@ use mb_engine::SchemaValidator;
 use mb_engine::budget::requested_page;
 use mb_engine::consistency::{list_items_mut, list_member};
 
-/// Items of one list answer looked up in the store, at most.
+/// Items of one list answer looked up in the store, at most: one read each, as
+/// [`mb_state::StateStore`] has no read of many at once.
 const MAX_OVERLAID: usize = 100;
+/// How deep [`projected`] follows a value's schema.
+const MAX_PROJECTED_DEPTH: usize = 16;
 
 use super::*;
 
@@ -215,9 +220,8 @@ fn string_elements<'a>(bundle: &'a mb_mcm::Bundle, member: &Member<'a>) -> Optio
 }
 
 /// The array of text query parameter `param`, declared by `query` as text or an array,
-/// filters: the member it names (see [`named_member`]) when that is one, else, when it
-/// names no member, the one such array whose stem a word of its name shares (`tags` for
-/// `tag_name`). Its elements' [`Member`], under the array's name.
+/// filters: the member its whole name names (see [`named_member`]), when that is one.
+/// Its elements' [`Member`], under the array's name.
 fn array_filter_member<'a>(
     bundle: &'a mb_mcm::Bundle,
     query: Option<&'a Value>,
@@ -233,27 +237,7 @@ fn array_filter_member<'a>(
     if !(param_types.iter().eq(["string"].iter()) || param_types.iter().eq(["array"].iter())) {
         return None;
     }
-    let element = match named_member(bundle, item_parts, param) {
-        Some(member) => string_elements(bundle, &member)?,
-        None => {
-            let stems: Vec<String> = mb_mcm::words(param).into_iter().map(mb_mcm::stem).collect();
-            let mut found = declared_names(item_parts).into_iter().filter_map(|name| {
-                if !stems.contains(&mb_mcm::stem(name)) {
-                    return None;
-                }
-                let schema = item_parts
-                    .iter()
-                    .find_map(|p| p.get("properties")?.get(name))?;
-                let (parts, _) = schema_parts(bundle, Some(schema));
-                string_elements(bundle, &Member { name, parts })
-            });
-            let first = found.next()?;
-            if found.next().is_some() {
-                return None;
-            }
-            first
-        }
-    };
+    let element = string_elements(bundle, &named_member(bundle, item_parts, param)?)?;
     // A parameter's own `enum` beside elements with none may hold words of its own.
     let own_words = param_parts
         .iter()
@@ -261,7 +245,7 @@ fn array_filter_member<'a>(
     (!(own_words && element.enumerated().is_none())).then_some(element)
 }
 
-/// The parts query value `raw` asks an array of text to hold each of: its
+/// The parts query value `raw` asks an array of text to hold one of: its
 /// comma-separated parts, or an array's strings, each one the elements' `enum` and
 /// `format` allow.
 fn wanted_parts(element: &Member<'_>, raw: &Value) -> Option<Vec<Value>> {
@@ -367,8 +351,9 @@ enum Test {
     /// To hold one of the values: as part of its text when `loose` (see
     /// [`Member::is_free_text`]); and, for a reference, not to be `null`.
     Equal { loose: bool, reference: bool },
-    /// For an array of text, to hold each of the values, whole and ignoring case.
-    HoldsEach,
+    /// For an array of text, to hold any of the values, whole, trimmed and ignoring
+    /// case.
+    HoldsAny,
 }
 
 /// A filter: the member, the values it asks of it, and how.
@@ -388,20 +373,20 @@ fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
     };
     let (loose, reference) = match filter.test {
         Test::Equal { loose, reference } => (loose, reference),
-        Test::HoldsEach => {
+        Test::HoldsAny => {
             let Some(elements) = held.as_array() else {
                 return false;
             };
             let Some(texts) = elements
                 .iter()
-                .map(|e| e.as_str().map(str::to_lowercase))
+                .map(|e| e.as_str().map(|t| t.trim().to_lowercase()))
                 .collect::<Option<Vec<_>>>()
             else {
                 return false;
             };
-            return !wanted.iter().all(|w| {
+            return !wanted.iter().any(|w| {
                 w.as_str()
-                    .is_some_and(|w| texts.contains(&w.to_lowercase()))
+                    .is_some_and(|w| texts.contains(&w.trim().to_lowercase()))
             });
         }
     };
@@ -417,66 +402,6 @@ fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
         )
     });
     comparable && !is_wanted(held, wanted, loose)
-}
-
-/// The values of `call`'s bounds by identity (see the module's doc): optional text
-/// parameters with no `enum`, naming no member of the items, outside the page size;
-/// none when a boolean parameter of the route is `true` in the request.
-fn bounds<'c>(
-    bundle: &mb_mcm::Bundle,
-    query: Option<&Value>,
-    item_parts: &[&Value],
-    call: &'c OperationCall,
-    page_param: Option<&str>,
-) -> Vec<&'c str> {
-    let Some(declared) = query
-        .and_then(|q| q.get("properties"))
-        .and_then(Value::as_object)
-    else {
-        return Vec::new();
-    };
-    let required = query
-        .and_then(|q| q.get("required"))
-        .and_then(Value::as_array);
-    let is_required =
-        |param: &str| required.is_some_and(|names| names.iter().any(|n| n.as_str() == Some(param)));
-    let types = |param: &str| {
-        let (parts, _) = schema_parts(bundle, declared.get(param));
-        (
-            types_of(&parts),
-            parts.iter().any(|p| p.get("enum").is_some()),
-        )
-    };
-    let inclusive = call.query.iter().any(|(param, value)| {
-        declared.contains_key(param)
-            && types(param).0.into_iter().eq(["boolean"])
-            && match value {
-                Value::Bool(b) => *b,
-                Value::String(s) => s.trim().eq_ignore_ascii_case("true"),
-                _ => false,
-            }
-    });
-    if inclusive {
-        return Vec::new();
-    }
-    call.query
-        .iter()
-        .filter(|(param, _)| {
-            let (types, enumerated) = types(param);
-            Some(param.as_str()) != page_param
-                && declared.contains_key(param.as_str())
-                && !is_required(param)
-                && !mb_mcm::is_generic_id(param)
-                && types.into_iter().eq(["string"])
-                && !enumerated
-                && named_member(bundle, item_parts, param).is_none()
-                && array_filter_member(bundle, query, item_parts, param).is_none()
-        })
-        .filter_map(|(_, value)| value.as_str().map(str::trim))
-        // A word (`hello`) is a search's as often as an id's: only what could be an id
-        // by [`world`]'s rule is a bound.
-        .filter(|value| world::id_like_value(&Value::String((*value).to_string())).is_some())
-        .collect()
 }
 
 /// The schema parts of `op`'s list answer `body`'s main array, and of its items.
@@ -562,31 +487,20 @@ pub(super) fn narrow(
             filters.push(Filter {
                 member: element.name,
                 values,
-                test: Test::HoldsEach,
+                test: Test::HoldsAny,
             });
         }
     }
-    let bounds = bounds(bundle, query, &item_parts, call, page.map(|(name, _)| name));
-    let field = (!bounds.is_empty()).then(|| item_identity(bundle, op, body));
-    let at_a_bound = |item: &Value| {
-        field
-            .as_deref()
-            .and_then(|field| item.get(field))
-            .and_then(id_string)
-            .is_some_and(|id| bounds.contains(&id.as_str()))
-    };
     let valid = |candidate: &Value| {
         plan.engine
             .serve_stored(bundle, op, candidate, None)
             .is_some()
     };
-    if !filters.is_empty() || !bounds.is_empty() {
+    if !filters.is_empty() {
         let mut kept = body.clone();
         if let Some(items) = list_items_mut(&mut kept) {
             let was = items.len();
-            items.retain(|item| {
-                !at_a_bound(item) && !filters.iter().any(|filter| contradicts(item, filter))
-            });
+            items.retain(|item| !filters.iter().any(|filter| contradicts(item, filter)));
             let removed = was - items.len();
             if removed > 0 && items.len() as u64 >= fewest && valid(&kept) {
                 if let Some(counted) =
@@ -625,12 +539,70 @@ pub(super) fn narrow(
     }
 }
 
+/// `value` as `schema` declares it, at every depth: of an object, the members its parts
+/// declare, each in turn as its own schema declares it, and others only where
+/// `additionalProperties` gives them a schema; of an array, each element as its
+/// `items` declares it. An object whose schema declares no members and no
+/// `additionalProperties: false` is free-form, and stays as it is, as does a scalar.
+fn projected(
+    bundle: &mb_mcm::Bundle,
+    schema: Option<&Value>,
+    value: &Value,
+    depth: usize,
+) -> Value {
+    let Some(schema) = schema.filter(|_| depth < MAX_PROJECTED_DEPTH) else {
+        return value.clone();
+    };
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    match value {
+        Value::Object(members) => {
+            let declared = |name: &str| parts.iter().find_map(|p| p.get("properties")?.get(name));
+            let additional = parts.iter().find_map(|p| p.get("additionalProperties"));
+            let declares_members = parts.iter().any(|p| p.get("properties").is_some());
+            let closed = matches!(additional, Some(Value::Bool(false)));
+            if !declares_members && !closed && !additional.is_some_and(Value::is_object) {
+                return value.clone();
+            }
+            let mut out = Map::new();
+            for (name, member) in members {
+                let schema = declared(name).or(additional.filter(|a| a.is_object()));
+                if let Some(schema) = schema {
+                    out.insert(
+                        name.clone(),
+                        projected(bundle, Some(schema), member, depth + 1),
+                    );
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(elements) => {
+            let items = parts.iter().find_map(|p| p.get("items"));
+            Value::Array(
+                elements
+                    .iter()
+                    .map(|element| projected(bundle, items, element, depth + 1))
+                    .collect(),
+            )
+        }
+        _ => value.clone(),
+    }
+}
+
+/// What the store says of one listed item.
+enum Stored {
+    /// Another parent's record: the item leaves the list.
+    Elsewhere,
+    /// The item with the record's members.
+    Overlaid(Value),
+}
+
 /// Has each item of list answer `body` that the session holds, by its identity and its
-/// type, show the stored record's members that the item declares (see the module's
-/// doc). The items of type `t` when their schema names no type of its own.
+/// type, show the stored record's members as the item declares them, and an item whose
+/// record is another parent's leave the list (see the module's doc). The items of type
+/// `t` when their schema names no type of its own.
 pub(super) async fn overlay_stored(
     state: &mut StateAccess<'_>,
-    plan: &CallPlan<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
     t: Option<&str>,
     body: &mut Value,
 ) {
@@ -640,19 +612,25 @@ pub(super) async fn overlay_stored(
     let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
         return;
     };
-    let declared: Vec<String> = {
-        let mut held = None;
-        let Some((_, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
-            return;
-        };
-        declared_names(&item_parts)
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+    let mut held = None;
+    let Some((array_parts, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
+        return;
     };
+    let declared = declared_names(&item_parts);
     if declared.is_empty() {
         return;
     }
+    let fewest = declared_count(&array_parts, "minItems").unwrap_or(0);
+    // The members the path's parameters name, and the path's values.
+    let parents: Vec<(&str, String)> = call
+        .path_params
+        .iter()
+        .filter(|(param, _)| !mb_mcm::is_generic_id(param))
+        .filter_map(|(param, value)| {
+            let member = named_member(bundle, &item_parts, param)?;
+            Some((member.name, id_string(value)?))
+        })
+        .collect();
     let Some(item_type) = rt
         .index()
         .item_type(bundle, op, body)
@@ -664,7 +642,7 @@ pub(super) async fn overlay_stored(
     let Some(items) = list_items(body) else {
         return;
     };
-    let mut overlaid: Vec<(usize, Value)> = Vec::new();
+    let mut found: Vec<(usize, Stored)> = Vec::new();
     for (at, item) in items.iter().enumerate().take(MAX_OVERLAID) {
         let (Some(own), Some(id)) = (item.as_object(), item.get(&field).and_then(id_string)) else {
             continue;
@@ -672,21 +650,37 @@ pub(super) async fn overlay_stored(
         let Some(stored) = state.get(&plan.session, &item_type, &id).await else {
             continue;
         };
+        let elsewhere = parents.iter().any(|(member, value)| {
+            stored
+                .data
+                .get(*member)
+                .and_then(id_string)
+                .is_some_and(|held| &held != value)
+        });
+        if elsewhere {
+            found.push((at, Stored::Elsewhere));
+            continue;
+        }
         let mut merged = own.clone();
         let mut changed = false;
         for name in &declared {
-            if let Some(value) = stored.data.get(name)
-                && own.get(name) != Some(value)
-            {
-                merged.insert(name.clone(), value.clone());
+            let Some(value) = stored.data.get(*name) else {
+                continue;
+            };
+            let schema = item_parts
+                .iter()
+                .find_map(|p| p.get("properties")?.get(*name));
+            let value = projected(bundle, schema, value, 0);
+            if own.get(*name) != Some(&value) {
+                merged.insert((*name).to_string(), value);
                 changed = true;
             }
         }
         if changed {
-            overlaid.push((at, Value::Object(merged)));
+            found.push((at, Stored::Overlaid(Value::Object(merged))));
         }
     }
-    if overlaid.is_empty() {
+    if found.is_empty() {
         return;
     }
     let valid = |candidate: &Value| {
@@ -694,6 +688,49 @@ pub(super) async fn overlay_stored(
             .serve_stored(bundle, op, candidate, None)
             .is_some()
     };
+    // Another parent's records first, as one step, kept as the filters' are.
+    let gone: Vec<usize> = found
+        .iter()
+        .filter_map(|(at, s)| matches!(s, Stored::Elsewhere).then_some(*at))
+        .collect();
+    let mut dropped = false;
+    if !gone.is_empty() {
+        let was = items.len();
+        let mut kept = body.clone();
+        if let Some(list) = list_items_mut(&mut kept) {
+            for at in gone.iter().rev() {
+                list.remove(*at);
+            }
+            if list.len() as u64 >= fewest && valid(&kept) {
+                if let Some(counted) =
+                    deleted::with_count_corrected(rt, op, body, &kept, was, gone.len() as u64)
+                    && valid(&counted)
+                {
+                    kept = counted;
+                }
+                *body = kept;
+                dropped = true;
+            }
+        }
+    }
+    // Where each overlaid item now is.
+    let overlaid: Vec<(usize, Value)> = found
+        .into_iter()
+        .filter_map(|(at, s)| match s {
+            Stored::Overlaid(item) => {
+                let before = if dropped {
+                    gone.iter().filter(|g| **g < at).count()
+                } else {
+                    0
+                };
+                Some((at - before, item))
+            }
+            Stored::Elsewhere => None,
+        })
+        .collect();
+    if overlaid.is_empty() {
+        return;
+    }
     let with = |base: &Value, changes: &[(usize, Value)]| {
         let mut candidate = base.clone();
         if let Some(items) = list_items_mut(&mut candidate) {

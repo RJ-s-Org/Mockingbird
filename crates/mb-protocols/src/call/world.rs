@@ -57,7 +57,7 @@ const MAX_ANSWER_BYTES: usize = 2 * 1024;
 /// `value` as an id it could be: a string of an id's length with no space in it and a
 /// digit or a separator (`thread_ts`'s value, `PROJ-1`, not `closed`), or a whole number
 /// too large to be a count.
-pub(super) fn id_like_value(value: &Value) -> Option<String> {
+fn id_like_value(value: &Value) -> Option<String> {
     match value {
         Value::String(text)
             if (MIN_ID_LEN..=MAX_ID_LEN).contains(&text.len())

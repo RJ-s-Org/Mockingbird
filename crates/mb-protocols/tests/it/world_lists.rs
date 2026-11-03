@@ -746,7 +746,11 @@ async fn an_overlay_brings_no_nested_member_the_item_does_not_declare() {
     assert_eq!(held["owner"]["email"], "o1@example.com", "{held}");
     let body = api.get("/tickets").await;
     assert_eq!(body[0]["status"], "closed", "{body}");
-    assert_eq!(body[0]["owner"], json!({"id": "o1", "name": "P o1"}), "{body}");
+    assert_eq!(
+        body[0]["owner"],
+        json!({"id": "o1", "name": "P o1"}),
+        "{body}"
+    );
     assert_eq!(
         body[0]["watchers"],
         json!([{"id": "w1", "name": "P w1"}, {"id": "w2", "name": "P w2"}]),
@@ -830,10 +834,7 @@ fn task(id: &str, project: &str, title: &str) -> Value {
 /// parent it is overlaid.
 #[tokio::test]
 async fn a_stored_record_of_another_parent_leaves_the_list() {
-    let listed = json!([
-        task("tk-0001", "p2", "made up"),
-        task("tk-0002", "p2", "B")
-    ]);
+    let listed = json!([task("tk-0001", "p2", "made up"), task("tk-0002", "p2", "B")]);
     let api = api_of(
         TASKS,
         true,
