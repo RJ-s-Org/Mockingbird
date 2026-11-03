@@ -149,12 +149,16 @@ fn session() -> SessionKey {
 }
 
 fn related(script: Vec<Value>) -> Harness {
+    related_with(RELATED, script)
+}
+
+fn related_with(contract: &str, script: Vec<Value>) -> Harness {
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
     let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let rt = MockRuntime::new(
         "m",
-        Arc::new(compile(RELATED.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -633,4 +637,221 @@ async fn probe_a_query_member_is_stored_as_the_query_says() {
     assert_eq!(answered, card("old", "list_100001"));
     let (_, _, read) = h.call("GET", "/cards/card_100001", None).await;
     assert_eq!(read, card("old", "list_100001"));
+}
+
+/// Payments updated in place, by a `PATCH` answering an acknowledgement, and by an
+/// action, beside refunds naming them by value.
+const LEDGER: &str = r##"
+openapi: 3.0.0
+info: {title: Ledger, version: "1"}
+paths:
+  /payments:
+    post:
+      operationId: createPayment
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+  /payments/{payment_id}:
+    parameters: [{name: payment_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getPayment
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+    put:
+      operationId: putPayment
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+    patch:
+      operationId: patchPayment
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+  /payments/{payment_id}/capture:
+    post:
+      operationId: capturePayment
+      parameters: [{name: payment_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+  /refunds:
+    post:
+      operationId: createRefund
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+components:
+  schemas:
+    Payment:
+      type: object
+      required: [id, amount, amount_refunded, status]
+      properties:
+        id: {type: string}
+        amount: {type: integer}
+        amount_refunded: {type: integer}
+        status: {type: string}
+    Refund:
+      type: object
+      required: [id, amount]
+      properties:
+        id: {type: string}
+        amount: {type: integer}
+        payment_id: {type: string}
+    Ack:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+"##;
+
+/// A payment and then a refund naming it, so the payment's memory only refers to it.
+async fn referenced_payment(h: &Harness, status: &str) {
+    h.call("POST", "/payments", Some(json!({"amount": 100})))
+        .await;
+    let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "state", "{read}");
+    assert_eq!(read["status"], status);
+    h.call(
+        "POST",
+        "/refunds",
+        Some(json!({"payment_id": "pay_100001", "amount": 40})),
+    )
+    .await;
+}
+
+fn refund() -> Value {
+    json!({"id": "re_200001", "amount": 40, "payment_id": "pay_100001"})
+}
+
+/// A `PUT` of a payment a refund only referred to settles as a plain update: what it
+/// names wins, what the answer guessed from the refund goes, it is told nothing of the
+/// refund, and the payment's next read still changes by effects alone.
+#[tokio::test]
+async fn a_put_on_a_referenced_record_settles() {
+    let h = related_with(
+        LEDGER,
+        vec![
+            payment("pay_100001", 0, "captured"),
+            refund(),
+            json!({"id": "pay_100001", "amount": 150, "amount_refunded": 40, "status": "partially_refunded"}),
+            by_effects(
+                "pay_100001",
+                json!({"amount_refunded": 40}),
+                json!({"id": "pay_100001", "amount": 7, "amount_refunded": 40, "status": "refunded"}),
+            ),
+        ],
+    );
+    referenced_payment(&h, "captured").await;
+    let (status, _, put) = h
+        .call("PUT", "/payments/pay_100001", Some(json!({"amount": 150})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(
+        put,
+        json!({"id": "pay_100001", "amount": 150, "amount_refunded": 0, "status": "captured"})
+    );
+    let prompt = h.prompt(2);
+    assert!(block(&prompt, "earlier_requests").is_none(), "{prompt}");
+
+    let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "llm");
+    assert_eq!(
+        read,
+        json!({"id": "pay_100001", "amount": 150, "amount_refunded": 40, "status": "captured"})
+    );
+    assert!(h.prompt(3).contains("createRefund"));
+    assert_eq!(h.calls(), 4);
+}
+
+/// An action on a payment a refund only referred to is as it was: told of the refund,
+/// its answer is the state after it.
+#[tokio::test]
+async fn an_action_on_a_referenced_record_is_unchanged() {
+    let h = related_with(
+        LEDGER,
+        vec![
+            payment("pay_100001", 0, "authorized"),
+            refund(),
+            payment("pay_100001", 40, "captured"),
+        ],
+    );
+    referenced_payment(&h, "authorized").await;
+    let (status, _, captured) = h.call("POST", "/payments/pay_100001/capture", None).await;
+    assert_eq!(status, StatusCode::OK, "{captured}");
+    assert_eq!(captured["status"], "captured", "{captured}");
+    let prompt = h.prompt(2);
+    assert!(
+        block(&prompt, "earlier_requests").is_some_and(|e| e.contains("createRefund")),
+        "{prompt}"
+    );
+}
+
+/// The review's sequence: a referring create, a whole update, then a short one. The
+/// memory holds a reference and an ordinary request; the catch-up whose answer replaces
+/// the stored copy is told only the ordinary one, and the reference waits for a read
+/// that changes by effects alone. The acknowledgement adds nothing to the payment.
+#[tokio::test]
+async fn a_mixed_memory_shows_a_catch_up_no_reference() {
+    let h = related_with(
+        LEDGER,
+        vec![
+            payment("pay_100001", 0, "captured"),
+            refund(),
+            payment("pay_100001", 0, "captured"),
+            json!({"ok": true}),
+            json!({"id": "pay_100001", "amount": 175, "amount_refunded": 0, "status": "captured"}),
+            by_effects(
+                "pay_100001",
+                json!({"amount_refunded": 40}),
+                json!({"id": "pay_100001", "amount": 1, "amount_refunded": 99, "status": "refunded"}),
+            ),
+        ],
+    );
+    referenced_payment(&h, "captured").await;
+    let (status, _, _) = h
+        .call("PUT", "/payments/pay_100001", Some(json!({"amount": 100})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, ack) = h
+        .call(
+            "PATCH",
+            "/payments/pay_100001",
+            Some(json!({"amount": 175})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{ack}");
+    let held = h
+        .store
+        .get(&session(), "payments", "pay_100001")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(held.data.get("ok").is_none(), "{}", held.data);
+
+    let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "llm");
+    assert_eq!(read["amount"], 175, "{read}");
+    let prompt = h.prompt(4);
+    let earlier = block(&prompt, "earlier_requests").expect("told the patch");
+    assert!(earlier.contains("patchPayment"), "{prompt}");
+    assert!(!prompt.contains("createRefund"), "{prompt}");
+    assert!(block(&prompt, "new_resources").is_none(), "{prompt}");
+
+    let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "llm", "the reference still waits: {read}");
+    assert_eq!(
+        read,
+        json!({"id": "pay_100001", "amount": 175, "amount_refunded": 40, "status": "captured"})
+    );
+    assert!(h.prompt(5).contains("createRefund"));
+    let (_, source, _) = h.call("GET", "/payments/pay_100001", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(h.calls(), 6);
 }

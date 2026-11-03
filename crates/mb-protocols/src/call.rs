@@ -1578,10 +1578,15 @@ async fn apply_effects(
             ),
             Err(reason) => (effect.clone(), None, Some(reason.to_string())),
         };
+        let applied = match rejected {
+            None => effect.set.keys().cloned().collect(),
+            Some(_) => Vec::new(),
+        };
         outcomes.push(EffectOutcome {
             effect,
             rejected,
             merged,
+            applied,
         });
     }
     outcomes
@@ -2501,6 +2506,7 @@ async fn place_new_record(
         effect,
         rejected: Some(reason.to_string()),
         merged: None,
+        applied: Vec::new(),
     };
     let reason = if stored {
         "the answer moved off this id"
@@ -5663,6 +5669,13 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         OperationKind::Command(Effect::Update) => {
             let (Some(id), Some(data)) = (target_id, data) else {
                 return;
+            };
+            // An answer of another schema adds nothing of its own to the held record.
+            let data = match &generated.body {
+                Some(_) if was_held && !generated.new_record => {
+                    write_memory::onto_record(rt, op, resource_type, data, generated.status)
+                }
+                _ => data,
             };
             (id, Some(data))
         }

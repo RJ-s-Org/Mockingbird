@@ -968,6 +968,33 @@ async fn an_answer_of_another_schema_leaves_the_resource() {
     assert_eq!(read["count"], 12, "{read}");
 }
 
+/// An answer of another schema lays onto the stored record only what the record's own
+/// schema declares: the acknowledgement's `message` is no gadget's.
+#[tokio::test]
+async fn an_answer_of_another_schema_adds_no_member_to_the_record() {
+    let h = harness_with(
+        SETTLING.as_bytes(),
+        vec![
+            gadget(),
+            json!({"status": "ok", "message": "done", "count": 1}),
+        ],
+        |_| {},
+    );
+    h.call("GET", "/gadgets/g1", None).await;
+    let (status, _, _) = h
+        .call("PATCH", "/gadgets/g1", Some(json!({"label": "x"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let held = h
+        .store
+        .get(&session(), "gadgets", "g1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(held.data.get("message").is_none(), "{}", held.data);
+    assert!(held.data.get("label").is_none(), "{}", held.data);
+}
+
 /// Defect 5: a request switching a union's branch applies, though merged into the
 /// stored branch it fits neither, whether the model's answer kept up or the faker's.
 #[tokio::test]
@@ -1131,6 +1158,69 @@ async fn a_rejected_effect_on_its_own_target_is_not_served() {
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["status"], "open", "{updated}");
+    let (_, _, read) = h.call("GET", WIDGET, None).await;
+    assert_eq!(read, updated);
+}
+
+/// An effect applied in part shows only the part that applied: the member the request
+/// names is the request's, whatever the effect said of it.
+#[tokio::test]
+async fn a_partly_rejected_effect_shows_only_what_applied() {
+    let mut answer = widget();
+    answer["status"] = json!("closed");
+    answer["name"] = json!("after");
+    let h = harness_with(
+        SETTLING.as_bytes(),
+        vec![
+            widget(),
+            json!({
+                "effects": [{
+                    "type": "widgets",
+                    "id": "w1",
+                    "set": {"status": "closed", "name": "from the effect", "junk": 1},
+                }],
+                "response": answer,
+            }),
+        ],
+        |_| {},
+    );
+    h.call("GET", WIDGET, None).await;
+    let (status, _, updated) = h
+        .call("PATCH", WIDGET, Some(json!({"name": "after"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["status"], "closed", "{updated}");
+    assert_eq!(updated["name"], "after", "{updated}");
+    assert!(updated.get("junk").is_none(), "{updated}");
+    let (_, source, read) = h.call("GET", WIDGET, None).await;
+    assert_eq!(source, "state");
+    assert_eq!(read, updated);
+}
+
+/// An effect naming part of a nested object keeps the rest of it, served and stored.
+#[tokio::test]
+#[ignore = "needs the deep effect merge of #198 (claude/effects-type-and-merge); un-ignore once it merges"]
+async fn a_nested_effect_on_its_own_target_keeps_its_siblings() {
+    let mut answer = widget();
+    answer["meta"]["a"] = json!("Z");
+    let h = harness_with(
+        SETTLING.as_bytes(),
+        vec![
+            widget(),
+            json!({
+                "effects": [{"type": "widgets", "id": "w1", "set": {"meta": {"a": "Z"}}}],
+                "response": answer,
+            }),
+        ],
+        |_| {},
+    );
+    h.call("GET", WIDGET, None).await;
+    let (status, _, updated) = h
+        .call("PATCH", WIDGET, Some(json!({"state_event": "touch"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["meta"]["a"], "Z", "{updated}");
+    assert_eq!(updated["meta"]["b"], "kept", "{updated}");
     let (_, _, read) = h.call("GET", WIDGET, None).await;
     assert_eq!(read, updated);
 }
