@@ -495,8 +495,9 @@ pub(crate) const EFFECTS_ENVELOPE_NOTE: &str = "Output one JSON object: {\"effec
 <resource type>, \"id\": <resource id>, \"set\": {<member>: <new value>}}], \"response\": <the \
 answer the schema describes>}. Decide what changes first, then write the response so it shows that \
 state. \"effects\" lists what this call changes in the resources it was shown: only the members \
-that change, never an id, and nothing it does not change. Leave it empty when the call changes \
-nothing there. Add no other members.";
+that change, never an id, and nothing it does not change. Nested objects are merged member by \
+member: to replace one, give the whole object, and give a map's full new contents. Leave it empty \
+when the call changes nothing there. Add no other members.";
 
 /// The error of output that holds no JSON value.
 pub(crate) const NOT_JSON: &str = "output is not valid JSON";

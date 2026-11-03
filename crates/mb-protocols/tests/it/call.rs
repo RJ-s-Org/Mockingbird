@@ -2077,6 +2077,25 @@ async fn cancel_shows_on_the_booking() {
     assert_eq!(api.provider.requests().len(), 1);
 }
 
+/// The effects instruction says how `set` merges: objects member by member, so a
+/// replaced object, or a map, is given whole.
+#[tokio::test]
+async fn the_effects_instruction_says_how_objects_merge() {
+    let effect = json!([{"type": "bookings", "id": "b1", "set": {"status": "cancelled"}}]);
+    let (api, _) = cancelling(true, effect).await;
+    api.call("POST", "/bookings/b1/cancel", None).await;
+    let prompt: String = api.provider.requests()[0]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(prompt.contains("member by member"), "{prompt}");
+    assert!(
+        prompt.contains("give a map's full new contents"),
+        "{prompt}"
+    );
+}
+
 /// The members `set` leaves out stay, and an effect may reach a resource of
 /// another type than the call's.
 #[tokio::test]
@@ -2146,6 +2165,8 @@ fn an_applied_effect_is_counted() {
 fn an_effect_on_a_missing_resource_is_rejected() {
     rejected(json!({"type": "bookings", "id": "nope", "set": {"status": "cancelled"}}));
     rejected(json!({"type": "nothing", "id": "nope", "set": {"status": "cancelled"}}));
+    // An id alone names no type: `b1` is the shown booking, `nothing` no stem of it.
+    rejected(json!({"type": "nothing", "id": "b1", "set": {"status": "cancelled"}}));
 }
 
 #[test]
@@ -5637,6 +5658,17 @@ paths:
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}
+  /users/{id}:
+    get:
+      operationId: getUser
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /track:
+    post:
+      operationId: suggestTrack
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Snapshot"}}}}
 components:
   schemas:
     Playlist:
@@ -5645,6 +5677,12 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
+        owner: {$ref: "#/components/schemas/User"}
+        labels: {type: object, additionalProperties: {type: string}}
+        metadata:
+          type: object
+          properties:
+            annotations: {type: object, additionalProperties: {type: string}}
         tracks:
           type: object
           required: [total, items]
@@ -5664,6 +5702,10 @@ components:
       type: object
       required: [id, uri, name]
       properties: {id: {type: string}, uri: {type: string}, name: {type: string}}
+    User:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}, email: {type: string}}
     Issue:
       type: object
       required: [id, state]
@@ -5682,11 +5724,15 @@ fn track(id: &str) -> Value {
     json!({"id": id, "uri": format!("spotify:track:{id}"), "name": format!("Song {id}")})
 }
 
-/// Playlist `p1` holding track `t1`, with counts and a declared dotted member.
+/// Playlist `p1` holding track `t1`, owned by `u1`, with counts, labels,
+/// annotations and a declared dotted member.
 fn playlist() -> Value {
     json!({
         "id": "p1",
         "name": "Mix",
+        "owner": {"id": "u1", "name": "Alice", "email": "alice@example.com"},
+        "labels": {"a": "1", "b": "2"},
+        "metadata": {"annotations": {"keep": "yes"}},
         "tracks": {"total": 1, "items": [{"added_at": "2026-01-01", "track": track("t1")}]},
         "stats": {"member_count": 0, "follower_count": 7},
         "sys.version": 1,
@@ -5701,6 +5747,21 @@ async fn shaped(effects: Value) -> (axum::Router, Arc<MemoryStore>, Arc<crate::s
     store(&state, "playlists", "p1", playlist()).await;
     store(&state, "tracks", "t1", track("t1")).await;
     store(&state, "tracks", "t2", track("t2")).await;
+    store(
+        &state,
+        "users",
+        "u1",
+        json!({"id": "u1", "name": "Alice", "email": "alice@example.com"}),
+    )
+    .await;
+    // More than a playlist's owner declares.
+    store(
+        &state,
+        "users",
+        "u2",
+        json!({"id": "u2", "name": "Bob", "email": "bob@example.com", "followers": 5}),
+    )
+    .await;
     store(&state, "issues", "i1", json!({"id": "i1", "state": "open"})).await;
     store(
         &state,
@@ -5774,15 +5835,108 @@ async fn an_effect_type_resolves_to_the_shown_type_of_its_stem() {
     }
 }
 
-/// A type matching no shown type's stem goes to the one shown type holding a
-/// record under the effect's id.
+/// A stem match is required: an id alone names no type, so a type sharing no
+/// shown type's stem is rejected whatever record its id finds.
 #[tokio::test]
-async fn an_effect_type_resolves_to_the_shown_type_holding_its_id() {
-    let effect = json!({"type": "song", "id": "t1", "set": {"name": "Liked"}});
+async fn an_effect_type_with_no_stem_match_is_rejected() {
+    for (uri, effect) in [
+        (
+            "/playlists/p1/tracks/t1/like",
+            json!({"type": "song", "id": "t1", "set": {"name": "Liked"}}),
+        ),
+        (
+            "/playlists/p1/refresh",
+            json!({"type": "playlist_item", "id": "p1", "set": {"name": "Renamed"}}),
+        ),
+    ] {
+        let (state, outcome) = shaped_effect(uri, effect.clone()).await;
+        assert_eq!(outcome["outcome"], "rejected", "{effect}: {outcome}");
+        assert_eq!(stored_data(&state, "tracks", "t1").await, track("t1"));
+        assert_eq!(stored_data(&state, "playlists", "p1").await, playlist());
+    }
+}
+
+/// The stem names playlists, the id is a shown track's: they disagree, so no guess.
+#[tokio::test]
+async fn an_effect_type_whose_stem_and_id_disagree_is_rejected() {
+    let effect = json!({"type": "playlist", "id": "t1", "set": {"name": "Renamed"}});
     let (state, outcome) = shaped_effect("/playlists/p1/tracks/t1/like", effect).await;
+    assert_eq!(outcome["outcome"], "rejected", "{outcome}");
+    assert_eq!(stored_data(&state, "tracks", "t1").await, track("t1"));
+    assert_eq!(stored_data(&state, "playlists", "p1").await, playlist());
+}
+
+/// A type the contract knows, though it has no schema, is never taken for another.
+#[tokio::test]
+async fn a_known_contract_type_is_never_redirected() {
+    let effect = json!({"type": "track", "id": "t1", "set": {"name": "Liked"}});
+    let (state, outcome) = shaped_effect("/playlists/p1/tracks/t1/like", effect).await;
+    assert_eq!(outcome["outcome"], "rejected", "{outcome}");
+    assert_eq!(outcome["type"], "track");
+    assert_eq!(stored_data(&state, "tracks", "t1").await, track("t1"));
+}
+
+/// An object naming another identity than the stored one is a reassignment: it is
+/// replaced whole, then filled with the record it names, as its place declares it.
+#[tokio::test]
+async fn a_reassigned_object_is_the_record_it_names() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {"owner": {"id": "u2"}}});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
     assert_eq!(outcome["outcome"], "applied", "{outcome}");
-    assert_eq!(outcome["type"], "tracks");
-    assert_eq!(stored_data(&state, "tracks", "t1").await["name"], "Liked");
+    assert_eq!(
+        stored_data(&state, "playlists", "p1").await["owner"],
+        json!({"id": "u2", "name": "Bob", "email": "bob@example.com"})
+    );
+}
+
+/// The same identity merges: what the object leaves out stays.
+#[tokio::test]
+async fn an_object_of_the_same_identity_merges() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {
+        "owner": {"id": "u1", "name": "Alicia"},
+    }});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    assert_eq!(
+        stored_data(&state, "playlists", "p1").await["owner"],
+        json!({"id": "u1", "name": "Alicia", "email": "alice@example.com"})
+    );
+}
+
+/// A map (only `additionalProperties`) is replaced whole: its new contents are all
+/// it holds.
+#[tokio::test]
+async fn a_map_is_replaced_whole() {
+    for (labels, expected) in [
+        (json!({"a": "1"}), json!({"a": "1"})),
+        (json!({}), json!({})),
+    ] {
+        let effect = json!({"type": "playlists", "id": "p1", "set": {"labels": labels}});
+        let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+        assert_eq!(outcome["outcome"], "applied", "{outcome}");
+        assert_eq!(
+            stored_data(&state, "playlists", "p1").await["labels"],
+            expected
+        );
+    }
+}
+
+/// A dotted path into a map sets that entry, and the rest of the path past a map
+/// is one key of it.
+#[tokio::test]
+async fn a_dotted_path_into_a_map_sets_one_entry() {
+    let effect = json!({"type": "playlists", "id": "p1", "set": {
+        "labels.c": "3",
+        "metadata.annotations.example.com/owner": "team-a",
+    }});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    let stored = stored_data(&state, "playlists", "p1").await;
+    assert_eq!(stored["labels"], json!({"a": "1", "b": "2", "c": "3"}));
+    assert_eq!(
+        stored["metadata"],
+        json!({"annotations": {"keep": "yes", "example.com/owner": "team-a"}})
+    );
 }
 
 /// Two shown types holding the id, and no stem telling them apart: no guess.
@@ -5897,6 +6051,11 @@ async fn a_dotted_key_sets_the_nested_member() {
         json!({"member_count": 1, "follower_count": 7})
     );
     assert!(stored.get("stats.member_count").is_none(), "{stored}");
+    // The log shows what was applied, not the dotted key the answer wrote.
+    assert_eq!(
+        outcome["set"],
+        json!({"stats": {"member_count": 1, "follower_count": 7}})
+    );
 }
 
 /// A dotted name the schema declares is that member.

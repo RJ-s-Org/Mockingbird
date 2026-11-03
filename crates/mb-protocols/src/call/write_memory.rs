@@ -1934,7 +1934,7 @@ fn named_for_param(member: &str, param: &str) -> bool {
 
 /// Whether `answer` is still `held`'s owner's: by the check a later read makes (see
 /// [`key_fits`]), and not linking elsewhere (see [`known_foreign`]).
-fn keeps_owner(
+pub(super) fn keeps_owner(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,

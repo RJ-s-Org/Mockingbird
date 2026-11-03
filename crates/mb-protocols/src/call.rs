@@ -1544,12 +1544,21 @@ async fn apply_effects(
         };
         metrics::counter!(EFFECTS_METRIC, "mock" => rt.name.clone(), "outcome" => outcome)
             .increment(1);
-        let (merged, rejected) = match result {
-            Ok(merged) => (Some(merged), None),
-            Err(reason) => (None, Some(reason.to_string())),
+        // An applied effect is told by what it set, as it now stands: its dotted
+        // keys as the members they went into.
+        let (effect, merged, rejected) = match result {
+            Ok((merged, set)) => (
+                ResourceEffect {
+                    set,
+                    ..effect.clone()
+                },
+                Some(merged),
+                None,
+            ),
+            Err(reason) => (effect.clone(), None, Some(reason.to_string())),
         };
         outcomes.push(EffectOutcome {
-            effect: effect.clone(),
+            effect,
             rejected,
             merged,
         });
@@ -1593,6 +1602,16 @@ fn has_schema(index: &BundleIndex, t: &str) -> bool {
     index.detail_reads.contains_key(t) || index.other_shapes.contains_key(t)
 }
 
+/// Whether `t` is a resource type of the contract's: one an operation acts on, or a
+/// definition is of. Such a name is what it says, schema or not.
+fn known_type(rt: &MockRuntime, t: &str) -> bool {
+    rt.bundle()
+        .operations
+        .iter()
+        .any(|op| op.resource_type.as_deref() == Some(t))
+        || rt.index().types_by_def.values().any(|v| v == t)
+}
+
 /// The resource types a prompt showed, in the order it showed them, each once, of
 /// those an effect can be checked against (see [`mb_engine::prompt`]'s effects note).
 fn shown_types(
@@ -1623,19 +1642,37 @@ fn type_stem(name: &str) -> String {
     mb_mcm::stem(&joined)
 }
 
-/// The one type of `shown` with the stem of `name` (see [`type_stem`]); none when
-/// no type or more than one has it.
-fn single_by_stem<'a>(shown: &'a [String], name: &str) -> Option<&'a str> {
+/// The type of `shown` that `name` means, `holding` being those of `shown` that hold a
+/// record under the effect's id. The stem decides (see [`type_stem`]): the one shown
+/// type of that stem, unless the id is held elsewhere and not by it; of several of
+/// that stem, the one holding the id. An id alone names no type.
+fn stem_type<'a>(shown: &'a [String], name: &str, holding: &[&str]) -> Option<&'a str> {
     let stem = type_stem(name);
-    let mut matching = shown.iter().filter(|t| type_stem(t) == stem);
-    let first = matching.next()?;
-    matching.next().is_none().then_some(first.as_str())
+    let matching: Vec<&'a str> = shown
+        .iter()
+        .filter(|t| type_stem(t) == stem)
+        .map(String::as_str)
+        .collect();
+    match matching.as_slice() {
+        [] => None,
+        [only] => (holding.is_empty() || holding.contains(only)).then_some(*only),
+        several => {
+            let held: Vec<&'a str> = several
+                .iter()
+                .copied()
+                .filter(|t| holding.contains(t))
+                .collect();
+            match held.as_slice() {
+                [one] => Some(*one),
+                _ => None,
+            }
+        }
+    }
 }
 
-/// Gives each effect whose type has no schema (models write `playlist` for the
-/// `playlists` they were shown) one of the `shown` types: the one holding a record
-/// under the effect's id, else the one with its stem (see [`single_by_stem`]). With
-/// no single such type the effect is left as it came, and is rejected.
+/// Gives each effect whose type the contract does not know (models write `playlist`
+/// for the `playlists` they were shown) the `shown` type it means (see
+/// [`stem_type`]). With none, the effect is left as it came, and is rejected.
 async fn resolve_effect_types(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1645,7 +1682,13 @@ async fn resolve_effect_types(
 ) {
     let index = rt.index();
     for effect in effects.iter_mut() {
-        if has_schema(index, &effect.resource_type) {
+        if has_schema(index, &effect.resource_type) || known_type(rt, &effect.resource_type) {
+            continue;
+        }
+        if !shown
+            .iter()
+            .any(|t| type_stem(t) == type_stem(&effect.resource_type))
+        {
             continue;
         }
         let mut holding = Vec::new();
@@ -1654,11 +1697,7 @@ async fn resolve_effect_types(
                 holding.push(t.as_str());
             }
         }
-        let resolved = match holding.as_slice() {
-            [only] => Some(*only),
-            _ => single_by_stem(shown, &effect.resource_type),
-        };
-        if let Some(t) = resolved {
+        if let Some(t) = stem_type(shown, &effect.resource_type, &holding) {
             tracing::debug!(
                 mock = %rt.name,
                 written = %log_capped(&effect.resource_type),
@@ -1670,66 +1709,226 @@ async fn resolve_effect_types(
     }
 }
 
-/// `set` with each dotted key (`stats.member_count`) that the schema of `t` does not
-/// declare, and whose first segment it declares as an object, taken for a path into
-/// that member. A dotted name the schema declares, or one into no declared object,
-/// stays as it is.
-fn dotted_as_paths(rt: &MockRuntime, t: &str, set: &Map<String, Value>) -> Map<String, Value> {
-    if !set.keys().any(|k| k.contains('.')) {
-        return set.clone();
-    }
-    let bundle = rt.bundle();
-    let (parts, _) = schema_parts(bundle, write_memory::read_schema(rt, t));
-    let declared = |key: &str| parts.iter().find_map(|p| p.get("properties")?.get(key));
-    let is_object = |schema: &Value| {
-        let (parts, _) = schema_parts(bundle, Some(schema));
-        parts.iter().any(|p| {
-            p.get("type").and_then(Value::as_str) == Some("object") || p.get("properties").is_some()
-        })
-    };
-    let mut out = Map::new();
-    for (key, value) in set {
-        let segments: Vec<&str> = key.split('.').collect();
-        let path = segments.len() > 1
-            && segments.iter().all(|s| !s.is_empty())
-            && declared(key).is_none()
-            && declared(segments[0]).is_some_and(is_object);
-        if !path {
-            // After a path into it, a member keeps what the path set.
-            let merged = match out.get(key) {
-                Some(held) => mb_engine::deep_over(value, held),
-                None => value.clone(),
-            };
-            out.insert(key.clone(), merged);
-            continue;
-        }
-        let nested = segments[1..]
-            .iter()
-            .rev()
-            .fold(value.clone(), |inner, segment| {
-                let mut member = Map::new();
-                member.insert((*segment).to_string(), inner);
-                Value::Object(member)
-            });
-        let merged = match out.get(segments[0]) {
-            Some(held) => mb_engine::deep_over(held, &nested),
-            None => nested,
-        };
-        out.insert(segments[0].to_string(), merged);
-    }
-    out
+/// What one place in a record's schema says, by its `$ref`s and compositions (see
+/// [`schema_parts`]).
+struct Place<'a> {
+    parts: Vec<&'a Value>,
+    defs: Vec<&'a str>,
 }
 
-/// Puts `set` on `data`, objects member by member at any depth (see
-/// [`mb_engine::deep_over`]): what an object of `set` leaves out stays as stored.
-fn merge_members(data: &mut Map<String, Value>, set: Map<String, Value>) {
+impl<'a> Place<'a> {
+    fn of(rt: &'a MockRuntime, schema: Option<&'a Value>) -> Self {
+        let (parts, defs) = schema_parts(rt.bundle(), schema);
+        Self { parts, defs }
+    }
+
+    /// The schema the place's `properties` give member `key`.
+    fn property(&self, key: &str) -> Option<&'a Value> {
+        self.parts
+            .iter()
+            .find_map(|p| p.get("properties")?.get(key))
+    }
+
+    /// Whether the place declares any `properties`.
+    fn declares(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|p| p.get("properties").and_then(Value::as_object).is_some())
+    }
+
+    /// Whether the place is a map: `additionalProperties` and nothing declared.
+    fn is_map(&self) -> bool {
+        !self.declares()
+            && self.parts.iter().any(|p| {
+                matches!(
+                    p.get("additionalProperties"),
+                    Some(Value::Object(_) | Value::Bool(true))
+                )
+            })
+    }
+
+    /// Whether the place holds an object.
+    fn is_object(&self) -> bool {
+        self.declares()
+            || self.is_map()
+            || self
+                .parts
+                .iter()
+                .any(|p| p.get("type").and_then(Value::as_str) == Some("object"))
+    }
+
+    /// The resource type the place's `$ref` is a definition of.
+    fn record_type(&self, index: &BundleIndex) -> Option<String> {
+        self.defs
+            .iter()
+            .find_map(|d| index.types_by_def.get(*d))
+            .cloned()
+    }
+}
+
+/// `new` put where `held` is, at a place of schema `schema`. Objects merge member by
+/// member where the place declares members (a value object), as the members' own
+/// places say. A map (see [`Place::is_map`]), an object the schema says nothing of, and
+/// an object naming another identity than `held`'s (a reassignment, see [`reassigns`])
+/// are replaced whole; so is anything that is not an object.
+fn merge_at(rt: &MockRuntime, held: &Value, new: &Value, schema: Option<&Value>) -> Value {
+    let (Value::Object(held_members), Value::Object(new_members)) = (held, new) else {
+        return new.clone();
+    };
+    let place = Place::of(rt, schema);
+    if !place.declares() || reassigns(rt, &place, held_members, new_members) {
+        return new.clone();
+    }
+    let mut out = held_members.clone();
+    for (key, value) in new_members {
+        let merged = match out.get(key) {
+            Some(was) => merge_at(rt, was, value, place.property(key)),
+            None => value.clone(),
+        };
+        out.insert(key.clone(), merged);
+    }
+    Value::Object(out)
+}
+
+/// Whether `new` names another record than `held` at `place`: an identity member the
+/// place declares (its type's, see [`identity_members`], else `id`) holds another value.
+fn reassigns(
+    rt: &MockRuntime,
+    place: &Place<'_>,
+    held: &Map<String, Value>,
+    new: &Map<String, Value>,
+) -> bool {
+    let identity = match place.record_type(rt.index()) {
+        Some(t) => identity_members(rt, &t),
+        None => vec!["id"],
+    };
+    identity
+        .iter()
+        .filter(|k| place.property(k).is_some())
+        .any(|k| matches!((held.get(*k), new.get(*k)), (Some(a), Some(b)) if a != b))
+}
+
+/// Puts `set` on `data`, the record of type `t`, each member as its place says (see
+/// [`merge_at`]).
+fn merge_members(
+    rt: &MockRuntime,
+    t: &str,
+    data: &mut Map<String, Value>,
+    set: Map<String, Value>,
+) {
+    let place = Place::of(rt, write_memory::read_schema(rt, t));
     for (key, value) in set {
         let merged = match data.get(&key) {
-            Some(held) => mb_engine::deep_over(held, &value),
+            Some(held) => merge_at(rt, held, &value, place.property(&key)),
             None => value,
         };
         data.insert(key, merged);
     }
+}
+
+/// The keys a dotted key of a record of type `t` is a path of, and the schema of the
+/// place it ends at; none when it is no path. It is one when the schema does not
+/// declare the dotted name and declares its first segment as an object. It goes
+/// on through declared `properties` only: past a map, or a segment not declared,
+/// the rest is one key (`annotations.example.com/owner`).
+fn dotted_path<'a>(
+    rt: &'a MockRuntime,
+    record: &Place<'a>,
+    key: &str,
+) -> Option<(Vec<String>, Option<&'a Value>)> {
+    let segments: Vec<&str> = key.split('.').collect();
+    let (first, rest) = segments.split_first()?;
+    if rest.is_empty() || segments.iter().any(|s| s.is_empty()) || record.property(key).is_some() {
+        return None;
+    }
+    let mut schema = record.property(first)?;
+    if !Place::of(rt, Some(schema)).is_object() {
+        return None;
+    }
+    let mut path = vec![(*first).to_string()];
+    for (i, segment) in rest.iter().enumerate() {
+        let place = Place::of(rt, Some(schema));
+        match place.property(segment).filter(|_| !place.is_map()) {
+            Some(inner) => {
+                path.push((*segment).to_string());
+                schema = inner;
+            }
+            None => {
+                path.push(rest[i..].join("."));
+                return Some((path, None));
+            }
+        }
+    }
+    Some((path, Some(schema)))
+}
+
+/// `value` put at `path` below `base`, the last key as its place says (see
+/// [`merge_at`]); what is not an object on the way becomes one.
+fn put_at(
+    rt: &MockRuntime,
+    base: &mut Value,
+    path: &[String],
+    value: &Value,
+    schema: Option<&Value>,
+) {
+    let Some((key, rest)) = path.split_first() else {
+        let merged = merge_at(rt, base, value, schema);
+        *base = merged;
+        return;
+    };
+    if !base.is_object() {
+        *base = Value::Object(Map::new());
+    }
+    if let Value::Object(members) = base {
+        let entry = members.entry(key.clone()).or_insert(Value::Null);
+        if rest.is_empty() && entry.is_null() {
+            *entry = value.clone();
+            return;
+        }
+        put_at(rt, entry, rest, value, schema);
+    }
+}
+
+/// `set` with each dotted key that is a path (see [`dotted_path`]) put into the member
+/// its first segment names, as `held` (the stored record of type `t`) has it: a whole
+/// new value for that member, with the rest of it as stored. A dotted name the schema
+/// declares, or one into no declared object, stays as it is.
+fn dotted_as_paths(
+    rt: &MockRuntime,
+    t: &str,
+    held: &Map<String, Value>,
+    set: &Map<String, Value>,
+) -> Map<String, Value> {
+    if !set.keys().any(|k| k.contains('.')) {
+        return set.clone();
+    }
+    let record = Place::of(rt, write_memory::read_schema(rt, t));
+    let mut out = Map::new();
+    for (key, value) in set {
+        match dotted_path(rt, &record, key) {
+            Some((path, schema)) => {
+                let Some((first, rest)) = path.split_first() else {
+                    continue;
+                };
+                let mut member = out
+                    .get(first)
+                    .or_else(|| held.get(first))
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Map::new()));
+                put_at(rt, &mut member, rest, value, schema);
+                out.insert(first.clone(), member);
+            }
+            None => {
+                // After a path into it, a member is merged as its place says.
+                let merged = match out.get(key) {
+                    Some(was) => merge_at(rt, was, value, record.property(key)),
+                    None => value.clone(),
+                };
+                out.insert(key.clone(), merged);
+            }
+        }
+    }
+    out
 }
 
 /// The members a record of type `t` is identified by: its read's key, `id`,
@@ -1761,9 +1960,28 @@ fn is_stub(object: &Map<String, Value>, stored: &Value, identity: &[&str]) -> bo
         })
 }
 
+/// `stored` with only the members `place` declares (all of it when it declares none).
+fn as_declared(stored: &Value, place: &Place<'_>) -> Value {
+    match stored {
+        Value::Object(members) if place.declares() => Value::Object(
+            members
+                .iter()
+                .filter(|(k, _)| place.property(k).is_some())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Records one effect's stub fill reads from the store at most, all its members
+/// together.
+const MAX_STUB_READS: usize = 20;
+
 /// Fills, in the members `keys` of record `value` of type `t`, each object that only
-/// names a record (see [`is_stub`]) of the type its place in the schema holds (see
-/// [`entity_type`]) with that record as the session stores it. Whether any was filled.
+/// names a record (see [`is_stub`]) at a place whose `$ref` is a definition of that
+/// record's type, with that record as the session stores it and as the place
+/// declares it (see [`as_declared`]).
 async fn fill_stubs(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1771,122 +1989,93 @@ async fn fill_stubs(
     t: &str,
     value: &mut Value,
     keys: &[String],
-) -> bool {
-    let bundle = rt.bundle();
-    let (parts, _) = schema_parts(bundle, write_memory::read_schema(rt, t));
-    let member_schema = |key: &str| parts.iter().find_map(|p| p.get("properties")?.get(key));
+) {
+    let record = Place::of(rt, write_memory::read_schema(rt, t));
     // First what the stubs name, then the records under it.
     let mut named: Vec<(String, String)> = Vec::new();
     if let Value::Object(members) = &*value {
+        let mut walk = StubWalk {
+            rt,
+            fill: &mut |rtype: &str, id: &str, _: &Map<String, Value>, _: &Place<'_>| {
+                let pair = (rtype.to_string(), id.to_string());
+                if named.len() < MAX_STUB_READS && !named.contains(&pair) {
+                    named.push(pair);
+                }
+                None
+            },
+        };
         for key in keys {
             if let Some(member) = members.get(key) {
                 let mut probe = member.clone();
-                let mut walk = StubWalk {
-                    rt,
-                    seen: 0,
-                    fill: &mut |rtype: &str, id: &str, _: &Map<String, Value>| {
-                        let pair = (rtype.to_string(), id.to_string());
-                        if !named.contains(&pair) {
-                            named.push(pair);
-                        }
-                        None
-                    },
-                };
-                walk.visit(&mut probe, member_schema(key), key, 1);
+                walk.visit(&mut probe, record.property(key), 1);
             }
         }
     }
     let mut held: HashMap<(String, String), Value> = HashMap::new();
     for (rtype, id) in named {
-        if let Some(record) = state.get(session, &rtype, &id).await {
-            held.insert((rtype, id), record.data);
+        if let Some(found) = state.get(session, &rtype, &id).await {
+            held.insert((rtype, id), found.data);
         }
     }
     if held.is_empty() {
-        return false;
+        return;
     }
-    let mut filled = false;
     if let Value::Object(members) = value {
+        let mut walk = StubWalk {
+            rt,
+            fill: &mut |rtype: &str, id: &str, object: &Map<String, Value>, place: &Place<'_>| {
+                let stored = as_declared(held.get(&(rtype.to_string(), id.to_string()))?, place);
+                let identity = identity_members(rt, rtype);
+                is_stub(object, &stored, &identity).then_some(stored)
+            },
+        };
         for key in keys {
             if let Some(member) = members.get_mut(key) {
-                let mut walk = StubWalk {
-                    rt,
-                    seen: 0,
-                    fill: &mut |rtype: &str, id: &str, object: &Map<String, Value>| {
-                        let stored = held.get(&(rtype.to_string(), id.to_string()))?;
-                        let identity = identity_members(rt, rtype);
-                        is_stub(object, stored, &identity).then(|| {
-                            filled = true;
-                            stored.clone()
-                        })
-                    },
-                };
-                walk.visit(member, member_schema(key), key, 1);
+                walk.visit(member, record.property(key), 1);
             }
         }
     }
-    filled
 }
 
-/// What [`StubWalk`] asks of each object of a known type and identity: given the
-/// type, the id and the object, the value to put in its place, if any.
-type StubFill<'f> = dyn FnMut(&str, &str, &Map<String, Value>) -> Option<Value> + 'f;
+/// What [`StubWalk`] asks of each object at a place holding a resource type: given
+/// the type, the id the object names, the object and its place, the value to put
+/// in its place, if any.
+type StubFill<'f> = dyn FnMut(&str, &str, &Map<String, Value>, &Place<'_>) -> Option<Value> + 'f;
 
-/// The type of each object an effect's member holds, by its place in the schema,
-/// and what it is identified by, as an answer's entities are found (see
-/// [`EntityWalk`]); `fill` may put another value in its place.
+/// The objects an effect's member holds at places whose `$ref` is a definition of a
+/// resource type, with the id each names; `fill` may put another value in its place.
 struct StubWalk<'a, 'f> {
     rt: &'a MockRuntime,
-    /// Objects of a known type and identity met.
-    seen: usize,
     fill: &'f mut StubFill<'f>,
 }
 
 impl<'a> StubWalk<'a, '_> {
-    fn visit(&mut self, value: &mut Value, schema: Option<&'a Value>, member: &str, depth: usize) {
-        if depth > MAX_ENTITY_DEPTH || self.seen >= MAX_ENTITIES {
+    fn visit(&mut self, value: &mut Value, schema: Option<&'a Value>, depth: usize) {
+        if depth > MAX_ENTITY_DEPTH {
             return;
         }
-        let bundle: &'a mb_mcm::Bundle = self.rt.bundle();
-        let (parts, defs) = schema_parts(bundle, schema);
+        let place = Place::of(self.rt, schema);
         match value {
             Value::Array(items) => {
-                let item = parts.iter().find_map(|p| p.get("items"));
+                let item = place.parts.iter().find_map(|p| p.get("items"));
                 for value in items {
-                    self.visit(value, item, member, depth + 1);
+                    self.visit(value, item, depth + 1);
                 }
             }
             Value::Object(fields) => {
-                let index = self.rt.index();
-                let def = defs
-                    .iter()
-                    .copied()
-                    .find(|d| index.types_by_def.contains_key(*d));
-                if let Some(rtype) = entity_type(index, def, member)
+                if let Some(rtype) = place.record_type(self.rt.index())
                     && let Some(id) = identity_members(self.rt, &rtype)
                         .into_iter()
                         .find_map(|f| fields.get(f).and_then(id_string))
+                    && let Some(record) = (self.fill)(&rtype, &id, fields, &place)
                 {
-                    self.seen += 1;
-                    if let Some(record) = (self.fill)(&rtype, &id, fields) {
-                        *value = record;
-                        return;
-                    }
+                    *value = record;
+                    return;
                 }
                 for (field, value) in fields.iter_mut() {
-                    if !value.is_object() && !value.is_array() {
-                        continue;
+                    if value.is_object() || value.is_array() {
+                        self.visit(value, place.property(field), depth + 1);
                     }
-                    let inner = parts
-                        .iter()
-                        .find_map(|p| p.get("properties")?.get(field.as_str()));
-                    let named = if ENVELOPE_KEYS.contains(&field.as_str()) {
-                        member
-                    } else {
-                        field.as_str()
-                    };
-                    let named = named.to_string();
-                    self.visit(value, inner, &named, depth + 1);
                 }
             }
             _ => {}
@@ -1894,25 +2083,26 @@ impl<'a> StubWalk<'a, '_> {
     }
 }
 
-/// Merges `effect` into the stored resource it names and returns the result;
-/// `Err` says why not. The resource must exist (an effect never creates one,
-/// and never deletes one), keep its identity and, merged, still suit its type,
-/// which must have a schema to check against (see [`entity_fits`]). Objects merge
-/// member by member, and a dotted key may be a path (see [`dotted_as_paths`]);
-/// merged objects that only name stored records may be filled with them (see
-/// [`fill_stubs`]). It applies whole or not at all.
+/// Merges `effect` into the stored resource it names and returns the result and the
+/// members it set, as they now are; `Err` says why not. The resource must exist (an
+/// effect never creates one, and never deletes one), keep its identity and owner and,
+/// merged, still suit its type, which must have a schema to check against (see
+/// [`entity_fits`]). Each member goes as its place in the schema says (see
+/// [`merge_at`]), a dotted key may be a path (see [`dotted_as_paths`]), and objects
+/// that only name stored records are filled with them (see [`fill_stubs`]). It
+/// applies whole or not at all.
 async fn apply_effect(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     rt: &MockRuntime,
     effect: &ResourceEffect,
     own: Option<(&CallPlan<'_>, &OperationCall)>,
-) -> Result<Value, &'static str> {
+) -> Result<(Value, Map<String, Value>), &'static str> {
     let t = effect.resource_type.as_str();
     let index = rt.index();
     let identity = index.identity_fields(t);
-    let set = dotted_as_paths(rt, t, &effect.set);
-    if set
+    if effect
+        .set
         .keys()
         .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
     {
@@ -1928,6 +2118,7 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
+    let set = dotted_as_paths(rt, t, data, &effect.set);
     let requested = mb_engine::effect_without_redacted(&held.data, &set);
     if requested.is_empty() && !set.is_empty() {
         return Err("it sets only what was redacted");
@@ -1942,25 +2133,28 @@ async fn apply_effect(
         requested
     };
     let keys: Vec<String> = requested.keys().cloned().collect();
-    merge_members(data, requested);
+    merge_members(rt, t, data, requested);
+    // Objects the effect names only by their identity are the records stored under it.
+    fill_stubs(state, session, rt, t, &mut stored.data, &keys).await;
     if !entity_fits(rt, t, &stored.data) {
-        // Objects the effect names only by their identity are the records stored
-        // under it: filled, the resource may suit its schema.
-        let mut filled = stored.data.clone();
-        if !fill_stubs(state, session, rt, t, &mut filled, &keys).await
-            || !entity_fits(rt, t, &filled)
-        {
-            return Err("the merged resource breaks its schema");
-        }
-        stored.data = filled;
+        return Err("the merged resource breaks its schema");
     }
+    if let Some((plan, call)) = own
+        && !write_memory::keeps_owner(rt, plan, call, &held, &stored.data)
+    {
+        return Err("the merged resource is no longer its owner's");
+    }
+    let applied: Map<String, Value> = keys
+        .iter()
+        .filter_map(|k| Some((k.clone(), stored.data.get(k)?.clone())))
+        .collect();
     let merged = stored.data.clone();
     let carried = stored.clone();
     if !state.upsert(session, stored).await {
         return Err("the store took no write");
     }
     rt.collections().carry(session, &held, &carried);
-    Ok(merged)
+    Ok((merged, applied))
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
@@ -5437,12 +5631,34 @@ mod tests {
             ("task", "tasks"),
             ("issue", "Issues"),
         ] {
-            assert_eq!(single_by_stem(&shown, written), Some(t), "{written}");
+            assert_eq!(stem_type(&shown, written, &[]), Some(t), "{written}");
         }
-        assert_eq!(single_by_stem(&shown, "order"), None);
+        assert_eq!(stem_type(&shown, "order", &[]), None);
         // Two shown types of one stem: no guess.
         let both: Vec<String> = vec!["entries".into(), "entry".into()];
-        assert_eq!(single_by_stem(&both, "Entry"), None);
+        assert_eq!(stem_type(&both, "Entry", &[]), None);
+    }
+
+    #[test]
+    fn the_id_only_chooses_among_types_of_the_stem() {
+        let shown: Vec<String> = ["entries", "entry", "playlists", "tracks"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        // Several of the stem: the one holding the id.
+        assert_eq!(stem_type(&shown, "Entry", &["entry"]), Some("entry"));
+        assert_eq!(stem_type(&shown, "Entry", &["entries", "entry"]), None);
+        assert_eq!(stem_type(&shown, "Entry", &["tracks"]), None);
+        // One of the stem, the id held elsewhere: they disagree.
+        assert_eq!(stem_type(&shown, "playlist", &["tracks"]), None);
+        assert_eq!(
+            stem_type(&shown, "playlist", &["playlists"]),
+            Some("playlists")
+        );
+        // Held nowhere: the stem's type, which then holds no such resource.
+        assert_eq!(stem_type(&shown, "playlist", &[]), Some("playlists"));
+        // No stem match: the id names no type.
+        assert_eq!(stem_type(&shown, "song", &["tracks"]), None);
     }
 
     #[test]
@@ -5470,20 +5686,6 @@ mod tests {
         assert!(!is_stub(&stub(json!({"uri": "u:t1"})), &stored, &id));
         // As much as the record: nothing to fill.
         assert!(!is_stub(&stub(stored.clone()), &stored, &id));
-    }
-
-    #[test]
-    fn members_merge_objects_and_replace_the_rest() {
-        let mut data = json!({"a": {"x": 1, "y": {"p": 1, "q": 2}}, "b": [1, 2], "c": 1})
-            .as_object()
-            .unwrap()
-            .clone();
-        let set = json!({"a": {"y": {"q": 3}}, "b": [3], "c": null, "d": "new"});
-        merge_members(&mut data, set.as_object().unwrap().clone());
-        assert_eq!(
-            Value::Object(data),
-            json!({"a": {"x": 1, "y": {"p": 1, "q": 3}}, "b": [3], "c": null, "d": "new"})
-        );
     }
 
     #[test]

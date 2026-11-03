@@ -2604,11 +2604,8 @@ fn deep_fill(root: &Value, schema: Option<&Value>, answer: &Value, stored: &Valu
     Value::Object(out)
 }
 
-/// `over` on `base`, objects member by member: an object in both merges at any
-/// depth, and anything else in `over` (an array, a scalar, `null`) replaces what
-/// `base` has there.
-#[must_use]
-pub fn deep_over(base: &Value, over: &Value) -> Value {
+/// `over` on `base`, objects member by member.
+fn deep_over(base: &Value, over: &Value) -> Value {
     let (Value::Object(base_members), Value::Object(over_members)) = (base, over) else {
         return over.clone();
     };
