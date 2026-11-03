@@ -1631,6 +1631,7 @@ const BY_CURSOR: &str = r##"    get:
         - {name: status, in: query, schema: {type: string, enum: [open, done]}}
         - {name: kind, in: query, schema: {type: string, enum: [title, other]}}
         - {name: fields, in: query, schema: {type: string}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
       responses:
         "200":
           description: ok
@@ -1867,6 +1868,23 @@ async fn a_list_beside_another_unscoped_one_is_not_paged_from_the_store() {
     assert_eq!(api.get("/tasks?limit=1").await, page);
 }
 
+/// A list under another name whose items are the same type (`/todos` of `Task`s) is a
+/// second list of that type: neither is paged from the store.
+#[tokio::test]
+async fn a_list_of_the_same_items_under_another_name_counts() {
+    let todos = BY_CURSOR.replace("operationId: listTasks", "operationId: listTodos");
+    let contract = stored_pages(BY_CURSOR).replace(
+        "  /tasks/{id}:",
+        &format!("  /todos:\n{todos}\n  /tasks/{{id}}:"),
+    );
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&contract, true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+}
+
 /// A token the model gave stays, and so does its count.
 #[tokio::test]
 async fn the_model_s_own_token_stays() {
@@ -1916,4 +1934,92 @@ async fn an_enum_value_naming_a_member_is_no_projection() {
         body["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
         "{body}"
     );
+}
+
+/// [`BY_CURSOR`] with a second boolean beside the token.
+fn with_livemode() -> String {
+    stored_pages(&BY_CURSOR.replace(
+        "has_more: {type: boolean}",
+        "has_more: {type: boolean}\n                  livemode: {type: boolean}",
+    ))
+}
+
+/// With two booleans beside the token, which says there is more is not known: a
+/// minted token flips neither, and `livemode` stays `false`.
+#[tokio::test]
+async fn a_minted_token_flips_no_boolean_beside_another() {
+    let mut script = created("open");
+    let page = json!({
+        "data": [stored_task("t1", "A", "open")],
+        "next_cursor": null,
+        "has_more": false,
+        "livemode": false,
+    });
+    script.push(Ok(page.to_string()));
+    let api = api_of(&with_livemode(), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    assert!(
+        first["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
+        "{first}"
+    );
+    assert_eq!(first["livemode"], false, "{first}");
+    assert_eq!(first["has_more"], false, "{first}");
+}
+
+/// The last page leaves two booleans beside its token as the first page had them.
+#[tokio::test]
+async fn the_last_page_flips_no_boolean_beside_another() {
+    let page = json!({
+        "data": [stored_task("t1", "A", "open"), stored_task("t2", "B", "open")],
+        "next_cursor": null,
+        "has_more": true,
+        "livemode": true,
+    });
+    let api = api_of(&with_livemode(), true, vec![Ok(page.to_string())]);
+    let first = api.get("/tasks?limit=1").await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    let last = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["t2"], "{last}");
+    assert_eq!(last["has_more"], true, "{last}");
+    assert_eq!(last["livemode"], true, "{last}");
+}
+
+/// Stripe's shape, a page cut to size: the one boolean beside the token says there is
+/// more, and the last page says there is none.
+#[tokio::test]
+async fn a_cut_page_s_one_boolean_says_there_is_more() {
+    let answer = json!({"data": users(3), "has_more": false, "next_cursor": null});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/feed?limit=2").await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let last = api.get(&format!("/feed?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(last["has_more"], false, "{last}");
+}
+
+/// A number at its parameter's `minimum` (`offset=0`) asks for nothing; another value
+/// leaves the page as the model answered.
+#[tokio::test]
+async fn a_number_at_its_minimum_constrains_nothing() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let body = api.get("/tasks?limit=1&offset=0").await;
+    assert!(
+        body["next_cursor"].as_str().is_some_and(|c| !c.is_empty()),
+        "{body}"
+    );
+    assert_eq!(api.get("/tasks?limit=1&offset=3").await, page);
 }

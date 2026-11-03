@@ -12,9 +12,9 @@
 //! next page. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
 //! a session). Its records are stored already, so they are not seeded again. A count of
 //! the list beside the token that counts fewer than the page and its rest (see
-//! [`deleted::with_count_at_least`]) is raised to them, and a boolean beside the token,
-//! in the same object, that is `false` is `true` where the answer validates so
-//! (`has_more`), as the last page sets it back.
+//! [`deleted::with_count_at_least`]) is raised to them. A minted token's more flag
+//! (see below) that is `false` is `true` where the answer validates so, as the last page
+//! sets it back.
 //!
 //! The place is one text member of the answer (no `const` or `enum`), at its top level
 //! or inside an object member beside the list, whose name is, or ends with the words
@@ -49,9 +49,11 @@
 //! ([`lists::narrow`]) and the delete markers ([`deleted::drop_from_list`]) applied
 //! again, as the session may have written since; and the next token when more remain.
 //! The last page's token is `null`, left out or empty, whichever the answer validates
-//! with; with none, the request is the model's. A boolean beside the token, in the same
-//! object, that the first page set `true` (`has_more`) is `false` on the last page when
-//! the answer validates so, and else as it was. A token with other filter values, of
+//! with; with none, the request is the model's. The more flag is the one boolean the
+//! response schema declares in the object holding the token (`has_more`); with none, or
+//! several (`has_more` beside `livemode`), there is none and no boolean changes. When
+//! the first page set it `true`, it is `false` on the last page when the answer
+//! validates so, and else as it was. A token with other filter values, of
 //! a cut since ended, or of another route, is the model's too. Its query differs from
 //! the first page's by the token, so the response cache never answers it with the
 //! first page; it is not cached itself, as the token already serves it.
@@ -127,56 +129,71 @@ fn carries(call: &OperationCall, name: &str) -> bool {
     })
 }
 
-/// `body` with each boolean beside `slot`, in the same object, that `first` holds
-/// `true` set to `false`: a `has_more` the first page set, on the last.
-fn without_more(body: &Value, first: &Value, slot: &[String]) -> Option<Value> {
+/// The member of `op`'s answer that says whether more pages follow the token at `slot`:
+/// the one boolean the response schema declares in the object holding the slot
+/// (`has_more`). With none, or several (`has_more` beside `livemode`), which says so is
+/// not known, and there is none.
+fn more_flag(bundle: &mb_mcm::Bundle, op: &Operation, slot: &[String]) -> Option<String> {
+    let schema = op.success_output()?.schema.as_ref()?;
     let (_, parents) = slot.split_last()?;
-    let object_at = |value: &Value| {
-        parents
-            .iter()
-            .try_fold(value.clone(), |at, name| at.get(name).cloned())
-    };
-    let flags: Vec<String> = object_at(first)?
-        .as_object()?
-        .iter()
-        .filter(|(_, value)| value.as_bool() == Some(true))
-        .map(|(name, _)| name.clone())
-        .collect();
-    if flags.is_empty() {
-        return None;
+    let (mut parts, _) = schema_parts(bundle, Some(schema));
+    for name in parents {
+        let member = parts.iter().find_map(|p| p.get("properties")?.get(name))?;
+        parts = schema_parts(bundle, Some(member)).0;
     }
+    let mut flags: Vec<&String> = Vec::new();
+    for (name, member) in parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flatten()
+    {
+        let (member_parts, _) = schema_parts(bundle, Some(member));
+        if lists::types_of(&member_parts).into_iter().eq(["boolean"]) && !flags.contains(&name) {
+            flags.push(name);
+        }
+    }
+    match flags.as_slice() {
+        [one] => Some((*one).clone()),
+        _ => None,
+    }
+}
+
+/// `body` with boolean `flag` beside `slot`, in the same object, set to `value` where
+/// it holds `!value`; `None` when it does not.
+fn flag_set(body: &Value, slot: &[String], flag: &str, value: bool) -> Option<Value> {
+    let (_, parents) = slot.split_last()?;
     let mut out = body.clone();
     let mut at = &mut out;
     for name in parents {
         at = at.get_mut(name)?;
     }
-    let object = at.as_object_mut()?;
-    for flag in flags {
-        if object.get(&flag).and_then(Value::as_bool) == Some(true) {
-            object.insert(flag, Value::Bool(false));
-        }
+    let held = at.as_object_mut()?.get_mut(flag)?;
+    if held.as_bool() != Some(!value) {
+        return None;
     }
+    *held = Value::Bool(value);
     Some(out)
 }
 
-/// `body` with each boolean beside `slot`, in the same object, that is `false` set to
-/// `true`: a `has_more` beside a minted token, as [`without_more`] ends it on the last
-/// page. `None` when there is none.
-fn with_more(body: &Value, slot: &[String]) -> Option<Value> {
+/// `body` with the [`more_flag`] beside `slot` set to `false` when `first` holds it
+/// `true`: a `has_more` the first page set, on the last.
+fn without_more(body: &Value, first: &Value, slot: &[String], flag: &str) -> Option<Value> {
     let (_, parents) = slot.split_last()?;
-    let mut out = body.clone();
-    let mut at = &mut out;
-    for name in parents {
-        at = at.get_mut(name)?;
+    let said = parents
+        .iter()
+        .try_fold(first, |at, name| at.get(name))
+        .and_then(|object| object.get(flag))
+        .and_then(Value::as_bool);
+    if said != Some(true) {
+        return None;
     }
-    let mut changed = false;
-    for value in at.as_object_mut()?.values_mut() {
-        if value.as_bool() == Some(false) {
-            *value = Value::Bool(true);
-            changed = true;
-        }
-    }
-    changed.then_some(out)
+    flag_set(body, slot, flag, false)
+}
+
+/// `body` with the [`more_flag`] beside `slot` set to `true` where it is `false`: a
+/// `has_more` beside a minted token, as [`without_more`] ends it on the last page.
+fn with_more(body: &Value, slot: &[String], flag: &str) -> Option<Value> {
+    flag_set(body, slot, flag, true)
 }
 
 /// The one place answer `body` to `call` has for a token (see the module's doc).
@@ -458,13 +475,15 @@ pub(super) async fn mint(
     // A count of the list that counts less than the page and the rest counts them.
     let known = list_items(body).map_or(0, Vec::len) + rest.len();
     let counted = deleted::with_count_at_least(rt, op, body, known);
+    let flag = more_flag(rt.bundle(), op, &slot.path);
     let Some(page) = counted
         .iter()
         .chain(std::iter::once(body))
         .filter_map(|base| placed(base, &slot.path, Some(Value::String(first.clone()))))
         .find_map(|page| {
             // More to come, where the answer allows saying so.
-            with_more(&page, &slot.path)
+            flag.as_deref()
+                .and_then(|flag| with_more(&page, &slot.path, flag))
                 .filter(|more| valid(more))
                 .or_else(|| valid(&page).then_some(page))
         })
@@ -582,13 +601,15 @@ pub(super) async fn serve(
         valid(&more)?
     } else {
         // The last page: no token, as the answer allows.
+        let flag = more_flag(rt.bundle(), op, &cut.slot);
         let ends = [Some(Value::Null), None, Some(Value::String(String::new()))];
         let end = ends
             .into_iter()
             .filter_map(|end| placed(&body, &cut.slot, end))
             .find_map(|candidate| {
                 // No more, as the first page said there was, where the answer allows.
-                without_more(&candidate, &cut.page, &cut.slot)
+                flag.as_deref()
+                    .and_then(|flag| without_more(&candidate, &cut.page, &cut.slot, flag))
                     .and_then(|done| valid(&done))
                     .or_else(|| valid(&candidate))
             });

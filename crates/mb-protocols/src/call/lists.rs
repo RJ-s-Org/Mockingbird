@@ -666,8 +666,9 @@ const MAX_STORED_REST: usize = 100;
 /// query's filters asks, and showing the request's every other value, unless the
 /// parameter is an array or free text (no `enum` or `const`) and all of that value's
 /// comma-separated words name members of the items (`fields=name,notes`). A value of a
-/// number parameter, which could be found anywhere, or of any other kind leaves `cut` as
-/// it is. Each record shows as the items declare it ([`projected`]), and only where it
+/// number parameter, which could be found anywhere, leaves `cut` as it is, unless it is
+/// the parameter's `default` or `minimum` (`offset=0`), which asks for nothing; so does a
+/// value of any other kind. Each record shows as the items declare it ([`projected`]), and only where it
 /// validates as one; one with no identity, or the identity of an item served or left
 /// out, is not taken. A page is full when it holds as many items as the request's page
 /// size asks. The store is read only when the answer has a place for a token
@@ -773,8 +774,21 @@ pub(super) async fn stored_rest(
         let (param_parts, _) =
             schema_parts(bundle, declared_params.and_then(|d| d.get(param.as_str())));
         let param_types = types_of(&param_parts);
-        // A number is found anywhere (a count, a price): such a value is not known.
+        // A number is found anywhere (a count, a price): such a value is not known, but
+        // for the parameter's `default` or `minimum` (`offset=0`), which asks nothing.
         if param_types.contains("integer") || param_types.contains("number") {
+            let bound = |at: &str| {
+                param_parts
+                    .iter()
+                    .filter_map(|p| p.get(at).and_then(Value::as_f64))
+                    .collect::<Vec<_>>()
+            };
+            let bounds = [bound("default"), bound("minimum")].concat();
+            let at_bound =
+                texts.len() == 1 && texts[0].parse::<f64>().is_ok_and(|n| bounds.contains(&n));
+            if at_bound {
+                continue;
+            }
             return cut;
         }
         // Only an array or free text lists fields: an `enum` value is a choice.
