@@ -247,6 +247,7 @@ async fn fallback_and_fresh_identity_repeat() {
         field: "ref".into(),
         input_field: None,
         path_field: None,
+        record: None,
     });
     let body = a.body.unwrap();
     let fresh = offline().fresh_identity(&bundle, &op, &body).unwrap();

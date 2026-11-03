@@ -162,6 +162,25 @@ pub(super) async fn recall(
     }
 }
 
+/// Whether a write is remembered that stored `held` does not show yet, or one made to
+/// the path of `call`, which a read of a member of `held` is behind.
+pub(super) async fn is_behind(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &StoredResource,
+) -> bool {
+    if !applies(state.rt, plan) {
+        return false;
+    }
+    let key = memory_key(&held.resource_type, &held.id, true);
+    !read_memory(state, &plan.session, &key)
+        .await
+        .requests
+        .is_empty()
+        || !recall_route(state, plan, call).await.is_empty()
+}
+
 /// One resource's memory, as kept.
 #[derive(Default)]
 struct Memory {
@@ -212,6 +231,10 @@ async fn write_memory(
 /// singleton read (see [`entity_fits`]).
 fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
     let index = rt.index();
+    // A record its read answers in an envelope or an array has its own schema.
+    if let Some(record) = index.record_schemas.get(t) {
+        return Some(record);
+    }
     match index.detail_reads.get(t) {
         Some(i) => rt
             .bundle()
@@ -248,7 +271,17 @@ fn is_read_schema(
             .as_ref()
     });
     let own = output.and_then(|o| o.schema.as_ref());
-    detail.is_some() && detail == own
+    if detail.is_some() && detail == own {
+        return true;
+    }
+    // An answer holding the type's record, as its read holds it or otherwise
+    // (Zendesk's `{ticket, audit}` beside `{ticket}`), holds the whole record.
+    let (Some(record), Some(identity), Some(own)) =
+        (rt.index().record_schemas.get(t), op.identity.as_ref(), own)
+    else {
+        return false;
+    };
+    record_schema_of(rt.bundle(), identity, own).as_ref() == Some(record)
 }
 
 impl Earlier {
@@ -1834,6 +1867,13 @@ pub(super) async fn settle_read(
                 usage: generated.usage,
                 ..*stored
             };
+            // The caller works on the record an answer holds, and puts it back.
+            if let Some(identity) = op.identity.as_ref().filter(|i| i.record.is_some()) {
+                generated.body = generated
+                    .body
+                    .as_ref()
+                    .and_then(|b| identity.record_in(b).cloned());
+            }
             note_not_caught_up(generated, plan, Some(held), earlier);
         }
         return;

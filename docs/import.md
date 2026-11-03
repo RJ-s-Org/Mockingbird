@@ -27,9 +27,16 @@ The member a route's record goes by comes from the contract, in this order.
 2. **A create's answer has a `sid` or a `uuid`.**
 3. **A member named for the type**: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one (`{id}`, `{userId}`, `{user_id}`): `{handle}` names something else. With no such route (`POST /tokens`) nothing could find the record again.
 
-With none of these a route has no identity, so a create stores nothing and a read is generated each time. That includes an answer in an envelope (`{"user": {...}}`) or an array. Where the contract's names do not give the identity, [`x-mockingbird-resource`](#correcting-it-x-mockingbird-resource) sets it.
+An answer can hold its record instead of being it:
 
-A read with no path parameter, of a type no other route has, reads as a type when every array it lists holds what that type's `GET` by path answers: `/users-by-email` beside `/users/{id}`. Another shape beside them leaves it as it was, as does a second type serving the same items.
+- **In an envelope.** An object with no identity of its own whose one member is a record with one, as above (Square's `{"payment": {...}}`), goes by that record's identity. So does an envelope with more members when exactly one of them has the schema the type's other routes answer as its record (Zendesk's `{"ticket": {...}, "audit": {...}}` beside `GET /tickets/{id}` answering `{"ticket": {...}}`). The record is what is stored, and a read answers it in its envelope. Two members of that schema, or none, leave the route without an identity. An action answering its parent's record in the envelope the parent's `GET` uses updates it.
+- **As the one item of an array.** A read answering an array of items, where the path's last parameter names a member the items require (by its name in any case, or by the stem they share: `{emails}` and `email`), goes by that member: SendGrid's `GET /bounces/{email}`, even beside an `id`, and the path's value is set in the item. It reads the record that value has, as a one-item array, and answers `[]` for a deleted one, and where an unknown id answers 404. The type's routes on that parameter that answer nothing (its `DELETE`) go by it too.
+
+With none of these a route has no identity, so a create stores nothing and a read is generated each time. Where the contract does not give the identity, [`x-mockingbird-resource`](#correcting-it-x-mockingbird-resource) sets it.
+
+A read with no path parameter, of a type no other route has, reads as a type when every array it lists holds what that type's `GET` by path answers: `/users-by-email` beside `/users/{id}`. Another shape beside them leaves it as it was, as does a second type serving the same items. Any other list read takes a type the same way when every array it lists holds exactly the record that type's `GET` by path serves, the same schema and not a shorter or longer form, even under a path parameter or beside routes of its own type: Notion's `POST /data_sources/{id}/query` lists `pages`, and Jira's `GET /search/jql` lists `issue`. A read with an identity of its own is one record, not a list, whatever arrays it holds.
+
+A `GET` below a record's read (`/playlists/{id}/items` below `/playlists/{id}`) that answers exactly the schema of one of that record's members (`tracks`) is answered by that member of the stored record, at runtime, when the session holds it and the request has no query. While a write the record does not show yet is remembered for it or for that path, the read generates as before, and is told of the write.
 
 ## How a `POST` under a resource is read
 
