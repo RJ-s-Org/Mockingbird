@@ -30,6 +30,18 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Prompts show where a minted value came from, and a write can be refused
+
+No migration or configuration. With an LLM and `consistency: on`, on HTTP routes:
+
+- **A value the mock minted is traced back**: a generated 2xx create or action whose answer holds a string of 8 to 512 bytes under a member named as a credential (`access_token`, `public_token`, `link_token`, not `key` or `sid`), or shaped like one, which its request did not send, is remembered by a SHA-256 hash of that value. A later request carrying it is shown, in an `<earlier_origins>` block, that answer and the request that got it, as far as their schemas declare them and past the wider name and shape checks, so the value itself, any other token and the client's `secret` are left out. One hop only: the request that minted the value it carried is not followed further.
+- **What is kept**: one document per session, of the reserved type `__mockingbird.earlier_requests` with id `#minted`, holding the newest 8 answers, each up to 4 KiB, and 3 are shown at most. It is not exported or counted and a session reset clears it. A value the client sent is never kept, nor hashed, even when the answer repeats it.
+- **More store reads**: one per generated call carrying a string of that length, on a contract with a create or action declaring such a member in its answer. Other contracts pay none, and a prompt with nothing to show is the same to the byte.
+- **A write can answer a declared error**: a command on a record the model was shown, whose operation declares a `400`, `409`, `412` or `422` response, is offered `"refusal": <status>` in its effects envelope, with those statuses listed in the prompt and as an integer `enum` in the schema sent. A refusal naming one of them is answered as that declared error, faker-filled and valid, with no effects and no second LLM call, tagged with the LLM's source. A status the operation does not declare is ignored and the answer stands. `401`, `403`, `404` and `429` are never offered.
+- **An operation declaring none of those statuses is asked for exactly what it was**, and so is any call with a forced status or a scenario, a read, a write shown nothing, or an answer whose own schema has a `refusal` member.
+- **Recorded prompts**: a snapshot or recording taken before this release may not replay for a call that is now offered a refusal or shown an origin. `without_effects_schema` still unwraps the envelope, with or without the refusal.
+- **Rust API**: `GenerationContext` gains a public field, `earlier_origins`, which breaks code constructing it in full; add `..Default::default()`. `StateStore` gains `touch_live`, defaulted, which a store should implement so that a read never makes an empty session.
+
 ### Write memory
 
 No migration or configuration. With an LLM and `consistency: on`, on HTTP routes ([what it does](concepts.md#sessions-and-state)):
@@ -42,7 +54,7 @@ No migration or configuration. With an LLM and `consistency: on`, on HTTP routes
 - **Rolling upgrades**: documents of the reserved type `__mockingbird.earlier_requests` are kept in the session's state. A node of an older release exports and counts them as resources, and a fixture exported through one may hold them; newer nodes drop them when seeding. Export sessions from upgraded nodes.
 - **Rust API**: `GenerationContext` gains a public field, `earlier_requests`, which breaks code constructing it in full; add `..Default::default()`. `Engine::scrub` is public. `GenerationContext` also gains `earlier_own_body`. `RequestRecorder` gains a defaulted `redact`, which an implementor keeping request bodies should provide, or only the built-in credential and PII scrubbing applies.
 - **Credential names**: one predicate, `mb_mcm::credentials::is_credential_name`, now decides for request headers, import redaction and the memory. It adds `session`, `credential`, `passwd`, `privatekey`, `sshkey`, `signingkey`, `cvv`, `bearer`, whole-word `auth` and `pin` to what headers treat as credentials, so a header such as `x-session-id` drops from recordings (prompts never carried request headers). `X-Mockingbird-*` overrides are exempt. A contract declaring a header does not exempt it, since contracts routinely declare `Authorization`.
-- **A 204 update with a valid body plus an undeclared member costs one extra LLM call** on the next read, as intended: the member cannot go in the stored copy, so the read is told of it. A remainder holding only redacted values, such as `password`, is not remembered and costs no call. A body that is only told, an action's or a child's to its parent, is redacted by every name rule, so `session_title` in an action's body shows as `[redacted]`.
+- **A 204 update with a valid body plus a member the request's schema declares and the read's does not costs one extra LLM call** on the next read, as intended: the member cannot go in the stored copy, so the read is told of it. A remainder holding only undeclared members, such as `code` or `value` under an open request schema, or only redacted values, such as `password`, is not remembered and costs no call. A body that is only told, an action's or a child's to its parent, is redacted by every name rule, so `session_title` in an action's body shows as `[redacted]`.
 - **The path says whose a resource is**: a 204 update's member contradicting the owner in its path (`PUT /orgs/octo/teams/core {"organization":"acme"}`) is neither applied nor remembered.
 
 ### Prompts show what a request refers to and who the caller is
@@ -59,7 +71,7 @@ No migration or configuration. With an LLM and `consistency: on`, on HTTP routes
 - **A record matched by value follows no references of its own**, so what it names is not shown unless the request names it too.
 - **An effect holding the redaction marker** leaves that member as stored and applies the rest, for every effect on a mock with an LLM. One setting only the marker is refused.
 - **Recorded prompts**: a snapshot or recording taken before this release may not replay where one of these applies.
-- **Not covered**: a deleted parent forgets its routes' writes only where the path below it has no other parameter, and a deleted child only the writes naming it. A caller's answer is kept per session, not per token. An answer of a `POST`-only route is not kept. A `GET` of such a route creates the session, with no resources, where a read did not.
+- **Not covered**: a deleted parent forgets its routes' writes only where the path below it has no other parameter, and a deleted child only the writes naming it. A caller's answer is kept per session, not per token. An answer of a `POST`-only route is not kept. A `GET` of such a route creates no session: its answer waits in this node's response cache until the session's first write, so one answered on another node, or evicted from the cache first, is not told.
 - **Rust API**: `GenerationContext` gains public fields, `earlier_answers` and `earlier_writes`, which breaks code constructing it in full; add `..Default::default()`.
 
 ### The output budget keeps what a request asked for
