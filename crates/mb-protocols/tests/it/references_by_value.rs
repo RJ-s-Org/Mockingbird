@@ -513,6 +513,31 @@ async fn a_unique_member_value_shows_its_record() {
     assert!(related_holds(&prompt, "ct-000101"), "{prompt}");
 }
 
+/// A plain string a record holds (a name with no digit) is kept only for the creates of
+/// its own type to see what they repeat: under the same member of another type's
+/// request it is no reference.
+#[tokio::test]
+async fn a_plain_member_value_is_no_reference() {
+    let h = harness(vec![
+        json!({"id": "ct-000101", "name": "jane-roe-contact", "email": "jane.roe@example.com"}),
+        json!({"id": "tk-000001", "subject": "Help"}),
+    ]);
+    h.call(
+        "POST",
+        "/contacts",
+        Some(json!({"name": "jane-roe-contact", "email": "jane.roe@example.com"})),
+    )
+    .await;
+    h.call(
+        "POST",
+        "/tickets",
+        Some(json!({"subject": "Help", "name": "jane-roe-contact"})),
+    )
+    .await;
+    let prompt = h.prompt(1);
+    assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
+}
+
 /// A value two stored records hold shows neither: which one the request means is a guess.
 #[tokio::test]
 async fn an_ambiguous_value_shows_nothing() {

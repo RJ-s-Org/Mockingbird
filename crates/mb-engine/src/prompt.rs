@@ -457,6 +457,7 @@ fn stream_user_message(
         earlier_origins: &[],
         created_since: &[],
         alongside: &[],
+        same_values: &[],
         changes_by_effects: false,
         update_guard: None,
     };

@@ -171,6 +171,12 @@ pub struct GenerationContext<'a> {
     /// conflict with by being of their type. A record of that type that only the
     /// request names by value is not among them.
     pub alongside: &'a [(String, String)],
+    /// The type, id and member of those of [`Self::related`] that are of the type this
+    /// create makes and already hold the value its request gives that same member (a
+    /// contact's `email`): what it can conflict with by repeating them. Found only for a
+    /// create whose operation declares a refusal status (see
+    /// [`guards::declares_a_refusal`]).
+    pub same_values: &'a [(String, String, String)],
     /// A read's target changes only through the effects its answer lists: it is behind
     /// writes that only referred to it, so the answer is the stored copy, and the read is
     /// offered the effects envelope to say what those writes changed on it.
@@ -754,7 +760,8 @@ impl Engine {
                         user.content
                             .push_str(&prompt::effects_note(op, status, &ctx));
                         if !refusals.is_empty() {
-                            user.content.push_str(&guards::refusal_note(op, &refusals));
+                            user.content
+                                .push_str(&guards::refusal_note(op, &ctx, &refusals));
                         }
                     } else if items_envelope {
                         user.content.push_str("\n\n");

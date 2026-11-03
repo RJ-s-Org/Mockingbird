@@ -699,6 +699,7 @@ pub(crate) async fn generate_pending(
         earlier_origins: &pending.earlier_origins,
         created_since: &pending.created_since,
         alongside: &pending.alongside,
+        same_values: &pending.same_values,
         changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
@@ -771,6 +772,9 @@ pub(crate) struct Pending<'a> {
     earlier_writes: Vec<Value>,
     /// Those of `related` a create's own collection holds (see [`created_alongside`]).
     alongside: Vec<(String, String)>,
+    /// Those of `related` of a create's type that hold a value of its request, with the
+    /// member (see [`shown_same_values`]).
+    same_values: Vec<(String, String, String)>,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -1016,15 +1020,18 @@ pub(crate) async fn prepare<'a>(
         }
         let alongside =
             created_alongside(&mut state, plan, call, target.as_ref(), &mut related).await;
+        let same_values =
+            shown_same_values(&mut state, plan, call, target.as_ref(), &mut related).await;
         (
             world::recall_answers(&mut state, plan).await,
             write_memory::recall_route(&mut state, plan, call).await,
             minted::recall(&mut state, plan, call).await,
-            alongside,
+            (alongside, same_values),
         )
     }
     .instrument(state_span())
     .await;
+    let (alongside, same_values) = alongside;
     let created_since =
         write_memory::created_since(&mut state, plan, &earlier, target.as_ref(), &mut related)
             .instrument(state_span())
@@ -1044,6 +1051,7 @@ pub(crate) async fn prepare<'a>(
         earlier_writes,
         earlier_origins,
         alongside,
+        same_values,
     }))
 }
 
@@ -5496,6 +5504,47 @@ async fn created_alongside(
             related.push(StoredResource { data, ..held });
         }
     }
+    marked
+}
+
+/// Puts first in `related` the records of the type a create makes that already hold a
+/// value of its request under the same member ([`value_index::same_values`]), so a
+/// prompt shows them whatever else it shows, and returns each one's type, id and member
+/// (see [`mb_engine::GenerationContext::same_values`]). A record `related` holds already
+/// keeps the copy it has; another is scrubbed as a record found by value is
+/// ([`write_memory::matched_for_context`]), and left out when nothing of it may be shown.
+/// Nothing, and `related` as it was, when there is none.
+async fn shown_same_values(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    target: Option<&StoredResource>,
+    related: &mut Vec<StoredResource>,
+) -> Vec<(String, String, String)> {
+    let rt = state.rt;
+    let known = |t: &str, id: &str| target.is_some_and(|r| r.resource_type == t && r.id == id);
+    let found = value_index::same_values(state, plan, call, known).await;
+    let mut first = Vec::with_capacity(found.len());
+    let mut marked = Vec::with_capacity(found.len());
+    for (hit, member) in found {
+        let shown = match related
+            .iter()
+            .position(|r| r.resource_type == hit.resource_type && r.id == hit.id)
+        {
+            Some(at) => related.remove(at),
+            None => {
+                let Some(data) =
+                    write_memory::matched_for_context(rt, plan, &hit.resource_type, &hit.data)
+                else {
+                    continue;
+                };
+                StoredResource { data, ..hit }
+            }
+        };
+        marked.push((shown.resource_type.clone(), shown.id.clone(), member));
+        first.push(shown);
+    }
+    related.splice(0..0, first);
     marked
 }
 
