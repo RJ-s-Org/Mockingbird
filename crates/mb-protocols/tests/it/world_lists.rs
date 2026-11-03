@@ -12,7 +12,7 @@ use mb_engine::{Engine, EngineConfig};
 use mb_import::compile;
 use mb_llm::{LlmError, Provider, ScriptedProvider};
 use mb_protocols::{MockRuntime, http_rest};
-use mb_state::MemoryStore;
+use mb_state::{CachingStateStore, MemoryStore, StateStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -73,6 +73,27 @@ struct Api {
 }
 
 fn api_of(contract: &str, consistency: bool, script: Vec<Result<String, LlmError>>) -> Api {
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    api_over(contract, consistency, script, store)
+}
+
+/// [`api_of`] over a store that caches answers, as a served mock's does.
+fn cached_api_of(contract: &str, script: Vec<Result<String, LlmError>>) -> Api {
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600))) as Arc<dyn StateStore>;
+    let cached = CachingStateStore::wrap(
+        store,
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    api_over(contract, true, script, cached)
+}
+
+fn api_over(
+    contract: &str,
+    consistency: bool,
+    script: Vec<Result<String, LlmError>>,
+    store: Arc<dyn StateStore>,
+) -> Api {
     let provider = Arc::new(ScriptedProvider::new(script));
     let mut rt = MockRuntime::new(
         "lists",
@@ -81,7 +102,7 @@ fn api_of(contract: &str, consistency: bool, script: Vec<Result<String, LlmError
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        store,
     );
     rt.consistency = consistency;
     Api {
@@ -587,4 +608,982 @@ async fn a_second_refund_sees_the_first() {
     let prompt = api.prompt(2);
     assert!(!prompt.contains("\"R1\""), "{prompt}");
     assert!(!prompt.contains("\"R2\""), "{prompt}");
+}
+
+/// Tickets: a list beside a create, a read and an update, with array members, a
+/// nullable reference, nested objects the summary declares less of, and parameters
+/// that name no member.
+const TICKETS: &str = r##"
+openapi: 3.1.0
+info: {title: Tickets, version: "1"}
+paths:
+  /tickets:
+    get:
+      operationId: listTickets
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [open, closed, all]}}
+        - {name: labels, in: query, schema: {type: string}}
+        - {name: tag_name, in: query, schema: {type: string}}
+        - {name: exclude_labels, in: query, schema: {type: string}}
+        - {name: without_tags, in: query, schema: {type: string}}
+        - {name: tag_ids, in: query, schema: {type: string}}
+        - {name: assignee_id, in: query, schema: {type: integer}}
+        - {name: before, in: query, schema: {type: string}}
+        - {name: inclusive, in: query, schema: {type: boolean}}
+        - {name: page, in: query, schema: {type: integer}}
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/TicketItem"}}}}}
+    post:
+      operationId: createTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+  /tickets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTicket
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+    patch:
+      operationId: updateTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+components:
+  schemas:
+    Ticket:
+      type: object
+      required: [id, status, title]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [open, closed, pending]}
+        title: {type: string}
+        labels: {type: array, items: {type: string}}
+        tags: {type: array, items: {type: string}}
+        assignee_id: {type: [integer, "null"]}
+        reply_count: {type: integer}
+        internal_note: {type: string}
+        owner: {$ref: "#/components/schemas/Person"}
+        watchers: {type: array, items: {$ref: "#/components/schemas/Person"}}
+    Person:
+      type: object
+      properties: {id: {type: string}, name: {type: string}, email: {type: string}}
+    PersonSummary:
+      type: object
+      additionalProperties: false
+      properties: {id: {type: string}, name: {type: string}}
+    TicketItem:
+      type: object
+      required: [id, status, title]
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [open, closed]}
+        title: {type: string}
+        labels: {type: array, items: {type: string}}
+        tags: {type: array, items: {type: string}}
+        assignee_id: {type: [integer, "null"]}
+        reply_count: {type: integer}
+        owner: {$ref: "#/components/schemas/PersonSummary"}
+        watchers: {type: array, items: {$ref: "#/components/schemas/PersonSummary"}}
+"##;
+
+fn ticket(id: &str, status: &str) -> Value {
+    json!({"id": id, "status": status, "title": format!("T {id}"), "reply_count": 0})
+}
+
+fn with(mut item: Value, member: &str, value: Value) -> Value {
+    item[member] = value;
+    item
+}
+
+/// Creates ticket `t1` and updates its status to `to`.
+async fn created_then_updated(api: &Api, to: &str) {
+    let (status, _) = api
+        .call("POST", "/tickets", Some(json!({"title": "T t1"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = api
+        .call("PATCH", "/tickets/t1", Some(json!({"status": to})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+fn person(id: &str) -> Value {
+    json!({"id": id, "name": format!("P {id}"), "email": format!("{id}@example.com")})
+}
+
+fn updated_script(list: Value) -> Vec<Result<String, LlmError>> {
+    let created = with(
+        with(
+            with(ticket("t1", "open"), "internal_note", json!("secret")),
+            "owner",
+            person("o1"),
+        ),
+        "watchers",
+        json!([person("w1"), person("w2")]),
+    );
+    let updated = with(created.clone(), "status", json!("closed"));
+    vec![
+        Ok(created.to_string()),
+        Ok(updated.to_string()),
+        Ok(list.to_string()),
+    ]
+}
+
+/// A list item the session holds shows the stored record's members, those the item
+/// declares only; another item is as generated, and the store is not changed.
+#[tokio::test]
+async fn a_listed_item_shows_its_stored_record() {
+    let list = json!([ticket("t1", "open"), ticket("t2", "open")]);
+    let api = api_of(TICKETS, true, updated_script(list));
+    created_then_updated(&api, "closed").await;
+    let held = api.get("/tickets/t1").await;
+    assert_eq!(held["status"], "closed");
+    assert_eq!(held["internal_note"], "secret");
+    let body = api.get("/tickets").await;
+    assert_eq!(body[0]["status"], "closed", "{body}");
+    assert_eq!(body[0]["title"], held["title"], "{body}");
+    assert!(body[0].get("internal_note").is_none(), "{body}");
+    assert_eq!(body[1], ticket("t2", "open"));
+    // The list changed no stored record.
+    assert_eq!(api.get("/tickets/t1").await, held);
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// What a nested object or an array's objects declare is all an overlay brings, at any
+/// depth: the owner's and watchers' `email` stays out, under `additionalProperties:
+/// false`, and the rest of the overlay still holds.
+#[tokio::test]
+async fn an_overlay_brings_no_nested_member_the_item_does_not_declare() {
+    let list = json!([ticket("t1", "open")]);
+    let api = api_of(TICKETS, true, updated_script(list));
+    created_then_updated(&api, "closed").await;
+    let held = api.get("/tickets/t1").await;
+    assert_eq!(held["owner"]["email"], "o1@example.com", "{held}");
+    let body = api.get("/tickets").await;
+    assert_eq!(body[0]["status"], "closed", "{body}");
+    assert_eq!(
+        body[0]["owner"],
+        json!({"id": "o1", "name": "P o1"}),
+        "{body}"
+    );
+    assert_eq!(
+        body[0]["watchers"],
+        json!([{"id": "w1", "name": "P w1"}, {"id": "w2", "name": "P w2"}]),
+        "{body}"
+    );
+}
+
+/// A stored record the item's schema does not allow (`pending` is no item status)
+/// leaves the item as generated.
+#[tokio::test]
+async fn a_stored_record_the_item_does_not_allow_changes_nothing() {
+    let list = json!([ticket("t1", "open")]);
+    let mut script = updated_script(list);
+    script[1] = Ok(ticket("t1", "pending").to_string());
+    let api = api_of(TICKETS, true, script);
+    created_then_updated(&api, "pending").await;
+    assert_eq!(api.get("/tickets/t1").await["status"], "pending");
+    let body = api.get("/tickets").await;
+    assert_eq!(body, json!([ticket("t1", "open")]));
+}
+
+/// A stored record is overlaid before the filters: `status=open` drops the ticket the
+/// session closed.
+#[tokio::test]
+async fn a_filter_sees_the_stored_record() {
+    let list = json!([ticket("t1", "open"), ticket("t2", "open")]);
+    let api = api_of(TICKETS, true, updated_script(list));
+    created_then_updated(&api, "closed").await;
+    let body = api.get("/tickets?status=open").await;
+    assert_eq!(ids(&body), ["t2"]);
+}
+
+/// With consistency off, a list is as the model wrote it.
+#[tokio::test]
+async fn consistency_off_overlays_nothing() {
+    let list = json!([ticket("t1", "open")]);
+    let api = api_of(TICKETS, false, updated_script(list));
+    created_then_updated(&api, "closed").await;
+    let body = api.get("/tickets").await;
+    assert_eq!(body, json!([ticket("t1", "open")]));
+}
+
+/// Tasks created under a project, listed under a project.
+const TASKS: &str = r##"
+openapi: 3.1.0
+info: {title: Tasks, version: "1"}
+paths:
+  /projects/{project_id}/tasks:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listTasks
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Task"}}}}}
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+  /tasks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTask
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, project_id, title]
+      properties: {id: {type: string}, project_id: {type: string}, title: {type: string}}
+"##;
+
+fn task(id: &str, project: &str, title: &str) -> Value {
+    json!({"id": id, "project_id": project, "title": title})
+}
+
+/// A generated item that holds the path's value under a member another stored record's
+/// value contradicts (`project_id`) is not overlaid: it stays as generated, as which of
+/// the two is right is a guess. Under its own parent it is overlaid.
+#[tokio::test]
+async fn a_stored_record_of_another_parent_is_not_overlaid() {
+    let listed = json!([task("tk-0001", "p2", "made up"), task("tk-0002", "p2", "B")]);
+    let api = api_of(
+        TASKS,
+        true,
+        vec![
+            Ok(task("tk-0001", "p1", "A").to_string()),
+            Ok(listed.to_string()),
+            Ok(json!([task("tk-0001", "p1", "made up")]).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/projects/p1/tasks", Some(json!({"title": "A"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/projects/p2/tasks").await;
+    assert_eq!(body, listed);
+    let body = api.get("/projects/p1/tasks").await;
+    assert_eq!(body, json!([task("tk-0001", "p1", "A")]));
+}
+
+/// Users with followers and events, and lists with members: routes whose path
+/// parameter names the items' own identity, takes an alias, or names one of many
+/// parents.
+const PEOPLE: &str = r##"
+openapi: 3.1.0
+info: {title: People, version: "1"}
+paths:
+  /users:
+    post:
+      operationId: createUser
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /users/{user_id}:
+    parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /users/{user_id}/followers:
+    parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listFollowers
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}
+  /users/{user_id}/events:
+    parameters: [{name: user_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listEvents
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Event"}}}}}
+  /events:
+    post:
+      operationId: createEvent
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Event"}}}}
+  /events/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getEvent
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Event"}}}}
+  /lists/{list_id}/members:
+    parameters: [{name: list_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listMembers
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Member"}}}}}
+    post:
+      operationId: addMember
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+  /members/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getMember
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Member"}}}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [user_id]
+      properties: {user_id: {type: string}, name: {type: string}}
+    Event:
+      type: object
+      required: [id, user_id]
+      properties: {id: {type: string}, user_id: {type: string}, kind: {type: string}}
+    Member:
+      type: object
+      required: [id, list_id]
+      properties: {id: {type: string}, list_id: {type: string}, name: {type: string}}
+"##;
+
+/// A follower is a user, whose identity the path's `user_id` also names: no conflict,
+/// so the stored user is overlaid and stays.
+#[tokio::test]
+async fn a_path_naming_the_items_identity_is_no_parent() {
+    let api = api_of(
+        PEOPLE,
+        true,
+        vec![
+            Ok(json!({"user_id": "u2", "name": "Bea"}).to_string()),
+            Ok(json!([{"user_id": "u2", "name": "stale"}]).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/users", Some(json!({"name": "Bea"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/users/u1/followers").await;
+    assert_eq!(body, json!([{"user_id": "u2", "name": "Bea"}]));
+}
+
+/// `/users/me/events`: the generated item holds the user's id, not the alias, so
+/// nothing contradicts and the stored event is overlaid.
+#[tokio::test]
+async fn an_alias_in_the_path_is_no_parent() {
+    let event = json!({"id": "ev-0001", "user_id": "u1", "kind": "login"});
+    let api = api_of(
+        PEOPLE,
+        true,
+        vec![
+            Ok(event.to_string()),
+            Ok(json!([{"id": "ev-0001", "user_id": "u1", "kind": "stale"}]).to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/events", Some(json!({"kind": "login"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/users/me/events").await;
+    assert_eq!(body, json!([event]));
+}
+
+/// A member of list A listed under B (many to many) stays in B's list, as generated.
+#[tokio::test]
+async fn a_member_of_two_lists_stays_in_both() {
+    let generated = json!([{"id": "h1", "list_id": "B", "name": "made up"}]);
+    let api = api_of(
+        PEOPLE,
+        true,
+        vec![
+            Ok(json!({"id": "h1", "list_id": "A", "name": "Hal"}).to_string()),
+            Ok(generated.to_string()),
+        ],
+    );
+    let (status, _) = api
+        .call("POST", "/lists/A/members", Some(json!({"name": "Hal"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/lists/B/members").await;
+    assert_eq!(body, generated);
+}
+
+/// Notes whose summary declares its `owner` in two `allOf` parts.
+const NOTES: &str = r##"
+openapi: 3.1.0
+info: {title: Notes, version: "1"}
+paths:
+  /notes:
+    get:
+      operationId: listNotes
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/NoteItem"}}}}}
+    post:
+      operationId: createNote
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+  /notes/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getNote
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+components:
+  schemas:
+    Note:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        owner: {type: object, properties: {id: {type: string}, name: {type: string}, email: {type: string}}}
+    NoteItem:
+      allOf:
+        - type: object
+          required: [id]
+          properties:
+            id: {type: string}
+            owner: {type: object, properties: {id: {type: string}}}
+        - type: object
+          properties:
+            owner: {type: object, properties: {name: {type: string}}}
+"##;
+
+/// Two `allOf` parts declaring the same member: the overlay keeps what either declares.
+#[tokio::test]
+async fn all_of_parts_of_a_member_are_merged() {
+    let api = api_of(
+        NOTES,
+        true,
+        vec![
+            Ok(
+                json!({"id": "n1", "owner": {"id": "o1", "name": "Olu", "email": "o@x"}})
+                    .to_string(),
+            ),
+            Ok(json!([{"id": "n1", "owner": {"id": "o1"}}]).to_string()),
+        ],
+    );
+    let (status, _) = api.call("POST", "/notes", Some(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let body = api.get("/notes").await;
+    assert_eq!(
+        body,
+        json!([{"id": "n1", "owner": {"id": "o1", "name": "Olu"}}])
+    );
+}
+
+fn labelled() -> Value {
+    json!([
+        with(ticket("t1", "open"), "labels", json!(["bug", "Urgent"])),
+        with(ticket("t2", "open"), "labels", json!([" bug "])),
+        with(ticket("t3", "open"), "labels", json!(["bugfix", "urgent"])),
+        ticket("t4", "open"),
+        with(ticket("t5", "open"), "labels", json!(["docs"])),
+    ])
+}
+
+/// A text parameter naming an array of strings keeps the items whose array holds any
+/// of its comma-separated parts, as an `enum` set keeps any of its values: whole,
+/// trimmed and ignoring case. An item without the array stays.
+#[tokio::test]
+async fn an_array_filter_keeps_items_holding_any_part() {
+    let api = api_of(
+        TICKETS,
+        true,
+        vec![Ok(labelled().to_string()), Ok(labelled().to_string())],
+    );
+    let body = api.get("/tickets?labels=bug,urgent").await;
+    assert_eq!(ids(&body), ["t1", "t2", "t3", "t4"]);
+    let body = api.get("/tickets?labels=bug").await;
+    assert_eq!(ids(&body), ["t1", "t2", "t4"]);
+}
+
+/// Only a parameter whose whole name names an array filters it: `tag_name`,
+/// `exclude_labels`, `without_tags` and `tag_ids` change nothing.
+#[tokio::test]
+async fn a_word_of_a_parameter_names_no_array() {
+    let list = json!([
+        with(
+            with(ticket("t1", "open"), "tags", json!(["prod"])),
+            "labels",
+            json!(["bug"])
+        ),
+        with(ticket("t2", "open"), "tags", json!(["staging"])),
+        with(ticket("t3", "open"), "tags", json!([])),
+    ]);
+    let script = (0..4).map(|_| Ok(list.to_string())).collect();
+    let api = api_of(TICKETS, true, script);
+    for uri in [
+        "/tickets?tag_name=prod",
+        "/tickets?exclude_labels=bug",
+        "/tickets?without_tags=prod",
+        "/tickets?tag_ids=prod",
+    ] {
+        assert_eq!(api.get(uri).await, list, "{uri}");
+    }
+}
+
+/// A reference filter drops an item whose reference is `null`; one without the member
+/// stays.
+#[tokio::test]
+async fn a_null_reference_contradicts_a_value() {
+    let list = json!([
+        with(ticket("t1", "open"), "assignee_id", json!(7)),
+        with(ticket("t2", "open"), "assignee_id", Value::Null),
+        with(ticket("t3", "open"), "assignee_id", json!(8)),
+        ticket("t4", "open"),
+    ]);
+    let api = api_of(TICKETS, true, vec![Ok(list.to_string())]);
+    let body = api.get("/tickets?assignee_id=7").await;
+    assert_eq!(ids(&body), ["t1", "t4"]);
+}
+
+fn four() -> Value {
+    json!([
+        ticket("tk-001", "open"),
+        ticket("tk-002", "open"),
+        ticket("tk-0010", "open"),
+        ticket("2", "open"),
+    ])
+}
+
+/// A parameter naming no member changes nothing, whatever its value: a bound naming an
+/// item (`before=tk-001`, with or without `inclusive`), a number (`page=2`), a search
+/// (`q`, even for an item's id), and a parameter's own `enum` word (`status=all`).
+#[tokio::test]
+async fn parameters_naming_nothing_change_nothing() {
+    let uris = [
+        "/tickets?before=tk-001",
+        "/tickets?before=tk-001&inclusive=true",
+        "/tickets?page=2",
+        "/tickets?q=bug",
+        "/tickets?q=tk-001",
+        "/tickets?status=all",
+        "/tickets?labels=",
+    ];
+    let script = uris.iter().map(|_| Ok(four().to_string())).collect();
+    let api = api_of(TICKETS, true, script);
+    for uri in uris {
+        let body = api.get(uri).await;
+        assert_eq!(body, four(), "{uri}");
+    }
+}
+
+/// Lists paged by a token: a top-level one named as its query parameter, one inside
+/// an object beside the list whose name ends with its parameter, a constant one, and
+/// a list with no token at all.
+const PAGES: &str = r##"
+openapi: 3.1.0
+info: {title: Pages, version: "1"}
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer}}
+        - {name: next_page_token, in: query, schema: {type: string}}
+        - {name: name, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_token: {type: string}
+                  total_records: {type: integer}
+  /users/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getUser
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+    patch:
+      operationId: updateUser
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+    delete:
+      operationId: deleteUser
+      responses:
+        "204": {description: gone}
+  /feed:
+    get:
+      operationId: listFeed
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  has_more: {type: boolean}
+                  next_cursor: {type: string}
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: status, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  data: {type: array, items: {$ref: "#/components/schemas/Order"}}
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: query, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: {type: string}
+                  results: {type: array, items: {$ref: "#/components/schemas/User"}}
+  /deals:
+    get:
+      operationId: listDeals
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  additional_data:
+                    type: object
+                    properties:
+                      next_cursor: {type: [string, "null"]}
+  /frozen:
+    get:
+      operationId: listFrozen
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  cursor: {type: string, const: ""}
+  /linked:
+    get:
+      operationId: listLinked
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: page, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  links: {type: object, properties: {next: {type: string}}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, name: {type: string}}
+    Order:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, status: {type: string}}
+"##;
+
+fn users(n: usize) -> Vec<Value> {
+    (1..=n)
+        .map(|i| json!({"id": format!("u{i}"), "name": format!("N{i}")}))
+        .collect()
+}
+
+fn ids_in<'a>(body: &'a Value, member: &str) -> Vec<&'a str> {
+    body[member]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["id"].as_str().unwrap())
+        .collect()
+}
+
+/// A page cut short gets a token the next request serves the rest by, page by page,
+/// with no model call; the last page has none, and the total is as generated.
+#[tokio::test]
+async fn a_cut_page_mints_a_token_for_the_rest() {
+    let answer = json!({"users": users(5), "next_page_token": "model-token", "total_records": 5});
+    let api = cached_api_of(PAGES, vec![Ok(answer.to_string())]);
+    let first = api.get("/users?page_size=2").await;
+    assert_eq!(ids_in(&first, "users"), ["u1", "u2"]);
+    let token = first["next_page_token"].as_str().unwrap().to_string();
+    assert!(!token.is_empty() && token != "model-token", "{first}");
+    let second = api
+        .get(&format!("/users?page_size=2&next_page_token={token}"))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u3", "u4"], "{second}");
+    assert_eq!(second["total_records"], 5);
+    let again = second["next_page_token"].as_str().unwrap().to_string();
+    assert!(!again.is_empty() && again != token, "{second}");
+    // No size asked: the first page's.
+    let last = api.get(&format!("/users?next_page_token={again}")).await;
+    assert_eq!(ids_in(&last, "users"), ["u5"], "{last}");
+    assert!(
+        last.get("next_page_token")
+            .is_none_or(|t| t.as_str() == Some("")),
+        "{last}"
+    );
+    // The first page again is the same page, with a token that still serves.
+    assert_eq!(api.get("/users?page_size=2").await, first);
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// The rest of a cut page is the session's: a read of one of its items is answered
+/// from state.
+#[tokio::test]
+async fn the_rest_of_a_cut_page_is_stored() {
+    let answer = json!({"users": users(3)});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    api.get("/users?page_size=1").await;
+    let user = api.get("/users/u3").await;
+    assert_eq!(user["name"], "N3");
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A token inside an object beside the list, named `next_cursor` for `cursor`, and a
+/// last page whose token is `null`.
+#[tokio::test]
+async fn a_nested_cursor_pages_the_rest() {
+    let answer = json!({"data": users(3), "additional_data": {"next_cursor": null}});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/deals?limit=2").await;
+    assert_eq!(ids_in(&first, "data"), ["u1", "u2"]);
+    let cursor = first["additional_data"]["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let last = api.get(&format!("/deals?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(
+        last["additional_data"]["next_cursor"],
+        Value::Null,
+        "{last}"
+    );
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A token the session did not mint is the model's to answer.
+#[tokio::test]
+async fn an_unknown_token_is_generated() {
+    let page = json!({"users": users(1)});
+    let api = api_of(
+        PAGES,
+        true,
+        vec![Ok(page.to_string()), Ok(page.to_string())],
+    );
+    api.get("/users?page_size=2&next_page_token=0123456789abcdef0123456789abcdef01234567")
+        .await;
+    api.get("/users?page_size=2&next_page_token=elsewhere")
+        .await;
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A page that is not cut keeps the model's token, a token the schema holds constant
+/// is not minted, and a list with no token member pairing a parameter only is cut.
+#[tokio::test]
+async fn no_token_where_the_contract_has_no_place_for_one() {
+    let whole = json!({"users": users(2), "next_page_token": "model-token"});
+    let frozen = json!({"items": users(3), "cursor": ""});
+    let linked = json!({"items": users(3), "links": {"next": "/linked?page=2"}});
+    let api = api_of(
+        PAGES,
+        true,
+        vec![
+            Ok(whole.to_string()),
+            Ok(frozen.to_string()),
+            Ok(linked.to_string()),
+        ],
+    );
+    assert_eq!(api.get("/users?page_size=2").await, whole);
+    let body = api.get("/frozen?limit=2").await;
+    assert_eq!(body["cursor"], "");
+    assert_eq!(ids_in(&body, "items"), ["u1", "u2"]);
+    let body = api.get("/linked?limit=2").await;
+    assert_eq!(ids_in(&body, "items"), ["u1", "u2"]);
+    assert_eq!(body["links"], json!({"next": "/linked?page=2"}));
+}
+
+/// With consistency off, nothing is cut or minted.
+#[tokio::test]
+async fn consistency_off_mints_nothing() {
+    let answer = json!({"users": users(3), "next_page_token": "model-token"});
+    let api = api_of(PAGES, false, vec![Ok(answer.to_string())]);
+    assert_eq!(api.get("/users?page_size=2").await, answer);
+}
+
+/// The first page of five users, two to a page, and its token.
+async fn first_of_five(api: &Api, query: &str) -> String {
+    let first = api.get(&format!("/users?page_size=2{query}")).await;
+    assert_eq!(ids_in(&first, "users"), ["u1", "u2"], "{first}");
+    first["next_page_token"].as_str().unwrap().to_string()
+}
+
+fn five() -> Result<String, LlmError> {
+    Ok(json!({"users": users(5)}).to_string())
+}
+
+/// A record deleted after the cut leaves the page it would be served on, and one
+/// deleted before is not kept for a later page at all.
+#[tokio::test]
+async fn a_deleted_item_leaves_a_served_page() {
+    let api = api_of(PAGES, true, vec![five(), Ok(String::new())]);
+    let token = first_of_five(&api, "").await;
+    let (status, _) = api.call("DELETE", "/users/u3", None).await;
+    assert!(status.is_success(), "{status}");
+    let second = api
+        .get(&format!("/users?page_size=2&next_page_token={token}"))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u4"], "{second}");
+
+    let api = api_of(PAGES, true, vec![Ok(String::new()), five()]);
+    let (status, _) = api.call("DELETE", "/users/u4", None).await;
+    assert!(status.is_success(), "{status}");
+    let token = first_of_five(&api, "").await;
+    let second = api
+        .get(&format!("/users?page_size=2&next_page_token={token}"))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u3", "u5"], "{second}");
+}
+
+/// A served page shows what the session wrote since, and the first request's filters
+/// apply to it: `u3` renamed is no `name=N` user.
+#[tokio::test]
+async fn a_served_page_is_overlaid_and_filtered() {
+    let renamed = json!({"id": "u3", "name": "Z"});
+    let api = api_of(PAGES, true, vec![five(), Ok(renamed.to_string())]);
+    let token = first_of_five(&api, "&name=N").await;
+    let (status, _) = api
+        .call("PATCH", "/users/u3", Some(json!({"name": "Z"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let second = api
+        .get(&format!(
+            "/users?page_size=2&name=N&next_page_token={token}"
+        ))
+        .await;
+    assert_eq!(ids_in(&second, "users"), ["u4"], "{second}");
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A token is bound to the first request's filters: with others it is the model's.
+#[tokio::test]
+async fn a_token_with_other_filters_is_generated() {
+    let other = json!({"users": [{"id": "x1", "name": "X"}]});
+    let api = api_of(PAGES, true, vec![five(), Ok(other.to_string())]);
+    let token = first_of_five(&api, "&name=N").await;
+    let body = api
+        .get(&format!(
+            "/users?page_size=2&name=X&next_page_token={token}"
+        ))
+        .await;
+    assert_eq!(ids_in(&body, "users"), ["x1"], "{body}");
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// The same token twice serves the same page, with the same next token.
+#[tokio::test]
+async fn a_retried_token_serves_the_same_page() {
+    let api = api_of(PAGES, true, vec![five()]);
+    let token = first_of_five(&api, "").await;
+    let uri = format!("/users?page_size=2&next_page_token={token}");
+    let once = api.get(&uri).await;
+    let twice = api.get(&uri).await;
+    assert_eq!(once, twice);
+    assert_eq!(ids_in(&once, "users"), ["u3", "u4"]);
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A member named as a filter of the items (`status`) is no cursor, nor is one that
+/// echoes the request (`query`): neither gets a token, and the list is only cut.
+#[tokio::test]
+async fn a_filter_or_an_echo_is_no_cursor() {
+    let orders = json!({
+        "status": "ok",
+        "data": [{"id": "o1", "status": "paid"}, {"id": "o2", "status": "paid"}],
+    });
+    let found = json!({"query": "ann", "results": users(3)});
+    let api = api_of(
+        PAGES,
+        true,
+        vec![Ok(orders.to_string()), Ok(found.to_string())],
+    );
+    let body = api.get("/orders?limit=1").await;
+    assert_eq!(body["status"], "ok", "{body}");
+    assert_eq!(ids_in(&body, "data"), ["o1"]);
+    let body = api.get("/search?limit=1&query=ann").await;
+    assert_eq!(body["query"], "ann", "{body}");
+    assert_eq!(ids_in(&body, "results"), ["u1"]);
+}
+
+/// A `has_more` beside the cursor that the first page set is `false` on the last.
+#[tokio::test]
+async fn the_last_page_has_no_more() {
+    let answer = json!({"data": users(3), "has_more": true, "next_cursor": "made-up"});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/feed?limit=2").await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    assert_ne!(cursor, "made-up");
+    let last = api.get(&format!("/feed?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(last["has_more"], false, "{last}");
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// An empty cursor (`cursor=`) asks for the first page, which mints as without one.
+#[tokio::test]
+async fn an_empty_cursor_is_no_cursor() {
+    let answer = json!({"data": users(3), "next_cursor": ""});
+    let api = api_of(PAGES, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/feed?limit=2&cursor=").await;
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    assert!(!cursor.is_empty(), "{first}");
+    let last = api.get(&format!("/feed?limit=2&cursor={cursor}")).await;
+    assert_eq!(ids_in(&last, "data"), ["u3"]);
+    assert_eq!(api.provider.requests().len(), 1);
 }

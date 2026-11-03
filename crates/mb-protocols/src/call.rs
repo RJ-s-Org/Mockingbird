@@ -31,6 +31,7 @@ use crate::{
 mod deleted;
 mod lists;
 mod minted;
+mod pages;
 mod value_index;
 mod world;
 
@@ -912,6 +913,16 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(served);
     }
 
+    // The next page of a list this session cut, by the token it minted.
+    if target.is_none()
+        && let Some(served) = pages::serve(&mut state, plan, call)
+            .instrument(state_span())
+            .await
+    {
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(served);
+    }
+
     let is_query = matches!(op.kind, OperationKind::Query);
     let cache = rt
         .state
@@ -1164,7 +1175,13 @@ pub(crate) async fn complete(
             && deleted::applies(rt, plan)
             && let Some(body) = generated.body.as_mut()
         {
-            lists::narrow(rt, plan, call, body);
+            // The store first: a filter sees what the session wrote since.
+            lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
+            if let Some(cut) = lists::narrow(rt, plan, call, body)
+                && !transient_fallback(&generated)
+            {
+                pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await;
+            }
         }
         if (200..300).contains(&generated.status)
             && let Some(t) = resource_type
@@ -4665,23 +4682,7 @@ fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option
     if paths.peek().is_some() {
         return Some(paths.all(|text| path_shows(text, owner)));
     }
-    let index = rt.index();
-    let schema = index.record_schemas.get(&r.resource_type).or_else(|| {
-        let i = index.detail_reads.get(&r.resource_type)?;
-        rt.bundle()
-            .operations
-            .get(*i)?
-            .success_output()?
-            .schema
-            .as_ref()
-    });
-    let (parts, _) = schema_parts(rt.bundle(), schema);
-    let own_type = |member: &str| {
-        let inner = parts.iter().find_map(|p| p.get("properties")?.get(member));
-        let (_, defs) = schema_parts(rt.bundle(), inner);
-        defs.iter()
-            .any(|d| index.types_by_def.get(*d) == Some(&r.resource_type))
-    };
+    let own_type = |member: &str| typed_as_own(rt, &r.resource_type, member);
     let holds = |value: &Value| match value {
         Value::Object(inner) => inner
             .values()
@@ -4709,6 +4710,27 @@ fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option
     strings()
         .any(|text| text.contains("://") && path_shows(text, owner))
         .then_some(true)
+}
+
+/// Whether the contract types `member` of a `resource_type` record as that same type
+/// (a task's `parent`, a user's `manager`), by the type's record schema: such a member
+/// names another of its kind, not an owner.
+fn typed_as_own(rt: &MockRuntime, resource_type: &str, member: &str) -> bool {
+    let index = rt.index();
+    let schema = index.record_schemas.get(resource_type).or_else(|| {
+        let i = index.detail_reads.get(resource_type)?;
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    let (parts, _) = schema_parts(rt.bundle(), schema);
+    let inner = parts.iter().find_map(|p| p.get("properties")?.get(member));
+    let (_, defs) = schema_parts(rt.bundle(), inner);
+    defs.iter()
+        .any(|d| index.types_by_def.get(*d).map(String::as_str) == Some(resource_type))
 }
 
 /// Whether `r` shows it is `owner`'s (see [`owner_evidence`]).
