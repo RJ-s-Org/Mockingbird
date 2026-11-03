@@ -34,7 +34,7 @@ mod minted;
 mod value_index;
 mod world;
 
-pub(crate) use value_index::ValueIndex;
+pub(crate) use value_index::{ValueFeed, ValueIndex};
 mod write_memory;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";

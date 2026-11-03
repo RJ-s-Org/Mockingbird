@@ -120,6 +120,7 @@ components:
         joined: {type: string, format: date}
         api_key: {type: string}
         timezone: {type: string}
+        status: {type: string}
     Ticket:
       type: object
       required: [id, subject]
@@ -225,16 +226,140 @@ impl StateStore for Shared {
     }
 }
 
+/// The in-memory store, as only this process writes to it, that counts the reads of
+/// each record and can be made to fail them.
+struct Flaky {
+    inner: Arc<MemoryStore>,
+    /// Reads of (type, id) so far.
+    reads: std::sync::Mutex<std::collections::HashMap<(String, String), usize>>,
+    /// The record whose next read fails.
+    fail: std::sync::Mutex<Option<(String, String)>>,
+}
+
+impl Flaky {
+    fn reads_of(&self, t: &str, id: &str) -> usize {
+        let reads = self.reads.lock().unwrap();
+        reads
+            .get(&(t.to_string(), id.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn fail_next_read_of(&self, t: &str, id: &str) {
+        *self.fail.lock().unwrap() = Some((t.to_string(), id.to_string()));
+    }
+}
+
+#[async_trait::async_trait]
+impl StateStore for Flaky {
+    async fn get(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        id: &str,
+    ) -> Result<Option<StoredResource>, StateError> {
+        let key = (t.to_string(), id.to_string());
+        *self.reads.lock().unwrap().entry(key.clone()).or_default() += 1;
+        let failing = {
+            let mut fail = self.fail.lock().unwrap();
+            let hit = fail.as_ref() == Some(&key);
+            if hit {
+                *fail = None;
+            }
+            hit
+        };
+        if failing {
+            return Err(StateError::Backend("injected".into()));
+        }
+        self.inner.get(s, t, id).await
+    }
+    async fn list(
+        &self,
+        s: &SessionKey,
+        t: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.list(s, t, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: StoredResource) -> Result<(), StateError> {
+        self.inner.upsert(s, r).await
+    }
+    async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, StateError> {
+        self.inner.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.reset(s).await
+    }
+    async fn reset_mock(&self, w: &str, m: &str) -> Result<(), StateError> {
+        self.inner.reset_mock(w, m).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
+        self.inner.touch(s).await
+    }
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        self.inner.touch_live(s).await
+    }
+    async fn sessions(&self, w: &str, m: &str) -> Result<Vec<SessionInfo>, StateError> {
+        self.inner.sessions(w, m).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<StoredResource>, StateError> {
+        self.inner.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, r: Vec<StoredResource>) -> Result<(), StateError> {
+        self.inner.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), StateError> {
+        self.inner.ping().await
+    }
+    fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
+        self.inner.subscribe()
+    }
+    fn local_only(&self) -> bool {
+        true
+    }
+}
+
+/// A harness over the in-memory store behind the response cache, as a single node
+/// serves it.
 fn harness(script: Vec<Value>) -> Harness {
     let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
-    harness_on(Arc::clone(&store) as Arc<dyn StateStore>, store, script)
+    let cached = mb_state::CachingStateStore::wrap(
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
+    harness_on(cached, store, script)
+}
+
+/// A harness over a [`Flaky`] store, whose breaker lets every call try the store.
+fn flaky(script: Vec<Value>) -> (Harness, Arc<Flaky>) {
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let flaky = Arc::new(Flaky {
+        inner: Arc::clone(&store),
+        reads: std::sync::Mutex::default(),
+        fail: std::sync::Mutex::default(),
+    });
+    let state = Arc::clone(&flaky) as Arc<dyn StateStore>;
+    let h = harness_with(state, store, script, |rt| {
+        rt.state_health = Arc::new(mb_protocols::StateHealth::new(Duration::ZERO));
+    });
+    (h, flaky)
 }
 
 /// A harness whose runtime goes through `state`, which keeps its records in `store`.
 fn harness_on(state: Arc<dyn StateStore>, store: Arc<MemoryStore>, script: Vec<Value>) -> Harness {
+    harness_with(state, store, script, |_| {})
+}
+
+fn harness_with(
+    state: Arc<dyn StateStore>,
+    store: Arc<MemoryStore>,
+    script: Vec<Value>,
+    change: impl FnOnce(&mut MockRuntime),
+) -> Harness {
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
-    let rt = MockRuntime::new(
+    let mut rt = MockRuntime::new(
         "m",
         Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
         Arc::new(Engine::new(
@@ -243,6 +368,7 @@ fn harness_on(state: Arc<dyn StateStore>, store: Arc<MemoryStore>, script: Vec<V
         )),
         state,
     );
+    change(&mut rt);
     Harness {
         router: http_rest::router(Arc::new(rt)),
         provider,
@@ -744,4 +870,88 @@ async fn sessions_do_not_see_each_others_values() {
     assert!(!h.prompt(1).contains("ct-000101"), "{}", h.prompt(1));
     create_ticket(&h, Some("a"), body).await;
     assert!(related_holds(&h.prompt(2), "ct-000101"), "{}", h.prompt(2));
+}
+
+/// A common value under the very member it is stored in still names nothing: a time zone
+/// or a status word is no identifier, however unique it happens to be.
+#[tokio::test]
+async fn common_values_under_the_same_name_show_nothing() {
+    for (member, value) in [("timezone", "America/New_York"), ("status", "in_progress")] {
+        let mut stored = contact("ct-000101", "jane.roe@example.com");
+        stored[member] = json!(value);
+        let h = harness(vec![stored, json!({"id": "tk-000001", "subject": "Help"})]);
+        create_contact(&h, None).await;
+        let mut body = json!({"subject": "Help"});
+        body[member] = json!(value);
+        create_ticket(&h, None, body).await;
+        let prompt = h.prompt(1);
+        assert!(
+            block(&prompt, "related_resources").is_none(),
+            "{member}: {prompt}"
+        );
+    }
+}
+
+/// A read the store failed says nothing of the record: the index keeps it, and the next
+/// request finds it.
+#[tokio::test]
+async fn a_failed_read_back_forgets_nothing() {
+    let (h, store) = flaky(vec![
+        contact("ct-000101", "jane.roe@example.com"),
+        json!({"id": "tk-000001", "subject": "Help"}),
+        ticket("tk-000002", json!({})),
+    ]);
+    create_contact(&h, None).await;
+    store.fail_next_read_of("contacts", "ct-000101");
+    let body = json!({"subject": "Help", "email": "jane.roe@example.com"});
+    create_ticket(&h, None, body.clone()).await;
+    assert!(!h.prompt(1).contains("ct-000101"), "{}", h.prompt(1));
+    create_ticket(&h, None, body).await;
+    assert!(related_holds(&h.prompt(2), "ct-000101"), "{}", h.prompt(2));
+}
+
+/// A record the id lookup already showed costs the index no read of its own.
+#[tokio::test]
+async fn a_record_in_hand_is_not_read_back() {
+    let (h, store) = flaky(vec![
+        contact("ct-000101", "jane.roe@example.com"),
+        json!({"effects": [], "response": {"ok": true}}),
+    ]);
+    create_contact(&h, None).await;
+    let before = store.reads_of("contacts", "ct-000101");
+    h.call("POST", "/moves", Some(json!({"subject": "ct-000101"})))
+        .await;
+    assert!(related_holds(&h.prompt(1), "Jane Roe"), "{}", h.prompt(1));
+    assert_eq!(store.reads_of("contacts", "ct-000101") - before, 1);
+}
+
+/// A delete the store reports, made where this runtime did not see it, is dropped from
+/// the index at once: even past the holders a request reads back, the one record left
+/// is shown.
+#[tokio::test]
+async fn a_reported_delete_is_dropped_from_the_index() {
+    let mut script: Vec<Value> = (1..=5)
+        .map(|n| contact(&format!("ct-00010{n}"), "jane.roe@example.com"))
+        .collect();
+    script.push(ticket("tk-000001", json!({})));
+    let h = harness(script);
+    for _ in 1..=5 {
+        create_contact(&h, None).await;
+    }
+    for n in 1..=4 {
+        h.store
+            .delete(&session(), "contacts", &format!("ct-00010{n}"))
+            .await
+            .unwrap();
+    }
+    // The feed is delivered on its own task.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    create_ticket(
+        &h,
+        None,
+        json!({"subject": "Help", "email": "jane.roe@example.com"}),
+    )
+    .await;
+    let prompt = h.prompt(5);
+    assert!(related_holds(&prompt, "ct-000105"), "{prompt}");
 }

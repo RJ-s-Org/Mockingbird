@@ -402,7 +402,10 @@ pub struct MockRuntime {
     path_aliases: call::PathAliases,
     /// The identities and member values of this runtime's writes (see
     /// [`call::ValueIndex`]).
-    value_index: call::ValueIndex,
+    value_index: Arc<call::ValueIndex>,
+    /// What keeps [`Self::value_index`] up with the deletes `state` reports, when built in
+    /// a Tokio runtime. It follows the store the runtime was built with.
+    _value_feed: Option<call::ValueFeed>,
     /// Which types each session was last seen writing (see [`call::WrittenTypes`]).
     written_types: call::WrittenTypes,
     /// Which stored resources are a plain read's own answer (see
@@ -499,6 +502,8 @@ impl MockRuntime {
         let data_plane_auth = DataPlaneAuth::default();
         let credential_names = CredentialNames::new(&data_plane_auth, &bundle);
         let index = call::BundleIndex::new(&bundle);
+        let value_index = Arc::new(call::ValueIndex::default());
+        let value_feed = call::ValueIndex::follow(&value_index, state.as_ref());
         Self {
             name: name.into(),
             workspace: "default".into(),
@@ -527,7 +532,8 @@ impl MockRuntime {
             credential_names,
             index,
             path_aliases: call::PathAliases::default(),
-            value_index: call::ValueIndex::default(),
+            value_index,
+            _value_feed: value_feed,
             written_types: call::WrittenTypes::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),

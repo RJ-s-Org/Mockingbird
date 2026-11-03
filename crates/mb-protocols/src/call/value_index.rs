@@ -14,9 +14,13 @@
 //!   identity of;
 //! - failing that, a whole value matches the one record holding it in a member of the
 //!   same name as the request's member, by stem or by whole words (`requester_email` names
-//!   `email`; `zone` names no `timezone`). Records of the type the operation creates or
-//!   targets are its siblings and left out; a value an id lookup already resolved, and a
-//!   member that is a reference (`<x>_id`, or named after a type), never take this path;
+//!   `email`; `zone` names no `timezone`). Only a value that identifies what holds it
+//!   counts ([`identifies`]): a member of `format` `email`, `uuid`, `uri` or `hostname`,
+//!   or a value holding an `@`, or of eight or more with letters and digits both, never a
+//!   date or a time; a time zone or a status word is no reference, however unique.
+//!   Records of the type the operation creates or targets are its siblings and left out;
+//!   a value an id lookup already resolved, and a member that is a reference (`<x>_id`, or
+//!   named after a type), never take this path;
 //! - a delimited token of a longer string (split on what is not alphanumeric) matches
 //!   only a record whose identity it is, exactly;
 //! - a short value under an identity member of an object matches only a record whose
@@ -31,21 +35,26 @@
 //! create marks as referenced ([`world::referenced_by_value`]), and an answer's body is
 //! never stored on it.
 //!
-//! The index is a hint of this runtime's writes, as [`PathAliases`] is. Resets, mock
-//! resets and expiry happen in the store (from the Admin API or its sweep), where no
-//! runtime sees them, so every holder of a value is read back before uniqueness is
-//! decided: a record gone or changed since is forgotten, and neither matches nor makes a
-//! value ambiguous. Each session keeps at most [`MAX_SESSION_ENTRIES`] entries, the
-//! oldest records going first, and the least recently written of more than
-//! [`MAX_SESSIONS`] sessions is dropped whole.
+//! The index is a hint of this runtime's writes, as [`PathAliases`] is: records the
+//! Admin API seeds or upserts are not in it, and do not match through it. A delete the
+//! store's change feed reports, made anywhere, drops its record at once
+//! ([`ValueIndex::follow`]). Resets, mock resets, seeds and expiry publish no change,
+//! and the runtime does not know the store's session TTL, so every holder of a value is
+//! also read back before uniqueness is decided: a record the store says is gone or
+//! changed is forgotten, and neither matches nor makes a value ambiguous. A read the
+//! store failed, or the breaker held off, forgets nothing and decides nothing. A record
+//! the request's other lookups already showed costs no read. Each session keeps at most
+//! [`MAX_SESSION_ENTRIES`] entries, the oldest records going first, and the least
+//! recently written of more than [`MAX_SESSIONS`] sessions is dropped whole.
 //!
 //! An identity is unique by construction, so matching identities is safe whatever the
 //! store. A member value's uniqueness is known only where this process sees every write:
-//! with a store other nodes write to (SQL, Redis, a relayed bus; see
+//! with a store other nodes write to (SQL, Redis, a bus to other nodes; see
 //! [`mb_state::StateStore::local_only`]), members are not indexed and only identities
-//! match.
+//! match. A single node's store, the in-memory one behind a local bus, is local only.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mb_state::INTERNAL_TYPE;
 
@@ -65,9 +74,13 @@ const MIN_WORD_TOKEN_LEN: usize = 16;
 /// Members of one record indexed, at most, besides its identity.
 const MAX_MEMBERS: usize = 16;
 /// Entries one session keeps at most; the oldest records go first.
-const MAX_SESSION_ENTRIES: usize = 4096;
+const MAX_SESSION_ENTRIES: usize = 2048;
 /// Sessions the index keeps at most; the least recently written goes first.
-const MAX_SESSIONS: usize = 256;
+const MAX_SESSIONS: usize = 64;
+/// Shortest member value matched by its shape alone, with letters and digits both.
+const MIN_SHAPED_LEN: usize = 8;
+/// The `format`s whose values identify what holds them.
+const IDENTIFYING_FORMATS: [&str; 4] = ["email", "uuid", "uri", "hostname"];
 /// Values of one request matched, at most.
 const MAX_CANDIDATES: usize = 16;
 /// How deep a request is walked.
@@ -154,6 +167,17 @@ struct Entries {
 #[derive(Debug, Default)]
 pub(crate) struct ValueIndex(std::sync::Mutex<Entries>);
 
+/// The task following the store's feed for a [`ValueIndex`] (see [`ValueIndex::follow`]),
+/// stopped when dropped.
+#[derive(Debug)]
+pub(crate) struct ValueFeed(tokio::task::JoinHandle<()>);
+
+impl Drop for ValueFeed {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl ValueIndex {
     /// Indexes `record` as it is now stored, in place of what it was indexed under.
     #[cfg(test)]
@@ -224,6 +248,42 @@ impl ValueIndex {
         }
     }
 
+    /// Forgets everything: what the index missed of the store's feed could be anything.
+    fn clear(&self) {
+        if let Ok(mut entries) = self.0.lock() {
+            entries.sessions.clear();
+        }
+    }
+
+    /// Follows `state`'s change feed on its own task, so that a delete the store reports,
+    /// made anywhere (the Admin API, another node), drops its record at once, holders a
+    /// request would not read back included. Resets and seeds publish no change, so their
+    /// records go when a read back finds them gone. A feed that lagged clears the index.
+    /// `None` outside a Tokio runtime, or with no feed to follow.
+    pub(crate) fn follow(index: &Arc<Self>, state: &dyn mb_state::StateStore) -> Option<ValueFeed> {
+        use tokio::sync::broadcast::error::RecvError;
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let mut changes = state.subscribe();
+        let index = Arc::downgrade(index);
+        let task = handle.spawn(async move {
+            loop {
+                let change = changes.recv().await;
+                let Some(index) = index.upgrade() else {
+                    return;
+                };
+                match change {
+                    Ok(change) if change.kind == mb_state::ChangeKind::Deleted => {
+                        index.forget(&change.session, &change.resource_type, &change.id);
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => index.clear(),
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        });
+        Some(ValueFeed(task))
+    }
+
     fn holders(&self, session: &SessionKey, value: &str) -> Vec<Holder> {
         self.0
             .lock()
@@ -281,6 +341,37 @@ fn trivial_member(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
     })
 }
 
+/// Whether `text` is shaped like a date or a time: digits and only the separators a date
+/// or a time uses (`2026-11-03`, `10:00:00Z`, `20261103T100000Z`, `2026/11/03`). A phone
+/// number has the same shape, and is no identifier either.
+fn date_or_time_shaped(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_digit())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | '/' | '.' | '+' | 'T' | 'Z'))
+}
+
+/// Whether a member value identifies what holds it, by its schema or its shape: a member
+/// whose `format` is an identifier's ([`IDENTIFYING_FORMATS`]), or a value holding an `@`,
+/// or of at least [`MIN_SHAPED_LEN`] with letters and digits both. A time zone
+/// (`America/New_York`), a status (`in_progress`), a locale or a media type is none, and
+/// a date or a time never is.
+fn identifies(bundle: &mb_mcm::Bundle, schema: &Value, text: &str) -> bool {
+    if date_or_time_shaped(text) {
+        return false;
+    }
+    let by_format = schema_parts(bundle, Some(schema)).0.iter().any(|part| {
+        part.get("format")
+            .and_then(Value::as_str)
+            .is_some_and(|f| IDENTIFYING_FORMATS.contains(&f))
+    });
+    let by_shape = text.contains('@')
+        || (text.len() >= MIN_SHAPED_LEN
+            && text.chars().any(|c| c.is_ascii_digit())
+            && text.chars().any(char::is_alphabetic));
+    by_format || by_shape
+}
+
 /// What a record is indexed under, taken before it is handed to the store.
 pub(super) struct Indexed {
     resource_type: String,
@@ -301,9 +392,9 @@ impl Indexed {
 }
 
 /// What `record` is indexed under: its identity and, with a store only this process
-/// writes to, the string members its read's schema declares that have an id's shape, are
-/// not trivial ([`trivial_member`]), are no reference to another record and hold no
-/// credential.
+/// writes to, the string members its read's schema declares that have an id's shape,
+/// identify what holds them ([`identifies`]), are not trivial ([`trivial_member`]), are
+/// no reference to another record and hold no credential.
 fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let id = record.id.as_str();
@@ -345,7 +436,9 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<(Option<Stri
         let declared = parts
             .iter()
             .find_map(|part| part.get("properties")?.get(name.as_str()));
-        if declared.is_none_or(|member| trivial_member(bundle, member)) {
+        if declared.is_none_or(|member| {
+            trivial_member(bundle, member) || !identifies(bundle, member, text)
+        }) {
             continue;
         }
         out.push((Some(name.clone()), text.clone()));
@@ -562,7 +655,11 @@ pub(super) async fn matched(
             break;
         }
         let (holders, value) = eligible(rt, session, candidate, &cx);
-        if holders.is_empty() || holders.len() > MAX_HOLDERS {
+        // A record in hand already is shown: no read for it, and none for its rivals.
+        if holders.is_empty()
+            || holders.len() > MAX_HOLDERS
+            || holders.iter().any(|h| known(&h.resource_type, &h.id))
+        {
             continue;
         }
         // Each holder read back: what is gone or changed counts for nothing.
@@ -584,6 +681,9 @@ pub(super) async fn matched(
             });
             match hit {
                 Some(hit) if holds_it => live.push(hit),
+                // Forgotten only on the store's word: a failed read or a closed breaker
+                // says nothing of the record, and nothing more is decided this call.
+                _ if !state.available() => break 'values,
                 _ => rt
                     .value_index()
                     .forget(session, &holder.resource_type, &holder.id),
@@ -719,6 +819,32 @@ components:
                 member: "z".into(),
             }
         );
+    }
+
+    /// What a member value must look like to identify what holds it.
+    #[test]
+    fn a_member_value_identifies_by_format_or_shape() {
+        let rt = runtime();
+        let bundle = rt.bundle();
+        let plain = serde_json::json!({"type": "string"});
+        let uri = serde_json::json!({"type": "string", "format": "uri"});
+        for text in ["jane@example.com", "acct4711x", "A1B2C3D4"] {
+            assert!(identifies(bundle, &plain, text), "{text}");
+        }
+        for text in [
+            "America/New_York",
+            "in_progress",
+            "en-US",
+            "image/png",
+            "2026-11-03",
+            "2026-11-03T10:00:00Z",
+            "10:00:00",
+            "+1-555-0100",
+        ] {
+            assert!(!identifies(bundle, &plain, text), "{text}");
+        }
+        assert!(identifies(bundle, &uri, "https://example.com/a"));
+        assert!(!identifies(bundle, &uri, "2026-11-03"), "a date never");
     }
 
     #[test]
