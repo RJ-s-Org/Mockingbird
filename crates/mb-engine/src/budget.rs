@@ -698,9 +698,18 @@ impl From<u64> for PageLimit {
     }
 }
 
-/// What a query parameter's name holds, normalized (see [`normalized`]), when it asks
-/// for a page size, as a last resort. Earlier words go first.
-const PAGE_SIZE_WORDS: [&str; 5] = ["limit", "perpage", "size", "first", "top"];
+/// What a query parameter's whole name is, normalized (see [`normalized`]), when it
+/// asks for a page size, as a last resort: never a part of a name, so `topic_id`,
+/// `desktop`, `first_seen` and `image_size` are none. Earlier words go first.
+const PAGE_SIZE_WORDS: [&str; 7] = [
+    "limit",
+    "perpage",
+    "pagesize",
+    "maxresults",
+    "size",
+    "first",
+    "top",
+];
 
 /// Lower case, with only letters and digits.
 fn normalized(name: &str) -> String {
@@ -722,7 +731,8 @@ fn may_be_integer(param: Option<&Value>) -> bool {
 
 /// The page size a request asks for: an integer query parameter whose `maximum` is the
 /// `maxItems` of an array `doc()` holds outside any array, as the contract says so; or
-/// else, as a last resort, one whose name holds `limit`, `per_page`, `size`, `first` or `top`. Zero, or a
+/// else, as a last resort, one named `limit`, `per_page`, `page_size`, `max_results`,
+/// `size`, `first` or `top`, in any case and with any separators. Zero, or a
 /// value that is no number, asks for nothing the budget can keep.
 #[must_use]
 pub fn requested_limit<'a>(
@@ -730,6 +740,16 @@ pub fn requested_limit<'a>(
     doc: impl Fn() -> &'a Value,
     call: &crate::OperationCall,
 ) -> Option<PageLimit> {
+    requested_page(query, doc, call).map(|(_, limit)| limit)
+}
+
+/// [`requested_limit`], with the name of the query parameter that asks for it.
+#[must_use]
+pub fn requested_page<'a, 'c>(
+    query: Option<&Value>,
+    doc: impl Fn() -> &'a Value,
+    call: &'c crate::OperationCall,
+) -> Option<(&'c str, PageLimit)> {
     let declared = query.and_then(|q| q.get("properties"));
     let mut sizes: Vec<(&String, u64, Option<&Value>)> = call
         .query
@@ -746,22 +766,23 @@ pub fn requested_limit<'a>(
         })
         .collect();
     sizes.sort_by_key(|(name, ..)| *name);
-    for (_, items, param) in &sizes {
+    for (name, items, param) in &sizes {
         let maximum = param.and_then(|p| p.get("maximum")).and_then(Value::as_u64);
         if let Some(maximum) = maximum
             && !arrays_up_to(doc(), maximum)?.is_empty()
         {
-            return Some(PageLimit {
+            let limit = PageLimit {
                 items: *items,
                 maximum: Some(maximum),
-            });
+            };
+            return Some((name.as_str(), limit));
         }
     }
     PAGE_SIZE_WORDS.iter().find_map(|word| {
         sizes
             .iter()
-            .find(|(name, ..)| normalized(name).contains(word))
-            .map(|(_, items, _)| PageLimit::from(*items))
+            .find(|(name, ..)| normalized(name) == *word)
+            .map(|(name, items, _)| (name.as_str(), PageLimit::from(*items)))
     })
 }
 
@@ -1151,6 +1172,12 @@ mod tests {
         assert_eq!(size(json!({"q": "5"})), None);
         assert_eq!(size(json!({"PageSize": 5})), Some(5));
         assert_eq!(size(json!({"per-page": 5})), Some(5));
+        assert_eq!(size(json!({"page_size": 5})), Some(5));
+        assert_eq!(size(json!({"maxResults": 5})), Some(5));
+        // A page-size word inside another name is no page size.
+        for other in ["topic_id", "desktop", "first_seen", "image_size", "limited"] {
+            assert_eq!(size(json!({other: 5})), None, "{other}");
+        }
         // Earlier words go first, whatever the query's order.
         assert_eq!(size(json!({"top": 7, "limit": 5})), Some(5));
         // Declared as text, it is no size.
