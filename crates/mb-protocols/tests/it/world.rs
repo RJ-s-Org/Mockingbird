@@ -2734,7 +2734,8 @@ async fn a_shown_header_keys_the_read_cache() {
         LOCALIZED.as_bytes(),
         vec![
             json!([{"id": "e1", "title": "Hello"}]),
-            json!([{"id": "e1", "title": "Bonjour"}]),
+            // Another id: the list overlay would lay the stored e1 over a second e1.
+            json!([{"id": "e2", "title": "Bonjour"}]),
         ],
         |_| {},
     );
