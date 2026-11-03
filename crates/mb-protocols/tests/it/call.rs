@@ -2091,7 +2091,8 @@ async fn the_effects_instruction_says_how_objects_merge() {
         .collect();
     assert!(prompt.contains("member by member"), "{prompt}");
     assert!(
-        prompt.contains("give a map's full new contents"),
+        prompt.contains("give a map's full new contents")
+            && prompt.contains("added but never removed"),
         "{prompt}"
     );
 }
@@ -5694,6 +5695,39 @@ components:
           required: [member_count, follower_count]
           properties: {member_count: {type: integer}, follower_count: {type: integer}}
         sys.version: {type: integer}
+        curator:
+          type: object
+          properties: {uuid: {type: string, readOnly: true}, name: {type: string}, bio: {type: string}}
+        tag:
+          type: object
+          properties: {_id: {type: string}, label: {type: string}, color: {type: string}}
+        payment:
+          oneOf:
+            - $ref: "#/components/schemas/Card"
+            - $ref: "#/components/schemas/Bank"
+        contact:
+          anyOf:
+            - $ref: "#/components/schemas/Email"
+            - $ref: "#/components/schemas/Phone"
+          discriminator: {propertyName: kind}
+    Card:
+      type: object
+      additionalProperties: false
+      required: [type, last4]
+      properties: {type: {type: string, enum: [card]}, last4: {type: string}, brand: {type: string}}
+    Bank:
+      type: object
+      additionalProperties: false
+      required: [type, iban]
+      properties: {type: {type: string, enum: [bank]}, iban: {type: string}}
+    Email:
+      type: object
+      required: [kind]
+      properties: {kind: {type: string}, address: {type: string}}
+    Phone:
+      type: object
+      required: [kind]
+      properties: {kind: {type: string}, digits: {type: string}}
     PlaylistTrack:
       type: object
       required: [track]
@@ -5736,6 +5770,10 @@ fn playlist() -> Value {
         "tracks": {"total": 1, "items": [{"added_at": "2026-01-01", "track": track("t1")}]},
         "stats": {"member_count": 0, "follower_count": 7},
         "sys.version": 1,
+        "curator": {"uuid": "c1", "name": "Cy", "bio": "Old bio"},
+        "tag": {"_id": "g1", "label": "Chill", "color": "blue"},
+        "payment": {"type": "card", "last4": "4242", "brand": "visa"},
+        "contact": {"kind": "email", "address": "cy@example.com"},
     })
 }
 
@@ -6067,4 +6105,169 @@ async fn a_declared_dotted_name_is_kept() {
     let stored = stored_data(&state, "playlists", "p1").await;
     assert_eq!(stored["sys.version"], 2);
     assert!(stored.get("sys").is_none(), "{stored}");
+}
+
+/// Applies `set` to [`playlist`] `p1` and returns its member `member` as stored.
+async fn playlist_member_after(set: Value, member: &str) -> Value {
+    let effect = json!({"type": "playlists", "id": "p1", "set": set});
+    let (state, outcome) = shaped_effect("/playlists/p1/refresh", effect).await;
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    stored_data(&state, "playlists", "p1").await[member].clone()
+}
+
+/// Another variant of a union replaces the value whole: a card becomes a bank
+/// account, whose branch allows no card members.
+#[tokio::test]
+async fn a_union_switching_variant_is_replaced() {
+    let payment = playlist_member_after(
+        json!({"payment": {"type": "bank", "iban": "DE00123"}}),
+        "payment",
+    )
+    .await;
+    assert_eq!(payment, json!({"type": "bank", "iban": "DE00123"}));
+}
+
+/// Open branches too: switching by the discriminator mixes nothing in.
+#[tokio::test]
+async fn a_union_switching_open_variant_mixes_nothing() {
+    let contact = playlist_member_after(
+        json!({"contact": {"kind": "phone", "digits": "555"}}),
+        "contact",
+    )
+    .await;
+    assert_eq!(contact, json!({"kind": "phone", "digits": "555"}));
+}
+
+/// The same variant merges: what the update leaves out stays.
+#[tokio::test]
+async fn a_union_of_the_same_variant_merges() {
+    let payment = playlist_member_after(
+        json!({"payment": {"type": "card", "last4": "1111"}}),
+        "payment",
+    )
+    .await;
+    assert_eq!(
+        payment,
+        json!({"type": "card", "last4": "1111", "brand": "visa"})
+    );
+}
+
+/// A redacted value is restored from the record at its own place only: a new owner
+/// never takes the old one's email. Bob's own comes from the store.
+#[tokio::test]
+async fn a_redacted_value_is_never_the_old_records() {
+    let owner = playlist_member_after(
+        json!({"owner": {"id": "u2", "name": "Bob", "email": "[redacted]"}}),
+        "owner",
+    )
+    .await;
+    assert_eq!(
+        owner,
+        json!({"id": "u2", "name": "Bob", "email": "bob@example.com"})
+    );
+}
+
+/// A map given whole keeps a redacted entry as it was under the same key.
+#[tokio::test]
+async fn a_redacted_map_entry_is_restored_at_its_key() {
+    let labels =
+        playlist_member_after(json!({"labels": {"a": "[redacted]", "c": "3"}}), "labels").await;
+    assert_eq!(labels, json!({"a": "1", "c": "3"}));
+}
+
+/// An inline object's identity is a generic id or a read-only member: another one
+/// is another object, replaced whole; the same one merges.
+#[tokio::test]
+async fn an_inline_object_with_another_identity_is_replaced() {
+    let curator =
+        playlist_member_after(json!({"curator": {"uuid": "c2", "name": "Di"}}), "curator").await;
+    assert_eq!(curator, json!({"uuid": "c2", "name": "Di"}));
+    let tag = playlist_member_after(json!({"tag": {"_id": "g2", "label": "Loud"}}), "tag").await;
+    assert_eq!(tag, json!({"_id": "g2", "label": "Loud"}));
+    let curator = playlist_member_after(
+        json!({"curator": {"uuid": "c1", "name": "Cyrus"}}),
+        "curator",
+    )
+    .await;
+    assert_eq!(
+        curator,
+        json!({"uuid": "c1", "name": "Cyrus", "bio": "Old bio"})
+    );
+}
+
+/// Teams under an org, whose record shows the org it belongs to.
+const ORG_TEAMS: &str = r##"
+openapi: 3.0.0
+info: {title: Org teams, version: "1"}
+paths:
+  /orgs/{org}/teams/{team_slug}:
+    get:
+      operationId: getTeam
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+    patch:
+      operationId: updateTeam
+      parameters:
+        - {name: org, in: path, required: true, schema: {type: string}}
+        - {name: team_slug, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}
+components:
+  schemas:
+    Team:
+      type: object
+      required: [id, slug, name, org]
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        org:
+          type: object
+          properties: {login: {type: string}, plan: {type: string}}
+"##;
+
+/// An effect on an update's own target is checked for its owner as it merges: a
+/// partial `org` keeps the org's `login`, so it stays the org's.
+#[tokio::test]
+async fn an_own_effect_is_owner_checked_as_merged() {
+    let team = json!({"id": "core", "slug": "core", "name": "Core", "org": {"login": "octo", "plan": "free"}});
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "teams", "core", team.clone()).await;
+    let mut renamed = team.clone();
+    renamed["name"] = json!("Platform");
+    let answer = json!({"response": renamed, "effects": [
+        {"type": "teams", "id": "core", "set": {"org": {"plan": "pro"}}},
+    ]});
+    let records = Arc::new(crate::support::Records::default());
+    let provider = Arc::new(ScriptedProvider::new(vec![Ok(answer.to_string())]));
+    let mut rt = MockRuntime::new(
+        "references",
+        Arc::new(compile(ORG_TEAMS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state) as Arc<dyn StateStore>,
+    );
+    rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
+    let req = Request::patch("/orgs/octo/teams/core")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"name": "Platform"}).to_string()))
+        .unwrap();
+    let resp = http_rest::router(Arc::new(rt)).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let record = records.wait(1).await.remove(0);
+    let outcome = &record.request["effects"][0];
+    assert_eq!(outcome["outcome"], "applied", "{outcome}");
+    assert_eq!(
+        stored_data(&state, "teams", "core").await["org"],
+        json!({"login": "octo", "plan": "pro"})
+    );
 }

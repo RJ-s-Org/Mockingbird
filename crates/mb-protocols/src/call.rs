@@ -1757,6 +1757,58 @@ impl<'a> Place<'a> {
                 .any(|p| p.get("type").and_then(Value::as_str) == Some("object"))
     }
 
+    /// Whether `new` is of the variant `held` is, at a place that is a union of two or
+    /// more object branches (`oneOf`, `anyOf`): both hold the same value of its
+    /// discriminator, `discriminator.propertyName` or else a member every object branch
+    /// pins (`const`, a one-value `enum`). Anywhere else there is one variant.
+    fn same_variant(
+        &self,
+        rt: &MockRuntime,
+        held: &Map<String, Value>,
+        new: &Map<String, Value>,
+    ) -> bool {
+        let Some((part, branches)) = self.parts.iter().find_map(|p| {
+            let branches = p
+                .get("oneOf")
+                .or_else(|| p.get("anyOf"))
+                .and_then(Value::as_array)?;
+            let objects: Vec<Place<'_>> = branches
+                .iter()
+                .map(|b| Place::of(rt, Some(b)))
+                .filter(Place::is_object)
+                .collect();
+            (objects.len() >= 2).then_some((*p, objects))
+        }) else {
+            return true;
+        };
+        let pins = |key: &str| {
+            branches.iter().all(|b| {
+                b.property(key).is_some_and(|s| {
+                    s.get("const").is_some()
+                        || s.get("enum")
+                            .and_then(Value::as_array)
+                            .is_some_and(|e| e.len() == 1)
+                })
+            })
+        };
+        let key = part
+            .get("discriminator")
+            .and_then(|d| d.get("propertyName"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                let first = branches.first()?;
+                first
+                    .parts
+                    .iter()
+                    .filter_map(|p| p.get("properties").and_then(Value::as_object))
+                    .flat_map(|members| members.keys())
+                    .find(|k| pins(k))
+                    .cloned()
+            });
+        key.is_some_and(|k| matches!((held.get(&k), new.get(&k)), (Some(a), Some(b)) if a == b))
+    }
+
     /// The resource type the place's `$ref` is a definition of.
     fn record_type(&self, index: &BundleIndex) -> Option<String> {
         self.defs
@@ -1766,46 +1818,108 @@ impl<'a> Place<'a> {
     }
 }
 
-/// `new` put where `held` is, at a place of schema `schema`. Objects merge member by
-/// member where the place declares members (a value object), as the members' own
-/// places say. A map (see [`Place::is_map`]), an object the schema says nothing of, and
-/// an object naming another identity than `held`'s (a reassignment, see [`reassigns`])
-/// are replaced whole; so is anything that is not an object.
-fn merge_at(rt: &MockRuntime, held: &Value, new: &Value, schema: Option<&Value>) -> Value {
+/// Whether `value` is what a prompt shows in place of a redacted one.
+fn is_redacted(value: &Value) -> bool {
+    value.as_str() == Some(mb_engine::REDACTED)
+}
+
+/// `new` where nothing is kept: what was redacted in it is left out (see
+/// [`mb_engine::without_redacted`]); none when nothing is left.
+fn unredacted(new: &Value) -> Option<Value> {
+    mb_engine::without_redacted(new)
+}
+
+/// `new` replacing `held` at the same place, what was redacted in it as `held` has it
+/// there (left out where `held` has nothing). An array holding anything redacted
+/// stays as held: it is replaced whole, and a prompt showed it redacted.
+fn restored(held: Option<&Value>, new: &Value) -> Option<Value> {
+    if is_redacted(new) {
+        return held.cloned();
+    }
+    match new {
+        Value::Object(members) => {
+            let held = held.and_then(Value::as_object);
+            Some(Value::Object(
+                members
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        Some((k.clone(), restored(held.and_then(|h| h.get(k)), v)?))
+                    })
+                    .collect(),
+            ))
+        }
+        Value::Array(_) if unredacted(new).as_ref() != Some(new) => held.cloned(),
+        other => Some(other.clone()),
+    }
+}
+
+/// `new` put where `held` is (none: nothing is there), at a place of schema `schema`;
+/// none when nothing is to be there. Objects merge member by member where the place
+/// declares members (a value object), as the members' own places say. These are
+/// replaced whole: anything that is not an object; a map (see [`Place::is_map`]) or
+/// an object the schema says nothing of, what was redacted in it kept as it was at
+/// its own key (see [`restored`]); and an object of another variant of a union (see
+/// [`Place::same_variant`]) or naming another identity (see [`reassigns`]), which
+/// keeps nothing of `held`, redacted or not.
+fn merge_at(
+    rt: &MockRuntime,
+    held: Option<&Value>,
+    new: &Value,
+    schema: Option<&Value>,
+) -> Option<Value> {
+    let Some(held) = held else {
+        return unredacted(new);
+    };
     let (Value::Object(held_members), Value::Object(new_members)) = (held, new) else {
-        return new.clone();
+        return restored(Some(held), new);
     };
     let place = Place::of(rt, schema);
-    if !place.declares() || reassigns(rt, &place, held_members, new_members) {
-        return new.clone();
+    if !place.same_variant(rt, held_members, new_members)
+        || reassigns(rt, &place, held_members, new_members)
+    {
+        return unredacted(new);
+    }
+    if !place.declares() {
+        return restored(Some(held), new);
     }
     let mut out = held_members.clone();
     for (key, value) in new_members {
-        let merged = match out.get(key) {
-            Some(was) => merge_at(rt, was, value, place.property(key)),
-            None => value.clone(),
-        };
-        out.insert(key.clone(), merged);
+        if let Some(merged) = merge_at(rt, out.get(key), value, place.property(key)) {
+            out.insert(key.clone(), merged);
+        }
     }
-    Value::Object(out)
+    Some(Value::Object(out))
 }
 
-/// Whether `new` names another record than `held` at `place`: an identity member the
-/// place declares (its type's, see [`identity_members`], else `id`) holds another value.
+/// Whether `new` names another object than `held` at `place`. For a place of a
+/// resource type, an identity member of that type (see [`identity_members`]) the place
+/// declares holds another value. For an inline object, a string member that is a
+/// generic id (`id`, `_id`, see [`mb_mcm::is_generic_id`]) or that the place declares
+/// `readOnly` does.
 fn reassigns(
     rt: &MockRuntime,
     place: &Place<'_>,
     held: &Map<String, Value>,
     new: &Map<String, Value>,
 ) -> bool {
-    let identity = match place.record_type(rt.index()) {
-        Some(t) => identity_members(rt, &t),
-        None => vec!["id"],
-    };
-    identity
-        .iter()
-        .filter(|k| place.property(k).is_some())
-        .any(|k| matches!((held.get(*k), new.get(*k)), (Some(a), Some(b)) if a != b))
+    let changed = |k: &str| matches!((held.get(k), new.get(k)), (Some(a), Some(b)) if a != b);
+    match place.record_type(rt.index()) {
+        Some(t) => identity_members(rt, &t)
+            .iter()
+            .filter(|k| place.property(k).is_some())
+            .any(|k| changed(k)),
+        None => new.iter().any(|(k, v)| {
+            v.is_string()
+                && held.get(k).is_some_and(Value::is_string)
+                && changed(k)
+                && (mb_mcm::is_generic_id(k)
+                    || place
+                        .property(k)
+                        .and_then(|s| s.get("readOnly"))
+                        .and_then(Value::as_bool)
+                        == Some(true))
+        }),
+    }
 }
 
 /// Puts `set` on `data`, the record of type `t`, each member as its place says (see
@@ -1818,11 +1932,9 @@ fn merge_members(
 ) {
     let place = Place::of(rt, write_memory::read_schema(rt, t));
     for (key, value) in set {
-        let merged = match data.get(&key) {
-            Some(held) => merge_at(rt, held, &value, place.property(&key)),
-            None => value,
-        };
-        data.insert(key, merged);
+        if let Some(merged) = merge_at(rt, data.get(&key), &value, place.property(&key)) {
+            data.insert(key, merged);
+        }
     }
 }
 
@@ -1872,21 +1984,22 @@ fn put_at(
     schema: Option<&Value>,
 ) {
     let Some((key, rest)) = path.split_first() else {
-        let merged = merge_at(rt, base, value, schema);
-        *base = merged;
         return;
     };
     if !base.is_object() {
         *base = Value::Object(Map::new());
     }
-    if let Value::Object(members) = base {
-        let entry = members.entry(key.clone()).or_insert(Value::Null);
-        if rest.is_empty() && entry.is_null() {
-            *entry = value.clone();
-            return;
+    let Value::Object(members) = base else {
+        return;
+    };
+    if rest.is_empty() {
+        if let Some(merged) = merge_at(rt, members.get(key), value, schema) {
+            members.insert(key.clone(), merged);
         }
-        put_at(rt, entry, rest, value, schema);
+        return;
     }
+    let entry = members.entry(key.clone()).or_insert(Value::Null);
+    put_at(rt, entry, rest, value, schema);
 }
 
 /// `set` with each dotted key that is a path (see [`dotted_path`]) put into the member
@@ -1921,10 +2034,12 @@ fn dotted_as_paths(
             None => {
                 // After a path into it, a member is merged as its place says.
                 let merged = match out.get(key) {
-                    Some(was) => merge_at(rt, was, value, record.property(key)),
-                    None => value.clone(),
+                    Some(was) => merge_at(rt, Some(was), value, record.property(key)),
+                    None => Some(value.clone()),
                 };
-                out.insert(key.clone(), merged);
+                if let Some(merged) = merged {
+                    out.insert(key.clone(), merged);
+                }
             }
         }
     }
@@ -2118,9 +2233,9 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
-    let set = dotted_as_paths(rt, t, data, &effect.set);
-    let requested = mb_engine::effect_without_redacted(&held.data, &set);
-    if requested.is_empty() && !set.is_empty() {
+    let requested = dotted_as_paths(rt, t, data, &effect.set);
+    // What was redacted is restored, or left out, where it merges (see [`merge_at`]).
+    if !effect.set.is_empty() && effect.set.values().all(|v| unredacted(v).is_none()) {
         return Err("it sets only what was redacted");
     }
     let requested = if let Some((plan, call)) = own {
