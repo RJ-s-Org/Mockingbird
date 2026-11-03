@@ -424,4 +424,8 @@ impl StateStore for CachingStateStore {
     fn response_cache(&self) -> Option<&ResponseCache> {
         Some(&self.cache)
     }
+
+    fn local_only(&self) -> bool {
+        self.inner.local_only()
+    }
 }

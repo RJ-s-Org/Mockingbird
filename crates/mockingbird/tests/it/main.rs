@@ -32,6 +32,7 @@ mod limits;
 mod observability;
 mod protocols_e2e;
 mod proxy;
+mod references_by_value;
 mod registry;
 mod release_workflow;
 mod repo_community;

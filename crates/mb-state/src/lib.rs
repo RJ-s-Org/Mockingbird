@@ -246,6 +246,16 @@ pub trait StateStore: Send + Sync {
     fn response_cache(&self) -> Option<&ResponseCache> {
         None
     }
+    /// Whether no other process writes to this store: true of [`MemoryStore`], and of a
+    /// wrapper over it that adds no other writer ([`CachingStateStore`], a bus wrapper on
+    /// a local bus). A shared backend (SQL, Redis), or one other nodes write to over a
+    /// bus, is not. Writes this process makes outside a runtime's calls (the Admin API's
+    /// seeds, upserts and resets) still happen; a caller relying on this sees them only
+    /// as the store's change feed or its reads tell. This default, for test doubles and
+    /// wrappers that do not say, answers `false`.
+    fn local_only(&self) -> bool {
+        false
+    }
 }
 
 /// Opens a state store: `memory` gives a [`MemoryStore`]; `redis://…` and

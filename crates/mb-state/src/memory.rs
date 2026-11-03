@@ -408,6 +408,10 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    fn local_only(&self) -> bool {
+        true
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
         self.inner.tx.subscribe()
     }

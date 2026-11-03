@@ -247,7 +247,7 @@ async fn write_memory(
 
 /// The schema of what `t`'s read by path answers, else its list items or
 /// singleton read (see [`entity_fits`]).
-fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
+pub(super) fn read_schema<'a>(rt: &'a MockRuntime, t: &str) -> Option<&'a Value> {
     let index = rt.index();
     // A record its read answers in an envelope or an array has its own schema.
     if let Some(record) = index.record_schemas.get(t) {

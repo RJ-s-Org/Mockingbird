@@ -558,6 +558,11 @@ impl StateStore for BusStateStore {
     fn subscribe(&self) -> broadcast::Receiver<StateChanged> {
         self.merged.subscribe()
     }
+    /// Only this process writes to it when no other node does (a local bus) and the
+    /// store underneath says so too.
+    fn local_only(&self) -> bool {
+        self.bus.is_local() && self.inner.local_only()
+    }
 }
 
 #[cfg(test)]

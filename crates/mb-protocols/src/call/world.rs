@@ -160,9 +160,6 @@ pub(super) async fn named_by_value(
     if let Some(body) = &call.body {
         id_values(rt, "", body, 0, &mut values);
     }
-    if values.is_empty() {
-        return;
-    }
     let named = &out[..followed.named];
     let known = |t: &str, id: &str| {
         let shown = |r: &StoredResource| r.resource_type == t && r.id == id;
@@ -172,15 +169,34 @@ pub(super) async fn named_by_value(
         let shown = write_memory::matched_for_context(rt, plan, &hit.resource_type, &hit.data);
         shown.map(|data| StoredResource { data, ..hit })
     };
-    let found = held_under(
-        state,
-        &plan.session,
-        &values,
-        (MAX_MATCHES, MAX_LOOKUPS),
-        known,
-        shown,
-    )
-    .await;
+    let mut found = if values.is_empty() {
+        Vec::new()
+    } else {
+        held_under(
+            state,
+            &plan.session,
+            &values,
+            (MAX_MATCHES, MAX_LOOKUPS),
+            &known,
+            shown,
+        )
+        .await
+    };
+    // What only the index of stored values resolves: an id inside a URI, a short id
+    // under its type's name, a unique member value (see [`value_index`]).
+    let room = MAX_MATCHES.saturating_sub(found.len());
+    let in_hand = |t: &str, id: &str| {
+        known(t, id) || found.iter().any(|r| r.resource_type == t && r.id == id)
+    };
+    // A value an id lookup resolved names that record, not a sibling sharing it.
+    let resolved = |value: &str| {
+        target.is_some_and(|r| r.id == value) || named.iter().chain(&found).any(|r| r.id == value)
+    };
+    let more = value_index::matched(state, plan, call, room, in_hand, resolved).await;
+    found.extend(more);
+    if found.is_empty() {
+        return;
+    }
     // Listed already, they move up among what the request names.
     out.retain(|r| !holds(&found, r));
     out.splice(followed.named..followed.named, found);
