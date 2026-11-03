@@ -1369,6 +1369,99 @@ async fn a_read_storing_nothing_lists_no_session() {
     assert_eq!(h.calls(), 4);
 }
 
+/// The unlisted marker of a session only reads wrote to sits beside the deleted markers:
+/// a delete lists the session with nothing in it, as on main, its marker holds, and the
+/// earlier answer is still told.
+#[tokio::test]
+async fn an_unlisted_session_keeps_its_deleted_markers() {
+    let h = world(vec![
+        me(),
+        json!({"id": "u-9", "name": "Bo"}),
+        note("note-4711"),
+    ]);
+    h.call("GET", "/me", None).await;
+    assert!(h.store.sessions("default", "m").await.unwrap().is_empty());
+    let (status, _) = h.call("GET", "/users/u-9", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h.call("DELETE", "/users/u-9", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let sessions = h.store.sessions("default", "m").await.unwrap();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0].resources, 0);
+    let kept = h.store.list(&session(), MEMORY, 20).await.unwrap();
+    assert!(
+        kept.iter().any(|d| d.id.starts_with("#deleted")),
+        "{kept:?}"
+    );
+    assert!(
+        !kept.iter().any(|d| d.id == mb_state::UNLISTED_ID),
+        "{kept:?}"
+    );
+    let (status, _) = h.call("GET", "/users/u-9", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    let shown = block(&h.prompt(2), "earlier_answers").unwrap().to_owned();
+    assert!(shown.contains("user-1"), "{shown}");
+    assert_eq!(h.calls(), 3);
+}
+
+/// A list read filtered by a value the mock minted is shown where it came from, and
+/// the filter still keeps only the items holding it.
+#[tokio::test]
+async fn a_list_filtered_by_a_minted_value_is_told_its_origin() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Links, version: "1"}
+paths:
+  /links:
+    get:
+      operationId: listLinks
+      parameters: [{name: link_token, in: query, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Link"}}}}}
+    post:
+      operationId: createLink
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {item_id: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Link"}}}}
+components:
+  schemas:
+    Link:
+      type: object
+      required: [link_token, item_id]
+      properties: {link_token: {type: string}, item_id: {type: string}}
+"##;
+    let other = "link-sandbox-0000aaaa";
+    let h = harness_with(
+        contract.as_bytes(),
+        vec![
+            json!({"link_token": ACCESS, "item_id": "item-4711"}),
+            json!([
+                {"link_token": ACCESS, "item_id": "item-4711"},
+                {"link_token": other, "item_id": "item-0001"},
+            ]),
+        ],
+        |_| {},
+    );
+    h.call("POST", "/links", Some(json!({"item_id": "item-4711"})))
+        .await;
+    let (status, listed) = h
+        .call("GET", &format!("/links?link_token={ACCESS}"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let prompt = h.prompt(1);
+    let origins = block(&prompt, "earlier_origins").unwrap();
+    assert!(origins.contains("createLink"), "{prompt}");
+    assert!(!origins.contains(ACCESS), "{prompt}");
+    assert_eq!(
+        listed,
+        json!([{"link_token": ACCESS, "item_id": "item-4711"}])
+    );
+}
+
 /// Slack's `auth.test`, from its contract alone, and its POST form replacing it.
 #[tokio::test]
 async fn slacks_auth_test_reaches_later_prompts() {
