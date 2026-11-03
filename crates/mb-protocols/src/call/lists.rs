@@ -411,7 +411,7 @@ fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
 }
 
 /// The schema parts of `op`'s list answer `body`'s main array, and of its items.
-fn list_parts<'a>(
+pub(super) fn list_parts<'a>(
     bundle: &'a mb_mcm::Bundle,
     schema: &'a Value,
     body: &Value,

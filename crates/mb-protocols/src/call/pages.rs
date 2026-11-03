@@ -10,21 +10,35 @@
 //! or inside an object member beside the list, whose name is, or ends with the words
 //! of, a text query parameter of the route other than the page size: Zoom's
 //! `next_page_token` for `next_page_token`, Square's `cursor` for `cursor`, Pipedrive's
-//! `additional_data.next_cursor` for `cursor`. Exactly one, or none is used; nor is a
-//! token written that leaves the answer invalid. With none, the answer is as
-//! [`lists::narrow`] left it.
+//! `additional_data.next_cursor` for `cursor`. A pair is a cursor only when the request
+//! does not carry the parameter (a page is asked for without one first), the parameter
+//! names no member of the items (`status` filters them), and what the model put in the
+//! member echoes no value of the request (a search's `query`). Exactly one pair, or none
+//! is used; nor is a token written that leaves the answer invalid. With none, the
+//! answer is as [`lists::narrow`] left it.
 //!
-//! The token is opaque: 40 hex digits, a hash of the session, the route and a counter.
-//! What it serves is kept under the store's reserved type ([`mb_state::INTERNAL_TYPE`]),
-//! like the deleted markers: the route, the path's values, the parameter, the page
-//! size, the page as answered and the items left out, the newest [`MAX_TOKENS`] per
-//! session. The items left out are seeded as a list's items are, so a read of one finds
-//! it. A request on the same route and path carrying a known token under that
-//! parameter is served from it without a model call: the next items, as many as the
-//! request's page size or the first's, each showing its stored record (see
-//! [`lists::overlay_stored`]), and a new token when more remain; the last page's token
-//! is `null`, left out or empty, whichever the answer validates with. Its query differs
-//! from the first page's by the token, so the response cache never answers it with the
+//! A cut is kept once, as one document under the store's reserved type
+//! ([`mb_state::INTERNAL_TYPE`]), like the deleted markers: the route, the path's
+//! values, the request's other query values, the token's place and parameter, the page
+//! size, the page as answered, and the items left out that no delete marker covers (at
+//! most [`MAX_REST`]). They are seeded as a list's items are, so a read of one finds it.
+//! A session keeps at most [`MAX_CUTS`] cuts: each goes in one of that many places,
+//! taken in turn, so a new cut ends the oldest and nothing is read to count them; two
+//! nodes may take the same place, which only ends a cut early. The session's TTL ends
+//! them all. A token is the cut's nonce, its place and the offset of the next item, in
+//! [`TOKEN_LEN`] hex digits: the same token always serves the same page and the same
+//! next token, and serving one writes nothing.
+//!
+//! A request on the same route and path, with the same other query values, carrying a
+//! token of a kept cut under its parameter is served without a model call: the next
+//! items, as many as the request's page size or the first's, each showing its stored
+//! record (see [`lists::overlay_stored`]), then the query's filters
+//! ([`lists::narrow`]) and the delete markers ([`deleted::drop_from_list`]) applied
+//! again, as the session may have written since; and the next token when more remain.
+//! The last page's token is `null`, left out or empty, whichever the answer validates
+//! with; with none, the request is the model's. A token with other filter values, of
+//! a cut since ended, or of another route, is the model's too. Its query differs from
+//! the first page's by the token, so the response cache never answers it with the
 //! first page; it is not cached itself, as the token already serves it.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says, and plain calls
@@ -38,17 +52,19 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 
-/// Tokens kept per session, the newest.
-const MAX_TOKENS: usize = 256;
-/// Items left out that a token keeps, at most.
+/// Cuts kept per session, the newest.
+const MAX_CUTS: u64 = 64;
+/// Items left out that a cut keeps, at most.
 const MAX_REST: usize = 500;
-/// Hex digits of a token.
+/// Hex digits of a token: the nonce's, the place's and the offset's.
 const TOKEN_LEN: usize = 40;
-/// The prefix of a token's document, and the document listing them, oldest first.
-const PREFIX: &str = "#page/";
-const INDEX: &str = "#pages";
+const NONCE_LEN: usize = 28;
+const PLACE_LEN: usize = 4;
+/// The prefix of a cut's document.
+const PREFIX: &str = "#cut/";
 
-/// Tokens minted by this process, which makes each unlike the last.
+/// Cuts minted by this process: which place each takes, and what makes each nonce
+/// unlike the last.
 static MINTED: AtomicU64 = AtomicU64::new(0);
 
 /// Where an answer of `op` carries its token: the member's path from the top, and the
@@ -74,21 +90,49 @@ fn is_free_text(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
             .any(|p| p.get("const").is_some() || p.get("enum").is_some())
 }
 
-/// The one place an answer `body` of `op` has for a token (see the module's doc).
-fn slot(bundle: &mb_mcm::Bundle, op: &Operation, body: &Value, size_param: &str) -> Option<Slot> {
+/// The text values `call` holds in its path and query.
+fn request_values(call: &OperationCall) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in call.path_params.values().chain(call.query.values()) {
+        match value {
+            Value::Array(values) => out.extend(values.iter().filter_map(id_string)),
+            other => out.extend(id_string(other)),
+        }
+    }
+    out
+}
+
+/// The one place answer `body` to `call` has for a token (see the module's doc).
+fn slot(
+    bundle: &mb_mcm::Bundle,
+    (op, call): (&Operation, &OperationCall),
+    body: &Value,
+    size_param: &str,
+) -> Option<Slot> {
     let list = list_member(body)?;
     let schema = op.success_output()?.schema.as_ref()?;
+    let mut held = None;
+    let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
     let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
     let params: Vec<&str> = declared
         .iter()
         .filter(|(name, schema)| {
             name.as_str() != size_param
                 && !mb_mcm::is_generic_id(name)
+                && !call.query.contains_key(name.as_str())
+                && lists::named_member(bundle, &item_parts, name).is_none()
                 && is_free_text(bundle, schema)
         })
         .map(|(name, _)| name.as_str())
         .collect();
-    let param_of = |name: &str| -> Option<String> {
+    let echoed = request_values(call);
+    let param_of = |name: &str, generated: Option<&Value>| -> Option<String> {
+        if generated
+            .and_then(id_string)
+            .is_some_and(|value| echoed.contains(&value))
+        {
+            return None;
+        }
         let mut named = params.iter().filter(|param| names_param(name, param));
         let first = named.next()?;
         named.next().is_none().then(|| (*first).to_string())
@@ -101,7 +145,7 @@ fn slot(bundle: &mb_mcm::Bundle, op: &Operation, body: &Value, size_param: &str)
         };
         for (name, member) in members.iter().filter(|(name, _)| name.as_str() != list) {
             if is_free_text(bundle, member) {
-                if let Some(param) = param_of(name) {
+                if let Some(param) = param_of(name, body.get(name)) {
                     found.push(Slot {
                         path: vec![name.clone()],
                         param,
@@ -115,8 +159,9 @@ fn slot(bundle: &mb_mcm::Bundle, op: &Operation, body: &Value, size_param: &str)
                 .filter_map(|p| p.get("properties").and_then(Value::as_object))
                 .flatten()
             {
+                let generated = body.get(name).and_then(|outer| outer.get(inner_name));
                 if is_free_text(bundle, inner_member)
-                    && let Some(param) = param_of(inner_name)
+                    && let Some(param) = param_of(inner_name, generated)
                 {
                     found.push(Slot {
                         path: vec![name.clone(), inner_name.clone()],
@@ -158,8 +203,8 @@ fn placed(body: &Value, path: &[String], value: Option<Value>) -> Option<Value> 
     Some(out)
 }
 
-/// A token not minted before.
-fn new_token(session: &SessionKey, op: &Operation) -> String {
+/// A nonce not minted before, and the place its cut takes.
+fn new_cut(session: &SessionKey, op: &Operation) -> (String, u64) {
     let count = MINTED.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -178,18 +223,45 @@ fn new_token(session: &SessionKey, op: &Operation) -> String {
     }
     let digest = hasher.finalize();
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    hex[..TOKEN_LEN].to_string()
+    (hex[..NONCE_LEN].to_string(), count % MAX_CUTS)
 }
 
-/// Whether `text` is a token's shape: [`TOKEN_LEN`] lower-case hex digits.
-fn is_token(text: &str) -> bool {
-    text.len() == TOKEN_LEN && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+/// The token of the item at `offset` of the cut `nonce` names in `place`.
+fn token(nonce: &str, place: u64, offset: usize) -> String {
+    format!("{nonce}{place:04x}{offset:08x}")
 }
 
-/// What a token serves.
-struct Page {
+/// A token's nonce, place and offset, when `text` is one.
+fn read_token(text: &str) -> Option<(&str, u64, usize)> {
+    if text.len() != TOKEN_LEN || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let (nonce, rest) = text.split_at(NONCE_LEN);
+    let (place, offset) = rest.split_at(PLACE_LEN);
+    let place = u64::from_str_radix(place, 16).ok()?;
+    let offset = usize::from_str_radix(offset, 16).ok()?;
+    (place < MAX_CUTS).then_some((nonce, place, offset))
+}
+
+fn place_key(place: u64) -> String {
+    format!("{PREFIX}{place:04x}")
+}
+
+/// The query values a token is bound to: the request's, but the token's and the page
+/// size's.
+fn bound_query(call: &OperationCall, param: &str, size_param: &str) -> Value {
+    let mut query = call.query.clone();
+    query.remove(param);
+    query.remove(size_param);
+    canonical(&Value::Object(query))
+}
+
+/// A kept cut.
+struct Cut {
+    nonce: String,
     op: String,
     path: Value,
+    query: Value,
     slot: Vec<String>,
     param: String,
     size: usize,
@@ -199,11 +271,13 @@ struct Page {
     rest: Vec<Value>,
 }
 
-impl Page {
+impl Cut {
     fn to_value(&self) -> Value {
         serde_json::json!({
+            "nonce": self.nonce,
             "op": self.op,
             "path": self.path,
+            "query": self.query,
             "slot": self.slot,
             "param": self.param,
             "size": self.size,
@@ -213,57 +287,35 @@ impl Page {
         })
     }
 
-    fn of(value: &Value) -> Option<Self> {
+    fn of(mut value: Value) -> Option<Self> {
+        let text = |value: &Value, key: &str| value.get(key)?.as_str().map(str::to_string);
+        let rest = match value.get_mut("rest")?.take() {
+            Value::Array(items) => items,
+            _ => return None,
+        };
         Some(Self {
-            op: value.get("op")?.as_str()?.to_string(),
+            nonce: text(&value, "nonce")?,
+            op: text(&value, "op")?,
             path: value.get("path")?.clone(),
+            query: value.get("query")?.clone(),
             slot: value
                 .get("slot")?
                 .as_array()?
                 .iter()
                 .map(|s| s.as_str().map(str::to_string))
                 .collect::<Option<_>>()?,
-            param: value.get("param")?.as_str()?.to_string(),
+            param: text(&value, "param")?,
             size: usize::try_from(value.get("size")?.as_u64()?).ok()?,
-            size_param: value.get("size_param")?.as_str()?.to_string(),
-            page: value.get("page")?.clone(),
-            rest: value.get("rest")?.as_array()?.clone(),
+            size_param: text(&value, "size_param")?,
+            page: value.get_mut("page")?.take(),
+            rest,
         })
     }
 }
 
-/// The path's values of `call`, as a token keeps them.
+/// The path's values of `call`, as a cut keeps them.
 fn path_of(call: &OperationCall) -> Value {
     canonical(&Value::Object(call.path_params.clone()))
-}
-
-/// Keeps `page` under a new token and lists it, ending the oldest past the bound.
-async fn keep(state: &mut StateAccess<'_>, session: &SessionKey, token: &str, page: &Page) {
-    let key = format!("{PREFIX}{token}");
-    let document = StoredResource {
-        resource_type: INTERNAL_TYPE.to_string(),
-        id: key.clone(),
-        data: page.to_value(),
-    };
-    if !state.upsert(session, document).await {
-        return;
-    }
-    let mut listed: Vec<String> = match state.get(session, INTERNAL_TYPE, INDEX).await {
-        Some(doc) => serde_json::from_value(doc.data).unwrap_or_default(),
-        None => Vec::new(),
-    };
-    listed.retain(|held| held != &key);
-    listed.push(key);
-    let excess = listed.len().saturating_sub(MAX_TOKENS);
-    for oldest in listed.drain(..excess) {
-        state.delete(session, INTERNAL_TYPE, &oldest).await;
-    }
-    let index = StoredResource {
-        resource_type: INTERNAL_TYPE.to_string(),
-        id: INDEX.to_string(),
-        data: Value::from(listed),
-    };
-    state.upsert(session, index).await;
 }
 
 /// `body` with its list's items `items`.
@@ -274,8 +326,8 @@ fn with_items(body: &Value, items: Vec<Value>) -> Option<Value> {
 }
 
 /// Writes a token for what `cut` left out of `generated`'s answer, when the answer has
-/// a place for one, keeps what it serves and seeds the items left out (see the
-/// module's doc). Items of type `t`.
+/// a place for one, keeps the cut and seeds the items left out (see the module's doc).
+/// Items of type `t`.
 pub(super) async fn mint(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -289,23 +341,42 @@ pub(super) async fn mint(
     let Some(body) = generated.body.as_ref() else {
         return;
     };
-    let Some(slot) = slot(rt.bundle(), op, body, &cut.size_param) else {
+    let Some(slot) = slot(rt.bundle(), (op, call), body, &cut.size_param) else {
         return;
     };
-    let token = new_token(session, op);
-    let Some(page) = placed(body, &slot.path, Some(Value::String(token.clone()))) else {
-        return;
-    };
-    let valid = |candidate: &Value| {
-        plan.engine
-            .serve_stored(rt.bundle(), op, candidate, None)
-            .is_some()
-    };
-    if !valid(&page) {
+    // What a delete marker covers is no later page's.
+    let mut rest = Vec::with_capacity(cut.rest.len().min(MAX_REST));
+    let field = item_identity(rt.bundle(), op, body);
+    let scope = deleted::scope(op, call);
+    for item in cut.rest {
+        if rest.len() >= MAX_REST {
+            break;
+        }
+        let gone = match (t, item.get(&field).and_then(id_string)) {
+            (Some(t), Some(id)) if state.tracks_deleted => {
+                deleted::is_deleted(state, session, t, scope.as_deref(), &id).await
+            }
+            _ => false,
+        };
+        if !gone {
+            rest.push(item);
+        }
+    }
+    if rest.is_empty() {
         return;
     }
-    let mut rest = cut.rest;
-    rest.truncate(MAX_REST);
+    let (nonce, place) = new_cut(session, op);
+    let first = token(&nonce, place, 0);
+    let Some(page) = placed(body, &slot.path, Some(Value::String(first))) else {
+        return;
+    };
+    let valid = plan
+        .engine
+        .serve_stored(rt.bundle(), op, &page, None)
+        .is_some();
+    if !valid {
+        return;
+    }
     // The items left out are the session's, as a list's items are.
     if let Some(t) = t
         && let Some(seeded) = with_items(&page, rest.clone())
@@ -330,9 +401,11 @@ pub(super) async fn mint(
         )
         .await;
     }
-    let kept = Page {
+    let kept = Cut {
+        nonce,
         op: op.id.clone(),
         path: path_of(call),
+        query: bound_query(call, &slot.param, &cut.size_param),
         slot: slot.path,
         param: slot.param,
         size: cut.size,
@@ -340,12 +413,19 @@ pub(super) async fn mint(
         page: page.clone(),
         rest,
     };
-    keep(state, session, &token, &kept).await;
-    generated.body = Some(page);
+    let document = StoredResource {
+        resource_type: INTERNAL_TYPE.to_string(),
+        id: place_key(place),
+        data: kept.to_value(),
+    };
+    // A cut not kept serves no token: the answer keeps the model's.
+    if state.upsert(session, document).await {
+        generated.body = Some(page);
+    }
 }
 
 /// The next page a token `call` carries serves, with no model call (see the module's
-/// doc); `None` when it carries none this route minted.
+/// doc); `None` when it carries none of a kept cut of this route, path and query.
 pub(super) async fn serve(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -359,28 +439,29 @@ pub(super) async fn serve(
     }
     let mut found = None;
     for (param, value) in &call.query {
-        let Some(token) = value.as_str().map(str::trim).filter(|t| is_token(t)) else {
-            continue;
-        };
-        let Some(doc) = state
-            .get(session, INTERNAL_TYPE, &format!("{PREFIX}{token}"))
-            .await
+        let Some((nonce, place, offset)) = value.as_str().map(str::trim).and_then(read_token)
         else {
             continue;
         };
-        if let Some(page) = Page::of(&doc.data)
-            && page.op == op.id
-            && page.param == *param
-            && page.path == path_of(call)
+        let Some(doc) = state.get(session, INTERNAL_TYPE, &place_key(place)).await else {
+            continue;
+        };
+        if let Some(cut) = Cut::of(doc.data)
+            && cut.nonce == nonce
+            && cut.op == op.id
+            && cut.param == *param
+            && cut.path == path_of(call)
+            && cut.query == bound_query(call, &cut.param, &cut.size_param)
+            && offset <= cut.rest.len()
         {
-            found = Some(page);
+            found = Some((cut, place, offset));
             break;
         }
     }
-    let mut page = found?;
+    let (cut, place, offset) = found?;
     let size = call
         .query
-        .get(&page.size_param)
+        .get(&cut.size_param)
         .and_then(|v| match v {
             Value::Number(n) => n.as_u64(),
             Value::String(s) => s.trim().parse().ok(),
@@ -388,28 +469,51 @@ pub(super) async fn serve(
         })
         .and_then(|n| usize::try_from(n).ok())
         .filter(|n| *n > 0)
-        .unwrap_or(page.size);
-    let remaining = page.rest.split_off(size.min(page.rest.len()));
-    let mut body = with_items(&page.page, std::mem::take(&mut page.rest))?;
-    lists::overlay_stored(state, (plan, call), op.resource_type.as_deref(), &mut body).await;
+        .unwrap_or(cut.size);
+    let next = offset.saturating_add(size).min(cut.rest.len());
+    let items = cut.rest.get(offset..next)?.to_vec();
+    let mut body = with_items(&cut.page, items)?;
+    // What the session wrote since, and the request's filters, as on a first page.
+    let t = op.resource_type.as_deref();
+    lists::overlay_stored(state, (plan, call), t, &mut body).await;
+    let _ = lists::narrow(rt, plan, call, &mut body);
     let valid = |candidate: &Value| plan.engine.serve_stored(rt.bundle(), op, candidate, None);
-    if remaining.is_empty() {
+    let mut served = if next < cut.rest.len() {
+        let more = placed(
+            &body,
+            &cut.slot,
+            Some(Value::String(token(&cut.nonce, place, next))),
+        )?;
+        valid(&more)?
+    } else {
         // The last page: no token, as the answer allows.
         let ends = [Some(Value::Null), None, Some(Value::String(String::new()))];
-        return ends
+        let end = ends
             .into_iter()
-            .filter_map(|end| placed(&body, &page.slot, end))
+            .filter_map(|end| placed(&body, &cut.slot, end))
             .find_map(|candidate| valid(&candidate));
-    }
-    let token = new_token(session, op);
-    let next = placed(&body, &page.slot, Some(Value::String(token.clone())))?;
-    let served = valid(&next)?;
-    let kept = Page {
-        page: next,
-        rest: remaining,
-        size,
-        ..page
+        if end.is_none() {
+            tracing::debug!(
+                mock = %rt.name,
+                operation = %op.id,
+                "no end of a page token validates; the last page is generated"
+            );
+        }
+        end?
     };
-    keep(state, session, &token, &kept).await;
+    if let Some(t) = t
+        && state.tracks_deleted
+    {
+        let scope = deleted::scope(op, call);
+        deleted::drop_from_list(
+            state,
+            session,
+            (plan, call),
+            t,
+            scope.as_deref(),
+            &mut served,
+        )
+        .await;
+    }
     Some(served)
 }
