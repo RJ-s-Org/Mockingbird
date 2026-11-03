@@ -11,7 +11,7 @@
 //! A hit is scrubbed for the prompt, an effect goes on the stored copy, and it follows
 //! none of its own references, which could name what no scrub went over. A call pays at
 //! most [`MAX_LOOKUPS`] reads, and none when no value could be an id or when its answer
-//! needs no generation. A create's new record is matched the same way, for the write
+//! needs no generation. A create's request is matched the same way, for the write
 //! memory to tell what it refers to (see [`referenced_by_value`]).
 //!
 //! An answer of a `GET` route with no parameters that returns a single object
@@ -172,20 +172,28 @@ pub(super) async fn named_by_value(
         let shown = write_memory::matched_for_context(rt, plan, &hit.resource_type, &hit.data);
         shown.map(|data| StoredResource { data, ..hit })
     };
-    let found = held_under(state, &plan.session, &values, MAX_MATCHES, known, shown).await;
+    let found = held_under(
+        state,
+        &plan.session,
+        &values,
+        (MAX_MATCHES, MAX_LOOKUPS),
+        known,
+        shown,
+    )
+    .await;
     // Listed already, they move up among what the request names.
     out.retain(|r| !holds(&found, r));
     out.splice(followed.named..followed.named, found);
 }
 
 /// The records `values` are the identity of (see the module's doc), as `keep` keeps them,
-/// at most `max` and within [`MAX_LOOKUPS`] reads: each type a value is found in, but none
+/// at most `max` and within `budget` store reads: each type a value is found in, but none
 /// `known(type, id)` says is already in hand, by the value before a read or by its id after.
 async fn held_under(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     values: &[String],
-    max: usize,
+    (max, budget): (usize, usize),
     known: impl Fn(&str, &str) -> bool,
     mut keep: impl FnMut(StoredResource) -> Option<StoredResource>,
 ) -> Vec<StoredResource> {
@@ -195,7 +203,7 @@ async fn held_under(
     let mut found: Vec<StoredResource> = Vec::new();
     'types: for t in types_to_search(rt, session) {
         for value in values {
-            if lookups >= MAX_LOOKUPS || found.len() >= max {
+            if lookups >= budget || found.len() >= max {
                 break 'types;
             }
             if known(&t, value) {
@@ -205,7 +213,7 @@ async fn held_under(
             let mut hit = state.get(session, &t, value).await;
             // Stored under another id, and known to hold this one in a path field.
             for field in index.path_fields(&t) {
-                if hit.is_some() || lookups >= MAX_LOOKUPS {
+                if hit.is_some() || lookups >= budget {
                     break;
                 }
                 let Some(id) = rt.path_aliases().id_of(session, &t, field, value) else {
@@ -228,19 +236,23 @@ async fn held_under(
     found
 }
 
-/// Records a create marks as behind, at most: each costs its next read one catch-up.
+/// Records a create marks as behind, at most: each costs its next read one call.
 const MAX_REFERENCED: usize = 4;
+/// Store reads a create pays to find them, at most.
+const MAX_REFERENCE_LOOKUPS: usize = 8;
 
-/// The held records a create's new record refers to by value, as stored: what a value of
-/// `record` (what the create stored) or of its `request` body is the identity of, by the
-/// matching [`named_by_value`] shows a generation (only a stored id, or a path field
-/// known to hold it), other than what `skip(type, id)` names (the new record itself, and
-/// what is told already). A reply naming the message it answers, a refund its payment:
-/// what counts them is behind. At most [`MAX_REFERENCED`], within [`MAX_LOOKUPS`] reads.
+/// The held records a create's request refers to by value, as stored: what a value of its
+/// body, or of its path, is the identity of, by the matching [`named_by_value`] shows a
+/// generation (a value holding a digit or a separator, or a large whole number, that is a
+/// stored id or a path field known to hold it), other than what `skip(type, id)` names
+/// (what is told already, as the parent its path names). Only the request: what the
+/// generated answer says is the model's, and a count equal to an id names nothing. A
+/// reply naming the message it answers, a refund its payment. At most
+/// [`MAX_REFERENCED`], within [`MAX_REFERENCE_LOOKUPS`] reads.
 pub(super) async fn referenced_by_value(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
-    (record, request): (Option<&Value>, Option<&Value>),
+    call: &OperationCall,
     skip: impl Fn(&str, &str) -> bool,
 ) -> Vec<StoredResource> {
     let rt = state.rt;
@@ -248,13 +260,17 @@ pub(super) async fn referenced_by_value(
         return Vec::new();
     }
     let mut values = Vec::new();
-    for value in [record, request].into_iter().flatten() {
-        id_values(rt, "", value, 0, &mut values);
+    if let Some(body) = &call.body {
+        id_values(rt, "", body, 0, &mut values);
+    }
+    for (name, value) in &call.path_params {
+        id_values(rt, name, value, 0, &mut values);
     }
     if values.is_empty() {
         return Vec::new();
     }
-    held_under(state, &plan.session, &values, MAX_REFERENCED, skip, Some).await
+    let limits = (MAX_REFERENCED, MAX_REFERENCE_LOOKUPS);
+    held_under(state, &plan.session, &values, limits, skip, Some).await
 }
 
 /// What routes with no parameters answered earlier in this session, oldest first, and

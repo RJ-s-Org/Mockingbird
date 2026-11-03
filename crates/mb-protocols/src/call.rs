@@ -694,6 +694,7 @@ pub(crate) async fn generate_pending(
         earlier_writes: &pending.earlier_writes,
         earlier_origins: &pending.earlier_origins,
         created_since: &pending.created_since,
+        changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
@@ -1354,6 +1355,7 @@ pub(crate) async fn complete(
             let own = resource_type
                 .zip(acted_on.as_deref())
                 .filter(|_| op.kind == OperationKind::Command(Effect::Update) && !op.is_action());
+            write_memory::effects_on_target(&earlier, target.as_ref(), &mut generated.effects);
             let outcomes = apply_effects(
                 &mut state,
                 session,
@@ -1371,6 +1373,16 @@ pub(crate) async fn complete(
                     "outcome" => "rejected"
                 )
                 .increment(generated.dropped_effects as u64);
+            }
+            if is_query {
+                write_memory::settle_by_effects(
+                    &mut state,
+                    plan,
+                    &earlier,
+                    target.as_ref(),
+                    &mut generated,
+                )
+                .await;
             }
         }
         // After the effects: one on the resource means it shows the write.

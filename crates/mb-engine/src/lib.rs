@@ -166,6 +166,10 @@ pub struct GenerationContext<'a> {
     /// was stored, so that what counts them has moved: shown as new, not among
     /// [`Self::related`]. Scrubbed by whoever found them. For the prompt only.
     pub created_since: &'a [StoredResource],
+    /// A read's target changes only through the effects its answer lists: it is behind
+    /// writes that only referred to it, so the answer is the stored copy, and the read is
+    /// offered the effects envelope to say what those writes changed on it.
+    pub changes_by_effects: bool,
     /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
     /// With none it does not.
     pub update_guard: Option<&'a dyn UpdateGuard>,
@@ -2009,7 +2013,7 @@ fn encode_base64(
     response
 }
 
-/// An error body whose schema declares an integer `status` member that may hold the HTTP
+/// An error body whose schema declares an integer or number `status` member that may hold the HTTP
 /// status, with that member set to it: a problem body (RFC 9457) says its own status, and
 /// a faker's or a model's otherwise says another. Kept only if the body still validates.
 /// The schema decides, not the name alone: a string `status`, or one whose bounds or enum
@@ -2042,13 +2046,14 @@ fn with_http_status(
     response
 }
 
-/// Whether `schema` is an integer's that allows `n`: by its type, bounds, `enum`,
+/// Whether `schema` is an integer's or a number's that allows `n`: by its type, bounds, `enum`,
 /// `const` and `multipleOf`.
 fn allows_integer(schema: &Value, n: u16) -> bool {
     let n = f64::from(n);
+    let numeric = |t: &Value| t == "integer" || t == "number";
     let integer = match schema.get("type") {
-        Some(Value::String(t)) => t == "integer",
-        Some(Value::Array(types)) => types.iter().any(|t| t == "integer"),
+        Some(t @ Value::String(_)) => numeric(t),
+        Some(Value::Array(types)) => types.iter().any(numeric),
         _ => false,
     };
     let bound = |key: &str| schema.get(key).and_then(Value::as_f64);
@@ -2093,7 +2098,7 @@ fn reflect(
     // An answer told of later writes is ahead of the stored copy, so that copy
     // only fills what it left out. A faker's knows of none, and takes the copy.
     let from_llm = !matches!(response.source, Source::Fallback);
-    let ahead = from_llm && !ctx.earlier_requests.is_empty();
+    let ahead = from_llm && !ctx.earlier_requests.is_empty() && !ctx.changes_by_effects;
     let body = match op.kind {
         OperationKind::Query => match ctx.target {
             Some(target) if ahead => caught_up(validator, body, target, ctx.earlier_own_body),
@@ -2113,6 +2118,13 @@ fn reflect(
                     (Some(target), Some(guard)) => {
                         let named = named_inputs(call);
                         let body = settled_update(validator, guard, body, target, named.as_deref());
+                        // The query's members as it says them, then the body's over them.
+                        let body = if call.query.is_empty() {
+                            body
+                        } else {
+                            let query = Value::Object(call.query.clone());
+                            overlay_request(validator, body, Some(&query))
+                        };
                         apply_request(validator, op, body, call.body.as_ref())
                     }
                     (target, _) => {

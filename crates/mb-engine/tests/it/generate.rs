@@ -49,6 +49,7 @@ fn ctx() -> GenerationContext<'static> {
         earlier_writes: &[],
         earlier_origins: &[],
         created_since: &[],
+        changes_by_effects: false,
         update_guard: None,
     }
 }
@@ -279,6 +280,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     earlier_writes: &[],
                     earlier_origins: &[],
                     created_since: &[],
+                    changes_by_effects: false,
                     update_guard: None,
                 },
             )

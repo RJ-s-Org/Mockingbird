@@ -11,10 +11,12 @@
 //! of its target, for replicas, feeds and triggers; telling a parent changes nothing
 //! it holds, and its read looks in the shared store before it serves, on any node.
 //!
-//! A create also tells the held records its new record refers to by value, by the
+//! A create also tells the held records its request refers to by value, by the
 //! matching [`world`] shows a request's references with: a reply the message it
-//! answers, a refund its payment. A parent and those keep, with the request, the record
-//! it created, which the read catching up is shown as new (see [`created_since`]).
+//! answers, a refund its payment. Those change only by the effects their next read's
+//! answer lists, and that read answers the stored copy (see [`Earlier::by_effects`]). A
+//! parent and those keep, with the request, the record it created, which the read
+//! catching up is shown as new (see [`created_since`]).
 //!
 //! The next generation for that resource is shown the requests; a read, which could
 //! otherwise answer from state and never see them, must generate. Its validated
@@ -74,6 +76,9 @@ pub(super) struct Earlier {
     /// a create's own body: all an answer has to keep. Last write wins, so any later
     /// write replaces or clears it, and older bodies are only told.
     pub(super) own: Option<Value>,
+    /// Every request kept only referred to the resource (see [`after_write`]): it
+    /// changes only by the effects a read's answer lists, and the stored copy stands.
+    pub(super) by_effects: bool,
     /// Catch-ups that failed since the last write.
     attempts: u64,
     /// This call's catch-up failed, so its answer is not one to repeat.
@@ -158,8 +163,14 @@ pub(super) async fn recall(
             told
         })
         .collect();
+    let by_effects = !memory.requests.is_empty()
+        && memory
+            .requests
+            .iter()
+            .all(|r| r.get(REFERENCED) == Some(&Value::Bool(true)));
     Earlier {
         key: Some(key),
+        by_effects,
         shown: memory.requests,
         told,
         own: memory.own,
@@ -1403,8 +1414,7 @@ pub(super) async fn after_write(
                         .as_ref()
                         .is_some_and(|p| p.resource_type == kind && p.id == other)
             };
-            let record = generated.body.as_ref();
-            world::referenced_by_value(state, plan, (record, w.call.body.as_ref()), told_already)
+            world::referenced_by_value(state, plan, w.call, told_already)
                 .await
                 .into_iter()
                 .filter(|r| !effect_applied(generated, &r.resource_type, &r.id))
@@ -1432,17 +1442,30 @@ pub(super) async fn after_write(
             state.upsert(session, held.clone()).await;
         }
     }
-    // Told as a child is, as what it is made under or refers to: last write wins.
-    let entry = memory_entry(op, told, created);
-    for related in parent.iter().chain(&referenced) {
-        let key = memory_key(&related.resource_type, &related.id, true);
+    // Told as a child is to what it is made under: last write wins.
+    let mut entry = memory_entry(op, told, created);
+    if let Some(parent) = &parent {
+        let key = memory_key(&parent.resource_type, &parent.id, true);
         remember(state, session, &key, &entry, None).await;
+    }
+    // What it only refers to is told so, and changes by effects alone (see
+    // [`Earlier::by_effects`]): what an older body says of it still stands.
+    if let Value::Object(members) = &mut entry {
+        members.insert(REFERENCED.to_string(), Value::Bool(true));
+    }
+    for related in &referenced {
+        let key = memory_key(&related.resource_type, &related.id, true);
+        let own = read_memory(state, session, &key).await.own;
+        remember(state, session, &key, &entry, own).await;
     }
 }
 
 /// What a kept request says beside what a prompt is told of it (see [`recall`]): when it
 /// was made, and the record it created, if any.
-const UNTOLD: [&str; 2] = ["at", CREATED];
+const UNTOLD: [&str; 3] = ["at", CREATED, REFERENCED];
+
+/// The member of a kept request saying it only referred to the record it is kept for.
+const REFERENCED: &str = "referenced";
 
 /// The member of a kept request naming the record it created, as `{type, id}`.
 const CREATED: &str = "created";
@@ -1929,6 +1952,50 @@ fn keeps_owner(
         && !known_foreign(rt, &plan.session, &candidate, &owner)
 }
 
+/// Whether this read of `held` changes it only by its answer's effects (see
+/// [`Earlier::by_effects`]), so that only those on it may apply.
+pub(super) fn by_effects(earlier: &Earlier, held: Option<&StoredResource>) -> bool {
+    earlier.by_effects && held.is_some() && !earlier.shown.is_empty()
+}
+
+/// The effects a read changing `held` by effects alone may apply: only those on `held`,
+/// as the requests it was told of only referred to it.
+pub(super) fn effects_on_target(
+    earlier: &Earlier,
+    held: Option<&StoredResource>,
+    effects: &mut Vec<ResourceEffect>,
+) {
+    if let (true, Some(held)) = (by_effects(earlier, held), held) {
+        effects.retain(|e| e.resource_type == held.resource_type && e.id == held.id);
+    }
+}
+
+/// After a generated 2xx read of `held` that changes by effects alone, once those applied:
+/// it answers the stored copy as it now stands, whatever else the answer said, and the
+/// requests it was told of are done. A failed generation never gets here (the stored
+/// copy answers and the next read tries again, up to the cap).
+pub(super) async fn settle_by_effects(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    earlier: &Earlier,
+    held: Option<&StoredResource>,
+    generated: &mut GeneratedResponse,
+) {
+    let (true, Some(held), Some(key)) = (by_effects(earlier, held), held, earlier.key.as_deref())
+    else {
+        return;
+    };
+    if !(200..300).contains(&generated.status) || transient_fallback(generated) {
+        return;
+    }
+    let session = &plan.session;
+    let current = state.get(session, &held.resource_type, &held.id).await;
+    if let Some(current) = current {
+        generated.body = Some(current.data);
+    }
+    forget_shown(state, session, key, &earlier.shown).await;
+}
+
 /// After a generated read that was told of remembered requests: when it is the
 /// whole resource, its answer takes the stored copy's place and those requests
 /// are done. A write landing during the generation leaves them: this answer did not
@@ -1971,6 +2038,10 @@ pub(super) async fn settle_read(
         }
         return;
     };
+    // Settled by its effects instead (see [`settle_by_effects`]).
+    if earlier.by_effects {
+        return;
+    }
     let Some(answer) = generated.body.as_ref() else {
         return;
     };

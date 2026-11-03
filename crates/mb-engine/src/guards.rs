@@ -707,7 +707,7 @@ pub(crate) fn effects_envelope(
     ctx: &crate::GenerationContext<'_>,
     validator: &SchemaValidator,
 ) -> bool {
-    crate::prompt::acts(op, status, ctx)
+    (crate::prompt::acts(op, status, ctx) || crate::prompt::changes_by_effects(op, status, ctx))
         && !validator
             .declared_property_names()
             .is_some_and(|d| d.contains(RESPONSE_KEY) || d.contains(EFFECTS_KEY))
@@ -727,8 +727,10 @@ pub(crate) fn refusals(
     effects_envelope: bool,
 ) -> Vec<u16> {
     // What a create would be refused on is not its own target.
+    // A read offered the envelope (see [`crate::prompt::changes_by_effects`]) is no write.
     let usable = effects_envelope
         && ctx.target.is_some()
+        && matches!(op.kind, mb_mcm::OperationKind::Command(_))
         && op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create)
         && ctx.forced_status.is_none()
         && ctx.scenario.is_none()

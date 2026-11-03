@@ -132,6 +132,16 @@ pub(crate) fn acts(op: &Operation, status: u16, ctx: &GenerationContext<'_>) -> 
         && (ctx.target.is_some() || !ctx.related.is_empty() || !ctx.created_since.is_empty())
 }
 
+/// Whether a 2xx read of `op` changes its stored target only through the effects its
+/// answer lists (see [`GenerationContext::changes_by_effects`]), so it is offered the
+/// effects envelope.
+pub(crate) fn changes_by_effects(op: &Operation, status: u16, ctx: &GenerationContext<'_>) -> bool {
+    ctx.changes_by_effects
+        && matches!(op.kind, OperationKind::Query)
+        && (200..300).contains(&status)
+        && ctx.target.is_some()
+}
+
 /// Whether the answer to `status` of `op` will settle on its stored target, as
 /// [`crate::settled_update`] does it: a plain update, told of no earlier requests, whose
 /// guard says the answer has the read's schema. What it changes beyond what the request
@@ -235,6 +245,7 @@ fn stream_user_message(
         earlier_writes: &[],
         earlier_origins: &[],
         created_since: &[],
+        changes_by_effects: false,
         update_guard: None,
     };
     let mut s = user_message(call, &unary, false, None, false, false, defaults);
@@ -541,6 +552,16 @@ pub(crate) fn effects_note(op: &Operation, status: u16, ctx: &GenerationContext<
     s.push_str("</shown_resources>");
     if decides_id(op, status, ctx) {
         s.push_str("\nIf it made a new one and changed nothing else, \"effects\" is empty.");
+    }
+    if let (true, Some(target)) = (changes_by_effects(op, status, ctx), ctx.target) {
+        let _ = write!(
+            s,
+            "\nThe response is <existing_resource> as stored, so it changes only through \"effects\": \
+they include what the requests in <earlier_requests> changed on it, if they changed anything, as \
+{{\"type\": {}, \"id\": {}, \"set\": {{...}}}}.",
+            data(&Value::from(target.resource_type.as_str())),
+            data(&Value::from(target.id.as_str())),
+        );
     }
     if let (OperationKind::Command(Effect::Other), Some(verb), Some(target)) =
         (&op.kind, action_verb(op, status), ctx.target)
