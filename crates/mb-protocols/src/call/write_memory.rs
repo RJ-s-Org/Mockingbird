@@ -1571,10 +1571,11 @@ async fn update_without_answer(
     }
     let own = request.as_ref().and_then(|r| own_part(rt, t, r));
     // What is left, as it may be kept: every credential has gone by now, since a
-    // scrubbed request has the same shape. What the copy holds has nothing to tell,
-    // and what was redacted nothing a catch-up could show.
+    // scrubbed request has the same shape, and of the rest only what is told (see
+    // [`told_of_update`]). What the copy holds has nothing to tell, and what was
+    // redacted nothing a catch-up could show.
     let kept = match (&request, &rest) {
-        (Some(request), Some(rest)) => Some(kept_part(request, rest)),
+        (Some(request), Some(rest)) => told_of_update(rt, plan, t, &kept_part(request, rest)),
         _ => None,
     };
     let Some(kept) = kept.filter(|kept| !carries(kept, &merged) && !only_redacted(kept)) else {
@@ -1627,6 +1628,18 @@ fn without_contradictions(
         !says_foreign(rt, &candidate, &owner)
     });
     Value::Object(kept.map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+
+/// What a 204 update's `rest`, the part of its scrubbed request it could not apply to
+/// `t`'s stored copy, tells that copy's reads: as a list read is told of a write, only
+/// the members the read's or the request's schema declares (see [`declared_plainly`]),
+/// past the wider checks of [`for_context`]. An undeclared member may be anything, a
+/// `code` or a `value` included, so it is not told. `None` when nothing is left.
+fn told_of_update(rt: &MockRuntime, plan: &CallPlan<'_>, t: &str, rest: &Value) -> Option<Value> {
+    let read = read_schema(rt, t);
+    let request = plan.op.input.body.as_ref();
+    declared_plainly(rt, t, (read, request), rest, 0)
+        .and_then(|told| for_context(rt, plan, t, &told, request, read))
 }
 
 /// The part of scrubbed `request` that `rest` is the raw form of.

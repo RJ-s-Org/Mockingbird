@@ -523,6 +523,10 @@ impl StateStore for SqlStateStore {
         self.inner.touch_existing(s).await.map(|_| ())
     }
 
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        self.inner.touch_existing(s).await
+    }
+
     async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
         let cutoff = self.inner.cutoff(now_ms());
         let n: i64 = on_pool!(&self.inner.pool, |p| sqlx::query_scalar(

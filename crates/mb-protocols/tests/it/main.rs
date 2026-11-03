@@ -16,6 +16,7 @@
 mod support;
 
 mod api;
+mod backends;
 mod call;
 mod data_plane_auth;
 mod data_plane_auth_protocols;

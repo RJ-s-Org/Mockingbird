@@ -473,6 +473,10 @@ impl StateStore for RedisStateStore {
         Ok(())
     }
 
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        Ok(self.run_refresh_script(&self.touch, s, None).await? == 1)
+    }
+
     /// Like [`StateStore::sessions`], without reading each session's
     /// resource count and timestamp: only whether its meta key still exists.
     async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {

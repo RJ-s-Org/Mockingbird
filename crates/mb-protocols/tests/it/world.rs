@@ -371,6 +371,9 @@ impl StateStore for Counting {
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError> {
         self.inner.touch(s).await
     }
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        self.inner.touch_live(s).await
+    }
     async fn sessions(&self, w: &str, m: &str) -> Result<Vec<SessionInfo>, StateError> {
         self.inner.sessions(w, m).await
     }
@@ -393,6 +396,8 @@ struct Harness {
     provider: Arc<ScriptedProvider>,
     store: Arc<MemoryStore>,
     counting: Arc<Counting>,
+    /// The store as the runtime has it, with the response cache.
+    state: Arc<dyn StateStore>,
 }
 
 fn session() -> SessionKey {
@@ -421,6 +426,12 @@ fn harness_with(
         gets: AtomicUsize::new(0),
         lists: AtomicUsize::new(0),
     });
+    // As a server runs it, with the response cache.
+    let state = CachingStateStore::wrap(
+        Arc::clone(&counting) as Arc<dyn StateStore>,
+        Duration::from_secs(3600),
+        mb_state::DEFAULT_CACHE_ENTRIES,
+    );
     let mut rt = MockRuntime::new(
         "m",
         Arc::new(compile(contract).unwrap()),
@@ -428,12 +439,7 @@ fn harness_with(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        // As a server runs it, with the response cache.
-        CachingStateStore::wrap(
-            Arc::clone(&counting) as Arc<dyn StateStore>,
-            Duration::from_secs(3600),
-            mb_state::DEFAULT_CACHE_ENTRIES,
-        ),
+        Arc::clone(&state),
     );
     change(&mut rt);
     Harness {
@@ -441,6 +447,7 @@ fn harness_with(
         provider,
         store,
         counting,
+        state,
     }
 }
 
@@ -1327,6 +1334,40 @@ async fn a_callers_answer_reaches_later_prompts() {
     assert_eq!(count, 1, "the note, and no count of what is remembered");
 }
 
+/// A read that stores nothing creates no session, though its answer is one to keep: the
+/// session's first write keeps it then, so later prompts are told of it all the same.
+#[tokio::test]
+async fn a_read_storing_nothing_creates_no_session() {
+    let h = world(vec![
+        me(),
+        json!({"up": "yes"}),
+        note("note-4711"),
+        note("note-4712"),
+    ]);
+    h.call("GET", "/me", None).await;
+    h.call("GET", "/status", None).await;
+    let sessions = h.store.sessions("default", "m").await.unwrap();
+    assert!(sessions.is_empty(), "{sessions:?}");
+    assert!(
+        h.store
+            .list(&session(), MEMORY, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // The first write is told of the answer, and keeps it past the cache it clears.
+    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        .await;
+    let shown = block(&h.prompt(2), "earlier_answers").unwrap().to_owned();
+    assert!(shown.contains("user-1"), "{shown}");
+    h.call("POST", "/notes", Some(json!({"title": "Another"})))
+        .await;
+    let again = block(&h.prompt(3), "earlier_answers").unwrap().to_owned();
+    assert!(again.contains("user-1"), "{again}");
+    assert_eq!(h.calls(), 4);
+}
+
 /// Slack's `auth.test`, from its contract alone, and its POST form replacing it.
 #[tokio::test]
 async fn slacks_auth_test_reaches_later_prompts() {
@@ -1427,7 +1468,7 @@ async fn earlier_answers_are_per_session_and_cleared_by_reset() {
         "{}",
         h.prompt(1)
     );
-    h.store.reset(&session()).await.unwrap();
+    h.state.reset(&session()).await.unwrap();
     h.call("POST", "/notes", note_request()).await;
     assert!(
         block(&h.prompt(2), "earlier_answers").is_none(),
@@ -1440,6 +1481,7 @@ async fn earlier_answers_are_per_session_and_cleared_by_reset() {
 #[tokio::test]
 async fn earlier_answers_are_on_no_change_feed() {
     let h = world(vec![me()]);
+    h.hold("notes", "note-4711", note("note-4711")).await;
     let mut changes = h.store.subscribe();
     h.call("GET", "/me", None).await;
     assert!(
@@ -1995,4 +2037,364 @@ async fn deleting_a_record_forgets_the_answer_about_it() {
     let shown = block(&prompt, "earlier_answers").unwrap();
     assert!(!shown.contains("user-1"), "{prompt}");
     assert!(shown.contains("plan-1"), "{prompt}");
+}
+
+// A refusal the contract declares.
+
+/// A refund of a capture, which declares a 422 for one the capture cannot take.
+const REFUNDS: &str = r##"
+openapi: 3.0.0
+info: {title: Refunds, version: "1"}
+paths:
+  /captures/{capture_id}:
+    get:
+      operationId: getCapture
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Capture"}}}}
+  /captures/{capture_id}/refund:
+    post:
+      operationId: refundCapture
+      parameters: [{name: capture_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {amount: {type: string}}}}}
+      responses:
+        "201": {description: refunded, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+        "422": {description: the capture cannot be refunded, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "401": {description: unauthorized, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+components:
+  schemas:
+    Capture:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, amount: {type: string}}
+    Refund:
+      type: object
+      required: [id, status]
+      properties: {id: {type: string}, status: {type: string}, amount: {type: string}}
+    Error:
+      type: object
+      required: [name, message]
+      properties: {name: {type: string}, message: {type: string}}
+"##;
+
+fn capture() -> Value {
+    json!({"id": "cap-4711", "status": "REFUNDED", "amount": "10.00"})
+}
+
+fn refund() -> Value {
+    json!({"id": "ref-1", "status": "COMPLETED", "amount": "10.00"})
+}
+
+/// The schema the `n`th LLM call asked for.
+fn format_schema(h: &Harness, n: usize) -> Value {
+    match &h.provider.requests()[n].response_format {
+        mb_llm::ResponseFormat::JsonSchema { schema, .. } => schema.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A refund of a fully refunded capture it was shown can answer the contract's 422,
+/// which the engine renders, valid, and which changes nothing.
+#[tokio::test]
+async fn a_write_on_a_shown_record_can_be_refused_as_declared() {
+    let h = harness_with(
+        REFUNDS.as_bytes(),
+        vec![json!({"effects": [], "response": null, "refusal": 422})],
+        |_| {},
+    );
+    h.hold("captures", "cap-4711", capture()).await;
+    let (status, body) = h
+        .call(
+            "POST",
+            "/captures/cap-4711/refund",
+            Some(json!({"amount": "10.00"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["name"].is_string() && body["message"].is_string(),
+        "{body}"
+    );
+    assert_eq!(h.calls(), 1, "no second call to render it");
+    let prompt = h.prompt(0);
+    assert!(prompt.contains("\"refusal\": <status>"), "{prompt}");
+    assert!(
+        prompt.contains("for this call: 422."),
+        "only what fits: {prompt}"
+    );
+    assert_eq!(
+        format_schema(&h, 0)["properties"]["refusal"],
+        json!({"type": "integer", "enum": [422]})
+    );
+    assert_eq!(h.held("captures", "cap-4711").await, capture());
+    let exported = h.store.export(&session()).await.unwrap();
+    assert_eq!(exported.len(), 1, "no refund stored: {exported:?}");
+}
+
+/// A status the operation does not declare is ignored: the answer stands.
+#[tokio::test]
+async fn an_undeclared_refusal_is_ignored() {
+    let h = harness_with(
+        REFUNDS.as_bytes(),
+        vec![
+            json!({"effects": [], "response": refund(), "refusal": 409}),
+            json!({"effects": [], "response": refund(), "refusal": 401}),
+        ],
+        |_| {},
+    );
+    h.hold("captures", "cap-4711", capture()).await;
+    for _ in 0..2 {
+        let (status, body) = h
+            .call(
+                "POST",
+                "/captures/cap-4711/refund",
+                Some(json!({"amount": "10.00"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["status"], "COMPLETED", "{body}");
+    }
+}
+
+/// An operation declaring no such error is asked for what it was, to the byte, and a
+/// refusal in its answer is no refusal.
+#[tokio::test]
+async fn no_declared_error_leaves_the_call_as_it_was() {
+    let without = REFUNDS.replace(
+        "        \"422\": {description: the capture cannot be refunded, content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n",
+        "",
+    );
+    assert_ne!(without, REFUNDS);
+    let calls = |contract: &str, answer: Value| {
+        let h = harness_with(contract.as_bytes(), vec![answer], |_| {});
+        async move {
+            h.hold("captures", "cap-4711", capture()).await;
+            let (status, _) = h
+                .call(
+                    "POST",
+                    "/captures/cap-4711/refund",
+                    Some(json!({"amount": "10.00"})),
+                )
+                .await;
+            (h, status)
+        }
+    };
+    let answer = json!({"effects": [], "response": refund(), "refusal": 422});
+    let (plain, status) = calls(&without, answer.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (offered, _) = calls(REFUNDS, answer).await;
+
+    let request = |h: &Harness| h.provider.requests()[0].clone();
+    let (plain_request, offered_request) = (request(&plain), request(&offered));
+    assert_eq!(
+        plain_request.messages[0].content, offered_request.messages[0].content,
+        "the system message"
+    );
+    let plain_prompt = timeless(&plain.prompt(0));
+    let offered_prompt = timeless(&offered.prompt(0));
+    assert!(!plain_prompt.contains("refusal"), "{plain_prompt}");
+    assert!(
+        offered_prompt.starts_with(&plain_prompt) && offered_prompt.len() > plain_prompt.len(),
+        "only the note is added:\n{plain_prompt}\n---\n{offered_prompt}"
+    );
+    let mut offered_schema = format_schema(&offered, 0);
+    offered_schema["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("refusal");
+    assert_eq!(format_schema(&plain, 0), offered_schema);
+    assert!(
+        format_schema(&plain, 0)["properties"]
+            .get("refusal")
+            .is_none()
+    );
+}
+
+/// A write on a record it was not shown, and a read, are offered no refusal.
+#[tokio::test]
+async fn a_read_or_a_record_not_shown_is_offered_no_refusal() {
+    let h = harness_with(REFUNDS.as_bytes(), vec![refund(), capture()], |_| {});
+    let (status, _) = h
+        .call(
+            "POST",
+            "/captures/cap-unknown/refund",
+            Some(json!({"amount": "10.00"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(!h.prompt(0).contains("refusal"), "{}", h.prompt(0));
+    h.call("GET", "/captures/cap-4711", None).await;
+    assert!(!h.prompt(1).contains("refusal"), "{}", h.prompt(1));
+}
+
+// Values a mock minted.
+
+/// Plaid's shape: a link answers a `public_token`, an exchange of it an `access_token`,
+/// and later calls carry that one. No record is stored under either.
+const EXCHANGE: &str = r##"
+openapi: 3.0.0
+info: {title: Exchange, version: "1"}
+paths:
+  /link/token/create:
+    post:
+      operationId: createLinkToken
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/LinkRequest"}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, required: [public_token], properties: {public_token: {type: string}, request_id: {type: string}}}}}}
+  /item/public_token/exchange:
+    post:
+      operationId: exchangePublicToken
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [public_token], properties: {client_id: {type: string}, secret: {type: string}, public_token: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, required: [access_token, item_id], properties: {access_token: {type: string}, item_id: {type: string}, request_id: {type: string}}}}}}
+  /item/get:
+    post:
+      operationId: itemGet
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [access_token], properties: {client_id: {type: string}, secret: {type: string}, access_token: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {item: {type: object, properties: {item_id: {type: string}, webhook: {type: string}}}}}}}}
+components:
+  schemas:
+    LinkRequest:
+      type: object
+      properties:
+        client_id: {type: string}
+        secret: {type: string}
+        webhook: {type: string}
+        access_token: {type: string}
+"##;
+
+const PUBLIC: &str = "public-sandbox-0c1f7a2e";
+const ACCESS: &str = "access-sandbox-9d3e4b71";
+const SECRET: &str = "client-secret-5b8a";
+
+/// An exchange answer's token, used in a later call, shows the item it belongs to and
+/// the request that got it, with the token, the token it was exchanged for and the
+/// client's secret left out. Only a hash of each minted value is kept.
+#[tokio::test]
+async fn a_minted_token_shows_the_answer_that_minted_it() {
+    let h = harness_with(
+        EXCHANGE.as_bytes(),
+        vec![
+            json!({"access_token": ACCESS, "item_id": "item-4711", "request_id": "req-1"}),
+            json!({"item": {"item_id": "item-4711"}}),
+        ],
+        |_| {},
+    );
+    h.call(
+        "POST",
+        "/item/public_token/exchange",
+        Some(json!({"client_id": "client-1", "secret": SECRET, "public_token": PUBLIC})),
+    )
+    .await;
+    assert!(block(&h.prompt(0), "earlier_origins").is_none());
+    h.call(
+        "POST",
+        "/item/get",
+        Some(json!({"client_id": "client-1", "secret": SECRET, "access_token": ACCESS})),
+    )
+    .await;
+    let prompt = h.prompt(1);
+    let origins = block(&prompt, "earlier_origins").unwrap();
+    assert!(origins.contains("item-4711"), "{prompt}");
+    assert!(origins.contains("exchangePublicToken"), "{prompt}");
+    assert!(
+        origins.contains("client-1"),
+        "one hop back, to its request: {prompt}"
+    );
+    for hidden in [ACCESS, PUBLIC, SECRET] {
+        assert!(!origins.contains(hidden), "{hidden}: {prompt}");
+    }
+    assert!(prompt.contains("may have changed"), "{prompt}");
+
+    let kept = h.store.list(&session(), MEMORY, 10).await.unwrap();
+    let text = serde_json::to_string(&kept).unwrap();
+    for hidden in [ACCESS, PUBLIC, SECRET] {
+        assert!(!text.contains(hidden), "{hidden}: {text}");
+    }
+    assert!(h.store.export(&session()).await.unwrap().is_empty());
+    h.state.reset(&session()).await.unwrap();
+    assert!(
+        h.store
+            .list(&session(), MEMORY, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// What a client sent is its own, not the mock's, however the answer names it: an answer
+/// repeating it mints nothing, and a request carrying it again is shown nothing.
+#[tokio::test]
+async fn a_clients_own_value_is_never_kept() {
+    let h = harness_with(
+        EXCHANGE.as_bytes(),
+        vec![
+            json!({"public_token": ACCESS, "request_id": "req-1"}),
+            json!({"item": {"item_id": "item-4711"}}),
+        ],
+        |_| {},
+    );
+    h.call(
+        "POST",
+        "/link/token/create",
+        Some(json!({"client_id": "client-1", "secret": SECRET, "access_token": ACCESS})),
+    )
+    .await;
+    assert!(
+        h.store
+            .list(&session(), MEMORY, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    h.call("POST", "/item/get", Some(json!({"access_token": ACCESS})))
+        .await;
+    assert!(block(&h.prompt(1), "earlier_origins").is_none());
+}
+
+/// A request carrying no minted value is told nothing, and a contract minting nothing
+/// pays no read for it.
+#[tokio::test]
+async fn nothing_minted_leaves_the_prompt_as_it_was() {
+    let h = harness_with(
+        EXCHANGE.as_bytes(),
+        vec![
+            json!({"access_token": ACCESS, "item_id": "item-4711"}),
+            json!({"item": {"item_id": "item-4711"}}),
+        ],
+        |_| {},
+    );
+    h.call(
+        "POST",
+        "/item/public_token/exchange",
+        Some(json!({"public_token": PUBLIC})),
+    )
+    .await;
+    h.call(
+        "POST",
+        "/item/get",
+        Some(json!({"access_token": "access-sandbox-other"})),
+    )
+    .await;
+    assert!(block(&h.prompt(1), "earlier_origins").is_none());
+
+    let plain = world(vec![json!({"ok": true})]);
+    plain.call("POST", "/pins", Some(json!({"n": 1}))).await;
+    let h = world(vec![json!({"ok": true})]);
+    h.call(
+        "POST",
+        "/pins",
+        Some(json!({"api_token": "secret-4711-long"})),
+    )
+    .await;
+    assert_eq!(h.reads(), plain.reads(), "no lookup");
 }

@@ -74,6 +74,11 @@ values.";
 const EARLIER_WRITES: &str = "Requests that succeeded earlier on this route, oldest first. They may \
 have changed what it answers, and that may have changed since.";
 
+/// What <earlier_origins> is: where a value the request carries came from, told.
+const EARLIER_ORIGINS: &str = "Earlier answers of this API in this session that issued a value \
+this request carries, oldest first, each with the request that got it. The request refers to what \
+they describe, which may have changed since.";
+
 /// The system and user messages of one generation of `status` for `call`,
 /// with `schema` the body schema the answer must match.
 #[must_use]
@@ -192,6 +197,7 @@ fn stream_user_message(call: &OperationCall, ctx: &StreamContext, items: usize) 
         earlier_own_body: None,
         earlier_answers: &[],
         earlier_writes: &[],
+        earlier_origins: &[],
         update_guard: None,
     };
     let mut s = user_message(call, &unary, false, None, false);
@@ -392,6 +398,12 @@ must follow them.\n{}\n</scenario>",
         ctx.earlier_answers,
     );
     data_block(&mut s, EARLIER_WRITES, "earlier_writes", ctx.earlier_writes);
+    data_block(
+        &mut s,
+        EARLIER_ORIGINS,
+        "earlier_origins",
+        ctx.earlier_origins,
+    );
     earlier_requests_block(&mut s, ctx.earlier_requests);
     s
 }

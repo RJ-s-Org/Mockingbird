@@ -422,6 +422,12 @@ async fn reads_do_not_create_sessions(st: &Arc<dyn StateStore>, ws: &str) {
     assert!(st.export(&k).await.expect("export").is_empty());
     st.touch(&k).await.expect("touch");
     assert!(st.sessions(ws, "reads").await.expect("sessions").is_empty());
+    assert!(!st.touch_live(&k).await.expect("touch_live"), "not live");
+    assert!(st.sessions(ws, "reads").await.expect("sessions").is_empty());
+    st.upsert(&k, res("order", "1", json!({"n": 1})))
+        .await
+        .expect("upsert");
+    assert!(st.touch_live(&k).await.expect("touch_live"), "live");
 }
 
 async fn sessions_lists_with_counts(st: &Arc<dyn StateStore>, ws: &str) {

@@ -207,6 +207,13 @@ pub trait StateStore: Send + Sync {
     /// Refreshes a live session's `last_touched`. A no-op for an unknown or
     /// expired session: never creates or revives one.
     async fn touch(&self, s: &SessionKey) -> Result<(), StateError>;
+    /// [`StateStore::touch`], answering whether the session was live: `false` for an
+    /// unknown or expired one, which it neither creates nor revives. This default, for
+    /// test doubles, touches and answers `true`.
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        self.touch(s).await?;
+        Ok(true)
+    }
     /// Live sessions of a mock, most recently touched first.
     async fn sessions(&self, workspace: &str, mock: &str) -> Result<Vec<SessionInfo>, StateError>;
     /// How many live sessions a mock has (the `mb_state_sessions` gauge):

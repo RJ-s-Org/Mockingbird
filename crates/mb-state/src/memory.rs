@@ -327,6 +327,10 @@ impl StateStore for MemoryStore {
         Ok(())
     }
 
+    async fn touch_live(&self, s: &SessionKey) -> Result<bool, StateError> {
+        Ok(self.inner.touch_existing(s).is_some())
+    }
+
     async fn session_count(&self, workspace: &str, mock: &str) -> Result<usize, StateError> {
         let now = Instant::now();
         Ok(self

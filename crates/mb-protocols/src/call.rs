@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod deleted;
+mod minted;
 mod world;
 mod write_memory;
 
@@ -686,6 +687,7 @@ pub(crate) async fn generate_pending(
         earlier_own_body: pending.earlier.own.as_ref(),
         earlier_answers: &pending.earlier_answers,
         earlier_writes: &pending.earlier_writes,
+        earlier_origins: &pending.earlier_origins,
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
@@ -746,6 +748,10 @@ pub(crate) struct Pending<'a> {
     earlier: write_memory::Earlier,
     /// What routes with no parameters answered earlier in the session.
     earlier_answers: Vec<Value>,
+    /// Of those, the ones only the response cache holds, for a write to keep.
+    unkept_answers: Vec<Value>,
+    /// The answers that minted values this call carries, with their requests.
+    earlier_origins: Vec<Value>,
     /// What was written to this list read's own path earlier in the session.
     earlier_writes: Vec<Value>,
 }
@@ -933,7 +939,7 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    let (earlier_answers, earlier_writes) = async {
+    let ((earlier_answers, unkept_answers), earlier_writes, earlier_origins) = async {
         parents_by_name(
             &mut state,
             session,
@@ -967,6 +973,7 @@ pub(crate) async fn prepare<'a>(
         (
             world::recall_answers(&mut state, plan).await,
             write_memory::recall_route(&mut state, plan, call).await,
+            minted::recall(&mut state, plan, call).await,
         )
     }
     .instrument(state_span())
@@ -981,7 +988,9 @@ pub(crate) async fn prepare<'a>(
         cache: since.zip(key),
         earlier,
         earlier_answers,
+        unkept_answers,
         earlier_writes,
+        earlier_origins,
     }))
 }
 
@@ -1002,6 +1011,7 @@ pub(crate) async fn complete(
         foreign_key,
         cache,
         mut earlier,
+        unkept_answers,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1206,6 +1216,8 @@ pub(crate) async fn complete(
             foreign_key || unstored,
         )
         .await;
+        world::keep_unkept(&mut state, plan, &unkept_answers, &generated).await;
+        minted::after_answer(&mut state, plan, call, &generated).await;
         world::after_answer(&mut state, plan, call, &generated).await;
         world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
@@ -1617,6 +1629,9 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
+    /// Whether a create or an action may mint a value for a client to send back (see
+    /// [`minted::may_mint`]).
+    mints: bool,
 }
 
 /// A list read whose path also takes writes.
@@ -1729,6 +1744,10 @@ impl BundleIndex {
             effect_types,
             single_reads,
             written_lists,
+            mints: bundle
+                .operations
+                .iter()
+                .any(|op| minted::may_mint(bundle, op)),
         }
     }
 
@@ -3659,6 +3678,16 @@ impl<'a> StateAccess<'a> {
             let r = self.rt.state.touch(s).await;
             self.settle(r);
         }
+    }
+
+    /// Whether the session is live, refreshing it if so. `false` when it is not, or the
+    /// store is unavailable.
+    async fn live(&mut self, s: &SessionKey) -> bool {
+        if !self.open() {
+            return false;
+        }
+        let r = self.rt.state.touch_live(s).await;
+        self.settle(r).unwrap_or(false)
     }
 
     /// Whether the store answered this call's reads: a missing resource is

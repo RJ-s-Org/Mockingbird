@@ -183,13 +183,109 @@ pub(super) async fn named_by_value(
     out.splice(followed.named..followed.named, found);
 }
 
-/// What routes with no parameters answered earlier in this session, oldest first.
-pub(super) async fn recall_answers(state: &mut StateAccess<'_>, plan: &CallPlan<'_>) -> Vec<Value> {
+/// What routes with no parameters answered earlier in this session, oldest first, and
+/// of those the ones only the response cache holds: answered before the session had
+/// anything stored, they were not kept, as a read creates no session (see
+/// [`keep_unkept`]).
+pub(super) async fn recall_answers(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+) -> (Vec<Value>, Vec<Value>) {
     let rt = state.rt;
     if !write_memory::applies(rt, plan) || rt.index().single_reads.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    read_answers(state, &plan.session).await
+    let mut answers = read_answers(state, &plan.session).await;
+    let unkept = cached_answers(rt, plan, &answers);
+    answers.extend(unkept.iter().cloned());
+    let excess = answers.len().saturating_sub(MAX_ANSWERS);
+    answers.drain(..excess);
+    (answers, unkept)
+}
+
+/// The answers of routes with no parameters that the response cache holds for this
+/// session and the kept answers do not, as they would be kept (see [`kept_answer`]).
+fn cached_answers(rt: &MockRuntime, plan: &CallPlan<'_>, held: &[Value]) -> Vec<Value> {
+    let Some(cache) = rt.state.response_cache() else {
+        return Vec::new();
+    };
+    let mut paths: Vec<(&String, &usize)> = rt.index().single_reads.iter().collect();
+    paths.sort_unstable();
+    paths
+        .into_iter()
+        .filter(|(path, _)| !held.iter().any(|e| of_path(e, path)))
+        .filter_map(|(path, i)| {
+            let read = rt.bundle().operations.get(*i)?;
+            let call = OperationCall {
+                operation_id: read.id.clone(),
+                ..OperationCall::default()
+            };
+            let key = format!(
+                "{}:{}",
+                rt.bundle.source_digest,
+                cache_key(read, &call, None)
+            );
+            let hit = cache.get(&plan.session, &key)?;
+            if hit.fallback_reason.is_some() || !(200..300).contains(&hit.status) {
+                return None;
+            }
+            let schema = read
+                .output_for_status(hit.status)
+                .and_then(|o| o.schema.as_ref());
+            let answer = kept_answer(rt, plan, read, schema, hit.body.as_ref()?)?;
+            Some(serde_json::json!({"path": path, "answer": answer}))
+        })
+        .collect()
+}
+
+/// After a 2xx command: keeps the answers [`recall_answers`] found only in the response
+/// cache, which the command has cleared, as the session now holds what it wrote.
+pub(super) async fn keep_unkept(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    unkept: &[Value],
+    generated: &GeneratedResponse,
+) {
+    if unkept.is_empty()
+        || !matches!(plan.op.kind, OperationKind::Command(_))
+        || !(200..300).contains(&generated.status)
+    {
+        return;
+    }
+    let session = &plan.session;
+    let held = read_answers(state, session).await;
+    let mut answers = held.clone();
+    for entry in unkept {
+        let path = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !answers.iter().any(|e| of_path(e, path)) {
+            answers.push(entry.clone());
+        }
+    }
+    let excess = answers.len().saturating_sub(MAX_ANSWERS);
+    answers.drain(..excess);
+    write_answers(state, session, &held, answers).await;
+}
+
+/// What is kept of `body`, an answer of `schema` from `read`'s route: what that schema
+/// declares (see [`write_memory::declared_plainly`]), as context may show it, within
+/// [`MAX_ANSWER_BYTES`].
+fn kept_answer(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    read: &Operation,
+    schema: Option<&Value>,
+    body: &Value,
+) -> Option<Value> {
+    if !body.is_object() || schema.is_none() {
+        return None;
+    }
+    let t = read.resource_type.as_deref().unwrap_or_default();
+    let declared = write_memory::declared_plainly(rt, t, (schema, None), body, 0)?;
+    write_memory::for_context(rt, plan, t, &declared, schema, schema)
+        .filter(|kept| kept.to_string().len() <= MAX_ANSWER_BYTES)
 }
 
 /// Whether a kept answer is that of `path`.
@@ -297,27 +393,18 @@ pub(super) async fn after_answer(
     if !usable {
         return;
     }
-    let read = rt.bundle().operations.get(*read);
-    let read_schema = read.and_then(|read| read.success_output()?.schema.as_ref());
-    let own_type = read.and_then(|read| read.resource_type.as_deref());
+    let Some(read) = rt.bundle().operations.get(*read) else {
+        return;
+    };
+    let read_schema = read.success_output().and_then(|o| o.schema.as_ref());
     let schema = op
         .output_for_status(generated.status)
         .and_then(|o| o.schema.as_ref());
     let kept = generated
         .body
         .as_ref()
-        .filter(|body| {
-            body.is_object()
-                && generated.source != Source::Fallback
-                && schema.is_some()
-                && schema == read_schema
-        })
-        .and_then(|body| {
-            let t = own_type.unwrap_or_default();
-            let declared = write_memory::declared_plainly(rt, t, (schema, None), body, 0)?;
-            write_memory::for_context(rt, plan, t, &declared, schema, schema)
-        })
-        .filter(|body| body.to_string().len() <= MAX_ANSWER_BYTES);
+        .filter(|_| generated.source != Source::Fallback && schema == read_schema)
+        .and_then(|body| kept_answer(rt, plan, read, schema, body));
     // A read that says nothing new leaves what is kept: a faker standing in for the LLM.
     // One too large to keep has outdated it.
     let said = generated.source != Source::Fallback
@@ -327,6 +414,11 @@ pub(super) async fn after_answer(
     }
     let session = &plan.session;
     let held = read_answers(state, session).await;
+    // A read creates no session: what only it would store waits in the response cache
+    // for the session's first write (see [`keep_unkept`]).
+    if !command && held.is_empty() && !state.live(session).await {
+        return;
+    }
     let mut answers: Vec<Value> = held.iter().filter(|e| !of_path(e, path)).cloned().collect();
     if let Some(answer) = kept {
         answers.push(serde_json::json!({"path": path, "answer": answer}));

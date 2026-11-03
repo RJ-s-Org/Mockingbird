@@ -47,6 +47,7 @@ fn ctx() -> GenerationContext<'static> {
         earlier_own_body: None,
         earlier_answers: &[],
         earlier_writes: &[],
+        earlier_origins: &[],
         update_guard: None,
     }
 }
@@ -275,6 +276,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     earlier_own_body: None,
                     earlier_answers: &[],
                     earlier_writes: &[],
+                    earlier_origins: &[],
                     update_guard: None,
                 },
             )
@@ -2481,6 +2483,10 @@ async fn the_sent_schema_requires_effects_and_response() {
     let mut older = schema.clone();
     older["required"] = json!(["response"]);
     assert_eq!(mb_engine::without_effects_schema(&older), inner);
+    // So is one offering a refusal of a declared error status.
+    let mut refusing = schema.clone();
+    refusing["properties"]["refusal"] = json!({"type": "integer", "enum": [409, 422]});
+    assert_eq!(mb_engine::without_effects_schema(&refusing), inner);
 }
 
 /// Member order does not matter: effects may come first, as asked.

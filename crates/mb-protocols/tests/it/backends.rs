@@ -1,0 +1,309 @@
+//! What a mock keeps for itself under the state store's reserved type, on each backend:
+//! the write memory, the deleted markers and the values a mock minted. The in-memory
+//! store always runs, and Redis and Postgres when `MB_TEST_REDIS_URL` or
+//! `MB_TEST_POSTGRES_URL` is set, as `mb-state`'s conformance suite gates them (see
+//! `scripts/test-redis.sh` and `scripts/test-postgres.sh`). Each run has its own
+//! workspace, so runs can share one server.
+#![cfg(test)]
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use mb_engine::{Engine, EngineConfig};
+use mb_import::compile;
+use mb_llm::{Provider, ScriptedProvider};
+use mb_protocols::{MockRuntime, http_rest};
+use mb_state::{CachingStateStore, INTERNAL_TYPE, SessionKey, StateStore};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+const LONG_TTL: Duration = Duration::from_secs(3600);
+
+const ITEMS: &str = r##"
+openapi: 3.0.0
+info: {title: Items, version: "1"}
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Created"}}}}
+  /items/{item_id}:
+    parameters: [{name: item_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getItem
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "404": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    delete:
+      operationId: deleteItem
+      responses:
+        "204": {description: gone}
+  /links:
+    post:
+      operationId: createLink
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {item_id: {type: string}, secret: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Link"}}}}
+  /links/inspect:
+    post:
+      operationId: inspectLink
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {link_token: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Inspection"}}}}
+components:
+  schemas:
+    Created:
+      type: object
+      required: [id]
+      properties: {id: {type: string}}
+    Item:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+    Link:
+      type: object
+      required: [link_token, item_id]
+      properties: {link_token: {type: string}, item_id: {type: string}}
+    Inspection:
+      type: object
+      required: [valid]
+      properties: {valid: {type: boolean}}
+    Error:
+      type: object
+      required: [code, message]
+      properties: {code: {type: integer}, message: {type: string}}
+"##;
+
+/// A workspace no other run uses.
+fn workspace() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("ws-{}-{nanos}", std::process::id())
+}
+
+struct Harness {
+    router: axum::Router,
+    provider: Arc<ScriptedProvider>,
+    state: Arc<dyn StateStore>,
+    session: SessionKey,
+}
+
+fn harness(store: Arc<dyn StateStore>, script: Vec<Value>) -> Harness {
+    let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let state = CachingStateStore::wrap(store, LONG_TTL, mb_state::DEFAULT_CACHE_ENTRIES);
+    let mut rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(ITEMS.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&state),
+    );
+    rt.workspace = workspace();
+    let session = SessionKey {
+        workspace: rt.workspace.clone(),
+        mock: "m".into(),
+        session: "default".into(),
+    };
+    Harness {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+        state,
+        session,
+    }
+}
+
+impl Harness {
+    async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, String) {
+        let mut req = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        let req = req
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let source = resp
+            .headers()
+            .get("x-mockingbird-source")
+            .map(|v| v.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        (status, source)
+    }
+
+    fn calls(&self) -> usize {
+        self.provider.requests().len()
+    }
+
+    fn prompt(&self, n: usize) -> String {
+        let requests = self.provider.requests();
+        requests[n].messages.last().unwrap().content.clone()
+    }
+
+    async fn kept(&self) -> Vec<mb_state::StoredResource> {
+        self.state
+            .list(&self.session, INTERNAL_TYPE, 100)
+            .await
+            .unwrap()
+    }
+}
+
+/// A create answering only its id tells the read after it what it asked, once, and
+/// the memory stays out of what the session shows.
+async fn write_memory(store: Arc<dyn StateStore>) {
+    let h = harness(
+        store,
+        vec![
+            json!({"id": "i1"}),
+            json!({"id": "i1", "title": "A remembered title"}),
+        ],
+    );
+    let (status, _) = h
+        .call(
+            "POST",
+            "/items",
+            Some(json!({"title": "A remembered title"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let kept = h.kept().await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let exported = h.state.export(&h.session).await.unwrap();
+    assert!(exported.iter().all(|r| r.resource_type != INTERNAL_TYPE));
+    let sessions = h.state.sessions(&h.session.workspace, "m").await.unwrap();
+    assert_eq!(sessions[0].resources, 1, "{sessions:?}");
+
+    let (status, source) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
+    assert!(
+        h.prompt(1).contains("A remembered title"),
+        "{}",
+        h.prompt(1)
+    );
+    assert!(h.kept().await.is_empty(), "{:?}", h.kept().await);
+    let (_, source) = h.call("GET", "/items/i1", None).await;
+    assert_eq!(source, "state");
+    assert_eq!(h.calls(), 2);
+
+    h.state.reset(&h.session).await.unwrap();
+    assert!(h.kept().await.is_empty());
+}
+
+/// A deleted record is a 404 with no LLM call, its marker stays out of what the session
+/// shows, and a reset forgets it.
+async fn deleted_markers(store: Arc<dyn StateStore>) {
+    let h = harness(
+        store,
+        vec![json!({"id": "i1"}), json!({"id": "i1", "title": "Back"})],
+    );
+    h.call("POST", "/items", Some(json!({"title": "A title"})))
+        .await;
+    let (status, _) = h.call("DELETE", "/items/i1", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    for _ in 0..2 {
+        let (status, source) = h.call("GET", "/items/i1", None).await;
+        assert_eq!((status, source.as_str()), (StatusCode::NOT_FOUND, "state"));
+    }
+    assert_eq!(h.calls(), 1);
+    assert!(
+        h.kept().await.iter().any(|d| d.id.starts_with("#deleted")),
+        "{:?}",
+        h.kept().await
+    );
+    assert!(h.state.export(&h.session).await.unwrap().is_empty());
+
+    h.state.reset(&h.session).await.unwrap();
+    let (status, source) = h.call("GET", "/items/i1", None).await;
+    assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
+}
+
+/// A value a mock minted shows, when a later request carries it, the answer that
+/// minted it, without the value or the client's secret; only a hash of it is kept.
+async fn minted_values(store: Arc<dyn StateStore>) {
+    let token = "link-sandbox-5f2b9c1e";
+    let h = harness(
+        store,
+        vec![
+            json!({"link_token": token, "item_id": "item-4711"}),
+            json!({"valid": true}),
+        ],
+    );
+    h.call(
+        "POST",
+        "/links",
+        Some(json!({"item_id": "item-4711", "secret": "client-secret-77"})),
+    )
+    .await;
+    h.call("POST", "/links/inspect", Some(json!({"link_token": token})))
+        .await;
+    let prompt = h.prompt(1);
+    let origins = prompt
+        .split("<earlier_origins>")
+        .nth(1)
+        .and_then(|rest| rest.split("</earlier_origins>").next())
+        .unwrap_or_default();
+    assert!(origins.contains("item-4711"), "{prompt}");
+    assert!(!origins.contains(token), "{prompt}");
+    assert!(!prompt.contains("client-secret-77"), "{prompt}");
+    let kept = serde_json::to_string(&h.kept().await).unwrap();
+    assert!(
+        !kept.contains(token) && !kept.contains("client-secret-77"),
+        "{kept}"
+    );
+    assert!(h.state.export(&h.session).await.unwrap().is_empty());
+
+    h.state.reset(&h.session).await.unwrap();
+    assert!(h.kept().await.is_empty());
+}
+
+async fn run_all(url: &str) {
+    for check in 0..3 {
+        let store = mb_state::connect(url, LONG_TTL).await.expect("connect");
+        match check {
+            0 => write_memory(store).await,
+            1 => deleted_markers(store).await,
+            _ => minted_values(store).await,
+        }
+    }
+}
+
+#[tokio::test]
+async fn memory_keeps_what_a_mock_keeps_for_itself() {
+    run_all("memory").await;
+}
+
+#[tokio::test]
+async fn postgres_keeps_what_a_mock_keeps_for_itself() {
+    let Ok(url) = std::env::var("MB_TEST_POSTGRES_URL") else {
+        println!("skipped: MB_TEST_POSTGRES_URL not set");
+        return;
+    };
+    run_all(&url).await;
+}
+
+#[tokio::test]
+async fn redis_keeps_what_a_mock_keeps_for_itself() {
+    let Ok(url) = std::env::var("MB_TEST_REDIS_URL") else {
+        println!("skipped: MB_TEST_REDIS_URL not set");
+        return;
+    };
+    run_all(&url).await;
+}
+
+#[tokio::test]
+async fn sqlite_keeps_what_a_mock_keeps_for_itself() {
+    run_all("sqlite::memory:").await;
+}
