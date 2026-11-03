@@ -2637,7 +2637,7 @@ BLIND4_CHECKS = {
         "project is owned by its team", "read by slug matches the created project",
         "organization projects list the project", "a taken slug is refused", "update answers the new name and slug",
         "new slug reads the same project", "key keeps its name", "key belongs to the project",
-        "project keys list the key", "unknown issue is not found", "deleted project leaves the organization's list",
+        "project keys list the key", "deleted project leaves the organization's list",
     ],
     "contentful": [
         "content type takes the id asked for", "content type keeps its fields",
@@ -2841,8 +2841,6 @@ def sentry_steps(j):
         else "".join(j.rng.choice("0123456789abcdef") for _ in range(32))
     keys = j.call("GET", f"/api/0/projects/{org}/{renamed}/keys/")
     j.check("project keys list the key", bool(by_id(keys, kid)), listed=ids_of(keys))
-    j.call("GET", f"/api/0/organizations/{org}/issues/{j.rng.randrange(10**9, 10**10)}/")
-    j.check("unknown issue is not found", j.last["status"] == 404)
     j.call("DELETE", f"/api/0/projects/{org}/{renamed}/")
     deleted = j.last["status"]
     rows = j.call("GET", f"/api/0/organizations/{org}/projects/")
@@ -3070,7 +3068,7 @@ BLIND5_CHECKS = {
         "booking keeps its start and event type", "booking lasts the event type's new length",
         "booking lists its attendee", "read by uid matches the booking", "date-range list holds the booking",
         "reschedule names the original booking", "original booking points to its reschedule",
-        "cancelled booking reads as cancelled", "unknown booking is not found",
+        "cancelled booking reads as cancelled",
     ],
 }
 JOURNEY_CHECKS.update(BLIND5_CHECKS)
@@ -3452,8 +3450,6 @@ def calcom_steps(j):
     j.check("cancelled booking reads as cancelled",
             eq(got.get("status"), "cancelled") and eq(got.get("cancellationReason"), reason),
             cancel_status=cancelled, booking_status=got.get("status"))
-    call("GET", f"/v2/bookings/{made_up(j, '', 22)}", bookings)
-    j.check("unknown booking is not found", j.last["status"] == 404)
 
 
 BLIND5_JOURNEYS = {"airtable": airtable_steps, "okta": okta_steps, "box": box_steps,

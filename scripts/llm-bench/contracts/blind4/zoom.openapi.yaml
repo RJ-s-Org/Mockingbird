@@ -218,7 +218,7 @@ paths:
                 type: object
                 required: [invitation]
                 properties:
-                  invitation: {type: string, description: The invitation text, join link included.}
+                  invitation: {type: string, description: "The invitation text, join link included."}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "404": {$ref: "#/components/responses/MeetingNotFound"}
   /v2/meetings/{meetingId}/registrants:
@@ -420,7 +420,7 @@ components:
         last_name: {type: string}
         display_name: {type: string}
         email: {type: string, format: email}
-        type: {type: integer, enum: [1, 2, 4, 99], description: 1 basic, 2 licensed, 4 unassigned without meetings basic, 99 none.}
+        type: {type: integer, enum: [1, 2, 4, 99], description: "1 basic, 2 licensed, 4 unassigned without meetings basic, 99 none."}
         role_name: {type: string}
         pmi: {type: integer, format: int64}
         use_pmi: {type: boolean}
@@ -468,9 +468,9 @@ components:
       type: object
       required: [type]
       properties:
-        type: {type: integer, enum: [1, 2, 3], description: 1 daily, 2 weekly, 3 monthly.}
+        type: {type: integer, enum: [1, 2, 3], description: "1 daily, 2 weekly, 3 monthly."}
         repeat_interval: {type: integer, minimum: 1}
-        weekly_days: {type: string, description: Comma-separated days, 1 Sunday to 7 Saturday.}
+        weekly_days: {type: string, description: "Comma-separated days, 1 Sunday to 7 Saturday."}
         monthly_day: {type: integer, minimum: 1, maximum: 31}
         monthly_week: {type: integer, enum: [-1, 1, 2, 3, 4]}
         monthly_week_day: {type: integer, minimum: 1, maximum: 7}

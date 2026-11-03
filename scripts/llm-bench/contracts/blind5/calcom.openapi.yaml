@@ -577,7 +577,7 @@ components:
       properties:
         name: {type: string}
         email: {type: string, format: email}
-        timeZone: {type: string, description: An IANA time zone, such as Europe/Lisbon.}
+        timeZone: {type: string, description: "An IANA time zone, such as Europe/Lisbon."}
         phoneNumber: {type: string}
         language: {type: string, default: en}
     Host:
