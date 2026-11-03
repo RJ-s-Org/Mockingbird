@@ -85,7 +85,7 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 
 ## Journeys
 
-`server_suites.py --suite journeys` runs three multi-step journeys (Stripe payment to refund, travel search to cancellation, GitHub search to issue) against mocks built from the contracts alone, one fresh session per rep. They measure whether the engine remembers entities across calls and applies the effects of writes. Each check is a `server.jsonl` row with `case` = `<journey>.<check>` and the `x-mockingbird-source` of the call it judged; a journey that breaks fails its remaining checks. The steps and check names match `pilot_world.py`, so results compare with `docs/benchmarks/pilot-2026-10-30/`. The suite is not in the default set, so `run.py` does not run it; it costs real calls.
+`server_suites.py --suite journeys` runs three multi-step journeys (Stripe payment to refund, travel search to cancellation, GitHub search to issue) against mocks built from the contracts alone, one fresh session per rep. They measure whether the engine remembers entities across calls and applies the effects of writes. Each check is a `server.jsonl` row with `case` = `<journey>.<check>` and the `x-mockingbird-source` of the call it judged; a journey that breaks fails its remaining checks. The steps and check names match `pilot_world.py`, so results compare with `docs/benchmarks/pilot-2026-10-30/`. The suite is not in the default set, so `run.py` does not run it; it costs real calls. `--journey <name>` (repeatable) limits a run, and also reaches `invoices`, which the default leaves out so results stay comparable: actions that move a status, actions that leave it, and a resource with none.
 
 ## Held-out journeys
 
@@ -94,6 +94,10 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 ## Blind journeys
 
 `server_suites.py --suite journeys_blind` runs five journeys over Spotify, Discord, Auth0, HubSpot and Slack, written by an author who read no engine code or past results. The [first run](../../docs/benchmarks/blind-baseline-2026-11-01/README.md) is the baseline. Once a fix looks at their failures they are tuned like the rest, so a final number needs a new set.
+
+`server_suites.py --suite journeys_blind2` is that new set: five journeys of 14 checks each over Twilio, SendGrid, Plaid, PayPal payments and OpenWeatherMap, written under the same rule from each contract alone. No check gates the rest of its journey, so one bad answer costs only the checks that depend on it. The suite is not in the default set; it costs real calls.
+
+`server_suites.py --suite journeys_blind3` is the third set, and its contracts are new too: Trello boards, Asana tasks, GitLab issues, Freshdesk tickets and Mailchimp audiences, written for this suite from each API's public documentation and kept in [`contracts/blind3/`](contracts/blind3/), so no one working on the engine has seen them. Each journey has 14 checks covering write-then-read, list-after-write, filters and search, child resources, references between resources, updates and deletes. Each check asserts only what its contract promises a client, and no check gates the rest. Do not edit a check or a contract to suit results. The suite is not in the default set; it costs real calls.
 
 ## Testing without spend
 

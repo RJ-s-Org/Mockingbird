@@ -19,6 +19,18 @@ Every draft is an OpenAPI 3.1 document compiled by the same importer as an uploa
 
 Many documentation pages carry their own OpenAPI definition: a fenced ```` ```yaml ```` or ```` ```json ```` block, a `<script type="application/json">` blob, or the page data of a ReadMe site (`script#ssr-props`, `script#__NEXT_DATA__`, `data-initial-props`, including definitions stored as JSON strings such as `oasDefinition`). An OpenAPI 3.x definition found there is taken as written: its operations (with every operation of the definition, not only the one the page describes), components and servers go into the draft with confidence 1.0 and the provenance `embedded OpenAPI`, and the block is removed from the text the LLM reads. When the definitions cover every endpoint the page names, no LLM is called (and none is needed). On a page with both, the block wins: the LLM only fills in operations without a block. A block operation that does not compile is skipped with an `invalid_operation` warning; a block that does not parse stays in the text for the LLM. A Swagger 2.0 block is converted to OpenAPI 3.0 first (definitions, parameters, `in: body` and `formData` parameters as request bodies, `consumes` and `produces`, response headers, security definitions, and `host` with `basePath` as the server) and then taken as written the same way.
 
+## How a resource's identity is read
+
+The member a route's record goes by comes from the contract, in this order.
+
+1. **The answer has an `id`**, or a member named by the path's last parameter (`/orders/{number}` → `number`, `{MessageSid}` → `sid`).
+2. **A create's answer has a `sid` or a `uuid`.**
+3. **A member named for the type**: `user_id` or `userId` for `users`, `category_id` for `categories`. It must be the only such member, and not an object or a list. The type needs a route ending in a parameter, and each such route must have an id-like one (`{id}`, `{userId}`, `{user_id}`): `{handle}` names something else. With no such route (`POST /tokens`) nothing could find the record again.
+
+With none of these a route has no identity, so a create stores nothing and a read is generated each time. That includes an answer in an envelope (`{"user": {...}}`) or an array. Where the contract's names do not give the identity, [`x-mockingbird-resource`](#correcting-it-x-mockingbird-resource) sets it.
+
+A read with no path parameter, of a type no other route has, reads as a type when every array it lists holds what that type's `GET` by path answers: `/users-by-email` beside `/users/{id}`. Another shape beside them leaves it as it was, as does a second type serving the same items.
+
 ## How a `POST` under a resource is read
 
 The compiler decides from the contract, not the words of the path, whether `POST <static>/{param}/<static>` adds a record of its own or acts on the resource `{param}` names. When the contract does not decide, it acts on the parent, which is harmless: the answer is served, the parent is shown as context, and the parent changes only through validated effects. OpenAPI 3 and Swagger 2.0 read it the same way, in this order:
@@ -27,7 +39,7 @@ The compiler decides from the contract, not the words of the path, whether `POST
 2. **A route below it** (`<path>/{...}`), or **a `GET` on its path that gives back what it answers**: a collection. That is the same schema, or the same identity member, directly or as the items of a list or an envelope (`{"data": [...]}`). A schema with no members on either side cannot be compared and also counts. A `GET` that reads something else does not.
 3. **The parent's `GET` answers the same record**: it acts on the parent. With the very schema of that `GET` it is an update, [decided at runtime](#an-update-that-answers-another-record).
 4. **Another resource's `GET` by path serves the same record**: a record of that route's type, with its identity (`POST /captures/{id}/refund` under `refunds`, because `GET /refunds/{id}` answers it). If `GET`s of several types serve it, the contract does not say which, and this rule does not apply.
-5. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no identity it stores nothing.
+5. **A declared `201`**, among any other successes: a record of its own, under the last segment. With no [identity](#how-a-resources-identity-is-read) it stores nothing.
 6. **Anything else**: it acts on the parent and stores nothing.
 
 The same record means the same schema, through a one-member envelope that holds an object (on either side), or a shorter form the other composes with `allOf`. Members in common are not enough: `{id, status}` beside a `Refund` that does not compose it does not match. An envelope with other members beside its record (`{data: User, links: ...}`) is not unwrapped, because nothing but the member's name says which one is the record.

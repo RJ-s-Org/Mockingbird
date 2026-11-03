@@ -511,11 +511,19 @@ fn mcp_drives_a_background_server() {
         );
         assert_eq!(got["body"]["id"], id.as_str());
 
-        let log = mcp.tool(
-            "list_requests",
-            json!({ "mock": "orders", "session": "t", "limit": 5 }),
-        );
-        assert_eq!(log.as_array().unwrap().len(), 2);
+        // The request log is written by a background writer: wait for both.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let log = loop {
+            let log = mcp.tool(
+                "list_requests",
+                json!({ "mock": "orders", "session": "t", "limit": 5 }),
+            );
+            if log.as_array().unwrap().len() >= 2 || std::time::Instant::now() >= deadline {
+                break log;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(log.as_array().unwrap().len(), 2, "{log}");
         assert!(log[0].get("response").is_none(), "{log}");
         assert!(log[0]["response_bytes"].as_u64().unwrap() > 0, "{log}");
         let one = mcp.tool(
@@ -534,10 +542,23 @@ fn mcp_drives_a_background_server() {
             json!({ "mock": "hello", "content": "type Query { hello: String }\n", "filename": "schema.graphql" }),
         );
         assert_eq!(imported["status"], "active", "{imported}");
-        let answer = mcp.tool(
-            "call_mock",
-            json!({ "method": "POST", "path": "/hello/graphql", "body": { "query": "{ hello }" } }),
-        );
+        // The import is stored at once; the data plane mounts the new mock
+        // when its registry watcher has rebuilt it, so wait for that.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let answer = loop {
+            let answer = mcp.tool(
+                "call_mock",
+                json!({ "method": "POST", "path": "/hello/graphql", "body": { "query": "{ hello }" } }),
+            );
+            let unmounted = answer["status"] == 404
+                && answer["body"]["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.starts_with("no mock is mounted"));
+            if !unmounted || std::time::Instant::now() >= deadline {
+                break answer;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         assert!(answer["body"]["data"]["hello"].is_string(), "{answer}");
 
         // The faker seed through create_mock and update_mock.

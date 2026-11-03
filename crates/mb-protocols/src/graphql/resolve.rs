@@ -157,7 +157,7 @@ impl HttpCall {
 /// How a root field that will generate gets its answer.
 enum Route<'a, 'b> {
     /// With the query's other root fields, in one LLM call.
-    Join(&'b super::batch::Batch, call::Pending<'a>),
+    Join(&'b super::batch::Batch, Box<call::Pending<'a>>),
     /// Without generating: an unknown id, a stored resource, a cached answer.
     Answered(mb_engine::GeneratedResponse),
     /// On its own.
@@ -435,6 +435,7 @@ async fn generate_in(
                     }
                     let generated = match route {
                         Route::Join(b, pending) => {
+                            let pending = *pending;
                             let part = super::batch::Part {
                                 key: key.clone(),
                                 op_id: op.id.clone(),
