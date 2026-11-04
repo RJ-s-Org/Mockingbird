@@ -5452,7 +5452,7 @@ BLIND9_CHECKS = {
         "create answers an operation with its metadata", "the create operation finishes with the folder",
         "a folder reads as active under its parent", "fields answers only the fields asked for",
         "a taken display name is refused among siblings", "list answers the parent's folders by display name",
-        "pageSize 1 answers one folder and a token", "the page token reaches the next folder",
+        "pageSize 1 answers one folder", "the page token reaches the next folder",
         "move finishes under the new parent", "a moved folder leaves its old parent's list",
         "search finds the folder by display name", "delete marks the folder for deletion",
         "showDeleted lists a folder marked for deletion", "undelete makes the folder active again",
@@ -5563,11 +5563,16 @@ def resourcemanager_steps(j):
     j.check("list answers the parent's folders by display name", rows == [b, a], listed=rows)
     first, page = listed(org, pageSize=1)
     token = given(page.get("nextPageToken"), None)
-    j.check("pageSize 1 answers one folder and a token", first == [b] and token is not None,
-            listed=first, next_page_token=token)
-    rest, page = listed(org, pageSize=1, pageToken=token or made_up(j, "", 24))
-    j.check("the page token reaches the next folder", rest == [a] and not page.get("nextPageToken"),
-            first=first, listed=rest, next_page_token=page.get("nextPageToken"))
+    # One check judges the page and the next judges the token, so a page without a token
+    # is one miss. With no token there is nothing to follow, and no made-up token is sent.
+    j.check("pageSize 1 answers one folder", first == [b], listed=first)
+    if token is not None:
+        rest, page = listed(org, pageSize=1, pageToken=token)
+        j.check("the page token reaches the next folder", rest == [a] and not page.get("nextPageToken"),
+                first=first, listed=rest, next_page_token=page.get("nextPageToken"))
+    else:
+        j.check("the page token reaches the next folder", False, first=first,
+                next_page_token=page.get("nextPageToken"), reason="page 1 gave no nextPageToken")
     moved = settle(obj(j.call("POST", f"/v3/{c}:move", body={"destinationParent": b})))
     response = obj(moved.get("response"))
     j.check("move finishes under the new parent",
