@@ -1898,13 +1898,13 @@ def auth0_steps(j):
     j.call("POST", f"{path}/roles", body={"roles": [role["id"]]})
     assigned = j.last["status"]
     after = obj(j.call("GET", f"{path}/roles", query={"include_totals": "true"}))
-    # The contract does not say a new user holds no roles, so the count is judged
-    # against the one read before the assignment: one more, unless the role was held.
-    had = bool(by_id(held.get("roles"), role["id"]))
+    # The contract does not say a new user holds no roles, so other roles may be held
+    # before; this one is not held before the assignment, is held after it, and the
+    # count goes up by one.
     before = held.get("total")
     j.check("user holds the assigned role",
-            isinstance(before, int) and assigned == 204 and eq(after.get("total"), before + (0 if had else 1))
-            and same(by_id(after.get("roles"), role["id"]), role, "id", "name"),
+            isinstance(before, int) and not by_id(held.get("roles"), role["id"]) and assigned == 204
+            and eq(after.get("total"), before + 1) and same(by_id(after.get("roles"), role["id"]), role, "id", "name"),
             before=before, after=after.get("total"), assign_status=assigned)
     j.call("DELETE", path)
     deleted = j.last["status"]
