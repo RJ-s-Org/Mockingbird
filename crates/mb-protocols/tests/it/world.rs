@@ -2296,11 +2296,18 @@ async fn no_declared_error_leaves_the_call_as_it_was() {
         offered_prompt.starts_with(&plain_prompt) && offered_prompt.len() > plain_prompt.len(),
         "only the note is added:\n{plain_prompt}\n---\n{offered_prompt}"
     );
+    // The refusal, and the error body it may be written with, are all that is added.
     let mut offered_schema = format_schema(&offered, 0);
-    offered_schema["properties"]
+    let properties = offered_schema["properties"].as_object_mut().unwrap();
+    properties.remove("refusal");
+    assert_eq!(
+        properties.remove("refusal_body"),
+        Some(json!({"$ref": "#/$defs/Error"}))
+    );
+    offered_schema["$defs"]
         .as_object_mut()
         .unwrap()
-        .remove("refusal");
+        .remove("Error");
     assert_eq!(format_schema(&plain, 0), offered_schema);
     assert!(
         format_schema(&plain, 0)["properties"]
