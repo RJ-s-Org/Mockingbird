@@ -1,0 +1,569 @@
+//! The effective world description of a contract version (tier 0 overlaid
+//! with the newest revision, validated) and carrying a description forward
+//! to a new contract version.
+#![cfg(test)]
+#![allow(clippy::panic)]
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use axum::Router;
+use axum::body::Body;
+use axum::http::{HeaderMap, Method, Request, header};
+use mb_admin::world::{carry_forward, effective_world};
+use mb_admin::{AdminState, UPLOAD_HEADER, router, run_next_import};
+use mb_auth::{AuthError, Authenticate, Principal, PrincipalKind, Role};
+use mb_import::world::tier0;
+use mb_mcm::Bundle;
+use mb_mcm::world::{Author, RefusalCode};
+use mb_protocols::world_gaps::GapCode;
+use mb_state::{MemoryStore, StateStore};
+use mb_store::{
+    ContractStatus, ControlStore, DEFAULT_WORKSPACE, NewContractVersion, NewMock, NewWorldRevision,
+    ResourceSource,
+};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use uuid::Uuid;
+
+/// Widgets with a `color` member.
+const V1: &str = r##"
+openapi: 3.0.0
+info: {title: Widgets, version: "1"}
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Widget"}}}}
+    post:
+      operationId: createWidget
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+      responses:
+        "201":
+          description: created
+          content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}
+  /widgets/{widgetId}:
+    get:
+      operationId: getWidget
+      parameters: [{name: widgetId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}
+        "404": {description: missing}
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        color: {type: string}
+"##;
+
+/// [`V1`] without the `color` member.
+fn v2() -> String {
+    V1.replace("        color: {type: string}\n", "")
+}
+
+fn compile(src: &str) -> Bundle {
+    mb_import::compile(src.as_bytes()).unwrap()
+}
+
+/// The resource type of `getWidget`.
+fn widget_type(b: &Bundle) -> String {
+    b.operations
+        .iter()
+        .find(|o| o.id == "getWidget")
+        .and_then(|o| o.resource_type.clone())
+        .unwrap()
+}
+
+async fn store_with_mock() -> (Arc<dyn ControlStore>, Uuid) {
+    let store: Arc<dyn ControlStore> = mb_store::connect("sqlite::memory:").await.unwrap();
+    let m = store
+        .create_mock(
+            DEFAULT_WORKSPACE,
+            NewMock {
+                name: "widgets".into(),
+                route_prefix: None,
+                persona: None,
+                llm_profile: None,
+                header_overrides: false,
+                source: ResourceSource::Api,
+                data_plane_auth: Default::default(),
+                chaos: None,
+                limits: Default::default(),
+                behavior: Default::default(),
+                hosts: vec![],
+                webhooks: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    (store, m.id)
+}
+
+async fn add_version(store: &dyn ControlStore, mock: Uuid, src: &str) -> (i64, Bundle) {
+    let bundle = compile(src);
+    let v = store
+        .add_contract_version(
+            mock,
+            NewContractVersion {
+                source: src.as_bytes().to_vec(),
+                bundle: bundle.clone(),
+                status: ContractStatus::Approved,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+    (v.version, bundle)
+}
+
+async fn revise(
+    store: &dyn ControlStore,
+    mock: Uuid,
+    version: i64,
+    author: Author,
+    document: Value,
+) -> i64 {
+    store
+        .add_world_revision(
+            mock,
+            version,
+            NewWorldRevision {
+                author,
+                document,
+                created_by: Some("tester".into()),
+                expect: None,
+            },
+        )
+        .await
+        .unwrap()
+        .revision
+}
+
+#[tokio::test]
+async fn effective_world_without_revisions_is_tier0_at_revision_0() {
+    let (store, mock) = store_with_mock().await;
+    let (version, bundle) = add_version(store.as_ref(), mock, V1).await;
+    let eff = effective_world(store.as_ref(), mock, version, &bundle)
+        .await
+        .unwrap();
+    assert_eq!(eff.revision, 0);
+    assert_eq!(eff.world, tier0(&bundle));
+    assert!(eff.authors.is_empty(), "{:?}", eff.authors);
+    assert!(eff.refused.is_empty(), "{:?}", eff.refused);
+    assert!(
+        eff.gaps.iter().all(|g| g.code != GapCode::Refused),
+        "{:?}",
+        eff.gaps
+    );
+}
+
+#[tokio::test]
+async fn overlay_entries_are_marked_with_their_author() {
+    let (store, mock) = store_with_mock().await;
+    let (version, bundle) = add_version(store.as_ref(), mock, V1).await;
+    let t = widget_type(&bundle);
+    // Revision 1 (an assistant) sets the order of the list and the widget's
+    // unique member; revision 2 (a person) keeps both and adds `not_found`;
+    // revision 3 (the assistant again) changes only the order and adds a
+    // stale entry.
+    revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::Agent,
+        json!({
+            "version": 1,
+            "types": {t.clone(): {"unique": [{"members": ["name"]}]}},
+            "operations": {"listWidgets": {"order": {"member": "name"}}},
+        }),
+    )
+    .await;
+    revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::User,
+        json!({
+            "version": 1,
+            "types": {t.clone(): {"unique": [{"members": ["name"]}]}},
+            "operations": {
+                "listWidgets": {"order": {"member": "name"}},
+                "getWidget": {"not_found": 404},
+            },
+        }),
+    )
+    .await;
+    let latest = revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::Agent,
+        json!({
+            "version": 1,
+            "types": {t.clone(): {"unique": [{"members": ["name"]}]}},
+            "operations": {
+                "listWidgets": {"order": {"member": "id"}},
+                "getWidget": {"not_found": 404, "order": {"member": "nope"}},
+            },
+        }),
+    )
+    .await;
+
+    let eff = effective_world(store.as_ref(), mock, version, &bundle)
+        .await
+        .unwrap();
+    assert_eq!(eff.revision, latest);
+    let unique = format!("/types/{t}/unique");
+    let expected: BTreeMap<String, Author> = [
+        (unique.as_str(), Author::Agent),
+        ("/operations/listWidgets/order", Author::Agent),
+        ("/operations/getWidget/not_found", Author::User),
+    ]
+    .into_iter()
+    .map(|(k, a)| (k.to_string(), a))
+    .collect();
+    assert_eq!(eff.authors, expected);
+    // The overlay is laid over tier 0: tier 0's entries stay.
+    let base = tier0(&bundle);
+    assert_eq!(
+        eff.world.operations["getWidget"].kind,
+        base.operations["getWidget"].kind
+    );
+    assert_eq!(eff.world.operations["getWidget"].not_found, Some(404));
+    assert_eq!(
+        eff.world.operations["listWidgets"]
+            .order
+            .as_ref()
+            .map(|o| o.member.as_str()),
+        Some("id")
+    );
+    // The stale entry is refused, listed as a gap, and not applied.
+    assert_eq!(eff.refused.len(), 1, "{:?}", eff.refused);
+    assert_eq!(eff.refused[0].path, "/operations/getWidget/order/member");
+    assert_eq!(eff.refused[0].code, RefusalCode::Unresolved);
+    assert!(eff.world.operations["getWidget"].order.is_none());
+    assert_eq!(
+        eff.gaps
+            .iter()
+            .filter(|g| g.code == GapCode::Refused)
+            .count(),
+        1,
+        "{:?}",
+        eff.gaps
+    );
+}
+
+#[tokio::test]
+async fn refused_overlay_entries_fall_back_to_tier0() {
+    let (store, mock) = store_with_mock().await;
+    let (version, bundle) = add_version(store.as_ref(), mock, V1).await;
+    let base = tier0(&bundle);
+    let target = base.operations["getWidget"].target.clone();
+    assert!(target.is_some(), "tier 0 has a target for getWidget");
+    revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::Agent,
+        json!({
+            "version": 1,
+            "operations": {"getWidget": {"target": {"path_param": "missing"}}},
+        }),
+    )
+    .await;
+    let eff = effective_world(store.as_ref(), mock, version, &bundle)
+        .await
+        .unwrap();
+    assert_eq!(eff.world.operations["getWidget"].target, target);
+    assert!(!eff.refused.is_empty());
+    assert!(eff.authors.is_empty(), "{:?}", eff.authors);
+}
+
+#[tokio::test]
+async fn carry_forward_keeps_valid_entries_and_drops_stale() {
+    let (store, mock) = store_with_mock().await;
+    let (from, b1) = add_version(store.as_ref(), mock, V1).await;
+    let t = widget_type(&b1);
+    revise(
+        store.as_ref(),
+        mock,
+        from,
+        Author::Agent,
+        json!({
+            "version": 1,
+            "types": {t.clone(): {"unique": [{"members": ["color"]}]}},
+            "operations": {
+                "listWidgets": {"order": {"member": "name"}},
+                "getWidget": {"not_found": 404},
+            },
+        }),
+    )
+    .await;
+    let (to, b2) = add_version(store.as_ref(), mock, &v2()).await;
+    assert!(
+        store
+            .latest_world_revision(mock, to)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let carried = carry_forward(store.as_ref(), mock, from, to, &b2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.version, to);
+    assert_eq!(carried.revision, 1);
+    assert_eq!(carried.author, Author::Agent);
+    assert_eq!(
+        carried.document,
+        json!({
+            "version": 1,
+            "operations": {
+                "getWidget": {"not_found": 404},
+                "listWidgets": {"order": {"member": "name"}},
+            },
+        })
+    );
+    // The effective world of the new version has nothing refused.
+    let eff = effective_world(store.as_ref(), mock, to, &b2)
+        .await
+        .unwrap();
+    assert_eq!(eff.revision, 1);
+    assert!(eff.refused.is_empty(), "{:?}", eff.refused);
+
+    // A version with no revision carries nothing.
+    let (next, b3) = add_version(store.as_ref(), mock, &v2()).await;
+    let (other, _) = add_version(store.as_ref(), mock, &v2()).await;
+    assert!(
+        carry_forward(store.as_ref(), mock, other, next, &b3)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// `Bearer editor` → an editor in `default`.
+struct TestAuth;
+
+#[async_trait]
+impl Authenticate for TestAuth {
+    async fn authenticate(&self, headers: &HeaderMap) -> Result<Option<Principal>, AuthError> {
+        if headers.get(header::AUTHORIZATION).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Principal {
+            subject: "editor".into(),
+            display_name: "editor".into(),
+            kind: PrincipalKind::User,
+            sysadmin: false,
+            roles: [(DEFAULT_WORKSPACE.to_string(), Role::Editor)]
+                .into_iter()
+                .collect(),
+        }))
+    }
+}
+
+const BASE: &str = "/api/v1/workspaces/default/mocks";
+
+async fn send(app: &Router, method: Method, uri: &str, ctype: &str, body: Vec<u8>) -> Value {
+    let req = Request::builder()
+        .method(method.clone())
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, ctype)
+        .header(UPLOAD_HEADER, "1")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(status.is_success(), "{method} {uri}: {status} {text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+async fn admin() -> (AdminState, Router) {
+    let store = mb_store::connect("sqlite::memory:").await.unwrap();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let st = AdminState {
+        auth: Arc::new(TestAuth),
+        ..AdminState::new(store, state)
+    };
+    let app = router(st.clone());
+    send(
+        &app,
+        Method::POST,
+        BASE,
+        "application/json",
+        json!({"name": "widgets"}).to_string().into_bytes(),
+    )
+    .await;
+    (st, app)
+}
+
+#[tokio::test]
+async fn carry_forward_runs_on_import_of_a_new_version() {
+    let (st, app) = admin().await;
+    let uri = format!("{BASE}/widgets/contracts");
+    let first = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let from = first["version"].as_i64().unwrap();
+    let mock = st
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "widgets")
+        .await
+        .unwrap()
+        .unwrap();
+    let t = widget_type(&compile(V1));
+    revise(
+        st.store.as_ref(),
+        mock.id,
+        from,
+        Author::User,
+        json!({
+            "version": 1,
+            "types": {t: {"unique": [{"members": ["color"]}]}},
+            "operations": {"getWidget": {"not_found": 404}},
+        }),
+    )
+    .await;
+
+    let second = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        v2().into_bytes(),
+    )
+    .await;
+    let to = second["version"].as_i64().unwrap();
+    assert_eq!(to, from + 1);
+    let carried = st
+        .store
+        .latest_world_revision(mock.id, to)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.revision, 1);
+    assert_eq!(carried.author, Author::User);
+    assert_eq!(
+        carried.document,
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}})
+    );
+
+    // A third upload carries the second version's description on, skipping
+    // nothing: the newest earlier version with a revision is the source.
+    let third = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let carried = st
+        .store
+        .latest_world_revision(mock.id, third["version"].as_i64().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        carried.document,
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}})
+    );
+}
+
+/// One `file` part of a multipart body, and its content type.
+fn multipart(filename: &str, bytes: &[u8]) -> (String, Vec<u8>) {
+    let boundary = "mbboundary7MA4YWxkTrZu0gW";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+#[tokio::test]
+async fn carry_forward_runs_on_an_import_job() {
+    let (st, app) = admin().await;
+    let har = std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/smart/petstore.har"),
+    )
+    .unwrap();
+    let uri = format!("{BASE}/widgets/imports");
+    let (ctype, body) = multipart("petstore.har", &har);
+    send(&app, Method::POST, &uri, &ctype, body.clone()).await;
+    assert!(run_next_import(&st).await.unwrap());
+    let mock = st
+        .store
+        .get_mock(DEFAULT_WORKSPACE, "widgets")
+        .await
+        .unwrap()
+        .unwrap();
+    let first = st
+        .store
+        .latest_contract_version(mock.id, &[ContractStatus::Draft])
+        .await
+        .unwrap()
+        .unwrap();
+    // An entry tier 0 already holds always validates on the merged draft.
+    let base = tier0(&first.bundle);
+    let (op, kind) = base
+        .operations
+        .iter()
+        .find_map(|(id, d)| d.kind.map(|k| (id.clone(), k)))
+        .unwrap();
+    let doc = json!({"version": 1, "operations": {op.clone(): {"kind": kind}}});
+    revise(
+        st.store.as_ref(),
+        mock.id,
+        first.version,
+        Author::Agent,
+        doc.clone(),
+    )
+    .await;
+
+    send(&app, Method::POST, &uri, &ctype, body).await;
+    assert!(run_next_import(&st).await.unwrap());
+    let second = st
+        .store
+        .latest_contract_version(mock.id, &[ContractStatus::Draft])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(second.version > first.version);
+    let carried = st
+        .store
+        .latest_world_revision(mock.id, second.version)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.revision, 1);
+    assert_eq!(carried.author, Author::Agent);
+    assert_eq!(carried.document, doc);
+}

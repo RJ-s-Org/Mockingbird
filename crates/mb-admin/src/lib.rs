@@ -66,6 +66,7 @@ mod sessions;
 mod webhook;
 pub mod webhook_deliveries;
 mod workspaces;
+pub mod world;
 
 pub use access::{CurrentPrincipal, WsAccess, authenticate};
 pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};

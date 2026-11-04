@@ -612,6 +612,13 @@ async fn apply_mock(
             )
             .await
             .with_context(|| format!("adding a contract version to mock {name:?}"))?;
+        // A world description is optional: the new version stands without it.
+        if let Err(e) =
+            mb_admin::world::carry_forward_into(store, mock.id, version.version, &version.bundle)
+                .await
+        {
+            tracing::warn!(mock = %name, version = version.version, error = %e, "cannot carry the world description forward");
+        }
         store
             .activate_contract_version(mock.id, version.version)
             .await
