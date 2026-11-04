@@ -452,8 +452,8 @@ def fallback_reason(hdrs):
 
 
 # A fallback answer the provider caused, not the model: the provider answered 5xx or
-# 429 ("no capacity", rate limited), answered any other status with a rate-limit body
-# (`RATE_LIMITED`), or the connection to it failed. Anchored, so a
+# 429 ("no capacity", rate limited), answered any other status with a structured
+# rate-limit signal (`RATE_LIMITED`), or the connection to it failed. Anchored, so a
 # reason that starts with the model's own failure (`LLM output truncated: ...; not
 # salvaged: LLM returned HTTP 503`) is not one. An LLM timeout is not one either: it is
 # often the model being slow (aggregate.py counts timeouts on their own). The bench
@@ -463,11 +463,14 @@ def fallback_reason(hdrs):
 # as a bare `LLM returned HTTP 503` and cannot be told apart, so it is labelled infra.
 # That is why the label never changes a row and never causes a re-run.
 INFRA_REASON = re.compile(r"^LLM returned HTTP (5\d\d|429)\b|^LLM transport error")
-# A rate limit is the provider's whatever status carries it (OpenRouter's "temporarily
-# rate-limited upstream", a "Too Many Requests" body, a `rate_limit_exceeded` code).
-# Only for a reason that is itself an HTTP error from the LLM, so the model's own failure
-# that merely ends in one (`LLM output truncated: ...; not salvaged: ...`) stays the model's.
-RATE_LIMITED = re.compile(r"^LLM returned HTTP \d{3}\b.*(rate[-_ ]?limit|too many requests)", re.I | re.S)
+# A rate limit under another status counts only on a structured signal: an error
+# `"code":429` in the body, or OpenRouter's exact phrase "temporarily rate-limited
+# upstream". Free text that merely mentions a rate limit (a `rate_limit` field, "Too
+# Many Requests") does not. Only for a reason that is itself an HTTP error from the LLM,
+# so the model's own failure that merely ends in one (`LLM output truncated: ...; not
+# salvaged: ...`) stays the model's.
+RATE_LIMITED = re.compile(r'^LLM returned HTTP \d{3}\b.*("code"\s*:\s*429\b|temporarily rate-limited upstream)',
+                          re.S)
 
 
 def infra_reason(last):
@@ -1057,10 +1060,11 @@ class Journey:
     are what they would be without it, and no run is repeated or dropped. The label
     goes by the latest call, which is the call a check judges in all but a few steps.
 
-    A failed check without that label, when an earlier call of the same run fell back
-    on a provider failure, carries `detail.infra_cascade` true instead: its own call
-    was answered, but the session may hold the earlier fallback's made-up state. That
-    is a label only too, and the row stays the model's in every score."""
+    A failed check without that label, when any earlier call of the same run fell back
+    on a provider failure, carries `detail.infra_cascade` true instead, whatever its own
+    call returned (a timeout too). It is coarse: the session may hold the earlier
+    fallback's made-up state, or the model may simply have failed. It is a label only,
+    not a discount: the row stays the model's in every score."""
 
     def __init__(self, name, srv, sink, args, rep):
         self.name, self.srv, self.sink, self.args, self.rep = name, srv, sink, args, rep

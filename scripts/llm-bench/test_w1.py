@@ -1276,28 +1276,33 @@ class InfraFailureTest(unittest.TestCase):
                  'Please retry shortly, or add your own provider key to use your own limits: '
                  'https://openrouter.ai/workspaces/default/byok","provid')
 
-    def test_a_rate_limit_is_the_providers_whatever_its_status(self):
+    def test_a_rate_limit_is_the_providers_on_a_structured_signal_only(self):
         def last(reason, source="fallback"):
             return {"source": source, "fallback_reason": reason}
 
         for reason in (
             self.FULL8_429,
             "LLM returned HTTP 429",
-            # A rate limit sent under another status, or as a code inside a 200 stream.
-            'LLM returned HTTP 400: {"error":{"message":"Rate limit exceeded: free-models-per-min"}}',
-            'LLM returned HTTP 403: {"error":{"code":"rate_limit_exceeded","message":"slow down"}}',
-            "LLM returned HTTP 408: Too Many Requests",
-            'LLM returned HTTP 400: {"error":{"metadata":{"raw":"x is temporarily RATE-LIMITED upstream"}}}',
+            # Under another status: an error code 429 in the body, or OpenRouter's exact phrase.
+            'LLM returned HTTP 400: {"error":{"message":"Provider returned error","code":429}}',
+            'LLM returned HTTP 400: {"error":{"code": 429}}',
+            'LLM returned HTTP 400: {"error":{"metadata":{"raw":"x is temporarily rate-limited upstream"}}}',
         ):
             self.assertEqual(server_suites.infra_reason(last(reason)), reason)
         for reason in (
+            # A 400 whose body only mentions a rate-limit field is the request's.
+            'LLM returned HTTP 400: {"error":{"message":"invalid field","param":"rate_limit"}}',
+            'LLM returned HTTP 400: {"error":{"message":"Rate limit exceeded: free-models-per-min"}}',
+            'LLM returned HTTP 403: {"error":{"code":"rate_limit_exceeded","message":"slow down"}}',
+            "LLM returned HTTP 408: Too Many Requests",
+            'LLM returned HTTP 400: {"error":{"code":4290}}',
             # The model's own failure that only ends in a rate limit stays the model's.
-            "LLM output truncated: stopped at max_tokens; not salvaged: LLM returned HTTP 429: rate-limited",
-            "repaired output still invalid: rate limit field missing",
-            "LLM request timed out; rate-limited",
-            # A 4xx without rate-limit words stays the request's, and so does the proxy's 424.
+            "LLM output truncated: stopped at max_tokens; not salvaged: LLM returned HTTP 429: x",
+            'repaired output still invalid: {"code":429}',
+            "LLM request timed out; temporarily rate-limited upstream",
+            # A 4xx without a signal stays the request's, and so does the proxy's 424.
             'LLM returned HTTP 400: {"error":{"message":"Provider returned error"}}',
-            'LLM returned HTTP 424: {"error":{"message":"upstream kept rejecting the request; rate limit"}}',
+            'LLM returned HTTP 424: {"error":{"message":"upstream kept rejecting the request","code":429}}',
         ):
             self.assertIsNone(server_suites.infra_reason(last(reason)), reason)
         # A mock answer from the LLM is no fallback: nothing to label.
@@ -1549,19 +1554,20 @@ class ProviderPinTest(unittest.TestCase):
             "nvidia/nemotron-3.5-lightning": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": False},
             "openai/gpt-6-luna": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False},
             "deepseek/deepseek-v4.1-flash-1017": {
-                "order": ["wafer/us", "together"], "only": ["wafer/us", "together"], "allow_fallbacks": False,
-                "quantizations": ["mxfp4", "int8", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"]},
+                "order": ["wafer/us"], "only": ["wafer/us"], "allow_fallbacks": False,
+                "quantizations": ["mxfp4"]},
         })
 
-    # OpenRouter's `quantizations` values in the order the bench ranks them, lowest first.
-    # fp4 stands for both mxfp4 and nvfp4, and the bench ranks the 4-bit formats other
-    # than mxfp4 (the DeepSeek pin's first endpoint) below it, so a pin floored at mxfp4
-    # admits only mxfp4 among them.
-    QUANTIZATIONS = ("int4", "fp4", "nvfp4", "mxfp4", "int8", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown")
+    # The `quantizations` values OpenRouter documents. It defines no precision order
+    # between them, so none is asserted here. `fp4` covers mxfp4 and nvfp4, and `fp8`
+    # covers mxfp8, so a filter naming one of those admits more than it names.
+    QUANTIZATIONS = {"int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32",
+                     "unknown"}
+    UMBRELLA = {"fp4", "fp8"}
 
-    def test_an_ordered_pin_stays_comparable(self):
-        # Every pin: `only` is `order`, no fallbacks, and a `quantizations` filter (when
-        # given) holds known values only and nothing below its lowest entry.
+    def test_every_pin_is_built_the_comparable_way(self):
+        # `only` is `order`, no fallbacks, a short list, and a `quantizations` filter (when
+        # given) that names documented, known values exactly: no `unknown`, no umbrella value.
         for model, pin in proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS).items():
             self.assertEqual(pin["only"], pin["order"], model)
             self.assertIs(pin["allow_fallbacks"], False, model)
@@ -1569,11 +1575,13 @@ class ProviderPinTest(unittest.TestCase):
             self.assertEqual(len(set(pin["order"])), len(pin["order"]), model)
             q = pin.get("quantizations")
             if q is None:
+                self.assertEqual(len(pin["order"]), 1, f"{model}: an ordered list needs a quantizations filter")
                 continue
-            self.assertTrue(set(q) <= set(self.QUANTIZATIONS), model)
-            known = [v for v in q if v != "unknown"]
-            floor = min(self.QUANTIZATIONS.index(v) for v in known)
-            self.assertEqual(set(known), set(self.QUANTIZATIONS[floor:-1]), model)
+            self.assertIsInstance(q, list, model)
+            self.assertTrue(q, model)
+            self.assertTrue(set(q) <= self.QUANTIZATIONS, model)
+            self.assertNotIn("unknown", q, model)
+            self.assertFalse(set(q) & self.UMBRELLA, model)
 
     def test_preflight_records_the_pins_it_is_given(self):
         d = tempfile.mkdtemp()
@@ -1691,18 +1699,26 @@ class ProviderPinProxyTest(unittest.TestCase):
         self.assertEqual((status, rec["error_kind"]), (503, "http_5xx"))
 
     def test_an_ordered_pin_is_sent_whole_and_takes_any_endpoint_it_lists(self):
-        pin = proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS)["deepseek/deepseek-v4.1-flash-1017"]
+        pin = {"order": ["wafer/us", "stepfun/fp8"], "only": ["wafer/us", "stepfun/fp8"],
+               "allow_fallbacks": False, "quantizations": ["mxfp4", "mxfp8"]}
         self.px.pins["deepseek/x"] = pin
-        for served in ("Wafer", "Together"):
+        for served in ("Wafer", "StepFun"):
             FakeRouter.served = served
             status, _, rec = self.call("deepseek/x")
             self.assertEqual(status, 200, served)
             self.assertEqual(FakeRouter.bodies[-1]["provider"], pin)  # quantizations included
-            self.assertEqual((rec["provider"], rec["provider_pin"]), (served, ["wafer/us", "together"]))
-        FakeRouter.served = "StepFun"
+            self.assertEqual((rec["provider"], rec["provider_pin"]), (served, ["wafer/us", "stepfun/fp8"]))
+        FakeRouter.served = "Together"
         status, doc, rec = self.call("deepseek/x")
         self.assertEqual((status, rec["error_kind"]), (503, "provider_unavailable"))
         self.assertTrue(rec["provider_pin_mismatch"])
+
+    def test_the_proxy_checks_the_provider_not_the_endpoint(self):
+        # An answer names only the provider (`Wafer`), so the proxy matches by base slug:
+        # it cannot tell `wafer/us` from `wafer/mxfp4`. Keeping to the endpoint is
+        # OpenRouter's routing (`only` with the full tag); the proxy cannot verify it.
+        self.assertTrue(proxy.pin_allows({"order": ["wafer/us"]}, "Wafer"))
+        self.assertEqual(proxy.provider_key("wafer/us"), proxy.provider_key("wafer/mxfp4"))
 
     def test_an_upstream_429_reaches_mockingbird_as_a_429(self):
         # As in full8: every pinned endpoint is rate-limited. The proxy passes the 429 on,
