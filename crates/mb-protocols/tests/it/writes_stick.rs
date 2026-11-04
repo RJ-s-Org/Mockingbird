@@ -2199,7 +2199,8 @@ async fn markers_are_bounded() {
         h.call("DELETE", &format!("/items/i{n}"), None).await;
     }
     let held = h.store.list(&session(), MARKERS, 5000).await.unwrap();
-    assert!(held.len() <= 1025, "{}", held.len());
+    // The markers and their index, and the latest write a client may retry.
+    assert!(held.len() <= 1026, "{}", held.len());
     assert_eq!(
         h.call("GET", "/items/i1029", None).await.0,
         StatusCode::NOT_FOUND
