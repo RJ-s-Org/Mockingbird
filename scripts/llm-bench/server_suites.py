@@ -1055,7 +1055,12 @@ class Journey:
     A failed check judged on a call the provider failed (`infra_reason`) carries
     `detail.infra` true. That is a label only: the row, its `ok` and every other row
     are what they would be without it, and no run is repeated or dropped. The label
-    goes by the latest call, which is the call a check judges in all but a few steps."""
+    goes by the latest call, which is the call a check judges in all but a few steps.
+
+    A failed check without that label, when an earlier call of the same run fell back
+    on a provider failure, carries `detail.infra_cascade` true instead: its own call
+    was answered, but the session may hold the earlier fallback's made-up state. That
+    is a label only too, and the row stays the model's in every score."""
 
     def __init__(self, name, srv, sink, args, rep):
         self.name, self.srv, self.sink, self.args, self.rep = name, srv, sink, args, rep
@@ -1065,6 +1070,8 @@ class Journey:
         self.done = set()
         self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
         self.last_infra = None  # the infra reason the latest check failed on, if any
+        self.last_call_infra = False  # the latest call fell back on a provider failure
+        self.earlier_infra = False  # a call before the latest one did
         self.raw = b""  # the raw body of the latest answer
         self.answer_headers = {}  # the headers of the latest answer
 
@@ -1080,8 +1087,10 @@ class Journey:
                                                 timeout=self.args.timeout)
         self.raw = raw
         self.answer_headers = hdrs or {}
+        self.earlier_infra = self.earlier_infra or self.last_call_infra
         self.last = {"status": status, "source": source_of(hdrs), "ms": ms,
                      "fallback_reason": fallback_reason(hdrs)}
+        self.last_call_infra = bool(infra_reason(self.last))
         if status >= 400 or status == 0:
             self.last["error"] = excerpt(raw)
         return parsed if isinstance(parsed, (dict, list)) else {}
@@ -1095,6 +1104,8 @@ class Journey:
         self.last_infra = infra if infra and not ok else None
         if self.last_infra:
             detail["infra"] = True
+        elif not ok and self.earlier_infra:
+            detail["infra_cascade"] = True
         journey_check(self.sink, self.name, self.rep, name, bool(ok), detail,
                       self.last["source"], self.last["ms"])
 
@@ -1118,6 +1129,8 @@ def run_one_journey(name, steps, srv, sink, args, rep):
         ended_on_infra = j.last_infra
     except Exception as e:  # noqa: BLE001 - a journey that breaks is recorded, not raised
         reason = f"{type(e).__name__}: {e}"[:300]
+    # A skipped check has no call of its own: every call the run made is an earlier one.
+    j.earlier_infra = j.earlier_infra or j.last_call_infra
     for check in JOURNEY_CHECKS[name]:
         if check not in j.done:
             j.last = {"status": None, "source": "skipped", "ms": None, "fallback_reason": None}
@@ -6113,7 +6126,10 @@ def run_suite(suite, args):
         sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
     n_ok = sum(1 for r in sink.rows if r["ok"])
     n_infra = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra"))
+    n_cascade = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra_cascade"))
     infra = f", {n_infra} failed on provider errors" if n_infra else ""
+    if n_cascade:
+        infra += f", {n_cascade} failed after a provider failure earlier in the journey"
     print(f"  {suite}: {n_ok}/{len(sink.rows)} ok{infra}", file=sys.stderr)
     mix = provider_mix(args, suite)
     if mix:

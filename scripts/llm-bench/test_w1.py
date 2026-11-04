@@ -1326,7 +1326,8 @@ class InfraFailureTest(unittest.TestCase):
         block = aggregate.journeys_block(rows + [{"suite": "consistency", "case": "stripe", "ok": False}])
         self.assertEqual(list(block), ["journeys_heldout"])
         self.assertEqual(block["journeys_heldout"], {"n": len(checks), "ok": 0, "ok_rate": 0.0, "failed_model": 0,
-                                                     "failed_timeout": 0, "failed_infra": len(checks)})
+                                                     "failed_timeout": 0, "failed_infra": len(checks),
+                                                     "failed_infra_cascade": 0})
 
     def test_rows_are_those_of_a_run_without_infra_but_for_the_label(self):
         labelled = self.square("once")
@@ -1335,7 +1336,7 @@ class InfraFailureTest(unittest.TestCase):
         def unlabelled(rows):
             out = []
             for r in rows:
-                detail = {k: v for k, v in r["detail"].items() if k not in ("infra", "fallback_reason")}
+                detail = {k: v for k, v in r["detail"].items() if k not in ("infra", "infra_cascade", "fallback_reason")}
                 out.append(dict({k: v for k, v in r.items() if k != "latency_ms"}, detail=detail))
             return out
 
@@ -1410,6 +1411,67 @@ class InfraFailureTest(unittest.TestCase):
         self.assertTrue(all(r["source"] == "skipped" and not r["ok"] for r in rows.values()))
         self.assertFalse(any(r["detail"].get("infra") for r in rows.values()), rows)
         self.assertIn("KeyError", rows["rest"]["detail"]["reason"])
+        # The infra call came before the skip, so the skipped checks are a cascade.
+        self.assertTrue(all(r["detail"].get("infra_cascade") for r in rows.values()), rows)
+
+    def test_a_failure_after_an_earlier_provider_failure_is_a_cascade(self):
+        def steps(j):
+            j.call("GET", "/model")
+            j.check("before", False)  # no provider failure yet: the model's, unlabelled
+            j.call("GET", "/infra")
+            j.check("own call", False)  # its own call failed: infra, not a cascade
+            j.call("GET", "/model")
+            j.check("after, passes", True)  # a pass is never labelled
+            j.check("after, fails", False)
+            j.call("GET", "/timeout")
+            j.check("after, times out", False)
+            server_suites.need(j, "gate", False)
+
+        names = ["before", "own call", "after, passes", "after, fails", "after, times out", "gate", "rest"]
+        rows = self.run_scripted(steps, names)
+        label = {n: (rows[n]["ok"], bool(rows[n]["detail"].get("infra")),
+                     bool(rows[n]["detail"].get("infra_cascade"))) for n in names}
+        self.assertEqual(label, {
+            "before": (False, False, False),
+            "own call": (False, True, False),
+            "after, passes": (True, False, False),
+            "after, fails": (False, False, True),
+            "after, times out": (False, False, True),
+            "gate": (False, False, True),
+            "rest": (False, False, True),  # skipped after a model gate, in a run that had one
+        })
+        block = aggregate.journeys_block(list(rows.values()))["journeys_heldout"]
+        # Raw passes unchanged; cascades stay the model's and are only shown apart. The gate
+        # judges the timeout call too, so two timeouts.
+        self.assertEqual((block["n"], block["ok"], block["failed_model"], block["failed_timeout"],
+                          block["failed_infra"], block["failed_infra_cascade"]), (7, 1, 5, 2, 1, 4))
+
+    def test_no_provider_failure_means_no_cascade(self):
+        rows = self.run_scripted(scripted_steps("model", "timeout", "model"),
+                                 ["check 0", "check 1", "check 2", "rest"])
+        self.assertFalse(any(r["detail"].get("infra_cascade") or r["detail"].get("infra")
+                             for r in rows.values()), rows)
+
+    def test_tables_report_the_cascade_next_to_the_raw_passes(self):
+        def row(case, ok, **detail):
+            return {"model": "m/x", "suite": "journeys_heldout", "case": case, "rep": 0, "ok": ok,
+                    "latency_ms": 1.0, "source": "llm", "detail": detail}
+
+        rows = [row("a", True), row("b", False, infra=True), row("c", False, infra_cascade=True),
+                row("d", False, infra_cascade=True), row("e", False)]
+        with tempfile.TemporaryDirectory() as out:
+            with open(os.path.join(out, "server.jsonl"), "w") as f:
+                f.writelines(json.dumps(r) + "\n" for r in rows)
+            with contextlib.redirect_stderr(io.StringIO()):
+                aggregate.main(["--out", out])
+            with open(os.path.join(out, "results.json")) as f:
+                block = json.load(f)["models"]["m/x"]["server"]["journeys"]["journeys_heldout"]
+            with open(os.path.join(out, "tables.md")) as f:
+                tables = f.read()
+        self.assertEqual((block["ok"], block["failed_model"], block["failed_infra"], block["failed_infra_cascade"]),
+                         (1, 3, 1, 2))
+        self.assertIn("of which after a provider failure", tables)
+        self.assertIn("| m/x | journeys_heldout | 5 | 1 | 3 | 0 | 2 | 1 |", tables)
 
 
 class FakeRouter(BaseHTTPRequestHandler):
