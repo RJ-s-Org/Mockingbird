@@ -4,9 +4,11 @@ info:
   version: "2.0"
   description: |
     A subset of the Xero Accounting API, written from its public documentation. Every
-    request names the organisation it acts on in the `Xero-tenant-id` header, a tenant
-    id the connection was granted. Each organisation's data is its own: a contact made
-    in one organisation is never read, listed or changed through another's tenant id.
+    request names the organisation it acts on in the `Xero-tenant-id` header. A
+    connection can be authorised for several organisations, and each tenant id it sends
+    names its own organisation, which starts with no contacts or contact groups. Each
+    organisation's data is its own: a contact made in one organisation is never read,
+    listed or changed through another's tenant id, whose lists simply do not hold it.
 
     Answers are wrapped: a call about contacts answers
     `{Id, Status, ProviderName, DateTimeUTC, Contacts: [...]}`, even for one contact, and
@@ -39,8 +41,8 @@ info:
     (`ContactID` and `Name` each).
 
     A `ContactID` or `ContactGroupID` the organisation does not hold answers 404 with
-    `{Title: "Not Found", Status: 404, Detail}`. A missing or unknown `Xero-tenant-id`
-    answers 403 `AuthorizationUnsuccessful`.
+    `{Title: "Not Found", Status: 404, Detail}`. A request without a `Xero-tenant-id`
+    header answers 403 `AuthorizationUnsuccessful`.
 servers:
   - url: https://api.xero.com/api.xro/2.0
 security:
@@ -289,7 +291,7 @@ components:
       name: Xero-tenant-id
       in: header
       required: true
-      description: The organisation to act on. Data never crosses organisations.
+      description: "The organisation to act on: each tenant id names its own organisation. Data never crosses organisations."
       schema: {type: string, format: uuid}
     contactId:
       name: ContactID
@@ -313,7 +315,7 @@ components:
         application/json:
           schema: {$ref: "#/components/schemas/Problem"}
     Forbidden:
-      description: "A missing or unknown Xero-tenant-id: `{Type: \"AuthorizationUnsuccessful\", Title, Status: 403, Detail}`."
+      description: "A request without a Xero-tenant-id header: `{Type: \"AuthorizationUnsuccessful\", Title, Status: 403, Detail}`."
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Problem"}

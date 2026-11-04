@@ -5855,10 +5855,14 @@ def moderntreasury_steps(j):
             j.last["status"] == 422 and eq(obj(bad.get("errors")).get("code"), "parameter_invalid"),
             errors=bad.get("errors"))
     posted = obj(j.call("PATCH", f"/api/ledger_transactions/{t1}", body={"status": "posted"}))
+    patched = j.last["status"]
+    read = obj(j.call("GET", f"/api/ledger_transactions/{t1}"))
     j.check("posting sets posted_at",
-            j.last["status"] == 200 and eq(posted.get("status"), "posted")
-            and instant(posted.get("posted_at")) is not None,
-            transaction_status=posted.get("status"), posted_at=posted.get("posted_at"))
+            patched == 200 and eq(posted.get("id"), t1) and eq(posted.get("status"), "posted")
+            and instant(posted.get("posted_at")) is not None
+            and eq(read.get("status"), "posted") and eq(read.get("posted_at"), posted.get("posted_at")),
+            patch_status=patched, transaction_status=posted.get("status"), posted_at=posted.get("posted_at"),
+            read_status=read.get("status"), read_posted_at=read.get("posted_at"))
     balances = account(cash)
     j.check("posted entries reach the posted balance",
             amounts(balance(balances, "posted_balance"), 10000, 10000, 0)
