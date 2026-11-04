@@ -43,7 +43,8 @@ pub struct Bundle {
     pub title: String,
     /// The contract's `info.version`.
     pub version: String,
-    /// The contract's API-level description (`info.description`), where it
+    /// The contract's API-level description (`info.description`; a WSDL's
+    /// `wsdl:documentation` of its `definitions` and services), where it
     /// often states rules that hold across operations; absent when it has none
     /// and in bundles compiled before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -488,7 +489,8 @@ pub struct Operation {
     pub binding: Binding,
     /// What the operation does.
     pub kind: OperationKind,
-    /// The contract's summary.
+    /// The contract's summary (a WSDL operation's `wsdl:documentation`, of
+    /// its portType operation then its binding operation).
     pub summary: Option<String>,
     /// The request schemas.
     pub input: InputSchemas,
@@ -732,6 +734,15 @@ pub fn joined_name(name: &str) -> String {
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// Whether `name` is, or ends with the [`words`] of, `tail`, separators and case aside:
+/// `next_page_token` ends with `page_token` and `pageToken`, not with `token_id`.
+#[must_use]
+pub fn ends_with_words(name: &str, tail: &str) -> bool {
+    let wanted = joined_name(tail);
+    let words = words(name);
+    (0..words.len()).any(|from| joined_name(&words[from..].concat()) == wanted)
 }
 
 /// Whether a run of `name`'s [`words`] names `member`, separators and case aside:

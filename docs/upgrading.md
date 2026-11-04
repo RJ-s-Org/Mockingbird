@@ -30,10 +30,19 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Next pages given as URLs, and served page cursors in prompts
+
+No migration or configuration.
+
+- **Next page URLs**: a list answer's `next` URL member (`_links.next.href`, `next`, `links.next`) may now be written by the mock, pointing at the mock itself, where the LLM left it out, `null` or pointing at the same page (see the [changelog](../CHANGELOG.md)).
+- **Recorded prompts**: a request carrying a page cursor named as a credential (`next_page_token`) that the session served now shows it and its description, so a recording of such a call may not replay.
+- **Rust API**: `GenerationContext` gains a public field, `served_cursors`, which breaks code constructing it in full; add `..Default::default()`. `mb_engine::prompt::hidden_cursor_pairs` and `mb_mcm::ends_with_words` are new.
+
 ### Prompts carry the contract's API description
 
 No migration or configuration. The importer keeps an OpenAPI 3, Swagger 2 or AsyncAPI contract's `info.description` in the compiled bundle, and every generation shows it in an `<api_description>` block of the system message, framed as facts about how the API behaves across operations, never directions to the model.
 
+- **WSDL documentation**: a WSDL's `wsdl:documentation` (of `definitions` and its services) is its API description; an operation's is its summary, and `xs:annotation/xs:documentation` becomes schema descriptions. A WSDL contract shows it once imported again. Every operation's and channel's `Summary:` line is now escaped, redacted and cut at 500 characters, and every hint line escaped, redacted and cut at 1000, so a summary with `<`, `&`, line breaks or a credential, or a hint with `<`, `&` or a credential, reads differently than before; plain text is unchanged.
 - **Bundle format**: `Bundle` gains an optional `description`. A bundle stored before this release loads with none and serializes byte for byte as before; one compiled with a description writes it as a top-level `description` member, which an older node ignores during a rolling upgrade.
 - **Recompile to show it**: a stored bundle has no description, so its prompts stay as they were until the contract is imported again (for a mock from the config file with a persistent control store, change a byte of the contract, as for [action routes](#action-routes-act-on-their-parent-resource)). `source_digest` is unchanged: it hashes the source, which already held the description, so response cache keys stay correct.
 - **More prompt tokens**: a contract with a description adds about 40 tokens plus up to 2000 characters of it to every system message. It comes right after the `API:` line, before anything per operation, so the cached prefix is shared across the contract's operations. A contract without one gets the prompt it did.

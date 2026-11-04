@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wsdl:definitions name="Library"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:example:library"
+    targetNamespace="urn:example:library">
+  <wsdl:documentation>
+    A lending library catalog.
+    Books are never deleted; a withdrawn book keeps its record.
+    Partners authenticate with api_key: lib_9fQ2xW7mLp4Rt8Zb3Nc6Vd1K.
+  </wsdl:documentation>
+  <wsdl:types>
+    <xs:schema elementFormDefault="qualified" targetNamespace="urn:example:library">
+      <xs:simpleType name="Isbn">
+        <xs:annotation>
+          <xs:documentation>A 13-digit ISBN, digits only.</xs:documentation>
+        </xs:annotation>
+        <xs:restriction base="xs:string">
+          <xs:pattern value="[0-9]{13}"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:complexType name="Book">
+        <xs:annotation>
+          <xs:appinfo>internal</xs:appinfo>
+          <xs:documentation xml:lang="en">A book in the catalog.</xs:documentation>
+          <xs:documentation xml:lang="en">One record per edition.</xs:documentation>
+        </xs:annotation>
+        <xs:sequence>
+          <xs:element name="id" type="xs:string">
+            <xs:annotation>
+              <xs:documentation>Catalog id, such as BK-000123.</xs:documentation>
+            </xs:annotation>
+          </xs:element>
+          <xs:element name="isbn" type="tns:Isbn"/>
+          <xs:element name="title" type="xs:string"/>
+          <xs:element name="authors" type="xs:string" maxOccurs="unbounded">
+            <xs:annotation>
+              <xs:documentation>Authors in credit order.</xs:documentation>
+            </xs:annotation>
+          </xs:element>
+        </xs:sequence>
+        <xs:attribute name="status" type="xs:string">
+          <xs:annotation>
+            <xs:documentation>available, on_loan or withdrawn; admin token=lib_7Hh2Kk9Mm4Nn6Pp8Qq1Rr3Ss.</xs:documentation>
+          </xs:annotation>
+        </xs:attribute>
+      </xs:complexType>
+      <xs:element name="GetBook">
+        <xs:annotation>
+          <xs:documentation>Looks up one book.</xs:documentation>
+        </xs:annotation>
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="id" type="xs:string"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="GetBookResponse" type="tns:Book">
+        <xs:annotation>
+          <xs:documentation>The book found.</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="GetBookIn">
+    <wsdl:part name="parameters" element="tns:GetBook"/>
+  </wsdl:message>
+  <wsdl:message name="GetBookOut">
+    <wsdl:part name="parameters" element="tns:GetBookResponse"/>
+  </wsdl:message>
+  <wsdl:portType name="LibraryPort">
+    <wsdl:operation name="GetBook">
+      <wsdl:documentation>
+        Returns a book by its catalog id.
+        <p xmlns="http://www.w3.org/1999/xhtml">A withdrawn book is still <b>returned</b>,</p><p xmlns="http://www.w3.org/1999/xhtml">with status withdrawn.</p>
+      </wsdl:documentation>
+      <wsdl:input message="tns:GetBookIn"/>
+      <wsdl:output message="tns:GetBookOut"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="LibrarySoap" type="tns:LibraryPort">
+    <soap:binding transport="http://schemas.xmlsoap.org/soap/http" style="document"/>
+    <wsdl:operation name="GetBook">
+      <wsdl:documentation>Served from the read replica; send Authorization: Bearer q8W3eR5tY7uI9oP1aS2dF4gH.</wsdl:documentation>
+      <soap:operation soapAction="urn:example:library/GetBook"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="LibraryService">
+    <wsdl:documentation>The public lending endpoint.</wsdl:documentation>
+    <wsdl:port name="LibrarySoap" binding="tns:LibrarySoap">
+      <soap:address location="http://library.example.com/soap/library"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>

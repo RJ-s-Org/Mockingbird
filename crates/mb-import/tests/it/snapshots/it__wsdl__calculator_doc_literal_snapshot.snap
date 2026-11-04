@@ -5,6 +5,7 @@ expression: b
 id: calculator
 title: Calculator
 version: "0"
+description: A document/literal calculator with SOAP 1.1 and 1.2 ports.
 source_digest: "[digest]"
 operations:
   - id: Add
@@ -19,7 +20,7 @@ operations:
         address_path: /calculator.asmx
     kind:
       command: create
-    summary: ~
+    summary: Adds two integers.
     input:
       path: ~
       query: ~

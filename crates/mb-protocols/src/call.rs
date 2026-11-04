@@ -28,6 +28,7 @@ use crate::{
     MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
 };
 
+mod cursors;
 mod deleted;
 mod envelopes;
 mod lists;
@@ -186,6 +187,10 @@ pub(crate) struct CallPlan<'a> {
     /// A hash of the token an `Authorization: Bearer` header sent, never the token (see
     /// [`minted::bearer_hash`]).
     pub bearer: Option<String>,
+    /// The URL the call reached the mock at, with no query: the base URL a client
+    /// reached it at ([`crate::base_url::of`]) and the request's path as sent. What a
+    /// next page's URL is written with ([`pages`]); `None` off HTTP routes.
+    pub page_url: Option<String>,
 }
 
 impl CallPlan<'_> {
@@ -480,6 +485,7 @@ pub(crate) async fn plan<'a>(
         engine,
         chaos,
         bearer: minted::bearer_hash(headers),
+        page_url: None,
     })
 }
 
@@ -699,6 +705,7 @@ pub(crate) async fn generate_pending(
         earlier_answers: &pending.earlier_answers,
         earlier_writes: &pending.earlier_writes,
         earlier_origins: &pending.earlier_origins,
+        served_cursors: &pending.served_cursors,
         created_since: &pending.created_since,
         alongside: &pending.alongside,
         same_values: &pending.same_values,
@@ -770,6 +777,9 @@ pub(crate) struct Pending<'a> {
     unlisted: bool,
     /// The answers that minted values this call carries, with their requests.
     earlier_origins: Vec<Value>,
+    /// The hidden cursor parameters this call carries with a value the session served
+    /// (see [`cursors`]).
+    served_cursors: Vec<String>,
     /// What was written to this list read's own path earlier in the session.
     earlier_writes: Vec<Value>,
     /// Those of `related` a create's own collection holds (see [`created_alongside`]).
@@ -943,6 +953,9 @@ pub(crate) async fn prepare<'a>(
             .instrument(state_span())
             .await
     {
+        cursors::after_answer(&mut state, plan, &served)
+            .instrument(state_span())
+            .await;
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(served);
     }
@@ -1005,50 +1018,54 @@ pub(crate) async fn prepare<'a>(
     };
 
     // Last, so that a 404, a stored or a cached answer costs none of this.
-    let ((earlier_answers, unlisted), earlier_writes, earlier_origins, alongside) = async {
-        parents_by_name(
-            &mut state,
-            session,
-            op,
-            call,
-            target.as_ref(),
-            &mut followed,
-            &mut related,
-        )
-        .await;
-        world::named_by_value(
-            &mut state,
-            plan,
-            call,
-            target.as_ref(),
-            &followed,
-            &mut related,
-        )
-        .await;
-        follow_hops(&mut state, session, target.as_ref(), followed, &mut related).await;
-        if is_query
-            && target_missing
-            && let Some(id) = target_id.as_deref()
-        {
-            for resource in referrers(&mut state, session, op, id).await {
-                if !holds(&related, &resource) {
-                    related.push(resource);
+    let ((earlier_answers, unlisted), earlier_writes, (earlier_origins, served_cursors), alongside) =
+        async {
+            parents_by_name(
+                &mut state,
+                session,
+                op,
+                call,
+                target.as_ref(),
+                &mut followed,
+                &mut related,
+            )
+            .await;
+            world::named_by_value(
+                &mut state,
+                plan,
+                call,
+                target.as_ref(),
+                &followed,
+                &mut related,
+            )
+            .await;
+            follow_hops(&mut state, session, target.as_ref(), followed, &mut related).await;
+            if is_query
+                && target_missing
+                && let Some(id) = target_id.as_deref()
+            {
+                for resource in referrers(&mut state, session, op, id).await {
+                    if !holds(&related, &resource) {
+                        related.push(resource);
+                    }
                 }
             }
+            let alongside =
+                created_alongside(&mut state, plan, call, target.as_ref(), &mut related).await;
+            let same_values =
+                shown_same_values(&mut state, plan, call, target.as_ref(), &mut related).await;
+            (
+                world::recall_answers(&mut state, plan).await,
+                write_memory::recall_route(&mut state, plan, call).await,
+                (
+                    minted::recall(&mut state, plan, call).await,
+                    cursors::recall(&mut state, plan, call).await,
+                ),
+                (alongside, same_values),
+            )
         }
-        let alongside =
-            created_alongside(&mut state, plan, call, target.as_ref(), &mut related).await;
-        let same_values =
-            shown_same_values(&mut state, plan, call, target.as_ref(), &mut related).await;
-        (
-            world::recall_answers(&mut state, plan).await,
-            write_memory::recall_route(&mut state, plan, call).await,
-            minted::recall(&mut state, plan, call).await,
-            (alongside, same_values),
-        )
-    }
-    .instrument(state_span())
-    .await;
+        .instrument(state_span())
+        .await;
     let (alongside, same_values) = alongside;
     let created_since =
         write_memory::created_since(&mut state, plan, &earlier, target.as_ref(), &mut related)
@@ -1068,6 +1085,7 @@ pub(crate) async fn prepare<'a>(
         unlisted,
         earlier_writes,
         earlier_origins,
+        served_cursors,
         alongside,
         same_values,
     }))
@@ -1579,6 +1597,7 @@ pub(crate) async fn complete(
         }
         world::list_session(&mut state, plan, unlisted, &generated).await;
         minted::after_answer(&mut state, plan, call, &generated).await;
+        cursors::after_answer(&mut state, plan, &generated).await;
         world::after_answer(&mut state, plan, call, &generated).await;
         world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
         state.touch(session).await;
