@@ -56,7 +56,7 @@ Each entry records its author (`heuristic`, `agent`, `llm` or `user`). A later t
 
 ## The description
 
-A YAML or JSON document, versioned with a published JSON Schema (`mockingbird schema world`). An illustrative excerpt:
+A YAML or JSON document, versioned with a published JSON Schema (`mockingbird world schema`). An illustrative excerpt:
 
 ```yaml
 version: 1
