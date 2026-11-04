@@ -729,19 +729,24 @@ def drop_harness_rejected(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
 
 def journeys_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Per journeys suite: checks, passes, and the failures split into those the
-    provider caused (`detail.infra`: a timeout or 5xx fallback, and the checks a journey
-    skipped after one) and the rest, which are the model's. `reruns` counts the journey
-    units re-run once because the provider failed them before any check passed."""
+    provider caused (`detail.infra`: a 5xx, 429 or transport-error fallback, and the
+    checks a journey skipped after one) and the rest, which are the model's.
+    `failed_timeout` counts the model failures judged on an LLM-timeout fallback: they
+    stay the model's (a slow model times out) and are only shown apart. `reruns` counts
+    the journey units re-run once because only the provider failed them."""
     out: Dict[str, Any] = {}
     for name in sorted({str(r.get("suite")) for r in rows if str(r.get("suite")).startswith("journeys")}):
         suite = [r for r in rows if r.get("suite") == name and r.get("case") != "suite_error"]
         details = [r.get("detail") if isinstance(r.get("detail"), dict) else {} for r in suite]
         failed = [d for r, d in zip(suite, details) if not r.get("ok")]
         infra = sum(1 for d in failed if d.get("infra"))
+        timeouts = sum(1 for d in failed if not d.get("infra")
+                       and "LLM request timed out" in str(d.get("fallback_reason") or ""))
         reruns = {(str(r.get("case")).split(".")[0], r.get("rep")) for r, d in zip(suite, details)
                   if d.get("retried_after")}
         out[name] = {"n": len(suite), "ok": len(suite) - len(failed), "ok_rate": rate(len(suite) - len(failed), len(suite)),
-                     "failed_model": len(failed) - infra, "failed_infra": infra, "reruns": len(reruns)}
+                     "failed_model": len(failed) - infra, "failed_timeout": timeouts, "failed_infra": infra,
+                     "reruns": len(reruns)}
     return out
 
 
@@ -1506,17 +1511,18 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
     for m, b in models.items():
         for name, jb in b["server"].get("journeys", {}).items():
             rows.append([m, name, fmt(jb["n"], "int"), fmt(jb["ok"], "int"), fmt(jb["failed_model"], "int"),
-                         fmt(jb["failed_infra"], "int"), fmt(jb["reruns"], "int")])
+                         fmt(jb["failed_timeout"], "int"), fmt(jb["failed_infra"], "int"), fmt(jb["reruns"], "int")])
     if rows:
         lines.append("Journey suites (failed checks split into the model's and the provider's):")
         lines.append("")
-        lines += md_table(["Model", "suite", "checks", "ok", "failed (model)", "failed (provider)",
-                           "units re-run"], rows)
+        lines += md_table(["Model", "suite", "checks", "ok", "failed (model)", "of which timeouts",
+                           "failed (provider)", "units re-run"], rows)
         lines.append("")
-        lines.append("failed (provider) = checks judged on a fallback the provider forced (an LLM timeout, "
-                     "HTTP 5xx or 429, a transport error) and the checks a journey skipped after one. A unit "
-                     "that failed this way before any check passed is re-run once in a fresh session, and "
-                     "only the re-run's rows are kept.")
+        lines.append("failed (provider) = checks judged on a fallback the provider forced (HTTP 5xx or 429, "
+                     "a transport error) and the checks a journey skipped after one. A unit that ended this "
+                     "way with no check passed and no other failure is re-run once in a fresh session, and "
+                     "only the re-run's rows are kept. An LLM timeout stays a model failure (of which "
+                     "timeouts) and never causes a re-run.")
         lines.append("")
 
     lines.append("## 9. Value sensitivity")
