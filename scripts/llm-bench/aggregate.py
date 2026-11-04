@@ -814,6 +814,9 @@ def ledger_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     error_n = sum(1 for r in rows if r.get("error_kind") in ERROR_KINDS)
     timeout_n = sum(1 for r in rows if r.get("error_kind") == "timeout")
     refusal_n = sum(1 for r in rows if r.get("error_kind") == "refusal")
+    # A client hang-up mid-generation (proxy.py: 499, `client_closed`): neither an
+    # error (not in ERROR_KINDS) nor a success (`is_success` needs status 200).
+    client_closed_n = sum(1 for r in rows if r.get("error_kind") == "client_closed")
     retry_n = sum(1 for r in rows if (num(r.get("attempts")) or 1) > 1)
     success = [r for r in rows if is_success(r)]
     engine_success = [r for r in success if r.get("workload") == "engine"]
@@ -824,6 +827,7 @@ def ledger_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "errors": error_n, "error_rate": rate(error_n, n),
         "timeouts": timeout_n, "timeout_rate": rate(timeout_n, n),
         "refusals": refusal_n, "refusal_rate": rate(refusal_n, n),
+        "client_closed": client_closed_n,
         "retries": retry_n, "retry_rate": rate(retry_n, n),
         "error_kinds": {str(k): v for k, v in Counter(r.get("error_kind") for r in rows
                                                        if r.get("error_kind")).items()},
