@@ -601,9 +601,7 @@ async fn write_by_id(
     call: &OperationCall,
     generated: &mb_engine::GeneratedResponse,
 ) {
-    if !(200..300).contains(&generated.status)
-        || matches!(generated.source, Source::State | Source::Cache)
-    {
+    if !writes_by_id(generated.status, generated.source) {
         return;
     }
     let Some(Value::Object(args)) = &call.body else {
@@ -612,7 +610,8 @@ async fn write_by_id(
     let Some(target) = super::state::by_id(&rt.bundle, op, args) else {
         return;
     };
-    let Some(held) = call::stored_in(rt, &plan.session, &target.types, &target.id).await else {
+    let Some(held) = call::stored(rt, &plan.session, &target.resource_type, &target.id).await
+    else {
         return;
     };
     if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
@@ -628,6 +627,13 @@ async fn write_by_id(
         };
         call::store_resources(rt, &plan.session, vec![resource], true).await;
     }
+}
+
+/// Whether an answer of `status` from `source` makes [`write_by_id`]'s
+/// write: a 2xx one generated now, not one from state or the cache, which
+/// wrote when it was first answered.
+fn writes_by_id(status: u16, source: Source) -> bool {
+    (200..300).contains(&status) && !matches!(source, Source::State | Source::Cache)
 }
 
 /// The one request-log record of an HTTP request's root fields: a single
@@ -747,5 +753,19 @@ pub(crate) fn project(value: Value, ty: &Type, shapes: &Shapes) -> Option<FieldV
                 Some(FieldValue::owned_any(value).with_type(typename))
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_generated_2xx_answer_writes_by_id() {
+        assert!(writes_by_id(200, Source::Llm));
+        assert!(writes_by_id(201, Source::Fallback));
+        assert!(!writes_by_id(200, Source::State));
+        assert!(!writes_by_id(200, Source::Cache));
+        assert!(!writes_by_id(404, Source::Llm));
     }
 }

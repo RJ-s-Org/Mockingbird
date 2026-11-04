@@ -602,10 +602,58 @@ fn def_schema(
 // Operations
 // ---------------------------------------------------------------------------
 
-/// The object type with an `id` that the operation `name` names, without
-/// its verb (`issueUpdate` -> `issue`), lowercased.
-fn named_record(schema: &Schema, name: &str) -> Option<String> {
-    let noun = resource_from_name(name)?;
+/// The write verbs a mutation's name may start or end with, and their
+/// effects.
+const WRITE_VERBS: [(&str, Effect); 3] = [
+    ("create", Effect::Create),
+    ("update", Effect::Update),
+    ("delete", Effect::Delete),
+];
+
+/// The write a mutation's name says it makes, and on what: a write verb
+/// at its start (`deleteComment`) or end (`issueUpdate`,
+/// `productVariantDelete`), at a word boundary (an uppercase letter or
+/// `_`), with the rest of the name naming exactly, once singular, an
+/// object type of the schema with an `id` (`ProductVariant`). That type,
+/// lowercased, is the record. `None` when the rest names no such type
+/// (`undoDelete`, `bulkDelete`, `itemsToDelete`).
+fn write_verb(schema: &Schema, name: &str) -> Option<(Effect, String)> {
+    WRITE_VERBS.iter().find_map(|(verb, effect)| {
+        let n = verb.len();
+        let prefix = name
+            .split_at_checked(n)
+            .filter(|(head, rest)| {
+                head.eq_ignore_ascii_case(verb)
+                    && rest.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+            })
+            .map(|(_, rest)| rest.trim_start_matches('_'));
+        let suffix = name
+            .len()
+            .checked_sub(n)
+            .and_then(|at| name.split_at_checked(at))
+            .filter(|(noun, tail)| {
+                tail.eq_ignore_ascii_case(verb)
+                    && (tail.starts_with(|c: char| c.is_ascii_uppercase()) || noun.ends_with('_'))
+            })
+            .map(|(noun, _)| noun.trim_end_matches('_'));
+        [prefix, suffix]
+            .into_iter()
+            .flatten()
+            .find_map(|noun| record_type(schema, noun))
+            .map(|record| (*effect, record))
+    })
+}
+
+/// The object type with an `id` that `noun` names exactly, ignoring case,
+/// with one trailing `s` (not `ss`) dropped, lowercased.
+fn record_type(schema: &Schema, noun: &str) -> Option<String> {
+    let mut noun = noun.to_lowercase();
+    if noun.ends_with('s') && !noun.ends_with("ss") {
+        noun.pop();
+    }
+    if noun.is_empty() {
+        return None;
+    }
     schema.types.keys().find_map(|t| {
         let lower = t.to_lowercase();
         let identified = schema
@@ -621,27 +669,36 @@ fn operation(
     label: &str,
     f: &Field,
 ) -> Operation {
+    let write = (operation_type == GraphqlOperationType::Mutation)
+        .then(|| write_verb(schema, &f.name))
+        .flatten();
     let kind = match operation_type {
         GraphqlOperationType::Query => OperationKind::Query,
+        // A verb prefix as on any protocol (`deleteIssue`), else a write
+        // verb ending a name that names a record (`issueUpdate`).
         GraphqlOperationType::Mutation => {
-            kind_from_name(&f.name, OperationKind::Command(Effect::Other))
+            match kind_from_name(&f.name, OperationKind::Command(Effect::Other)) {
+                OperationKind::Command(Effect::Other) => write
+                    .as_ref()
+                    .map_or(OperationKind::Command(Effect::Other), |(effect, _)| {
+                        OperationKind::Command(*effect)
+                    }),
+                kind => kind,
+            }
         }
         GraphqlOperationType::Subscription => OperationKind::StreamServer,
     };
     let named = named_type(&f.ty);
     let object_fields = schema.object_fields(named);
+    let record = write.map(|(_, record)| record);
     let resource_type = match object_fields {
-        // A mutation's payload with no `id` of its own (`IssuePayload`,
-        // `DeletePayload`) stands for the record its name names
-        // (`issueUpdate`, `deleteComment`) when the schema has that type.
-        Some(fields)
-            if operation_type == GraphqlOperationType::Mutation
-                && !fields.iter().any(|x| x.name == "id") =>
-        {
-            Some(named_record(schema, &f.name).unwrap_or_else(|| named.to_lowercase()))
+        // A write's payload with no `id` of its own (`IssuePayload`,
+        // `DeletePayload`) stands for the record its name names.
+        Some(fields) if !fields.iter().any(|x| x.name == "id") => {
+            Some(record.unwrap_or_else(|| named.to_lowercase()))
         }
         Some(_) => Some(named.to_lowercase()),
-        None => resource_from_name(&f.name),
+        None => record.or_else(|| resource_from_name(&f.name)),
     };
     let returns_one = matches!(f.ty.base, BaseType::Named(_));
     let identity = object_fields

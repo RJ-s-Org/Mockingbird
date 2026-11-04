@@ -2168,12 +2168,24 @@ async fn chaos_applies_to_each_batched_operation() {
 }
 
 /// A Linear-like schema: noun-first mutations (`issueUpdate`) whose payloads
-/// need not select the record, beside verb-first ones.
+/// need not select the record, beside verb-first ones, and names a write
+/// verb ends that name no record.
 const NOUN_FIRST: &str = r#"
 type Issue { id: ID! title: String! priority: Int! }
 type Comment { id: ID! body: String! }
+type Product { id: ID! title: String! }
+type ProductVariant { id: ID! title: String! }
+type Order { id: ID! status: String! }
+type Notification { id: ID! readAt: String }
+type Item { id: ID! name: String! }
+type Run { id: ID! }
+type Search { id: ID! }
 type IssuePayload { success: Boolean! issue: Issue }
 type CommentPayload { success: Boolean! comment: Comment }
+type ProductPayload { product: Product }
+type ProductVariantDeletePayload { deletedId: ID product: Product }
+type OrderPayload { order: Order }
+type NotificationPayload { notification: Notification }
 type DeletePayload { success: Boolean! entityId: String }
 input IssueCreateInput { title: String! priority: Int }
 input IssueUpdateInput { title: String priority: Int stateId: String }
@@ -2181,15 +2193,39 @@ input CommentCreateInput { body: String! }
 type Query {
   issue(id: ID!): Issue
   comment(id: ID!): Comment
+  product(id: ID!): Product
+  order(id: ID!): Order
+  issueUpdate(id: ID!): IssuePayload
 }
 type Mutation {
   issueCreate(input: IssueCreateInput!): IssuePayload!
   issueUpdate(id: String!, input: IssueUpdateInput!): IssuePayload!
-  issueBulkUpdate(input: IssueUpdateInput!): IssuePayload!
+  issuesUpdate(input: IssueUpdateInput!): IssuePayload!
   issueArchive(id: String!): IssuePayload!
   updateIssue(id: String!, input: IssueUpdateInput!): IssuePayload!
   commentCreate(input: CommentCreateInput!): CommentPayload!
   commentDelete(id: String!): DeletePayload!
+  productCreate(title: String!): ProductPayload!
+  productVariantDelete(id: ID!): ProductVariantDeletePayload!
+  orderCreate(status: String!): OrderPayload!
+  orderCancel(id: ID!): OrderPayload!
+  cancelOrder(id: ID!): OrderPayload!
+  notificationMarkRead(id: ID!): NotificationPayload!
+  markAsRead(id: ID!): Boolean
+  SaveSearch(id: ID!): Boolean
+  RunQuery(id: ID!): Boolean
+  undoDelete(id: ID!): Boolean
+  DryRunDelete(id: ID!): Boolean
+  ValidateCreate(id: ID!): Boolean
+  PreviewUpdate(id: ID!): Boolean
+  CanDelete(id: ID!): Boolean
+  isNew(id: ID!): Boolean
+  canEdit(id: ID!): Boolean
+  onCreate(id: ID!): Boolean
+  AfterDelete(id: ID!): Boolean
+  itemsToDelete(id: ID!): Boolean
+  autoCreate(id: ID!): Boolean
+  bulkDelete(id: ID!): Boolean
 }
 "#;
 
@@ -2226,57 +2262,108 @@ async fn read_issue(base: &str, session: &[(&str, &str)]) -> Answer {
     .await
 }
 
+fn noun_first_op<'a>(bundle: &'a Bundle, id: &str) -> &'a mb_mcm::Operation {
+    bundle
+        .operations
+        .iter()
+        .find(|o| o.id == id)
+        .unwrap_or_else(|| panic!("{id}"))
+}
+
 #[test]
 fn noun_first_mutations_take_their_kind_from_a_verb_suffix() {
     use mb_mcm::{Effect, OperationKind};
     let bundle = compile(NOUN_FIRST.as_bytes()).unwrap();
-    let op = |id: &str| {
-        bundle
-            .operations
-            .iter()
-            .find(|o| o.id == format!("Mutation.{id}"))
-            .unwrap()
-    };
+    let create = OperationKind::Command(Effect::Create);
+    let update = OperationKind::Command(Effect::Update);
+    let delete = OperationKind::Command(Effect::Delete);
     for (name, kind, resource) in [
-        (
-            "issueCreate",
-            OperationKind::Command(Effect::Create),
-            "issue",
-        ),
-        (
-            "issueUpdate",
-            OperationKind::Command(Effect::Update),
-            "issue",
-        ),
-        (
-            "commentDelete",
-            OperationKind::Command(Effect::Delete),
-            "comment",
-        ),
-        (
-            "updateIssue",
-            OperationKind::Command(Effect::Update),
-            "issue",
-        ),
-        (
-            "issueArchive",
-            OperationKind::Command(Effect::Other),
-            "issuepayload",
-        ),
+        ("issueCreate", create, "issue"),
+        ("issueUpdate", update, "issue"),
+        ("issuesUpdate", update, "issue"),
+        ("commentDelete", delete, "comment"),
+        ("productVariantDelete", delete, "productvariant"),
+        // Verb-first, as before; a payload with no `id` takes the record
+        // the name names.
+        ("updateIssue", update, "issue"),
     ] {
-        assert_eq!(op(name).kind, kind, "{name}");
-        assert_eq!(op(name).resource_type.as_deref(), Some(resource), "{name}");
+        let op = noun_first_op(&bundle, &format!("Mutation.{name}"));
+        assert_eq!(op.kind, kind, "{name}");
+        assert_eq!(op.resource_type.as_deref(), Some(resource), "{name}");
+    }
+    // `cancel` prefixes a delete as before, but names no record to delete.
+    let cancel = noun_first_op(&bundle, "Mutation.cancelOrder");
+    assert_eq!(cancel.kind, delete);
+    assert_eq!(cancel.resource_type.as_deref(), Some("orderpayload"));
+    // A query is no write, whatever its name (the Mutation guard).
+    let query = noun_first_op(&bundle, "Query.issueUpdate");
+    assert_eq!(query.kind, OperationKind::Query);
+    assert_eq!(query.resource_type.as_deref(), Some("issuepayload"));
+}
+
+/// Only create, update and delete end a name, and only after a noun that
+/// names a record type exactly: no read verb, no `cancel`, no qualifier.
+#[test]
+fn a_verb_suffix_after_no_record_gives_no_kind() {
+    use mb_mcm::{Effect, OperationKind};
+    let bundle = compile(NOUN_FIRST.as_bytes()).unwrap();
+    let records = [
+        "issue",
+        "comment",
+        "product",
+        "productvariant",
+        "order",
+        "notification",
+        "item",
+        "run",
+        "search",
+    ];
+    for name in [
+        "orderCancel",
+        "notificationMarkRead",
+        "markAsRead",
+        "SaveSearch",
+        "RunQuery",
+        "undoDelete",
+        "DryRunDelete",
+        "ValidateCreate",
+        "PreviewUpdate",
+        "CanDelete",
+        "isNew",
+        "canEdit",
+        "onCreate",
+        "AfterDelete",
+        "itemsToDelete",
+        "autoCreate",
+        "bulkDelete",
+        "issueArchive",
+    ] {
+        let op = noun_first_op(&bundle, &format!("Mutation.{name}"));
+        assert_eq!(op.kind, OperationKind::Command(Effect::Other), "{name}");
+        let resource = op.resource_type.as_deref().unwrap_or_default();
+        assert!(!records.contains(&resource), "{name}: {resource}");
     }
 }
 
 /// `issueUpdate(id:, input:) { success }` selects no issue, yet the stored
-/// issue takes the input's members: a later read from state sees them.
+/// issue takes the input's members: a later read from state sees them. The
+/// input's `stateId`, no member of an issue, is left out of it.
 #[tokio::test]
 async fn a_noun_first_update_selecting_no_record_changes_the_stored_one() {
-    let (provider, rt) = noun_first(scripted(vec![
+    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let provider = scripted(vec![
         issue_payload(),
         json!({"__typename": "IssuePayload", "success": true}),
-    ]));
+    ]);
+    let rt = MockRuntime::new(
+        "sdl",
+        Arc::new(compile(NOUN_FIRST.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(provider.clone() as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        store.clone(),
+    );
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
     create_issue(&base, &session).await;
@@ -2301,6 +2388,16 @@ async fn a_noun_first_update_selecting_no_record_changes_the_stored_one() {
         json!({"id": "i-1", "title": "Crash", "priority": 1})
     );
     assert_eq!(provider.requests().len(), 2);
+    let key = mb_state::SessionKey {
+        workspace: "default".into(),
+        mock: "sdl".into(),
+        session: "s1".into(),
+    };
+    let held = mb_state::StateStore::list(store.as_ref(), &key, "issue", 10)
+        .await
+        .unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held[0].data.get("stateId").is_none(), "{:?}", held[0].data);
 }
 
 /// When the payload does select the issue, the input still wins over what
@@ -2374,7 +2471,106 @@ async fn a_noun_first_delete_removes_the_stored_record() {
     assert_eq!(provider.requests().len(), 3);
 }
 
-/// A mutation naming no record by `id` (`issueBulkUpdate(input:)`), and an
+/// `productVariantDelete(id: "1")` deletes a variant: the stored product
+/// `1` its payload holds stays.
+#[tokio::test]
+async fn a_delete_by_id_leaves_its_payload_s_parent() {
+    let (_, rt) = noun_first(scripted(vec![
+        json!({"__typename": "ProductPayload",
+               "product": {"__typename": "Product", "id": "1", "title": "Tee"}}),
+        json!({"__typename": "ProductVariantDeletePayload", "deletedId": "1"}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({"query": "mutation { productCreate(title: \"Tee\") { product { id title } } }"}),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let deleted = post(
+        &base,
+        json!({"query": "mutation { productVariantDelete(id: \"1\") { deletedId } }"}),
+        &session,
+    )
+    .await;
+    assert!(deleted.body.get("errors").is_none(), "{}", deleted.body);
+    let read = post(
+        &base,
+        json!({"query": "{ product(id: \"1\") { id title } }"}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(read.body["data"]["product"]["title"], "Tee");
+}
+
+/// A cancel keeps the record: neither `orderCancel` nor `cancelOrder`
+/// removes the stored order.
+#[tokio::test]
+async fn a_cancel_keeps_the_stored_record() {
+    let order = |status: &str| {
+        json!({"__typename": "OrderPayload",
+               "order": {"__typename": "Order", "id": "o-1", "status": status}})
+    };
+    let (_, rt) = noun_first(scripted(vec![
+        order("open"),
+        order("cancelled"),
+        order("cancelled"),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({"query": "mutation { orderCreate(status: \"open\") { order { id status } } }"}),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    for q in [
+        "mutation { orderCancel(id: \"o-1\") { order { id status } } }",
+        "mutation { cancelOrder(id: \"o-1\") { order { id status } } }",
+    ] {
+        let answer = post(&base, json!({"query": q}), &session).await;
+        assert!(answer.body.get("errors").is_none(), "{}", answer.body);
+        let read = post(
+            &base,
+            json!({"query": "{ order(id: \"o-1\") { id status } }"}),
+            &session,
+        )
+        .await;
+        assert_eq!(
+            read.headers["x-mockingbird-source"], "state",
+            "{q}: {}",
+            read.body
+        );
+    }
+}
+
+/// `notificationMarkRead` is a write, not a read: a repeat is generated
+/// again, never answered from the cache.
+#[tokio::test]
+async fn a_read_verb_ending_a_mutation_is_no_query() {
+    let payload = json!({"__typename": "NotificationPayload",
+                         "notification": {"__typename": "Notification", "id": "n-1", "readAt": "2026-11-04T00:00:00Z"}});
+    let (provider, rt) = noun_first(scripted(vec![payload.clone(), payload]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let q = json!({"query": "mutation { notificationMarkRead(id: \"n-1\") { notification { id readAt } } }"});
+    for _ in 0..2 {
+        let answer = post(&base, q.clone(), &session).await;
+        assert!(answer.body.get("errors").is_none(), "{}", answer.body);
+        assert_ne!(answer.headers["x-mockingbird-source"], "cache");
+    }
+    assert_eq!(provider.requests().len(), 2);
+}
+
+/// A mutation naming no record by `id` (`issuesUpdate(input:)`), and an
 /// action (`issueArchive`), leave the stored issue as it was.
 #[tokio::test]
 async fn a_mutation_with_no_id_argument_changes_nothing() {
@@ -2387,7 +2583,7 @@ async fn a_mutation_with_no_id_argument_changes_nothing() {
     let session = [("x-mockingbird-session", "s1")];
     create_issue(&base, &session).await;
     for q in [
-        "mutation { issueBulkUpdate(input: {priority: 1, title: \"Other\"}) { success } }",
+        "mutation { issuesUpdate(input: {priority: 1, title: \"Other\"}) { success } }",
         "mutation { issueArchive(id: \"i-1\") { success } }",
     ] {
         let answer = post(&base, json!({"query": q}), &session).await;

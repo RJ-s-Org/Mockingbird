@@ -5340,28 +5340,18 @@ pub(crate) async fn store_resources(
     .await;
 }
 
-/// The resource the session holds under `id` in the first of `types` that
-/// has one.
+/// The resource of type `t` the session holds under `id`.
 #[cfg(feature = "graphql")]
-pub(crate) async fn stored_in(
+pub(crate) async fn stored(
     rt: &MockRuntime,
     session: &SessionKey,
-    types: &[String],
+    t: &str,
     id: &str,
 ) -> Option<StoredResource> {
     let mut state = StateAccess::new(rt);
-    async {
-        let mut found = None;
-        for t in types {
-            if let Some(hit) = state.get(session, t, id).await {
-                found = Some(hit);
-                break;
-            }
-        }
-        found
-    }
-    .instrument(state_span())
-    .await
+    async { state.get(session, t, id).await }
+        .instrument(state_span())
+        .await
 }
 
 /// Removes `gone`, a resource the session holds, from it. Keeps the
