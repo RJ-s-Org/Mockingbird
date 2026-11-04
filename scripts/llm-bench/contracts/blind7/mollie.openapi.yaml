@@ -1,0 +1,466 @@
+openapi: 3.0.3
+info:
+  title: Mollie API (customers and payments)
+  version: "2.0.0"
+  description: |
+    A subset of the Mollie API v2, written from its public documentation. Every
+    answer is HAL: a resource carries `resource` (its kind), its `id` and `_links`,
+    where each link is an object with `href` and `type`. `_links.self` is the
+    resource's own URL, and a payment made for a customer links to that customer
+    under `_links.customer`. Customer ids start with `cst_` and payment ids with
+    `tr_`.
+
+    Amounts are objects of `currency` (ISO 4217) and `value`, a string with exactly
+    the currency's number of decimals: "10.00" for EUR, never "10" or "10.0". An
+    amount whose value has the wrong number of decimals is refused with 422, and
+    the error's `field` names it (`amount.value`).
+
+    A payment starts `open`. Payments made for a customer are listed under the
+    customer, newest first. Lists answer `count` (the items on this page),
+    `_embedded` holding the items under the resource's plural name, and `_links`
+    with `self`, `previous` and `next`; `next` is null on the last page and
+    otherwise a URL carrying `from` (the id of the first item of the next page)
+    and `limit`. `limit` is 1 to 250 (default 50).
+
+    `DELETE /v2/payments/{id}` cancels a payment while `isCancelable` is true (an
+    open bank transfer is cancelable): the payment answers with status `canceled`
+    and `canceledAt` set, and reads that way afterwards. `PATCH` changes only the
+    fields it is sent. A deleted customer answers 404 afterwards, as does an
+    unknown id. Errors are `application/hal+json` with `status`, `title` and
+    `detail`.
+servers:
+  - url: https://api.mollie.com
+security:
+  - bearer: []
+tags:
+  - name: Customers
+  - name: Payments
+paths:
+  /v2/customers:
+    get:
+      tags: [Customers]
+      operationId: list-customers
+      summary: List customers
+      parameters:
+        - $ref: "#/components/parameters/from"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of customers, newest first.
+          content:
+            application/hal+json:
+              schema:
+                type: object
+                required: [count, _embedded, _links]
+                properties:
+                  count: {type: integer}
+                  _embedded:
+                    type: object
+                    required: [customers]
+                    properties:
+                      customers:
+                        type: array
+                        items: {$ref: "#/components/schemas/Customer"}
+                  _links: {$ref: "#/components/schemas/ListLinks"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Customers]
+      operationId: create-customer
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CustomerInput"}
+      responses:
+        "201":
+          description: The created customer.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v2/customers/{customerId}:
+    parameters:
+      - $ref: "#/components/parameters/customerId"
+    get:
+      tags: [Customers]
+      operationId: get-customer
+      summary: Get a customer
+      responses:
+        "200":
+          description: The customer.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Customers]
+      operationId: update-customer
+      summary: Update a customer
+      description: Changes only the fields sent; the others keep their values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CustomerInput"}
+      responses:
+        "200":
+          description: The updated customer.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+    delete:
+      tags: [Customers]
+      operationId: delete-customer
+      summary: Delete a customer
+      description: The customer answers 404 afterwards.
+      responses:
+        "204":
+          description: Deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/customers/{customerId}/payments:
+    parameters:
+      - $ref: "#/components/parameters/customerId"
+    get:
+      tags: [Customers, Payments]
+      operationId: list-customer-payments
+      summary: List a customer's payments
+      parameters:
+        - $ref: "#/components/parameters/from"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of the customer's payments, newest first.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/PaymentList"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Customers, Payments]
+      operationId: create-customer-payment
+      summary: Create a payment for a customer
+      description: The payment's `customerId` is the customer's id and its `_links.customer` points at it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PaymentInput"}
+      responses:
+        "201":
+          description: The created payment, open.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Payment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v2/payments:
+    get:
+      tags: [Payments]
+      operationId: list-payments
+      summary: List payments
+      parameters:
+        - $ref: "#/components/parameters/from"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of payments, newest first.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/PaymentList"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Payments]
+      operationId: create-payment
+      summary: Create a payment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PaymentInput"
+                - type: object
+                  properties:
+                    customerId: {type: string, description: "The customer to make the payment for."}
+      responses:
+        "201":
+          description: The created payment, open.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Payment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+  /v2/payments/{paymentId}:
+    parameters:
+      - $ref: "#/components/parameters/paymentId"
+    get:
+      tags: [Payments]
+      operationId: get-payment
+      summary: Get a payment
+      responses:
+        "200":
+          description: The payment, with its current status.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Payment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Payments]
+      operationId: update-payment
+      summary: Update a payment
+      description: Changes only the fields sent. The amount cannot be changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: {type: string, maxLength: 255}
+                redirectUrl: {type: string, format: uri}
+                webhookUrl: {type: string, format: uri}
+                metadata: {type: object, nullable: true, additionalProperties: true}
+                locale: {$ref: "#/components/schemas/Locale"}
+      responses:
+        "200":
+          description: The updated payment.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Payment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+    delete:
+      tags: [Payments]
+      operationId: cancel-payment
+      summary: Cancel a payment
+      description: |
+        Cancels the payment while `isCancelable` is true. The answer is the payment
+        with status `canceled` and `canceledAt` set; a payment that cannot be
+        canceled is refused with 422.
+      responses:
+        "200":
+          description: The canceled payment.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Payment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Unprocessable"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: "An API key (`live_...` or `test_...`) or an access token."
+  parameters:
+    customerId:
+      name: customerId
+      in: path
+      required: true
+      schema: {type: string, pattern: "^cst_[A-Za-z0-9]+$"}
+    paymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: {type: string, pattern: "^tr_[A-Za-z0-9]+$"}
+    from:
+      name: from
+      in: query
+      description: The id of the item to start the page at, as the `next` link carries it.
+      schema: {type: string}
+    limit:
+      name: limit
+      in: query
+      description: Items per page.
+      schema: {type: integer, minimum: 1, maximum: 250, default: 50}
+  responses:
+    BadRequest:
+      description: A parameter is not valid, such as a `from` id that does not exist.
+      content:
+        application/hal+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: No valid API key or token.
+      content:
+        application/hal+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No resource has the id.
+      content:
+        application/hal+json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unprocessable:
+      description: A field is missing or not valid; `field` names it.
+      content:
+        application/hal+json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Link:
+      type: object
+      required: [href, type]
+      properties:
+        href: {type: string, format: uri}
+        type: {type: string, example: application/hal+json}
+    NullableLink:
+      type: object
+      nullable: true
+      required: [href, type]
+      properties:
+        href: {type: string, format: uri}
+        type: {type: string}
+    ListLinks:
+      type: object
+      required: [self, previous, next]
+      properties:
+        self: {$ref: "#/components/schemas/Link"}
+        previous: {$ref: "#/components/schemas/NullableLink"}
+        next:
+          allOf:
+            - $ref: "#/components/schemas/NullableLink"
+          description: Null on the last page; otherwise the URL of the next page, with `from` and `limit`.
+        documentation: {$ref: "#/components/schemas/Link"}
+    Error:
+      type: object
+      required: [status, title, detail]
+      properties:
+        status: {type: integer, description: The HTTP status.}
+        title: {type: string, example: Unprocessable Entity}
+        detail: {type: string}
+        field: {type: string, description: "The field that is not valid, such as `amount.value`."}
+        _links:
+          type: object
+          properties:
+            documentation: {$ref: "#/components/schemas/Link"}
+    Amount:
+      type: object
+      required: [currency, value]
+      properties:
+        currency: {type: string, pattern: "^[A-Z]{3}$", example: EUR}
+        value:
+          type: string
+          pattern: "^[0-9]+\\.[0-9]{2}$"
+          example: "10.00"
+          description: The amount with exactly the currency's number of decimals; anything else is refused with 422.
+    Locale:
+      type: string
+      enum: [en_US, en_GB, nl_NL, nl_BE, fr_FR, fr_BE, de_DE, de_AT, de_CH, es_ES, ca_ES, pt_PT, it_IT, nb_NO,
+             sv_SE, fi_FI, da_DK, is_IS, hu_HU, pl_PL, lv_LV, lt_LT]
+    Mode:
+      type: string
+      enum: [live, test]
+    CustomerInput:
+      type: object
+      properties:
+        name: {type: string, nullable: true}
+        email: {type: string, format: email, nullable: true}
+        locale: {$ref: "#/components/schemas/Locale"}
+        metadata: {type: object, nullable: true, additionalProperties: true}
+    Customer:
+      type: object
+      required: [resource, id, mode, name, email, locale, metadata, createdAt, _links]
+      properties:
+        resource: {type: string, enum: [customer]}
+        id: {type: string, pattern: "^cst_[A-Za-z0-9]+$"}
+        mode: {$ref: "#/components/schemas/Mode"}
+        name: {type: string, nullable: true}
+        email: {type: string, format: email, nullable: true}
+        locale:
+          allOf:
+            - $ref: "#/components/schemas/Locale"
+          nullable: true
+        metadata: {type: object, nullable: true, additionalProperties: true}
+        createdAt: {type: string, format: date-time}
+        _links:
+          type: object
+          required: [self, dashboard]
+          properties:
+            self: {$ref: "#/components/schemas/Link"}
+            dashboard: {$ref: "#/components/schemas/Link"}
+            payments: {$ref: "#/components/schemas/Link"}
+            mandates: {$ref: "#/components/schemas/Link"}
+            subscriptions: {$ref: "#/components/schemas/Link"}
+            documentation: {$ref: "#/components/schemas/Link"}
+    PaymentStatus:
+      type: string
+      enum: [open, pending, authorized, paid, canceled, expired, failed]
+    PaymentInput:
+      type: object
+      required: [amount, description]
+      properties:
+        amount: {$ref: "#/components/schemas/Amount"}
+        description: {type: string, maxLength: 255}
+        redirectUrl: {type: string, format: uri, nullable: true}
+        cancelUrl: {type: string, format: uri, nullable: true}
+        webhookUrl: {type: string, format: uri, nullable: true}
+        locale: {$ref: "#/components/schemas/Locale"}
+        method:
+          type: string
+          nullable: true
+          enum: [applepay, bancontact, banktransfer, belfius, creditcard, eps, giftcard, ideal, kbc, paypal,
+                 paysafecard, przelewy24, sofort]
+        metadata: {type: object, nullable: true, additionalProperties: true}
+        sequenceType: {type: string, enum: [oneoff, first, recurring], default: oneoff}
+    Payment:
+      type: object
+      required: [resource, id, mode, status, isCancelable, amount, description, method, metadata, createdAt,
+                 _links]
+      properties:
+        resource: {type: string, enum: [payment]}
+        id: {type: string, pattern: "^tr_[A-Za-z0-9]+$"}
+        mode: {$ref: "#/components/schemas/Mode"}
+        status: {$ref: "#/components/schemas/PaymentStatus"}
+        isCancelable: {type: boolean, description: Whether DELETE can still cancel the payment.}
+        amount: {$ref: "#/components/schemas/Amount"}
+        amountRefunded: {$ref: "#/components/schemas/Amount"}
+        amountRemaining: {$ref: "#/components/schemas/Amount"}
+        description: {type: string}
+        method: {type: string, nullable: true}
+        metadata: {type: object, nullable: true, additionalProperties: true}
+        locale: {type: string, nullable: true}
+        countryCode: {type: string, nullable: true}
+        profileId: {type: string, pattern: "^pfl_[A-Za-z0-9]+$"}
+        customerId: {type: string, nullable: true, description: The customer the payment was made for.}
+        sequenceType: {type: string, enum: [oneoff, first, recurring]}
+        redirectUrl: {type: string, format: uri, nullable: true}
+        webhookUrl: {type: string, format: uri, nullable: true}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time, nullable: true}
+        paidAt: {type: string, format: date-time, nullable: true}
+        canceledAt: {type: string, format: date-time, nullable: true, description: When the payment was canceled; absent or null until then.}
+        details: {type: object, nullable: true, additionalProperties: true}
+        _links:
+          type: object
+          required: [self, dashboard]
+          properties:
+            self: {$ref: "#/components/schemas/Link"}
+            checkout: {$ref: "#/components/schemas/Link"}
+            dashboard: {$ref: "#/components/schemas/Link"}
+            customer: {$ref: "#/components/schemas/Link"}
+            refunds: {$ref: "#/components/schemas/Link"}
+            documentation: {$ref: "#/components/schemas/Link"}
+    PaymentList:
+      type: object
+      required: [count, _embedded, _links]
+      properties:
+        count: {type: integer, description: The payments on this page.}
+        _embedded:
+          type: object
+          required: [payments]
+          properties:
+            payments:
+              type: array
+              items: {$ref: "#/components/schemas/Payment"}
+        _links: {$ref: "#/components/schemas/ListLinks"}
