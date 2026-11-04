@@ -829,3 +829,60 @@ async fn a_small_id_a_copied_amount_equals_is_no_name() {
     assert_eq!(first["amount"], 25.0, "{first}");
     assert_eq!(first["description"], "Order X-1", "{first}");
 }
+
+/// The amount alone copied onto payment `1`, whose id the amount equals, leaves it as it
+/// was: the payment stores an amount, so the copy is no reference.
+#[tokio::test]
+async fn a_copied_amount_alone_never_rewrites_a_sibling() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("1", 25.0, "Order X-1"),
+            json!({
+                "effects": [{"type": "payments", "id": "1", "set": {"amount": 1}}],
+                "response": payment("2", 1.0, "Order X-2"),
+            }),
+        ],
+    );
+    let uri = "/ledgers/lg_000001/payments";
+    h.post(uri, json!({"amount": 25.0, "description": "Order X-1"}))
+        .await;
+    let (status, body) = h
+        .post(uri, json!({"amount": 1, "description": "Order X-2"}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body} {}", h.prompt(1));
+    assert!(h.prompt(1).contains("\"effects\""), "{}", h.prompt(1));
+    assert_eq!(h.held("payments", "1").await["amount"], 25.0);
+}
+
+/// A nested object of the request copied onto the sibling it names lands none of its
+/// members there (`note`), while the rest of the effect (`replies`) applies.
+#[tokio::test]
+async fn a_copied_nested_object_lands_none_of_its_members() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("tr_000001", 25.0, "Order X-1"),
+            json!({
+                "effects": [{"type": "payments", "id": "tr_000001", "set": {
+                    "fields": {"parent": {"id": "tr_000001"}, "note": "copied"},
+                    "replies": 2,
+                }}],
+                "response": payment("tr_000002", 2.0, "Child"),
+            }),
+        ],
+    );
+    let uri = "/ledgers/lg_000001/payments";
+    h.post(uri, json!({"amount": 25.0, "description": "Order X-1"}))
+        .await;
+    let (status, body) = h
+        .post(
+            uri,
+            json!({"amount": 2.0, "description": "Child", "fields": {"parent": {"id": "tr_000001"}, "note": "copied"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body} {}", h.prompt(1));
+    let first = h.held("payments", "tr_000001").await;
+    assert_eq!(first["replies"], 2, "{first} {}", h.prompt(1));
+    assert!(first.get("fields").is_none(), "{first}");
+}
