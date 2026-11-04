@@ -3794,3 +3794,78 @@ async fn review_free_text_matches_only_declared_text() {
         "undeclared email matched q: {first}"
     );
 }
+
+/// The model's page reached by its own token, carried on the last stored page, does
+/// not serve again a record the stored pages served, and keeps the model's token.
+#[tokio::test]
+async fn review2_model_page_after_stored_rest_does_not_repeat_it() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc", "total": 3});
+    script.push(Ok(page.to_string()));
+    let model2 =
+        json!({"data": [stored_task("t2", "B", "open")], "next_cursor": "def", "total": 3});
+    script.push(Ok(model2.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let second = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    let then = second["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let third = api.get(&format!("/tasks?limit=1&cursor={then}")).await;
+    let mut all: Vec<String> = Vec::new();
+    for p in [&first, &second, &third] {
+        all.extend(ids_in(p, "data").into_iter().map(|s| s.to_string()));
+    }
+    let mut dedup = all.clone();
+    dedup.sort();
+    dedup.dedup();
+    assert_eq!(all.len(), dedup.len(), "duplicate across pages: {all:?}");
+    assert_eq!(third["next_cursor"], "def", "{third}");
+}
+
+const PATCH_BLOCK: &str = r##"  /tasks/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    patch:
+      operationId: updateTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+"##;
+
+/// An update of an acme task keeps its scope: its title (`Another`) does not let it
+/// into `org=other`'s next page by containment.
+#[tokio::test]
+async fn review2_an_update_does_not_reopen_the_scope_leak() {
+    let tasks = [
+        ("t1", "Another", "acme"),
+        ("t2", "X", "other"),
+        ("t3", "Y", "other"),
+    ];
+    let mut script = scoped_answers(&tasks);
+    script.push(Ok(
+        json!({"id": "t1", "title": "Another", "status": "done"}).to_string(),
+    ));
+    let page = json!({"data": [stored_task("t2", "X", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    let contract = SCOPED_PAGES.replacen("components:\n", PATCH_BLOCK, 1);
+    let api = api_of(&contract, true, script);
+    scoped_tasks(&api, &tasks).await;
+    let (status, body) = api
+        .call("PATCH", "/tasks/t1", Some(json!({"status": "done"})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = api.get("/tasks?org=other&limit=1").await;
+    let second = next_of(&api, &first, "org=other&limit=1").await;
+    assert_eq!(ids_in(&second, "data"), ["t3"], "{second}");
+}

@@ -681,9 +681,11 @@ struct Shown<'q> {
 impl Shown<'_> {
     /// Whether stored `r`, shown as `item`, shows every one of the values. When the
     /// create that stored it carried the parameter, that alone decides: the same value
-    /// shows, another excludes it. Otherwise `r` holds the value whole, or, for free text
-    /// of at least [`MIN_CONTAINED`] characters holding no digit, one of `texts`, the
-    /// item's declared text members, holds it, ignoring case.
+    /// shows, another excludes it. Once noted, a scope this runtime no longer knows to
+    /// hold ([`ScopeOf::Noted`]) still keeps the parameter from being found by part.
+    /// Otherwise `r` holds the value whole, or, for free text of at least
+    /// [`MIN_CONTAINED`] characters holding no digit, one of `texts`, the item's
+    /// declared text members, holds it, ignoring case.
     fn holds(
         &self,
         rt: &MockRuntime,
@@ -693,8 +695,9 @@ impl Shown<'_> {
     ) -> bool {
         let carried = rt.collections().carried(session, r, self.param);
         self.texts.iter().all(|value| match &carried {
-            Some(values) => values.contains(value),
-            None => {
+            ScopeOf::Carried(values) => values.contains(value),
+            ScopeOf::Noted => mentions(&r.data, value, 0),
+            ScopeOf::Unknown => {
                 mentions(&r.data, value, 0)
                     || (self.loose
                         && value.chars().count() >= MIN_CONTAINED

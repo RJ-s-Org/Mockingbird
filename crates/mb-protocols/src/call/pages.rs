@@ -11,7 +11,10 @@
 //! size cut. So is such a page whose token the model gave: the stored records come
 //! before the model's own next page: a minted token takes the place of the model's,
 //! which is kept with the cut, and the last page of the rest carries it, where the
-//! answer validates so, leading on to the model's own pages. The count stays, raised
+//! answer validates so, leading on to the model's own pages. The model's page for that
+//! token is generated as any, but the items the rest served are taken out of it (where
+//! it still validates), its token stays as the model gave it, and the store is not read
+//! for a rest of its own ([`Followed`]). The count stays, raised
 //! only as below. A cut the page size made of the model's own items alone writes its
 //! token over the model's, which the last page does not carry; a page that is no cut
 //! keeps the model's token as it is. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
@@ -878,6 +881,134 @@ fn place_key(place: u64) -> String {
     format!("{PREFIX}{place:04x}")
 }
 
+/// The prefix of a [`Followed`] document.
+const FOLLOWED_PREFIX: &str = "#then/";
+/// Query values of a request looked up as a model's token carried on, at most.
+const MAX_FOLLOWED_LOOKUPS: usize = 4;
+
+/// What a cut's last page led on to: a token the model gave on the first page (see
+/// the module's doc), and the ids of the items the cut served before it. A request
+/// carrying the token under its parameter, with the first page's other query values,
+/// is the model's, but those items are not served again on it. Kept under the store's
+/// reserved type, one document per token, ended by the session's TTL like cuts.
+struct Followed {
+    op: String,
+    path: Value,
+    query: Value,
+    param: String,
+    size_param: String,
+    ids: Vec<String>,
+}
+
+impl Followed {
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "op": self.op,
+            "path": self.path,
+            "query": self.query,
+            "param": self.param,
+            "size_param": self.size_param,
+            "ids": self.ids,
+        })
+    }
+
+    fn of(value: &Value) -> Option<Self> {
+        let text = |key: &str| value.get(key)?.as_str().map(str::to_string);
+        Some(Self {
+            op: text("op")?,
+            path: value.get("path")?.clone(),
+            query: value.get("query")?.clone(),
+            param: text("param")?,
+            size_param: text("size_param")?,
+            ids: value
+                .get("ids")?
+                .as_array()?
+                .iter()
+                .map(|id| id.as_str().map(str::to_string))
+                .collect::<Option<_>>()?,
+        })
+    }
+}
+
+/// The key of the [`Followed`] document of `token`, a model's token on `op`'s route
+/// and `call`'s path.
+fn followed_key(op: &Operation, call: &OperationCall, token: &str) -> String {
+    let mut hasher = Sha256::new();
+    for part in [op.id.as_str(), &path_of(call).to_string(), token] {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("{FOLLOWED_PREFIX}{hex}")
+}
+
+/// The ids a cut served before the model's token `call` carries, which the model's
+/// page for it is not to serve again; `None` when it carries no such token. Only text
+/// values of declared text parameters with no `enum` or `format` are looked up, at
+/// most [`MAX_FOLLOWED_LOOKUPS`].
+pub(super) async fn followed(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+) -> Option<Vec<String>> {
+    let rt = state.rt;
+    let op = plan.op;
+    let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
+    let candidates: Vec<(&String, String)> = call
+        .query
+        .iter()
+        .filter(|(name, _)| {
+            declared
+                .get(name.as_str())
+                .is_some_and(|schema| is_free_text(rt.bundle(), schema))
+        })
+        .filter_map(|(name, value)| {
+            let token = value.as_str()?.trim();
+            (!token.is_empty()).then(|| (name, token.to_string()))
+        })
+        .take(MAX_FOLLOWED_LOOKUPS)
+        .collect();
+    for (param, token) in candidates {
+        let key = followed_key(op, call, &token);
+        let Some(doc) = state.get(&plan.session, INTERNAL_TYPE, &key).await else {
+            continue;
+        };
+        if let Some(followed) = Followed::of(&doc.data)
+            && followed.op == op.id
+            && followed.param == *param
+            && followed.path == path_of(call)
+            && followed.query == bound_query(call, param, &followed.size_param)
+        {
+            return Some(followed.ids);
+        }
+    }
+    None
+}
+
+/// `body` without the items whose identity is one of `ids`, where the answer still
+/// validates so.
+pub(super) fn drop_served(plan: &CallPlan<'_>, rt: &MockRuntime, body: &mut Value, ids: &[String]) {
+    let field = item_identity(rt.bundle(), plan.op, body);
+    let mut kept = body.clone();
+    let Some(items) = list_items_mut(&mut kept) else {
+        return;
+    };
+    let was = items.len();
+    items.retain(|item| {
+        item.get(&field)
+            .and_then(id_string)
+            .is_none_or(|id| !ids.contains(&id))
+    });
+    if items.len() < was
+        && plan
+            .engine
+            .serve_stored(rt.bundle(), plan.op, &kept, None)
+            .is_some()
+    {
+        *body = kept;
+    }
+}
+
 /// The query values a token is bound to: the request's, but the token's and the page
 /// size's.
 pub(super) fn bound_query(call: &OperationCall, param: &str, size_param: &str) -> Value {
@@ -1023,6 +1154,19 @@ pub(super) async fn mint(
     if rest.is_empty() {
         return false;
     }
+    // The model's token the last page carries on, with what the rest serves before it.
+    let followed_by = slot
+        .as_ref()
+        .filter(|_| cut.stored > 0)
+        .and_then(|slot| Some((slot.param.clone(), slot.given(body)?)))
+        .map(|(param, token)| {
+            let ids: Vec<String> = rest
+                .iter()
+                .filter_map(|item| item.get(&field).and_then(id_string))
+                .collect();
+            (param, token, ids)
+        });
+    let size_param = cut.size_param.clone();
     let kept = match slot {
         Some(slot) => tokened(
             rt,
@@ -1071,6 +1215,22 @@ pub(super) async fn mint(
     }
     // A cut not kept serves no token: the answer keeps the model's.
     let kept = state.upsert(session, document).await;
+    if kept && let Some((param, token, ids)) = followed_by {
+        let followed = Followed {
+            op: op.id.clone(),
+            path: path_of(call),
+            query: bound_query(call, &param, &size_param),
+            param,
+            size_param,
+            ids,
+        };
+        let document = StoredResource {
+            resource_type: INTERNAL_TYPE.to_string(),
+            id: followed_key(op, call, &token),
+            data: followed.to_value(),
+        };
+        state.upsert(session, document).await;
+    }
     if kept {
         generated.body = Some(page);
     }

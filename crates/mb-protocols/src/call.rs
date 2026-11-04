@@ -1272,15 +1272,21 @@ pub(crate) async fn complete(
             && deleted::applies(rt, plan)
             && let Some(body) = generated.body.as_mut()
         {
+            // The model's own next page, after a rest the mock served: not those again,
+            // and its token as the model gave it.
+            let followed = pages::followed(&mut state, (plan, call)).await;
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
+            if let Some(ids) = &followed {
+                pages::drop_served(plan, rt, body, ids);
+            }
             let cut = lists::narrow(rt, plan, call, body);
             // A full page whose rest the model left out, but the store holds.
-            let cut = match fallback {
-                false => {
+            let cut = match (fallback, followed.is_some()) {
+                (false, false) => {
                     lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await
                 }
-                true => None,
+                _ => None,
             };
             let kept = match cut {
                 Some(cut) => {
@@ -5288,13 +5294,32 @@ impl CollectionRecords {
 }
 
 /// The query values the create that stored a resource carried (`org=acme`), as
-/// trimmed text, with the hash of the resource then: a list asking them again asks for
-/// what the create was made in. Any change of the resource since, a write of this
-/// runtime's or not, ends it.
+/// trimmed text, with the hash of the resource as this runtime last wrote it: a list
+/// asking them again asks for what the create was made in. This runtime's own writes
+/// of the resource keep it, as a write does not move a resource out of its scope, and
+/// bring the hash up to date. A change this runtime did not write (another node's, an
+/// effect stored past [`write_state`], a reset of the session followed by a record
+/// with other members) leaves it noted but no longer known ([`ScopeOf::Noted`]). A
+/// reset of the session is not told to the runtime, so a record stored again after one
+/// with the very same members finds the scope its create had.
 #[derive(Debug, Clone)]
 struct Scope {
     pairs: Vec<(String, String)>,
     digest: u64,
+}
+
+/// What this runtime knows of the scope a stored resource's create carried, for one
+/// query parameter.
+#[derive(Debug, PartialEq, Eq)]
+enum ScopeOf {
+    /// The create carried these values under it, and the resource is as this runtime
+    /// last wrote it.
+    Carried(Vec<String>),
+    /// The create carried it, but the resource changed since in a way this runtime did
+    /// not write: its values are not known to hold, nor is any part of its text.
+    Noted,
+    /// Not known: no scope noted, or the create did not carry the parameter.
+    Unknown,
 }
 
 /// A resource a top-level create stored: when, and the scope its create carried.
@@ -5341,7 +5366,8 @@ impl Collections {
         self.record(session, r, collection, false);
     }
 
-    /// Records where `r` is. Any scope noted before ends: a create notes its own after.
+    /// Records where `r` is, keeping the scope noted for it (see [`Scope`]), as of
+    /// `r` now.
     fn record(
         &self,
         session: &SessionKey,
@@ -5355,7 +5381,13 @@ impl Collections {
         held.make_room();
         let order = held.next_order();
         let key = OwnReads::key(session, r);
-        held.top_level.remove(&key);
+        let digest = OwnReads::digest(&r.data);
+        let scope = held
+            .top_level
+            .remove(&key)
+            .and_then(|top| top.scope)
+            .or_else(|| held.records.get(&key).and_then(|was| was.scope.clone()))
+            .map(|scope| Scope { digest, ..scope });
         // A later write or list there leaves what a create put there.
         let created = created
             || held
@@ -5364,10 +5396,10 @@ impl Collections {
                 .is_some_and(|was| was.created && was.collection == collection);
         let record = CollectionRecord {
             collection,
-            digest: OwnReads::digest(&r.data),
+            digest,
             order,
             created,
-            scope: None,
+            scope,
         };
         held.records.insert(key, record);
     }
@@ -5412,46 +5444,50 @@ impl Collections {
         }
     }
 
-    /// Ends the scope noted for `r`: a write other than its create.
-    fn end_scope(&self, session: &SessionKey, r: &StoredResource) {
+    /// Brings the scope noted for `r` up to date with this runtime's own write of it,
+    /// other than its create: it stays, as of `r` now.
+    fn refresh_scope(&self, session: &SessionKey, r: &StoredResource) {
         let Ok(mut held) = self.0.lock() else {
             return;
         };
         let key = OwnReads::key(session, r);
-        if let Some(record) = held.records.get_mut(&key) {
-            record.scope = None;
+        let digest = OwnReads::digest(&r.data);
+        if let Some(scope) = held.records.get_mut(&key).and_then(|r| r.scope.as_mut()) {
+            scope.digest = digest;
         }
-        if let Some(top) = held.top_level.get_mut(&key) {
-            top.scope = None;
+        if let Some(scope) = held.top_level.get_mut(&key).and_then(|t| t.scope.as_mut()) {
+            scope.digest = digest;
         }
     }
 
-    /// The values the create that stored `r` carried under query parameter `param`,
-    /// when this runtime noted its scope and `r` is as it was then, and the create
-    /// carried the parameter; `None` when that is not known.
-    fn carried(
-        &self,
-        session: &SessionKey,
-        r: &StoredResource,
-        param: &str,
-    ) -> Option<Vec<String>> {
-        let held = self.0.lock().ok()?;
+    /// What the create that stored `r` carried under query parameter `param` (see
+    /// [`ScopeOf`]).
+    fn carried(&self, session: &SessionKey, r: &StoredResource, param: &str) -> ScopeOf {
+        let Ok(held) = self.0.lock() else {
+            return ScopeOf::Unknown;
+        };
         let key = OwnReads::key(session, r);
-        let scope = held
+        let Some(scope) = held
             .records
             .get(&key)
             .and_then(|record| record.scope.as_ref())
-            .or_else(|| held.top_level.get(&key).and_then(|t| t.scope.as_ref()))?;
-        if scope.digest != OwnReads::digest(&r.data) {
-            return None;
-        }
+            .or_else(|| held.top_level.get(&key).and_then(|t| t.scope.as_ref()))
+        else {
+            return ScopeOf::Unknown;
+        };
         let values: Vec<String> = scope
             .pairs
             .iter()
             .filter(|(p, _)| p == param)
             .map(|(_, v)| v.clone())
             .collect();
-        (!values.is_empty()).then_some(values)
+        if values.is_empty() {
+            ScopeOf::Unknown
+        } else if scope.digest == OwnReads::digest(&r.data) {
+            ScopeOf::Carried(values)
+        } else {
+            ScopeOf::Noted
+        }
     }
 
     /// Records that a top-level create stored `r`, in no collection.
@@ -6748,7 +6784,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 }
                 match query {
                     Some(query) if created => rt.collections().note_scope(session, &stored, query),
-                    _ => rt.collections().end_scope(session, &stored),
+                    _ => rt.collections().refresh_scope(session, &stored),
                 }
             }
         }
@@ -6813,30 +6849,52 @@ mod tests {
         query.insert("deep".into(), json!({"x": 1}));
         // Placed nowhere known: no scope.
         collections.note_scope(&at, &r, &query);
-        assert_eq!(collections.carried(&at, &r, "organization_id"), None);
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Unknown
+        );
         collections.place_top_level(&at, &r);
         collections.note_scope(&at, &r, &query);
         assert_eq!(
             collections.carried(&at, &r, "organization_id"),
-            Some(vec!["42".to_string()])
+            ScopeOf::Carried(vec!["42".to_string()])
         );
         assert_eq!(
             collections.carried(&at, &r, "tag"),
-            Some(vec!["a".to_string(), "b".to_string()])
+            ScopeOf::Carried(vec!["a".to_string(), "b".to_string()])
         );
-        assert_eq!(collections.carried(&at, &r, "deep"), None);
-        // Changed since, by anyone: the scope no longer holds.
+        assert_eq!(collections.carried(&at, &r, "deep"), ScopeOf::Unknown);
+        // Changed by a write this runtime did not record: noted, no longer known.
         let changed = StoredResource {
             data: json!({"id": "1", "x": 2}),
             ..r.clone()
         };
-        assert_eq!(collections.carried(&at, &changed, "organization_id"), None);
-        // Another write, or a delete, ends it.
-        collections.end_scope(&at, &r);
-        assert_eq!(collections.carried(&at, &r, "organization_id"), None);
-        collections.note_scope(&at, &r, &query);
+        assert_eq!(
+            collections.carried(&at, &changed, "organization_id"),
+            ScopeOf::Noted
+        );
+        // This runtime's own write keeps it, as of the record now.
+        collections.refresh_scope(&at, &changed);
+        assert_eq!(
+            collections.carried(&at, &changed, "organization_id"),
+            ScopeOf::Carried(vec!["42".to_string()])
+        );
+        // So does a write placing it in a collection.
+        let collection = Collection {
+            template: "/orgs/{org}/invoices".into(),
+            path: "/orgs/o/invoices".into(),
+        };
+        collections.record(&at, &r, collection, false);
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Carried(vec!["42".to_string()])
+        );
+        // A delete ends it.
         collections.forget_id(&at, "invoices", "1");
-        assert_eq!(collections.carried(&at, &r, "organization_id"), None);
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Unknown
+        );
     }
 
     #[test]
