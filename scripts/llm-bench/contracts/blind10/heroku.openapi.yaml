@@ -1,0 +1,466 @@
+openapi: 3.0.3
+info:
+  title: Heroku Platform API (apps, config vars, releases and domains)
+  version: "3"
+  description: |
+    A subset of the Heroku Platform API, written from its public reference
+    (devcenter.heroku.com/articles/platform-api-reference). Every request sends
+    `Accept: application/vnd.heroku+json; version=3`; a request without it is refused
+    with 406 `not_acceptable`. Bodies are JSON.
+
+    Resources are addressed by id or by natural key: `{app_id_or_name}` takes an app's
+    UUID `id` or its `name`, and both name the same app;
+    `{release_id_or_version}` takes a release's `id` or its `version` number;
+    `{domain_id_or_hostname}` takes a domain's `id` or its `hostname`. An app's `name`
+    matches `^[a-z][a-z0-9-]{1,28}[a-z0-9]$` and is unique across Heroku: a create or
+    rename to a name that is taken is refused with 422 `invalid_params`
+    ("Name is already taken"). After a rename, the old name no longer names the app and
+    answers 404 `not_found`; the app keeps its `id`. A deleted app answers 404
+    `not_found` by id and by name.
+
+    Config vars are an app's environment: `GET /apps/{app}/config-vars` answers them as
+    one flat object of names to string values. `PATCH /apps/{app}/config-vars` sets the
+    vars it is sent and keeps the others; a var sent as `null` is removed. It answers the
+    app's whole config after the change.
+
+    Releases record each change to an app's code or config. Every config var change
+    adds a release, whose `version` is one more than the app's latest, whose
+    `description` names the change (such as `Set FOO, BAR config vars` or
+    `Remove FOO config var`), and which becomes the `current` release (the one before is
+    no longer current). `POST /apps/{app}/releases` with `release` (a release id) rolls
+    back: it makes a new release, with the next version and the description
+    `Rollback to v{n}`, whose code and config vars are those of release `v{n}`; the
+    app's config vars are then that release's again.
+
+    Domains route web traffic to an app. An app has its default Heroku domain
+    (`kind` `heroku`). `POST /apps/{app}/domains` adds a custom domain (`kind` `custom`),
+    whose `cname` is the DNS target to point the hostname at; a hostname is used by one
+    app at a time (another add is refused with 422 `invalid_params`). Deleting a domain
+    answers it, and it leaves the app's list.
+
+    Lists answer JSON arrays and are paged by the `Range` request header:
+    `Range: <field> [<start>]..[<end>][; [order=<asc|desc>,]max=<n>;]`, as
+    `Range: id ..; max=10;` or `Range: name ..; order=desc,max=10;`. `<start>` and
+    `<end>` are values of the field and bound the items it selects, both included; a
+    `]` before `<start>` leaves the start value out. Each list sorts on
+    the fields its `Accept-Ranges` response header names (`id` and `name` for apps,
+    `id` and `version` for releases, `id` and `hostname` for domains), ascending by
+    default; without a `Range` header a list sorts by `id`. `max` defaults to 200 and is
+    at most 1000. A list that holds every remaining item answers 200; a truncated list
+    answers 206 Partial Content with a `Next-Range` header, which the client sends back
+    as its next `Range` header to get the following items. Every list answers
+    `Content-Range` and `Accept-Ranges`.
+
+    Errors answer `{id, message, url?}`: `bad_request` (400), `unauthorized` (401),
+    `forbidden` (403), `not_found` (404), `not_acceptable` (406), `conflict` (409),
+    `requested_range_not_satisfiable` (416), `invalid_params` (422) and `rate_limit`
+    (429). Responses carry an `ETag`; a GET that sends it back in `If-None-Match`
+    answers 304 when nothing changed.
+servers:
+  - url: https://api.heroku.com
+security:
+  - bearer: []
+tags:
+  - name: App
+  - name: Config Vars
+  - name: Release
+  - name: Domain
+paths:
+  /apps:
+    get:
+      tags: [App]
+      operationId: app-list
+      summary: List apps
+      description: "The account's apps, paged by the Range header (sorted on `id` or `name`)."
+      parameters:
+        - $ref: "#/components/parameters/range"
+      responses:
+        "200":
+          description: Every remaining app.
+          headers:
+            Content-Range: {$ref: "#/components/headers/ContentRange"}
+            Accept-Ranges: {$ref: "#/components/headers/AcceptRanges"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/App"}
+        "206":
+          description: "A page of apps; Next-Range asks for the following ones."
+          headers:
+            Next-Range: {$ref: "#/components/headers/NextRange"}
+            Content-Range: {$ref: "#/components/headers/ContentRange"}
+            Accept-Ranges: {$ref: "#/components/headers/AcceptRanges"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/App"}
+        "416": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [App]
+      operationId: app-create
+      summary: Create an app
+      description: "A name already taken is refused with 422 invalid_params. Without a name the app gets a random one."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {$ref: "#/components/schemas/AppName"}
+                region: {type: string, description: "Region name or id, such as `us` or `eu`.", example: us}
+                stack: {type: string, description: "Stack name or id.", example: heroku-24}
+      responses:
+        "201":
+          description: The created app.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/App"}
+        "422": {$ref: "#/components/responses/Error"}
+  /apps/{app_id_or_name}:
+    parameters:
+      - $ref: "#/components/parameters/app"
+    get:
+      tags: [App]
+      operationId: app-info
+      summary: Info for an app
+      description: The same app by its id or by its name.
+      responses:
+        "200":
+          description: The app.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/App"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [App]
+      operationId: app-update
+      summary: Update an app
+      description: "Renames the app or sets maintenance. The app keeps its id; after a rename the old name answers 404 not_found."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {$ref: "#/components/schemas/AppName"}
+                maintenance: {type: boolean}
+                build_stack: {type: string}
+      responses:
+        "200":
+          description: The updated app.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/App"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [App]
+      operationId: app-delete
+      summary: Delete an app
+      responses:
+        "200":
+          description: The deleted app.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/App"}
+        "404": {$ref: "#/components/responses/Error"}
+  /apps/{app_id_or_name}/config-vars:
+    parameters:
+      - $ref: "#/components/parameters/app"
+    get:
+      tags: [Config Vars]
+      operationId: config-vars-info-for-app
+      summary: Config vars of an app
+      responses:
+        "200":
+          description: Every config var, names to values.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ConfigVars"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Config Vars]
+      operationId: config-vars-update
+      summary: Update config vars
+      description: "Sets the vars sent, removes those sent as null and keeps the rest. Each change adds a release."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: {type: string, nullable: true}
+      responses:
+        "200":
+          description: The app's whole config after the change.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ConfigVars"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /apps/{app_id_or_name}/releases:
+    parameters:
+      - $ref: "#/components/parameters/app"
+    get:
+      tags: [Release]
+      operationId: release-list
+      summary: List releases
+      description: "The app's releases, paged by the Range header (sorted on `id` or `version`)."
+      parameters:
+        - $ref: "#/components/parameters/range"
+      responses:
+        "200":
+          description: Every remaining release.
+          headers:
+            Content-Range: {$ref: "#/components/headers/ContentRange"}
+            Accept-Ranges: {$ref: "#/components/headers/AcceptRanges"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Release"}
+        "206":
+          description: A page of releases.
+          headers:
+            Next-Range: {$ref: "#/components/headers/NextRange"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Release"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Release]
+      operationId: release-rollback
+      summary: Roll back to a release
+      description: "Makes a new current release with the next version, described `Rollback to v{n}`, carrying the code and config vars of the release named."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [release]
+              properties:
+                release: {type: string, format: uuid, description: The id of the release to roll back to.}
+      responses:
+        "201":
+          description: The new release.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Release"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /apps/{app_id_or_name}/releases/{release_id_or_version}:
+    parameters:
+      - $ref: "#/components/parameters/app"
+      - name: release_id_or_version
+        in: path
+        required: true
+        description: A release's id or its version number.
+        schema: {type: string}
+    get:
+      tags: [Release]
+      operationId: release-info
+      summary: Info for a release
+      responses:
+        "200":
+          description: The release.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Release"}
+        "404": {$ref: "#/components/responses/Error"}
+  /apps/{app_id_or_name}/domains:
+    parameters:
+      - $ref: "#/components/parameters/app"
+    get:
+      tags: [Domain]
+      operationId: domain-list
+      summary: List domains
+      description: "The app's domains, its default Heroku domain included, paged by the Range header (sorted on `id` or `hostname`)."
+      parameters:
+        - $ref: "#/components/parameters/range"
+      responses:
+        "200":
+          description: Every remaining domain.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Domain"}
+        "206":
+          description: A page of domains.
+          headers:
+            Next-Range: {$ref: "#/components/headers/NextRange"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Domain"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Domain]
+      operationId: domain-create
+      summary: Add a custom domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hostname, sni_endpoint]
+              properties:
+                hostname: {type: string, example: www.example.com}
+                sni_endpoint: {type: string, nullable: true, description: "An SNI endpoint id or name, or null."}
+      responses:
+        "201":
+          description: "The domain, `kind` custom, with the `cname` to point it at."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Domain"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /apps/{app_id_or_name}/domains/{domain_id_or_hostname}:
+    parameters:
+      - $ref: "#/components/parameters/app"
+      - name: domain_id_or_hostname
+        in: path
+        required: true
+        description: A domain's id or its hostname.
+        schema: {type: string}
+    get:
+      tags: [Domain]
+      operationId: domain-info
+      summary: Info for a domain
+      responses:
+        "200":
+          description: The domain.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Domain"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Domain]
+      operationId: domain-delete
+      summary: Delete a domain
+      responses:
+        "200":
+          description: The deleted domain.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Domain"}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    app:
+      name: app_id_or_name
+      in: path
+      required: true
+      description: An app's id or its name; both name the same app.
+      schema: {type: string}
+    range:
+      name: Range
+      in: header
+      description: "`<field> [<start>]..[<end>][; [order=<asc|desc>,]max=<n>;]`, such as `id ..; max=10;`, `name ..; order=desc,max=10;` or the `Next-Range` of the previous page."
+      schema: {type: string, example: "name ..; order=desc,max=10;"}
+  headers:
+    NextRange:
+      description: The Range header that asks for the items after this page.
+      schema: {type: string, example: "]my-app-b..; max=10;"}
+    ContentRange:
+      description: The range this answer covers.
+      schema: {type: string, example: "name my-app-a..my-app-b"}
+    AcceptRanges:
+      description: The fields this list can be sorted and ranged on.
+      schema: {type: string, example: "id, name"}
+  responses:
+    Error:
+      description: "`{id, message}` with `id` one of not_found, invalid_params, not_acceptable, requested_range_not_satisfiable and the rest."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    AppName:
+      type: string
+      pattern: "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+      description: Unique across Heroku.
+    NamedRef:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+    App:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string, format: uuid}
+        name: {$ref: "#/components/schemas/AppName"}
+        region: {$ref: "#/components/schemas/NamedRef"}
+        stack: {$ref: "#/components/schemas/NamedRef"}
+        build_stack: {$ref: "#/components/schemas/NamedRef"}
+        maintenance: {type: boolean}
+        acm: {type: boolean}
+        git_url: {type: string, example: "https://git.heroku.com/example.git"}
+        web_url: {type: string, format: uri, nullable: true}
+        owner:
+          type: object
+          properties:
+            id: {type: string, format: uuid}
+            email: {type: string, format: email}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        released_at: {type: string, format: date-time, nullable: true}
+        archived_at: {type: string, format: date-time, nullable: true}
+    ConfigVars:
+      type: object
+      additionalProperties: {type: string}
+      example: {FOO: bar, BAZ: qux}
+    Release:
+      type: object
+      required: [id, version, status, current]
+      properties:
+        id: {type: string, format: uuid}
+        version: {type: integer, description: "One more than the app's previous release."}
+        description: {type: string, example: "Set FOO, BAR config vars"}
+        status: {type: string, enum: [failed, pending, succeeded, expired]}
+        current: {type: boolean, description: "True on the app's latest release only."}
+        app: {$ref: "#/components/schemas/NamedRef"}
+        user:
+          type: object
+          properties:
+            id: {type: string, format: uuid}
+            email: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Domain:
+      type: object
+      required: [id, hostname, kind]
+      properties:
+        id: {type: string, format: uuid}
+        hostname: {type: string, example: subdomain.example.com}
+        kind: {type: string, enum: [heroku, custom]}
+        cname: {type: string, nullable: true, description: "The DNS target of a custom domain, such as `example.herokudns.com`."}
+        status: {type: string, example: pending}
+        app: {$ref: "#/components/schemas/NamedRef"}
+        sni_endpoint:
+          type: object
+          nullable: true
+          properties:
+            id: {type: string}
+            name: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Error:
+      type: object
+      required: [id, message]
+      properties:
+        id: {type: string, example: not_found}
+        message: {type: string, example: "Couldn't find that app."}
+        url: {type: string}

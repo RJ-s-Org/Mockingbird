@@ -1,0 +1,362 @@
+openapi: 3.0.3
+info:
+  title: Google Calendar API v3 (calendars and events)
+  version: v3
+  description: |
+    A subset of the Google Calendar API v3, written from its public reference and its
+    guides "Resource versions" (ETags) and "Synchronize resources efficiently" (sync
+    tokens). Calendars hold events: an event is addressed under its calendar,
+    `/calendar/v3/calendars/{calendarId}/events/{eventId}`. `POST /calendar/v3/calendars`
+    makes a secondary calendar, whose `id` the service assigns (an address ending in
+    `@group.calendar.google.com`); a new calendar holds no events.
+
+    Event ids. An insert may send its own `id`: 5 to 1024 characters of base32hex
+    (lowercase letters `a`-`v` and digits `0`-`9`), unique within the calendar. An insert
+    whose `id` is already used in the calendar is refused with 409 and reason
+    `duplicate`. Without an `id` the service makes one.
+
+    ETags. Every calendar and event has an `etag`, which changes whenever the resource
+    changes. A GET that sends the etag it last read in `If-None-Match` answers 304 Not Modified, with no body,
+    when the resource is unchanged, and the resource with its new etag when it has
+    changed. An update, patch or delete that sends `If-Match` succeeds only while the
+    resource still has that etag; once it has changed, the request is refused with
+    412 Precondition Failed (reason `conditionNotMet`) and nothing changes.
+    `PATCH` changes only the fields it is sent; `PUT` replaces the event.
+
+    Listing events. `GET .../events` answers `{kind: "calendar#events", etag, summary,
+    timeZone, updated, items, nextPageToken?, nextSyncToken?}`. `timeMin` keeps events
+    that end after it and `timeMax` events that start before it (both RFC 3339 with an
+    offset). `q` keeps events whose summary, description, location or attendees contain
+    the text. `singleEvents=true` with `orderBy=startTime` sorts by start time,
+    ascending (`orderBy=startTime` needs `singleEvents=true`); `orderBy=updated` sorts by
+    last change. `maxResults` caps a page (default 250); when more events follow, the page
+    answers `nextPageToken`, which the next request sends as `pageToken` with the same
+    other parameters. Deleted events (`status` `cancelled`) are left out unless
+    `showDeleted=true`.
+
+    Sync tokens. The last page of a list answers `nextSyncToken`. A later list that sends
+    it as `syncToken` answers only the events that changed since that token was made:
+    created, updated or deleted ones, deleted events included with `status`
+    `cancelled`, and answers a fresh `nextSyncToken`. With `syncToken`, deleted events
+    are always included and `showDeleted=false` may not be sent. `syncToken` cannot be
+    combined with `iCalUID`, `orderBy`, `privateExtendedProperty`, `q`,
+    `sharedExtendedProperty`, `timeMin`, `timeMax` or `updatedMin`: such a request is
+    refused with 400. A token the server has invalidated answers 410 Gone (reason
+    `fullSyncRequired`); the client then lists everything again without a token.
+
+    Deleting an event answers 204 and sets its `status` to `cancelled`. Errors answer
+    `{error: {code, message, errors: [{domain, reason, message}]}}`, with `code` the
+    HTTP status and `reason` such as `duplicate` (409), `conditionNotMet` (412),
+    `notFound` (404), `invalid` (400) or `fullSyncRequired` (410).
+servers:
+  - url: https://www.googleapis.com
+security:
+  - oauth2: [https://www.googleapis.com/auth/calendar]
+tags:
+  - name: Calendars
+  - name: Events
+paths:
+  /calendar/v3/calendars:
+    post:
+      tags: [Calendars]
+      operationId: calendar.calendars.insert
+      summary: Create a secondary calendar
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [summary]
+              properties:
+                summary: {type: string}
+                description: {type: string}
+                timeZone: {type: string, example: Europe/Zurich}
+      responses:
+        "200":
+          description: The created calendar.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Calendar"}
+        "400": {$ref: "#/components/responses/Error"}
+  /calendar/v3/calendars/{calendarId}:
+    parameters:
+      - $ref: "#/components/parameters/calendarId"
+    get:
+      tags: [Calendars]
+      operationId: calendar.calendars.get
+      summary: Get a calendar
+      parameters:
+        - $ref: "#/components/parameters/ifNoneMatch"
+      responses:
+        "200":
+          description: The calendar.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Calendar"}
+        "304":
+          description: The calendar is unchanged since the etag in If-None-Match.
+        "404": {$ref: "#/components/responses/Error"}
+  /calendar/v3/calendars/{calendarId}/events:
+    parameters:
+      - $ref: "#/components/parameters/calendarId"
+    get:
+      tags: [Events]
+      operationId: calendar.events.list
+      summary: List events
+      description: |
+        The calendar's events, filtered by the parameters. Deleted events are left out
+        unless `showDeleted=true` or a `syncToken` is sent. With `syncToken`, only the
+        events changed since that token, deleted ones always included; `iCalUID`,
+        `orderBy`, `privateExtendedProperty`, `q`, `sharedExtendedProperty`, `timeMin`,
+        `timeMax` and `updatedMin` cannot be sent with it (400), nor `showDeleted=false`.
+      parameters:
+        - name: timeMin
+          in: query
+          description: "Keep events that end after this time (RFC 3339 with an offset, such as `2026-11-10T00:00:00Z`)."
+          schema: {type: string, format: date-time}
+        - name: timeMax
+          in: query
+          description: Keep events that start before this time (RFC 3339 with an offset).
+          schema: {type: string, format: date-time}
+        - name: q
+          in: query
+          description: "Free text matched against summary, description, location and attendees."
+          schema: {type: string}
+        - name: singleEvents
+          in: query
+          description: Expand recurring events into their instances.
+          schema: {type: boolean, default: false}
+        - name: orderBy
+          in: query
+          description: "`startTime` (ascending; needs singleEvents=true) or `updated`."
+          schema: {type: string, enum: [startTime, updated]}
+        - name: maxResults
+          in: query
+          description: At most this many events per page (default 250).
+          schema: {type: integer, minimum: 1, maximum: 2500}
+        - name: pageToken
+          in: query
+          description: The nextPageToken of the previous page.
+          schema: {type: string}
+        - name: showDeleted
+          in: query
+          description: "Also list deleted events, with `status` `cancelled`. With syncToken deleted events are always included, and false may not be sent."
+          schema: {type: boolean, default: false}
+        - name: syncToken
+          in: query
+          description: "The nextSyncToken of an earlier list: answers only the events changed since, deleted ones included as cancelled."
+          schema: {type: string}
+        - name: updatedMin
+          in: query
+          description: Keep events changed after this time.
+          schema: {type: string, format: date-time}
+      responses:
+        "200":
+          description: A page of events.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Events"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "410": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Events]
+      operationId: calendar.events.insert
+      summary: Create an event
+      description: "An `id` already used in the calendar is refused with 409 duplicate."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Event"}
+      responses:
+        "200":
+          description: The created event, `status` confirmed unless sent otherwise.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Event"}
+        "400": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /calendar/v3/calendars/{calendarId}/events/{eventId}:
+    parameters:
+      - $ref: "#/components/parameters/calendarId"
+      - $ref: "#/components/parameters/eventId"
+    get:
+      tags: [Events]
+      operationId: calendar.events.get
+      summary: Get an event
+      parameters:
+        - $ref: "#/components/parameters/ifNoneMatch"
+      responses:
+        "200":
+          description: The event.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Event"}
+        "304":
+          description: The event is unchanged since the etag in If-None-Match. No body.
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Events]
+      operationId: calendar.events.patch
+      summary: Patch an event
+      description: "Changes only the fields sent; the event gets a new etag. With a stale If-Match, 412 conditionNotMet and nothing changes."
+      parameters:
+        - $ref: "#/components/parameters/ifMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Event"}
+      responses:
+        "200":
+          description: The patched event.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Event"}
+        "404": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Events]
+      operationId: calendar.events.update
+      summary: Replace an event
+      description: "Replaces the event; the event gets a new etag. With a stale If-Match, 412 conditionNotMet and nothing changes."
+      parameters:
+        - $ref: "#/components/parameters/ifMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Event"}
+      responses:
+        "200":
+          description: The updated event.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Event"}
+        "404": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Events]
+      operationId: calendar.events.delete
+      summary: Delete an event
+      description: "Sets the event's status to cancelled: lists leave it out unless showDeleted, and a sync answers it as cancelled."
+      parameters:
+        - $ref: "#/components/parameters/ifMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "404": {$ref: "#/components/responses/Error"}
+        "410": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://accounts.google.com/o/oauth2/auth
+          tokenUrl: https://oauth2.googleapis.com/token
+          scopes:
+            https://www.googleapis.com/auth/calendar: See and change calendars and events.
+  parameters:
+    calendarId:
+      name: calendarId
+      in: path
+      required: true
+      description: "A calendar's id, or `primary` for the user's primary calendar."
+      schema: {type: string}
+    eventId:
+      name: eventId
+      in: path
+      required: true
+      schema: {type: string}
+    ifNoneMatch:
+      name: If-None-Match
+      in: header
+      description: "An etag last read: 304 Not Modified while the resource still has it."
+      schema: {type: string}
+    ifMatch:
+      name: If-Match
+      in: header
+      description: "An etag last read: the change goes ahead only while the resource still has it, else 412."
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{error: {code, message, errors: [{domain, reason, message}]}}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Calendar:
+      type: object
+      properties:
+        kind: {type: string, enum: ["calendar#calendar"]}
+        etag: {type: string}
+        id: {type: string, example: c_8f3k2abc@group.calendar.google.com}
+        summary: {type: string}
+        description: {type: string}
+        timeZone: {type: string}
+    EventDateTime:
+      type: object
+      properties:
+        dateTime: {type: string, format: date-time, description: "A time with an offset, unless timeZone is given."}
+        date: {type: string, format: date, description: For an all-day event.}
+        timeZone: {type: string, example: Europe/Zurich}
+    Attendee:
+      type: object
+      properties:
+        email: {type: string, format: email}
+        displayName: {type: string}
+        optional: {type: boolean}
+        responseStatus: {type: string, enum: [needsAction, declined, tentative, accepted]}
+    Event:
+      type: object
+      properties:
+        kind: {type: string, enum: ["calendar#event"]}
+        etag: {type: string, readOnly: true, description: Changes whenever the event changes.}
+        id: {type: string, description: "5 to 1024 characters of base32hex (a-v and 0-9), unique within the calendar."}
+        status: {type: string, enum: [confirmed, tentative, cancelled]}
+        htmlLink: {type: string, readOnly: true}
+        created: {type: string, format: date-time, readOnly: true}
+        updated: {type: string, format: date-time, readOnly: true}
+        summary: {type: string}
+        description: {type: string}
+        location: {type: string}
+        start: {$ref: "#/components/schemas/EventDateTime"}
+        end: {$ref: "#/components/schemas/EventDateTime"}
+        attendees:
+          type: array
+          items: {$ref: "#/components/schemas/Attendee"}
+        sequence: {type: integer}
+        iCalUID: {type: string, readOnly: true}
+    Events:
+      type: object
+      properties:
+        kind: {type: string, enum: ["calendar#events"]}
+        etag: {type: string}
+        summary: {type: string}
+        timeZone: {type: string}
+        updated: {type: string, format: date-time}
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/Event"}
+        nextPageToken: {type: string, description: Present when more events follow.}
+        nextSyncToken: {type: string, description: "On the last page only: send as syncToken to get later changes."}
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: {type: integer}
+            message: {type: string}
+            errors:
+              type: array
+              items:
+                type: object
+                properties:
+                  domain: {type: string, example: global}
+                  reason: {type: string, example: duplicate}
+                  message: {type: string}

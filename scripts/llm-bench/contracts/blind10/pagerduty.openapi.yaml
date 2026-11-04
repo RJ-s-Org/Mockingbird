@@ -1,0 +1,606 @@
+openapi: 3.0.3
+info:
+  title: PagerDuty REST API v2 (users, escalation policies, services and incidents)
+  version: "2"
+  description: |
+    A subset of the PagerDuty REST API v2, written from its public reference
+    (developer.pagerduty.com / docs.pagerduty.com, "API Reference" and "Pagination",
+    "Includes" and "Errors"). Requests send
+    `Accept: application/vnd.pagerduty+json;version=2` and
+    `Authorization: Token token=<API key>`. Creating or updating an incident, and adding
+    a note, also sends `From`: the email address of a valid user on the account, who is
+    recorded as the one acting (the note's `user`, the acknowledger, the resolver).
+    Without `From` such a request is refused with 400 and error code 2011 ("You must
+    specify a requester_id to perform this action").
+
+    Bodies are wrapped in the resource's name: a create sends `{"incident": {...}}` and
+    answers `{"incident": {...}}`; a list answers the plural (`{"incidents": [...]}`).
+    Ids are short uppercase alphanumeric strings such as `PT4KHLK`. Other resources are
+    named by references, `{id, type}` with `type` such as `user_reference`,
+    `service_reference` or `escalation_policy_reference`; an answer carries the reference
+    with its `summary`, `self` and `html_url`.
+
+    Routing. A service names the escalation policy that handles its incidents. A new
+    incident on a service is `triggered` and is assigned to the targets of the first
+    rule of that escalation policy: each `assignments` entry has an `assignee` (a
+    `user_reference`) and `at`. Incidents are numbered per account by `incident_number`,
+    counting up from 1.
+
+    De-duplication. An incident may carry an `incident_key`. While an incident with that
+    key is open (`triggered` or `acknowledged`) on a service, another create with the
+    same key on that service is refused with 400 (error code 2001, "Open incident with
+    matching dedup key already exists on this service"). Once it is resolved, the key may
+    be used again.
+
+    Status. `PUT /incidents/{id}` with
+    `{"incident": {"type": "incident_reference", "status": ...}}` moves an incident:
+    `triggered` to `acknowledged` (adding an `acknowledgements` entry whose
+    `acknowledger` is the `From` user) and either open status to `resolved` (setting
+    `resolved_at`). A resolved incident stays resolved. Other fields sent the same way
+    (`title`, `urgency`, `escalation_level`) are changed too; fields not sent are kept.
+
+    Notes. `POST /incidents/{id}/notes` adds `{"note": {"content": ...}}`, answered with
+    its `id`, `content`, `created_at` and `user` (the `From` user).
+    `GET /incidents/{id}/notes` lists them, oldest first. Notes cannot be edited.
+
+    Lists are paged by `offset` (default 0) and `limit` (default 25, at most 100) and
+    answer `offset`, `limit`, `more` (true when more results follow this page) and
+    `total` (null unless the request sends `total=true`; then the number of results that
+    match the whole query). Array parameters repeat with brackets: `statuses[]=triggered`
+    `&statuses[]=acknowledged`, `service_ids[]=PABC123`. `GET /incidents` filters by
+    `statuses[]`, `service_ids[]`, `incident_key` and `urgencies[]`, and sorts by
+    `sort_by` (such as `created_at:asc` or `incident_number:desc`).
+
+    Includes. `include[]` side-loads related resources: with `include[]=services` each
+    incident's `service` is the full service object (`type` `service`, with `name`,
+    `description` and the rest) instead of a reference; likewise `include[]=users` on an
+    escalation policy, and `include[]=escalation_policies` on a service.
+
+    Errors answer `{"error": {"code", "message", "errors": [...]}}`: code 2001 "Invalid
+    Input Provided" (400), 2002 "Arguments Caused Error" (400), 2006 "Authentication
+    failed" (401), 2010 "Access Denied" (403), 2011 "You must specify a requester_id to
+    perform this action" (400, a missing `From`) and 2100 "Not Found" (404).
+servers:
+  - url: https://api.pagerduty.com
+security:
+  - token: []
+tags:
+  - name: Users
+  - name: Escalation Policies
+  - name: Services
+  - name: Incidents
+paths:
+  /users:
+    post:
+      tags: [Users]
+      operationId: createUser
+      summary: Create a user
+      parameters:
+        - $ref: "#/components/parameters/from"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: {$ref: "#/components/schemas/User"}
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: "#/components/schemas/User"}
+        "400": {$ref: "#/components/responses/Error"}
+  /users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Users]
+      operationId: getUser
+      summary: Get a user
+      responses:
+        "200":
+          description: The user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: "#/components/schemas/User"}
+        "404": {$ref: "#/components/responses/Error"}
+  /escalation_policies:
+    post:
+      tags: [Escalation Policies]
+      operationId: createEscalationPolicy
+      summary: Create an escalation policy
+      parameters:
+        - $ref: "#/components/parameters/from"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [escalation_policy]
+              properties:
+                escalation_policy: {$ref: "#/components/schemas/EscalationPolicy"}
+      responses:
+        "201":
+          description: The created escalation policy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  escalation_policy: {$ref: "#/components/schemas/EscalationPolicy"}
+        "400": {$ref: "#/components/responses/Error"}
+  /escalation_policies/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Escalation Policies]
+      operationId: getEscalationPolicy
+      summary: Get an escalation policy
+      parameters:
+        - $ref: "#/components/parameters/include"
+      responses:
+        "200":
+          description: The escalation policy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  escalation_policy: {$ref: "#/components/schemas/EscalationPolicy"}
+        "404": {$ref: "#/components/responses/Error"}
+  /services:
+    get:
+      tags: [Services]
+      operationId: listServices
+      summary: List services
+      parameters:
+        - name: query
+          in: query
+          description: Services whose name contains this text.
+          schema: {type: string}
+        - $ref: "#/components/parameters/include"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/total"
+      responses:
+        "200":
+          description: A page of services.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      services:
+                        type: array
+                        items: {$ref: "#/components/schemas/Service"}
+    post:
+      tags: [Services]
+      operationId: createService
+      summary: Create a service
+      description: "A new service is `active` and routes its incidents to the escalation policy it names."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service]
+              properties:
+                service: {$ref: "#/components/schemas/Service"}
+      responses:
+        "201":
+          description: The created service.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: {$ref: "#/components/schemas/Service"}
+        "400": {$ref: "#/components/responses/Error"}
+  /services/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Services]
+      operationId: getService
+      summary: Get a service
+      parameters:
+        - $ref: "#/components/parameters/include"
+      responses:
+        "200":
+          description: The service.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: {$ref: "#/components/schemas/Service"}
+        "404": {$ref: "#/components/responses/Error"}
+  /incidents:
+    get:
+      tags: [Incidents]
+      operationId: listIncidents
+      summary: List incidents
+      parameters:
+        - name: statuses[]
+          in: query
+          description: "Only incidents in these statuses; repeat for several."
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: {type: string, enum: [triggered, acknowledged, resolved]}
+        - name: service_ids[]
+          in: query
+          description: Only incidents on these services; repeat for several.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: {type: string}
+        - name: urgencies[]
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: {type: string, enum: [high, low]}
+        - name: incident_key
+          in: query
+          description: Only incidents with this de-duplication key.
+          schema: {type: string}
+        - name: sort_by
+          in: query
+          description: "A field and a direction: `created_at:asc`, `created_at:desc`, `incident_number:asc`, `incident_number:desc`, `resolved_at:asc`."
+          schema: {type: string}
+        - $ref: "#/components/parameters/include"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/total"
+      responses:
+        "200":
+          description: A page of incidents.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      incidents:
+                        type: array
+                        items: {$ref: "#/components/schemas/Incident"}
+        "400": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Incidents]
+      operationId: createIncident
+      summary: Create an incident
+      description: |
+        A new incident is `triggered` and assigned to the first rule's targets of its
+        service's escalation policy. An `incident_key` held by an open incident on the
+        same service is refused with 400, error code 2001.
+      parameters:
+        - $ref: "#/components/parameters/fromRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident]
+              properties:
+                incident:
+                  type: object
+                  required: [type, title, service]
+                  properties:
+                    type: {type: string, enum: [incident]}
+                    title: {type: string}
+                    service: {$ref: "#/components/schemas/Reference"}
+                    urgency: {type: string, enum: [high, low]}
+                    incident_key: {type: string, description: "A de-duplication key: one open incident per key and service."}
+                    body:
+                      type: object
+                      properties:
+                        type: {type: string, enum: [incident_body]}
+                        details: {type: string}
+                    escalation_policy: {$ref: "#/components/schemas/Reference"}
+      responses:
+        "201":
+          description: The created incident.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incident: {$ref: "#/components/schemas/Incident"}
+        "400": {$ref: "#/components/responses/Error"}
+  /incidents/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Incidents]
+      operationId: getIncident
+      summary: Get an incident
+      parameters:
+        - $ref: "#/components/parameters/include"
+      responses:
+        "200":
+          description: The incident.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incident: {$ref: "#/components/schemas/Incident"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Incidents]
+      operationId: updateIncident
+      summary: Update an incident
+      description: "Acknowledge or resolve the incident, or change its title or urgency. Fields not sent are kept."
+      parameters:
+        - $ref: "#/components/parameters/fromRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [incident]
+              properties:
+                incident:
+                  type: object
+                  required: [type]
+                  properties:
+                    type: {type: string, enum: [incident_reference, incident]}
+                    status: {type: string, enum: [acknowledged, resolved]}
+                    title: {type: string}
+                    urgency: {type: string, enum: [high, low]}
+                    escalation_level: {type: integer}
+      responses:
+        "200":
+          description: The updated incident.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  incident: {$ref: "#/components/schemas/Incident"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /incidents/{id}/notes:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Incidents]
+      operationId: listIncidentNotes
+      summary: List an incident's notes
+      responses:
+        "200":
+          description: The notes, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notes:
+                    type: array
+                    items: {$ref: "#/components/schemas/Note"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Incidents]
+      operationId: createIncidentNote
+      summary: Add a note to an incident
+      parameters:
+        - $ref: "#/components/parameters/fromRequired"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note:
+                  type: object
+                  required: [content]
+                  properties:
+                    content: {type: string}
+      responses:
+        "201":
+          description: The note; its user is the From user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note: {$ref: "#/components/schemas/Note"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    token:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "`Token token=<API key>`."
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, example: PT4KHLK}
+    from:
+      name: From
+      in: header
+      description: The email of a valid user on the account.
+      schema: {type: string, format: email}
+    fromRequired:
+      name: From
+      in: header
+      required: true
+      description: "The email of a valid user on the account, recorded as the one acting."
+      schema: {type: string, format: email}
+    include:
+      name: include[]
+      in: query
+      description: "Related resources to side-load in full instead of as references: `services`, `users`, `escalation_policies`, `teams`, `assignees`, `acknowledgers`."
+      style: form
+      explode: true
+      schema:
+        type: array
+        items: {type: string}
+    offset:
+      name: offset
+      in: query
+      description: The number of results to skip.
+      schema: {type: integer, minimum: 0, default: 0}
+    limit:
+      name: limit
+      in: query
+      description: Results per page (default 25, at most 100).
+      schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    total:
+      name: total
+      in: query
+      description: Count every result in `total` (null otherwise).
+      schema: {type: boolean, default: false}
+  responses:
+    Error:
+      description: "`{error: {code, message, errors}}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Reference:
+      type: object
+      required: [id, type]
+      properties:
+        id: {type: string}
+        type: {type: string, example: service_reference}
+        summary: {type: string}
+        self: {type: string, format: uri}
+        html_url: {type: string, format: uri}
+    Page:
+      type: object
+      properties:
+        offset: {type: integer}
+        limit: {type: integer}
+        more: {type: boolean, description: True when more results follow this page.}
+        total: {type: integer, nullable: true, description: "Every result of the query; null unless total=true."}
+    User:
+      type: object
+      properties:
+        id: {type: string, readOnly: true}
+        type: {type: string, enum: [user]}
+        name: {type: string}
+        email: {type: string, format: email}
+        time_zone: {type: string, example: America/Lima}
+        role: {type: string, enum: [admin, limited_user, observer, owner, read_only_user, restricted_access, read_only_limited_user, user]}
+        summary: {type: string, readOnly: true}
+        self: {type: string, readOnly: true}
+        html_url: {type: string, readOnly: true}
+    EscalationPolicy:
+      type: object
+      properties:
+        id: {type: string, readOnly: true}
+        type: {type: string, enum: [escalation_policy]}
+        name: {type: string}
+        description: {type: string}
+        num_loops: {type: integer}
+        escalation_rules:
+          type: array
+          description: In order; a new incident is assigned to the first rule's targets.
+          items:
+            type: object
+            properties:
+              id: {type: string, readOnly: true}
+              escalation_delay_in_minutes: {type: integer}
+              targets:
+                type: array
+                items: {$ref: "#/components/schemas/Reference"}
+        services:
+          type: array
+          readOnly: true
+          items: {$ref: "#/components/schemas/Reference"}
+        summary: {type: string, readOnly: true}
+    Service:
+      type: object
+      properties:
+        id: {type: string, readOnly: true}
+        type: {type: string, enum: [service]}
+        name: {type: string}
+        description: {type: string}
+        status: {type: string, enum: [active, warning, critical, maintenance, disabled]}
+        escalation_policy: {$ref: "#/components/schemas/Reference"}
+        auto_resolve_timeout: {type: integer, nullable: true}
+        acknowledgement_timeout: {type: integer, nullable: true}
+        created_at: {type: string, format: date-time, readOnly: true}
+        summary: {type: string, readOnly: true}
+    Incident:
+      type: object
+      properties:
+        id: {type: string}
+        type: {type: string, enum: [incident]}
+        incident_number: {type: integer}
+        title: {type: string}
+        summary: {type: string}
+        status: {type: string, enum: [triggered, acknowledged, resolved]}
+        urgency: {type: string, enum: [high, low]}
+        incident_key: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        resolved_at: {type: string, format: date-time, nullable: true}
+        last_status_change_at: {type: string, format: date-time}
+        service:
+          description: "A service_reference, or the full service with include[]=services."
+          oneOf:
+            - $ref: "#/components/schemas/Reference"
+            - $ref: "#/components/schemas/Service"
+        escalation_policy: {$ref: "#/components/schemas/Reference"}
+        assignments:
+          type: array
+          items:
+            type: object
+            properties:
+              at: {type: string, format: date-time}
+              assignee: {$ref: "#/components/schemas/Reference"}
+        acknowledgements:
+          type: array
+          items:
+            type: object
+            properties:
+              at: {type: string, format: date-time}
+              acknowledger: {$ref: "#/components/schemas/Reference"}
+        self: {type: string}
+        html_url: {type: string}
+    Note:
+      type: object
+      properties:
+        id: {type: string}
+        content: {type: string}
+        created_at: {type: string, format: date-time}
+        user: {$ref: "#/components/schemas/Reference"}
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: {type: integer, example: 2001}
+            message: {type: string, example: Invalid Input Provided}
+            errors:
+              type: array
+              items: {type: string}
