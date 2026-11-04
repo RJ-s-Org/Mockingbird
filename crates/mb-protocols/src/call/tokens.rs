@@ -7,9 +7,10 @@
 //! - a `409` or a `412` the write declares names it in code position in its description
 //!   (`` `version` ``, `<code>version</code>`). A member an error schema merely declares
 //!   is none: a problem's `title` is no record's;
-//! - the server manages it: the record's read marks it `readOnly`, or the write's input
-//!   cannot set it (its body schema does not declare it, or marks it `readOnly`). So
-//!   "a project with this `name` already exists" ties no `name` the write sets;
+//! - the server manages it: the record's read marks it `readOnly`, or no create or
+//!   update of the type lets a client set it (no body schema declares it but as
+//!   `readOnly`, and no query parameter is named so). So "a project with this `name`
+//!   already exists" ties no `name`, on any write of projects;
 //! - it is an integer or a string with no `enum` or `const` (a state, not a version),
 //!   and no identity or path member.
 //!
@@ -154,14 +155,34 @@ fn tied(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
     if !types.iter().any(|t| matches!(*t, "integer" | "string")) {
         return false;
     }
-    // Server-managed: the client cannot set it.
-    let settable = op
-        .input
-        .body
-        .as_ref()
-        .and_then(|s| mb_engine::consistency::property_schema(bundle, s, member))
-        .is_some_and(|input| !read_only(bundle, &input, 0));
-    read_only(bundle, &schema, 0) || !settable
+    // Server-managed: the record's read says the client does not set it, or no write of
+    // the type lets it.
+    read_only(bundle, &schema, 0) || !settable_by_any_write(rt, t, member)
+}
+
+/// Whether some create or update of `t` declares `member` as one its client sets: in its
+/// body schema, not `readOnly`, or as a query parameter.
+fn settable_by_any_write(rt: &MockRuntime, t: &str, member: &str) -> bool {
+    let bundle = rt.bundle();
+    bundle.operations.iter().any(|op| {
+        op.resource_type.as_deref() == Some(t)
+            && matches!(
+                op.kind,
+                OperationKind::Command(Effect::Create | Effect::Update)
+            )
+            && (op
+                .input
+                .body
+                .as_ref()
+                .and_then(|s| mb_engine::consistency::property_schema(bundle, s, member))
+                .is_some_and(|input| !read_only(bundle, &input, 0))
+                || op
+                    .input
+                    .query
+                    .as_ref()
+                    .and_then(|s| mb_engine::consistency::property_schema(bundle, s, member))
+                    .is_some())
+    })
 }
 
 /// The document of `t` `id`'s tokens.
@@ -222,14 +243,16 @@ pub(super) async fn check(
         }
     }
 
-    // What the update advances: a token it sets no new value for.
+    // What the update advances: a token its body or query sets no new value for.
     let mut advancing = Vec::new();
     if op.kind == OperationKind::Command(Effect::Update)
         && let Value::Object(held) = &target.data
     {
         for (member, value) in held {
+            // What the body or the query sets it to, as the answer settles on both.
             let new = body
                 .and_then(|b| b.get(member))
+                .or_else(|| call.query.get(member))
                 .is_some_and(|sent| as_text(sent) != as_text(value));
             if !new && as_text(value).is_some() && tied(rt, op, t, member) {
                 advancing.push(member.clone());

@@ -39,12 +39,13 @@ paths:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}
     put:
       operationId: replaceDoc
+      parameters: [{name: version, in: query, schema: {type: integer}}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: "#/components/schemas/DocWrite"}}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}
-        "409": {description: "The `version` sent is stale: `error.code` is `version_conflict`. A doc whose `status` is closed conflicts too.", content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "409": {description: "The `version` sent is stale: `error.code` is `version_conflict`. A doc whose `status` is closed conflicts too, as does one whose `state` is live.", content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
   /items:
     post:
       operationId: createItem
@@ -89,6 +90,14 @@ paths:
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
         "409": {description: "A project with this `name` already exists.", content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
+    patch:
+      operationId: archiveProject
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {archived: {type: boolean}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+        "409": {description: "Unarchiving conflicts when another project has the same `name`.", content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
   /drafts:
     post:
       operationId: createDraft
@@ -132,6 +141,7 @@ components:
         view_count: {type: integer}
         updated: {type: integer}
         owner_id: {type: string, readOnly: true}
+        state: {type: string, enum: [draft, live], readOnly: true}
     Item:
       type: object
       required: [id, title]
@@ -145,6 +155,7 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
+        archived: {type: boolean}
     Problem:
       type: object
       required: [title, status]
@@ -495,4 +506,85 @@ async fn a_member_the_write_sets_is_no_token() {
         StatusCode::OK
     );
     assert_eq!(h.calls(), 4);
+}
+
+/// A member another write of the type sets is no token, whichever write's `409` names
+/// it: archiving keeps the stored name over the model's, and unarchiving with it goes
+/// through.
+#[tokio::test]
+async fn a_member_any_write_sets_is_no_token() {
+    let project =
+        |name: &str, archived: bool| json!({"id": "p1", "name": name, "archived": archived});
+    let h = harness(vec![
+        project("a", false),
+        answer(project("made-up", true)),
+        answer(project("a", false)),
+    ]);
+    h.send("POST", "/projects", Some(json!({"name": "a"})), &[])
+        .await;
+    let (status, _) = h
+        .send(
+            "PATCH",
+            "/projects/p1",
+            Some(json!({"archived": true})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.held("projects", "p1").await["name"], "a", "not advanced");
+    let (status, body) = h
+        .send(
+            "PATCH",
+            "/projects/p1",
+            Some(json!({"archived": false, "name": "a"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.calls(), 3);
+}
+
+/// A `readOnly` state with an `enum` is no version, though a `409` names it: the
+/// model's new state is not stored over the copy's.
+#[tokio::test]
+async fn a_read_only_enum_state_is_no_token() {
+    let with_state = |state: &str, version: i64| json!({"id": "d1", "title": "t", "version": version, "state": state});
+    let h = harness(vec![
+        with_state("draft", 1),
+        answer(with_state("live", 2)),
+        answer(with_state("draft", 3)),
+    ]);
+    h.send("POST", "/docs", Some(json!({"title": "t"})), &[])
+        .await;
+    assert_eq!(
+        h.put("/docs/d1", json!({"title": "t"})).await,
+        StatusCode::OK
+    );
+    let held = h.held("docs", "d1").await;
+    assert_eq!(held["state"], "draft", "{held}");
+    assert_eq!(held["version"], 2, "the version advanced: {held}");
+    assert_eq!(
+        h.put("/docs/d1", json!({"title": "u"})).await,
+        StatusCode::OK
+    );
+    assert_eq!(h.calls(), 3);
+}
+
+/// A token a query parameter sets to a new value is the client's: it is not advanced,
+/// and the query's value stands.
+#[tokio::test]
+async fn a_token_the_query_sets_is_the_clients() {
+    let h = harness(vec![doc("a", 1), answer(doc("b", 2))]);
+    h.send("POST", "/docs", Some(json!({"title": "a"})), &[])
+        .await;
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/docs/d1?version=5",
+            Some(json!({"title": "b"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.held("docs", "d1").await["version"], 5);
 }
