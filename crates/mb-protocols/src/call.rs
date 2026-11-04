@@ -2856,7 +2856,7 @@ async fn taken_id(
     let body = generated.body.as_ref()?;
     if state.get(session, resource_type, &id).await.is_some()
         || (request_values(op, call).contains(&id)
-            && !keyed_apart(state.rt, resource_type, field, body)
+            && !keyed_apart(state.rt, op, resource_type, field, body)
             && world::held_elsewhere(state, session, resource_type, &id).await)
     {
         return Some(id);
@@ -2865,17 +2865,17 @@ async fn taken_id(
 }
 
 /// Whether `answer` also holds, beside its identity `field` (`id`), the one scalar
-/// member named for its own type `t` (`seat_id` of a `seats` record), and the
-/// type's read or record schema declares both: then the contract keys the record
-/// apart from `id`, which may well hold another record's id (the showing booked),
-/// and its naming a held record of another type is no collision. What the answer
-/// alone holds, with no schema declaring it, keys nothing apart.
-fn keyed_apart(rt: &MockRuntime, t: &str, field: &str, answer: &Value) -> bool {
+/// member named for its own type `t` (`seat_id` of a `seats` record), and one of the
+/// type's read schema, its record schema or `op`'s own declared success answer
+/// declares both: then the contract keys the record apart from `id`, which may well
+/// hold another record's id (the showing booked), and its naming a held record of
+/// another type is no collision. What the answer alone holds, with no schema
+/// declaring it, keys nothing apart.
+fn keyed_apart(rt: &MockRuntime, op: &Operation, t: &str, field: &str, answer: &Value) -> bool {
     let Value::Object(members) = answer else {
         return false;
     };
-    let declared = declared_members(rt, t);
-    if field != "id" || !declared.contains(&"id") {
+    if field != "id" {
         return false;
     }
     let own = mb_mcm::stem(t);
@@ -2886,12 +2886,28 @@ fn keyed_apart(rt: &MockRuntime, t: &str, field: &str, answer: &Value) -> bool {
             .or_else(|| lower.strip_suffix("id"))
             .filter(|name| !name.is_empty())
             .is_some_and(|name| mb_mcm::stem(name) == own);
-        member.as_str() != field
-            && named
-            && declared.contains(&member.as_str())
-            && (value.is_string() || value.is_number())
+        member.as_str() != field && named && (value.is_string() || value.is_number())
     });
-    keys.next().is_some() && keys.next().is_none()
+    let (Some((key, _)), None) = (keys.next(), keys.next()) else {
+        return false;
+    };
+    let index = rt.index();
+    let read = index.detail_reads.get(t).and_then(|i| {
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    let answered = op.success_output().and_then(|o| o.schema.as_ref());
+    [index.record_schemas.get(t), read, answered]
+        .into_iter()
+        .flatten()
+        .any(|schema| {
+            let declared = schema_members(rt, Some(schema));
+            declared.contains(&"id") && declared.contains(&key.as_str())
+        })
 }
 
 /// A different identity for `record`, the record a create's answer holds (in
@@ -6000,6 +6016,11 @@ fn declared_members<'a>(rt: &'a MockRuntime, resource_type: &str) -> Vec<&'a str
             .schema
             .as_ref()
     });
+    schema_members(rt, schema)
+}
+
+/// The members `schema` declares, its `$ref`s followed and its branches flattened.
+fn schema_members<'a>(rt: &'a MockRuntime, schema: Option<&'a Value>) -> Vec<&'a str> {
     let mut names = Vec::new();
     for name in schema_parts(rt.bundle(), schema)
         .0

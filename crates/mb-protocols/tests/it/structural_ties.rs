@@ -239,17 +239,36 @@ async fn an_answer_keyed_apart_keeps_the_id_it_names() {
     assert_eq!(booked["seat_id"], "st-a81f", "{booked}");
 }
 
-/// With no read of a seat declaring `seat_id`, the answer's `seat_id` keys nothing
-/// apart, and the showing's id under `id` is re-minted, as before.
+/// With no read of a seat, the booking's own declared answer, holding `id` and
+/// `seat_id` both, keys it apart (Zoom's registrant, whose list item declares no
+/// `registrant_id`).
+#[tokio::test]
+async fn an_answer_its_operation_declares_keyed_apart_keeps_the_id() {
+    let booked = booked_seat(&unread_seats()).await;
+    assert_eq!(booked["id"], 78_245_196_304_u64, "{booked}");
+}
+
+/// When no schema declares `seat_id`, the answer's `seat_id` keys nothing apart, and
+/// the showing's id under `id` is re-minted, as before.
 #[tokio::test]
 async fn an_answer_keyed_apart_only_by_its_body_is_re_minted() {
+    let undeclared = unread_seats().replace(
+        "      required: [id, seat_id, title]\n",
+        "      required: [id, title]\n      additionalProperties: true\n",
+    );
+    let undeclared = undeclared.replace("        seat_id: {type: string}\n", "");
+    assert!(!undeclared.contains("seat_id: {"));
+    let booked = booked_seat(&undeclared).await;
+    assert_ne!(booked["id"], 78_245_196_304_u64, "{booked}");
+}
+
+/// [`SEATS`] with no read of a seat.
+fn unread_seats() -> String {
     let start = SEATS
         .find("  /showings/{showingId}/seats/{seat_id}:")
         .unwrap();
     let end = SEATS.find("components:").unwrap();
-    let unread = format!("{}{}", &SEATS[..start], &SEATS[end..]);
-    let booked = booked_seat(&unread).await;
-    assert_ne!(booked["id"], 78_245_196_304_u64, "{booked}");
+    format!("{}{}", &SEATS[..start], &SEATS[end..])
 }
 
 /// Products whose read declares no `404`: a missing item answers the declared
