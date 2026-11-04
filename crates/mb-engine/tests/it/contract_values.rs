@@ -275,3 +275,234 @@ fn values_after_a_member_count_to_the_end_of_its_sentence() {
     );
     assert_eq!(conflict_body(&bundle)["code"], "version_conflict");
 }
+
+/// The member named as a plain word of the prose counts, and a member typed as a number
+/// takes a plain number after it, never the status itself.
+#[test]
+fn a_member_named_in_prose_takes_the_value_after_it() {
+    let bundle = contract(
+        (PLAIN, "Not found."),
+        (PLAIN, "Refused with the code `name_taken`."),
+    );
+    assert_eq!(conflict_body(&bundle)["code"], "name_taken");
+    let numbered = r#"{type: object, required: [code, message], properties: {code: {type: integer}, message: {type: string}}}"#;
+    let bundle = contract(
+        (PLAIN, "Not found."),
+        (
+            numbered,
+            "Code 1001 when another thing has the name; 409 otherwise.",
+        ),
+    );
+    assert_eq!(conflict_body(&bundle)["code"], 1001);
+    let bundle = contract((PLAIN, "Not found."), (numbered, "The code is 409."));
+    assert_ne!(conflict_body(&bundle)["code"], 409, "the status is no code");
+    // A string member takes no plain word, and two numbers are no guess.
+    let bundle = contract((PLAIN, "Not found."), (PLAIN, "The code says stale."));
+    assert_ne!(conflict_body(&bundle)["code"], "says");
+    let bundle = contract((PLAIN, "Not found."), (numbered, "Code 7 or code 8."));
+    let code = conflict_body(&bundle)["code"].clone();
+    assert!(code != 7 && code != 8, "{code}");
+}
+
+/// A create of things whose `sku` is unique, its `400` and `409` sharing one `Error`;
+/// `info` is the API-level description.
+fn shop(info: &str) -> Bundle {
+    let src = format!(
+        r##"
+openapi: 3.1.0
+info:
+  title: Shop
+  version: "1"
+  description: "{info}"
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {{content: {{application/json: {{schema: {{type: object, properties: {{sku: {{type: string}}, name: {{type: string}}}}}}}}}}}}
+      responses:
+        "201": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string}}}}}}}}}}}}
+        "400": {{description: "`bad_param` or `taken`.", content: {{application/json: {{schema: {{$ref: "#/components/schemas/Error"}}}}}}}}
+        "409": {{description: Conflict., content: {{application/json: {{schema: {{$ref: "#/components/schemas/Error"}}}}}}}}
+components:
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties: {{code: {{type: string}}, message: {{type: string}}}}
+"##
+    );
+    compile(src.as_bytes()).unwrap()
+}
+
+fn repeat_body(bundle: &Bundle, status: u16, member: &str) -> Value {
+    let op = bundle.operation("createThing").unwrap();
+    let answered = mb_engine::GeneratedResponse {
+        status: 201,
+        content_type: None,
+        body: None,
+        source: Source::Llm,
+        usage: Default::default(),
+        fallback_reason: None,
+        effects: Vec::new(),
+        effect_outcomes: Vec::new(),
+        dropped_effects: 0,
+        new_record: false,
+        patched: None,
+    };
+    let out = offline()
+        .refuse_repeated_value(
+            bundle,
+            op,
+            &OperationCall::default(),
+            (status, member),
+            &answered,
+        )
+        .unwrap();
+    assert_eq!(out.status, status);
+    out.body.unwrap()
+}
+
+/// The API-level description gives a repeat's refusal its code when one sentence holds
+/// the status, names the repeated member, and names the code after the error's member.
+#[test]
+fn the_api_description_names_a_repeats_code() {
+    let info = "A thing's `sku` is unique: a create with an SKU another has is refused with 400 and the code `sku_taken`. An unknown id answers 404 with the code `missing`.";
+    let bundle = shop(info);
+    for _ in 0..4 {
+        assert_eq!(repeat_body(&bundle, 400, "sku")["code"], "sku_taken");
+    }
+    // Another status's refusal, another member's repeat, or no repeat at all: nothing.
+    assert_ne!(repeat_body(&bundle, 409, "sku")["code"], "sku_taken");
+    assert_ne!(repeat_body(&bundle, 400, "name")["code"], "sku_taken");
+    let op = bundle.operation("createThing").unwrap();
+    let body = offline()
+        .refuse_from_state(&bundle, op, &OperationCall::default(), 400)
+        .unwrap()
+        .body
+        .unwrap();
+    assert_ne!(body["code"], "sku_taken", "{body}");
+    // The status named in another sentence than the member's ties nothing.
+    let bundle =
+        shop("A thing's `sku` is unique, and the code is `sku_taken`. Refusals answer 400.");
+    assert_ne!(repeat_body(&bundle, 400, "sku")["code"], "sku_taken");
+    // Nor does a sentence that names no type the create makes.
+    let bundle = shop(
+        "A gizmo's `sku` is unique: one with a taken SKU is refused with 400 and the code `sku_taken`.",
+    );
+    assert_ne!(repeat_body(&bundle, 400, "sku")["code"], "sku_taken");
+}
+
+/// What ties a repeat to a refusal strongly enough to enforce it: a declared 409 whose
+/// own description names the member in code position and nothing else there. A 409
+/// naming it in prose, or beside another span, a 400 or a 422 whatever it says, and any
+/// sentence of the API description tie nothing.
+#[test]
+fn only_a_409_naming_the_member_alone_in_code_position_ties_a_repeat() {
+    use mb_engine::guards::refusal_tied_to;
+    let tied = |bundle: &Bundle, member: &str| {
+        refusal_tied_to(bundle.operation("createThing").unwrap(), member)
+    };
+    let set = |bundle: &mut Bundle, code: u16, description: &str| {
+        let op = bundle
+            .operations
+            .iter_mut()
+            .find(|op| op.id == "createThing")
+            .unwrap();
+        let variant = op
+            .outputs
+            .iter_mut()
+            .find(|o| o.status == mb_mcm::StatusSelector::Code(code))
+            .unwrap();
+        variant.description = Some(description.into());
+    };
+    let mut bundle = shop("A thing's `sku` is unique: a taken one is refused with 409.");
+    assert_eq!(tied(&bundle, "sku"), None, "an API sentence ties nothing");
+    for (description, expected) in [
+        ("A thing with this `sku` exists.", Some(409)),
+        ("A thing with this SKU exists.", None),
+        ("A thing with this `sku` exists (code `sku_taken`).", None),
+        ("A thing with this `sku` or `name` exists.", None),
+    ] {
+        set(&mut bundle, 409, description);
+        assert_eq!(tied(&bundle, "sku"), expected, "{description}");
+    }
+    set(&mut bundle, 409, "A thing with this `sku` exists.");
+    assert_eq!(tied(&bundle, "name"), None);
+    // A 400 is never enforced, whatever it says.
+    set(&mut bundle, 400, "Another thing has this `sku`.");
+    let op = bundle
+        .operations
+        .iter_mut()
+        .find(|op| op.id == "createThing")
+        .unwrap();
+    op.outputs
+        .retain(|o| o.status != mb_mcm::StatusSelector::Code(409));
+    assert_eq!(tied(&bundle, "sku"), None);
+}
+
+/// A sentence of the API description naming another status too, or another member of
+/// the request, gives a repeat's refusal no code.
+#[test]
+fn an_api_sentence_of_two_statuses_or_members_names_no_code() {
+    for info in [
+        "A thing with a taken `sku` is refused with 400 and the code `sku_taken`, a missing one with 404.",
+        "A thing with a taken `sku` or `name` is refused with 400 and the code `sku_taken`.",
+    ] {
+        let bundle = shop(info);
+        assert_ne!(
+            repeat_body(&bundle, 400, "sku")["code"],
+            "sku_taken",
+            "{info}"
+        );
+    }
+}
+
+/// A member whose own description lists codes takes the one the status's description
+/// names; naming two, or none of them, keeps the faker's value.
+#[test]
+fn a_member_s_own_description_lists_the_codes_the_status_picks_from() {
+    let listed = r#"{type: object, required: [code, version], properties: {code: {type: string, description: "Such as `ConcurrentModification`, `ResourceNotFound` or `InvalidInput`."}, version: {type: integer, description: "With `ConcurrentModification`: the current version."}}}"#;
+    let bundle = contract(
+        (listed, "No resource has the id (`ResourceNotFound`)."),
+        (
+            listed,
+            "The version sent is not the current one (`ConcurrentModification`); nothing changed.",
+        ),
+    );
+    for _ in 0..4 {
+        assert_eq!(conflict_body(&bundle)["code"], "ConcurrentModification");
+        assert_eq!(not_found_body(&bundle)["code"], "ResourceNotFound");
+    }
+    assert!(conflict_body(&bundle)["version"].is_i64());
+    let bundle = contract(
+        (listed, "Either `ResourceNotFound` or `InvalidInput`."),
+        (listed, "Conflict."),
+    );
+    let code = not_found_body(&bundle)["code"].clone();
+    assert!(
+        code != "ResourceNotFound" && code != "InvalidInput",
+        "{code}"
+    );
+}
+
+/// Where the prose names the repeated request member, it speaks of the request: a
+/// member of the error body of that name takes no value from it.
+#[test]
+fn the_repeated_member_named_in_prose_is_the_requests() {
+    let src = r##"
+openapi: 3.1.0
+info: {title: Shop, version: "1", description: "A thing's `name` is unique: a taken name is refused with 409 `name_in_use`."}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+        "409": {description: A thing with this name exists (code `name_in_use`)., content: {application/json: {schema: {type: object, required: [code, conflict], properties: {code: {type: string}, conflict: {type: object, required: [name], properties: {name: {type: string}}}}}}}}
+"##;
+    let bundle = compile(src.as_bytes()).unwrap();
+    let body = repeat_body(&bundle, 409, "name");
+    assert_eq!(body["code"], "name_in_use", "{body}");
+    assert_ne!(body["conflict"]["name"], "name_in_use", "{body}");
+}

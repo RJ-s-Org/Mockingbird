@@ -34,6 +34,7 @@ mod envelopes;
 mod lists;
 mod minted;
 mod pages;
+mod repeats;
 mod runs;
 mod tokens;
 mod value_index;
@@ -1337,6 +1338,12 @@ pub(crate) async fn complete(
                 .await;
             }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
+                // The answer as the model gave it, before a fresh id replaces one a stored
+                // record holds: whether it is that record (see [`repeats`]).
+                let as_answered = match same_values.is_empty() {
+                    true => None,
+                    false => generated.body.clone(),
+                };
                 unique_create_id(
                     rt,
                     &mut state,
@@ -1364,17 +1371,22 @@ pub(crate) async fn complete(
                         "create not stored: its id is held in another collection"
                     );
                 }
+                let here = matches!(repeated, Some(Repeated::Here(_)));
                 if let Some(Repeated::Here(held)) = repeated {
                     unstored = true;
                     drop_all_effects(rt, op, &held.id, &mut generated);
                     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                    // An answer that is the held record as stored (an "it exists" answer)
+                    // is right: it stands, neither refused nor replaced.
+                    let as_held = repeats::answers_the_held(generated.body.as_ref(), &held, field);
                     let offered = same_values
                         .iter()
                         .any(|(st, id, member)| st == t && *id == held.id && member == field);
-                    let refusal = offered
+                    let refusal = (offered && !as_held)
                         .then(|| plan.engine.refuse_repeat(rt.bundle(), op, call, &generated))
                         .flatten();
                     match refusal {
+                        None if as_held => {}
                         Some(mut refusal) => {
                             refusal.effect_outcomes =
                                 std::mem::take(&mut generated.effect_outcomes);
@@ -1384,6 +1396,44 @@ pub(crate) async fn complete(
                         }
                         None => generated.body = Some(held.data),
                     }
+                }
+                // A success for a create that repeats a value the contract says is
+                // unique, which a stored record in its collection holds: the refusal
+                // offered, enforced (see [`repeats`]).
+                let enforced = match !here && (200..300).contains(&generated.status) {
+                    true => {
+                        repeats::enforced(
+                            &mut state,
+                            (session, op, t),
+                            (call, as_answered.as_ref()),
+                            &same_values,
+                        )
+                        .await
+                    }
+                    false => None,
+                };
+                match enforced {
+                    // The holder itself, as stored: served as the model answered it, and
+                    // stored over nothing.
+                    Some(repeats::Enforced::Held { id, stored }) => {
+                        unstored = true;
+                        drop_all_effects(rt, op, &id, &mut generated);
+                        generated.body = stored.or(as_answered);
+                    }
+                    Some(repeats::Enforced::Refuse { code, member, held }) => {
+                        if let Some(refusal) = plan.engine.refuse_repeated_value(
+                            rt.bundle(),
+                            op,
+                            call,
+                            (code, &member),
+                            &generated,
+                        ) {
+                            unstored = true;
+                            answered = None;
+                            repeats::replace(rt, op, (&member, &held), &mut generated, refusal);
+                        }
+                    }
+                    None => {}
                 }
             }
             // An action's new record goes under its own id, not over another's.
