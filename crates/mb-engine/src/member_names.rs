@@ -20,16 +20,75 @@ const MAX_DEPTH: usize = 32;
 /// name.
 const CUT_AT: &[char] = &['"', ':', '}', ','];
 
-/// The name `key` was meant to be: trimmed, cut at the first [`CUT_AT`]
-/// character, and trimmed again. `None` when that leaves it as it was, or
-/// leaves nothing.
+/// The name `key` was meant to be: trimmed of ASCII whitespace and cut at the
+/// first [`CUT_AT`] character, when what that cuts off is JSON debris alone
+/// (see [`is_debris`]): `"id:"` and `"total\":null},"` were `id` and `total`,
+/// while `name:en`, `id:alt`, `xmlns:foo` and `a,b` are names of their own.
+/// `None` when that leaves the key as it was, or leaves nothing.
 fn meant(key: &str) -> Option<&str> {
-    let trimmed = key.trim();
-    let cut = trimmed
-        .find(CUT_AT)
-        .map_or(trimmed, |i| &trimmed[..i])
-        .trim();
-    (!cut.is_empty() && cut != key).then_some(cut)
+    fn ascii_trim(s: &str) -> &str {
+        s.trim_matches(|c: char| c.is_ascii_whitespace())
+    }
+    let trimmed = ascii_trim(key);
+    let (name, rest) = match trimmed.find(CUT_AT) {
+        Some(i) => trimmed.split_at(i),
+        None => (trimmed, ""),
+    };
+    let name = ascii_trim(name);
+    (!name.is_empty() && name != key && is_debris(rest)).then_some(name)
+}
+
+/// Whether `rest`, what followed a member name, is only JSON written after it:
+/// ASCII whitespace, the punctuation `"`, `:`, `,`, `{`, `}`, `[` and `]`, the
+/// literals `null`, `true` and `false`, numbers and quoted strings. A `"` it
+/// starts with closes the name.
+fn is_debris(rest: &str) -> bool {
+    let mut chars = rest.strip_prefix('"').unwrap_or(rest).chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_ascii_whitespace() => {}
+            ':' | ',' | '{' | '}' | '[' | ']' => {}
+            '"' => {
+                // A quoted string, to its closing quote.
+                let mut closed = false;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if !closed {
+                    return false;
+                }
+            }
+            c if c == '-' || c.is_ascii_digit() => {
+                while chars
+                    .peek()
+                    .is_some_and(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+                {
+                    chars.next();
+                }
+            }
+            c if c.is_ascii_alphabetic() => {
+                let mut word = String::from(c);
+                while let Some(c) = chars.peek().copied().filter(char::is_ascii_alphabetic) {
+                    word.push(c);
+                    chars.next();
+                }
+                if !matches!(word.as_str(), "null" | "true" | "false") {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// `value`, whose schema is `schema`, with each member name that is not one its
@@ -102,9 +161,22 @@ fn rename(nodes: &[&Value], members: &mut Map<String, Value>) -> usize {
                 .is_some_and(|p| p.contains_key(name))
         })
     };
+    // A key a `patternProperties` pattern matches is a name the schema allows
+    // (one that does not compile is taken to match).
+    let patterns: Vec<Option<regex::Regex>> = nodes
+        .iter()
+        .filter_map(|n| n.get("patternProperties").and_then(Value::as_object))
+        .flat_map(|p| p.keys())
+        .map(|p| regex::Regex::new(p).ok())
+        .collect();
+    let patterned = |key: &str| {
+        patterns
+            .iter()
+            .any(|p| p.as_ref().is_none_or(|p| p.is_match(key)))
+    };
     let corrupted: Vec<(String, String)> = members
         .keys()
-        .filter(|k| !declared(k))
+        .filter(|k| !declared(k) && !patterned(k))
         .filter_map(|k| {
             let to = meant(k).filter(|to| declared(to))?;
             Some((k.clone(), to.to_string()))
@@ -239,6 +311,67 @@ mod tests {
                 "labels": {"id:": "kept", "env:": "prod"}
             })
         );
+    }
+
+    /// What follows the cut must be JSON debris: a name of its own with a `:` or a
+    /// `,` in it is kept, beside the declared member or alone.
+    #[test]
+    fn a_name_whose_rest_is_no_json_is_kept() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "id": {"type": "string"},
+                           "xmlns": {"type": "string"}, "a": {"type": "string"}},
+            "additionalProperties": {"type": "string"}
+        });
+        for value in [
+            json!({"name": "Ada", "name:en": "Ada"}),
+            json!({"name:en": "Ada"}),
+            json!({"id": "1", "id:alt": "2"}),
+            json!({"id:alt": "2"}),
+            json!({"xmlns:foo": "urn:x"}),
+            json!({"a,b": "x"}),
+            json!({"name}x": "x"}),
+            json!({"\u{a0}name": "x"}),
+            json!({"name\u{3000}": "x"}),
+            json!({"\u{a0}id:": "x"}),
+        ] {
+            assert_eq!(mended(&schema, value.clone()), (value.clone(), 0), "{value}");
+        }
+    }
+
+    /// JSON debris after the name is cut off: punctuation, literals, numbers and
+    /// quoted strings.
+    #[test]
+    fn a_name_followed_by_json_debris_is_mended() {
+        let schema = json!({"type": "object", "properties": {"name": {"type": "string"}}});
+        for key in [
+            "name:",
+            "name\":null},",
+            "name\":\"books\"},",
+            "name\": true,",
+            "name\":-1.5e3]",
+            "\tname ",
+            "name\":\"a \\\" b\",",
+        ] {
+            let (value, n) = mended(&schema, json!({key: "x"}));
+            assert_eq!((value, n), (json!({"name": "x"}), 1), "{key}");
+        }
+        // An unclosed string or a word is no debris.
+        for key in ["name\":\"books", "name\":nil", "name: x"] {
+            assert_eq!(mended(&schema, json!({key: "x"})).1, 0, "{key}");
+        }
+    }
+
+    /// A key a `patternProperties` pattern matches is the schema's own.
+    #[test]
+    fn a_patterned_key_is_kept() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "patternProperties": {"^id:": {"type": "string"}}
+        });
+        let value = json!({"id:": "x"});
+        assert_eq!(mended(&schema, value.clone()), (value, 0));
     }
 
     #[test]
