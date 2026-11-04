@@ -412,7 +412,17 @@ impl<'a> Ctx<'a> {
         };
         let record = match desc {
             Some(d) if at(&d.record).is_some() => at(&d.record),
-            Some(d) if at(&d.records).is_some() => at(&d.records).and_then(|s| items(b, s)),
+            // Only a `records` pointer `check_pointer` would accept: one on
+            // an array whose items resolve. A refused one leaves the lookup
+            // to the bundle's own record location.
+            Some(d)
+                if at(&d.records)
+                    .filter(|s| is_array(b, s))
+                    .and_then(|s| items(b, s))
+                    .is_some() =>
+            {
+                at(&d.records).and_then(|s| items(b, s))
+            }
             _ => match op.identity.as_ref().and_then(|i| i.record.as_ref()) {
                 None => Some(answer),
                 Some(RecordAt::Member(m)) => property(b, answer, m),
@@ -1703,6 +1713,38 @@ mod tests {
         // An item of an array resolves through `items`.
         let w = world(json!({"operations": {"ListFolders": {"answer": {"record": "/folders/0"}}}}));
         assert_eq!(validate(&w, &folders()).refused, vec![]);
+    }
+
+    #[test]
+    fn validate_refused_records_pointer_leaves_record_lookup_alone() {
+        // `/name` resolves, but to a string: refused as `invalid`, it must
+        // not stand in for the record, so the valid identity member applies.
+        let w = world(json!({
+            "types": {"folder": {"identity": {"member": "name"}}},
+            "operations": {"GetFolder": {"answer": {"records": "/name"}}}
+        }));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![("/operations/GetFolder/answer/records", RefusalCode::Invalid)]
+        );
+        assert!(v.applied.types["folder"].identity.is_some());
+    }
+
+    #[test]
+    fn validate_resolves_member_behind_interior_ref() {
+        let mut b = folders();
+        b.defs.insert(
+            "Wrapped".into(),
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "m": {"$ref": "#/$defs/Folder/properties/meta"}
+            }}),
+        );
+        op(&mut b, "GetFolder").outputs[0].schema = Some(json!({"$ref": "#/$defs/Wrapped"}));
+        let w = world(json!({"types": {"folder": {"unique": [{"members": ["m.created"]}]}}}));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
     }
 
     #[test]
