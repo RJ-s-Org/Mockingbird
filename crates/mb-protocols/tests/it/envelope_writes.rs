@@ -651,3 +651,76 @@ async fn an_order_with_one_line_is_stored_as_the_order() {
     let held = h.held("orders", "o1").await;
     assert_eq!(held, Some(order));
 }
+
+const DELETABLE: &str = r##"
+openapi: 3.0.0
+info: {title: Deletable, version: "1"}
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Widget"}}}}}
+    post:
+      operationId: createWidget
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {type: object}}}}
+  /widgets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getWidget
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+    delete:
+      operationId: deleteWidget
+      responses:
+        "204": {description: gone}
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        color: {type: string}
+"##;
+
+/// A create's answer mentioning a record the session deleted leaves it deleted.
+#[tokio::test]
+async fn a_create_s_envelope_never_brings_back_a_deleted_record() {
+    let h = harness(
+        DELETABLE,
+        vec![
+            json!({"id": "w1", "name": "old", "color": "red"}),
+            json!({"ok": true, "like": {"id": "w1", "name": "old", "color": "red"}}),
+            json!({"ok": true, "like": {"id": "w1", "name": "old", "color": "red"}}),
+        ],
+    );
+    let (s, _) = h.call("GET", "/widgets/w1", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = h.call("DELETE", "/widgets/w1", None).await;
+    assert!(s.is_success(), "{s}");
+    assert_eq!(h.held("widgets", "w1").await, None);
+    let (s, body) = h
+        .call(
+            "POST",
+            "/widgets",
+            Some(json!({"name": "new", "color": "red"})),
+        )
+        .await;
+    assert!(s.is_success(), "{body}");
+    let held = h.held("widgets", "w1").await;
+    assert_eq!(held, None, "a deleted record must stay deleted");
+    // Even one holding every value the request sent.
+    let (s, body) = h
+        .call(
+            "POST",
+            "/widgets",
+            Some(json!({"name": "old", "color": "red"})),
+        )
+        .await;
+    assert!(s.is_success(), "{body}");
+    assert_eq!(h.held("widgets", "w1").await, None);
+}

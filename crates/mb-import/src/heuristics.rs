@@ -576,6 +576,10 @@ fn merge_all_of(
 ) -> bool {
     *visits += 1;
     if *visits > MAX_ALL_OF_BRANCHES {
+        tracing::debug!(
+            limit = MAX_ALL_OF_BRANCHES,
+            "allOf branches past the limit are not read: their members are left out"
+        );
         return false;
     }
     let mut found = false;

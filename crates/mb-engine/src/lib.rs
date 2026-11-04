@@ -2713,9 +2713,10 @@ fn is_single(value: &Value) -> bool {
 
 /// The members a request's item sends, onto the answer's item it pairs with: each the
 /// answer's lacks or holds as `null`; an object or a list of as many objects member by
-/// member, item by item. `None` when the two disagree on a single value both name, or
-/// inside: they are not one item. A list inside that is not paired is the LLM's own
-/// (`answer_wins`), or a faker's answer takes the request's.
+/// member, item by item. For an LLM's answer (`answer_wins`), `None` when the two
+/// disagree on a single value both name, or inside: they are not one item. A faker's
+/// answer takes the request's value where they disagree, keeping what it drew beside
+/// (its ids). A list inside that is not paired is the LLM's own, or the request's.
 fn echo_item(answered: &Value, sent: &Value, answer_wins: bool) -> Option<Value> {
     let (Value::Object(answered), Value::Object(sent)) = (answered, sent) else {
         return None;
@@ -2724,12 +2725,12 @@ fn echo_item(answered: &Value, sent: &Value, answer_wins: bool) -> Option<Value>
     for (name, value) in sent {
         let merged = match item.get(name) {
             None | Some(Value::Null) => value.clone(),
-            Some(held) if is_single(held) && is_single(value) => {
-                if held != value {
-                    return None;
-                }
-                held.clone()
-            }
+            // A faker's value says nothing of which item it is: the request's stands.
+            Some(held) if is_single(held) && is_single(value) => match held == value {
+                true => held.clone(),
+                false if answer_wins => return None,
+                false => value.clone(),
+            },
             Some(held @ Value::Object(_)) if value.is_object() => {
                 echo_item(held, value, answer_wins)?
             }
@@ -3628,14 +3629,20 @@ mod tests {
             let out = echo_request(&v, answer.clone(), Some(&sent), answer_wins);
             assert_eq!(out, merged, "{answer_wins}");
         }
-        // Items in another order disagree on `name`: an LLM's list stands, a faker's is
-        // replaced by the request's.
+        // Items in another order disagree on `name`: an LLM's list stands; a faker's
+        // items take the request's values and keep the keys they drew.
         let answer = json!({"items": [{"key": "1", "name": "B"}, {"key": "2", "name": "A"}]});
         let sent = json!({"items": [{"name": "A", "email": "a@x"}, {"name": "B", "email": "b@x"}]});
         let llm = echo_request(&v, answer.clone(), Some(&sent), true);
         assert_eq!(llm["items"], answer["items"]);
         let faker = echo_request(&v, answer.clone(), Some(&sent), false);
-        assert_eq!(faker["items"], sent["items"]);
+        assert_eq!(
+            faker["items"],
+            json!([
+                {"key": "1", "name": "A", "email": "a@x"},
+                {"key": "2", "name": "B", "email": "b@x"},
+            ])
+        );
         // As many items or none: the request's list replaces the answer's, as before.
         let two = json!({"items": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
         let out = echo_request(&v, answer, Some(&two), true);

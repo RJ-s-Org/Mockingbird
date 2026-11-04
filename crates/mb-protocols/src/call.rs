@@ -6936,22 +6936,32 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 // An envelope the contract does not say holds the record: the one
                 // member of the answer that is a record of the type and holds what
                 // the request sent is, when nothing is held under its id.
+                // It is inserted as a mention is: never over a held record, nor one the
+                // session deleted, and as no record this create made.
                 None => {
                     let (Some(answer), Some(sent)) = (generated.body.as_ref(), request_body) else {
                         return;
                     };
                     let want = Holding::Sent(sent);
                     let on = (op, generated.status);
-                    let Some(record) = fitting_member(rt, on, resource_type, answer, want) else {
+                    let Some(data) = fitting_member(rt, on, resource_type, answer, want) else {
                         return;
                     };
-                    let Some(id) = record.get(field).and_then(id_string) else {
+                    let Some(id) = data.get(field).and_then(id_string) else {
                         return;
                     };
-                    if state.get(session, resource_type, &id).await.is_some() {
-                        return;
+                    let resource = StoredResource {
+                        resource_type: resource_type.into(),
+                        id,
+                        data,
+                    };
+                    let stored = resource.clone();
+                    if state.insert_seeded(session, resource).await
+                        && let Some(collection) = collection
+                    {
+                        rt.collections().remember(session, &stored, collection);
                     }
-                    (id, Some(record))
+                    return;
                 }
             }
         }
@@ -7034,6 +7044,30 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
     }
 }
 
+/// The members type `t`'s schema declares at its top level, as [`entity_fits`] reads
+/// that schema; none for a type with nothing to check against.
+fn type_members(rt: &MockRuntime, t: &str) -> Vec<String> {
+    let index = rt.index();
+    let bundle = rt.bundle();
+    let (read, shape) = match index.detail_reads.get(t) {
+        Some(i) => (Some(*i), index.record_schemas.get(t)),
+        None => match index.other_shapes.get(t) {
+            Some((i, schema)) => (Some(*i), Some(schema)),
+            None => (None, None),
+        },
+    };
+    let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
+        return Vec::new();
+    };
+    let schema = shape.or_else(|| op.success_output()?.schema.as_ref());
+    Place::of(rt, schema)
+        .parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flat_map(|p| p.keys().cloned())
+        .collect()
+}
+
 /// What the record [`fitting_member`] finds must hold.
 #[derive(Clone, Copy)]
 enum Holding<'a> {
@@ -7073,12 +7107,19 @@ fn fitting_member(
             let (Some(record), Some(sent)) = (record.as_object(), sent.as_object()) else {
                 return false;
             };
-            sent.iter().any(|(name, value)| {
+            let declared = type_members(rt, t);
+            let mut named = sent.iter().filter(|(name, value)| {
                 !value.is_null()
                     && !value.is_object()
                     && !value.is_array()
-                    && record.get(name) == Some(value)
-            })
+                    && declared.contains(*name)
+            });
+            let first = named.next();
+            first.is_some()
+                && first
+                    .into_iter()
+                    .chain(named)
+                    .all(|(name, value)| record.get(name) == Some(value))
         }
     };
     let bundle = rt.bundle();
