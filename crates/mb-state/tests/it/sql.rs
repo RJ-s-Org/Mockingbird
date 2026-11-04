@@ -26,6 +26,23 @@ async fn sqlite_ttl_expiry() {
     crate::conformance::ttl_expiry(store, ttl).await;
 }
 
+/// A private in-memory database (the default install's state store) is written by this
+/// store alone; a file, or a named in-memory database, may be opened by another.
+#[tokio::test]
+async fn only_a_private_in_memory_database_is_local_only() {
+    for url in ["sqlite::memory:", "sqlite://:memory:"] {
+        let store = mb_state::connect(url, LONG_TTL).await.expect("connect");
+        assert!(store.local_only(), "{url}");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = format!("sqlite://{}", dir.path().join("state.db").display());
+    let named = "sqlite:file:mb-local-only-test?mode=memory&cache=shared";
+    for url in [file.as_str(), named] {
+        let store = mb_state::connect(url, LONG_TTL).await.expect("connect");
+        assert!(!store.local_only(), "{url}");
+    }
+}
+
 #[tokio::test]
 async fn sqlite_file_persists_across_reconnect() {
     use mb_state::{SessionKey, StoredResource};

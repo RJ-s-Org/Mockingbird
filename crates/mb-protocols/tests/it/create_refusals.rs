@@ -134,7 +134,7 @@ components:
 struct Harness {
     router: axum::Router,
     provider: Arc<ScriptedProvider>,
-    store: Arc<MemoryStore>,
+    store: Arc<dyn StateStore>,
 }
 
 fn session() -> SessionKey {
@@ -147,7 +147,15 @@ fn session() -> SessionKey {
 
 /// A harness over the in-memory store, as a single node serves it.
 fn harness(contract: &str, script: Vec<Value>) -> Harness {
-    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    harness_on(
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        contract,
+        script,
+    )
+}
+
+/// A harness over `store`.
+fn harness_on(store: Arc<dyn StateStore>, contract: &str, script: Vec<Value>) -> Harness {
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
     let rt = MockRuntime::new(
@@ -157,7 +165,7 @@ fn harness(contract: &str, script: Vec<Value>) -> Harness {
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
         )),
-        Arc::clone(&store) as Arc<dyn StateStore>,
+        Arc::clone(&store),
     );
     Harness {
         router: http_rest::router(Arc::new(rt)),
@@ -715,4 +723,323 @@ async fn a_top_level_create_skips_records_of_a_parent_path() {
     let prompt = h.prompt(1);
     assert!(!prompt.contains("ct-000101"), "{prompt}");
     assert!(!prompt.contains("refusal"), "{prompt}");
+}
+
+/// The SQL stores a create's duplicates are found on: the default install's private
+/// in-memory SQLite database, and a SQLite file (as the benchmark runs), which another
+/// process may write to. The file's directory is kept alive with the store.
+async fn sql_stores() -> Vec<(&'static str, Arc<dyn StateStore>, Option<tempfile::TempDir>)> {
+    let ttl = Duration::from_secs(3600);
+    let memory = mb_state::connect("sqlite::memory:", ttl).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("state.db").display());
+    let file = mb_state::connect(&url, ttl).await.unwrap();
+    vec![
+        ("sqlite::memory:", memory, None),
+        ("sqlite file", file, Some(dir)),
+    ]
+}
+
+/// Duplicates are found on a SQL store as on the in-memory one: a taken email (an
+/// identifying value) and a taken folder name in the same parent (a plain one) are shown
+/// and offered the 409, a taken name in another parent and a taken email under another
+/// path parent are not.
+#[tokio::test]
+async fn a_sql_store_finds_what_a_create_repeats() {
+    for (backend, store, _dir) in sql_stores().await {
+        let h = harness_on(
+            Arc::clone(&store),
+            CONTRACT,
+            vec![
+                contact("ct-000101", "Jane Roe", "jane.roe@example.com"),
+                refusal(),
+                folder("fd-000001", "0"),
+                refusal(),
+                folder("fd-000002", "77"),
+            ],
+        );
+        h.post(
+            "/contacts",
+            json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
+        )
+        .await;
+        let (status, _) = h
+            .post(
+                "/contacts",
+                json!({"name": "J. Roe", "email": "jane.roe@example.com"}),
+            )
+            .await;
+        let prompt = h.prompt(1);
+        assert_eq!(status, StatusCode::CONFLICT, "{backend}: {prompt}");
+        let same = block(&prompt, "same_values").unwrap_or_default();
+        assert!(
+            same.contains("\"id\": \"ct-000101\"") && same.contains("\"member\": \"email\""),
+            "{backend}: {prompt}"
+        );
+
+        let body = json!({"name": "Quarterly Reports", "parent": {"id": "0"}});
+        h.post("/folders", body.clone()).await;
+        let (status, _) = h.post("/folders", body).await;
+        let prompt = h.prompt(3);
+        assert_eq!(status, StatusCode::CONFLICT, "{backend}: {prompt}");
+        let same = block(&prompt, "same_values").unwrap_or_default();
+        assert!(
+            same.contains("fd-000001") && same.contains("\"member\": \"name\""),
+            "{backend}: {prompt}"
+        );
+        let (status, _) = h
+            .post(
+                "/folders",
+                json!({"name": "Quarterly Reports", "parent": {"id": "77"}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{backend}");
+        let prompt = h.prompt(4);
+        assert!(!prompt.contains("same_values"), "{backend}: {prompt}");
+        assert!(!prompt.contains("refusal"), "{backend}: {prompt}");
+    }
+
+    for (backend, store, _dir) in sql_stores().await {
+        let h = harness_on(
+            store,
+            NESTED,
+            vec![
+                json!({"id": "mb-000001", "email": "jane.roe@example.com"}),
+                json!({"id": "mb-000002", "email": "jane.roe@example.com"}),
+            ],
+        );
+        let body = json!({"email": "jane.roe@example.com"});
+        h.post("/orgs/acme/members", body.clone()).await;
+        let (status, _) = h.post("/orgs/globex/members", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{backend}");
+        let prompt = h.prompt(1);
+        assert!(!prompt.contains("mb-000001"), "{backend}: {prompt}");
+        assert!(!prompt.contains("refusal"), "{backend}: {prompt}");
+    }
+}
+
+fn stored(t: &str, data: Value) -> mb_state::StoredResource {
+    mb_state::StoredResource {
+        resource_type: t.into(),
+        id: data["id"].as_str().unwrap_or_default().into(),
+        data,
+    }
+}
+
+/// [`CONTRACT`] with no route creating contacts under a parent path: every contact is
+/// then in no collection, wherever it came from.
+fn flat_contract() -> String {
+    let start = CONTRACT.find("  /groups/{group}/contacts:").unwrap();
+    let end = CONTRACT.find("components:").unwrap();
+    let flat = format!("{}{}", &CONTRACT[..start], &CONTRACT[end..]);
+    assert!(!flat.contains("/groups/"));
+    flat
+}
+
+/// On a store another process writes to, the record that process stored is what the
+/// create repeats: it is found by asking the store, not this runtime's index. A plain
+/// name two records hold is still no match.
+#[tokio::test]
+async fn a_shared_store_finds_a_record_another_node_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("state.db").display());
+    let ttl = Duration::from_secs(3600);
+    let ours = mb_state::connect(&url, ttl).await.unwrap();
+    let theirs = mb_state::connect(&url, ttl).await.unwrap();
+    assert!(!ours.local_only());
+    let held = contact("ct-000901", "Jane Roe", "jane.roe@example.com");
+    theirs
+        .upsert(&session(), stored("contacts", held))
+        .await
+        .unwrap();
+    let h = harness_on(ours, &flat_contract(), vec![refusal()]);
+    let (status, _) = h
+        .post(
+            "/contacts",
+            json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
+        )
+        .await;
+    let prompt = h.prompt(0);
+    assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+    let same = block(&prompt, "same_values").unwrap_or_default();
+    assert!(same.contains("ct-000901"), "{prompt}");
+
+    for id in ["fd-000901", "fd-000902"] {
+        theirs
+            .upsert(&session(), stored("folders", folder(id, "0")))
+            .await
+            .unwrap();
+    }
+    let h = harness_on(
+        mb_state::connect(&url, ttl).await.unwrap(),
+        CONTRACT,
+        vec![folder("fd-000903", "0")],
+    );
+    let (status, _) = h
+        .post(
+            "/folders",
+            json!({"name": "Quarterly Reports", "parent": {"id": "0"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(!h.prompt(0).contains("same_values"), "{}", h.prompt(0));
+}
+
+/// Two runtimes on one SQLite file: what runtime A created under a parent path
+/// (`/groups/g1/contacts`) is in a collection runtime B cannot know, so B's top-level
+/// create of the same contact is no repeat of it.
+#[tokio::test]
+async fn a_top_level_create_skips_another_runtime_s_record_of_a_parent_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("state.db").display());
+    let ttl = Duration::from_secs(3600);
+    let a = harness_on(
+        mb_state::connect(&url, ttl).await.unwrap(),
+        CONTRACT,
+        vec![contact("ct-000101", "Jane Roe", "jane.roe@example.com")],
+    );
+    let b = harness_on(
+        mb_state::connect(&url, ttl).await.unwrap(),
+        CONTRACT,
+        vec![
+            contact("ct-000102", "Jane Roe", "jane.roe@example.com"),
+            refusal(),
+        ],
+    );
+    let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
+    let (status, _) = a.post("/groups/g1/contacts", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = b.post("/contacts", body.clone()).await;
+    let prompt = b.prompt(0);
+    assert_eq!(status, StatusCode::CREATED, "{prompt}");
+    assert!(!prompt.contains("ct-000101"), "{prompt}");
+    assert!(!prompt.contains("same_values"), "{prompt}");
+
+    // What B created at the top level, it knows is in no collection: a repeat counts.
+    let (status, _) = b.post("/contacts", body).await;
+    let prompt = b.prompt(1);
+    assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+    let same = block(&prompt, "same_values").unwrap_or_default();
+    assert!(
+        same.contains("ct-000102") && !same.contains("ct-000101"),
+        "{prompt}"
+    );
+}
+
+/// A record the Admin API seeded or upserted is existing data a create repeats, on
+/// every store alike: a create with its email is shown it and offered the 409.
+#[tokio::test]
+async fn a_seeded_record_counts_on_every_store() {
+    let mut stores = sql_stores().await;
+    let memory: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    stores.push(("memory", memory, None));
+    for (backend, store, _dir) in stores {
+        let held = contact("ct-000901", "Jane Roe", "jane.roe@example.com");
+        store
+            .seed(&session(), vec![stored("contacts", held)])
+            .await
+            .unwrap();
+        let h = harness_on(store, &flat_contract(), vec![refusal()]);
+        let (status, _) = h
+            .post(
+                "/contacts",
+                json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
+            )
+            .await;
+        let prompt = h.prompt(0);
+        assert_eq!(status, StatusCode::CONFLICT, "{backend}: {prompt}");
+        let same = block(&prompt, "same_values").unwrap_or_default();
+        assert!(same.contains("ct-000901"), "{backend}: {prompt}");
+    }
+}
+
+/// A store whose listing fails when told to.
+struct FailingList {
+    inner: Arc<dyn StateStore>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl StateStore for FailingList {
+    async fn get(&self, s: &SessionKey, t: &str, id: &str) -> Result<Option<Stored>, Failed> {
+        self.inner.get(s, t, id).await
+    }
+    async fn list(&self, s: &SessionKey, t: &str, limit: usize) -> Result<Vec<Stored>, Failed> {
+        if self.fail {
+            return Err(Failed::Backend("list failed".into()));
+        }
+        self.inner.list(s, t, limit).await
+    }
+    async fn upsert(&self, s: &SessionKey, r: Stored) -> Result<(), Failed> {
+        self.inner.upsert(s, r).await
+    }
+    async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, Failed> {
+        self.inner.delete(s, t, id).await
+    }
+    async fn reset(&self, s: &SessionKey) -> Result<(), Failed> {
+        self.inner.reset(s).await
+    }
+    async fn reset_mock(&self, w: &str, m: &str) -> Result<(), Failed> {
+        self.inner.reset_mock(w, m).await
+    }
+    async fn touch(&self, s: &SessionKey) -> Result<(), Failed> {
+        self.inner.touch(s).await
+    }
+    async fn sessions(&self, w: &str, m: &str) -> Result<Vec<mb_state::SessionInfo>, Failed> {
+        self.inner.sessions(w, m).await
+    }
+    async fn export(&self, s: &SessionKey) -> Result<Vec<Stored>, Failed> {
+        self.inner.export(s).await
+    }
+    async fn seed(&self, s: &SessionKey, r: Vec<Stored>) -> Result<(), Failed> {
+        self.inner.seed(s, r).await
+    }
+    async fn ping(&self) -> Result<(), Failed> {
+        self.inner.ping().await
+    }
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<mb_state::StateChanged> {
+        self.inner.subscribe()
+    }
+}
+
+type Stored = mb_state::StoredResource;
+type Failed = mb_state::StateError;
+
+/// A store holding a contact with a create's email: when its listing answers, the
+/// create is refused; when it fails, what the create repeats is unknown, and it is shown
+/// nothing and offered no refusal.
+#[tokio::test]
+async fn a_failed_listing_decides_nothing() {
+    for fail in [false, true] {
+        let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let held = contact("ct-000101", "Jane Roe", "jane.roe@example.com");
+        store
+            .upsert(&session(), stored("contacts", held))
+            .await
+            .unwrap();
+        let h = harness_on(
+            Arc::new(FailingList { inner: store, fail }),
+            &flat_contract(),
+            vec![if fail {
+                contact("ct-000102", "Jane Roe", "jane.roe@example.com")
+            } else {
+                refusal()
+            }],
+        );
+        let (status, _) = h
+            .post(
+                "/contacts",
+                json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
+            )
+            .await;
+        let prompt = h.prompt(0);
+        if fail {
+            assert_eq!(status, StatusCode::CREATED, "{prompt}");
+            assert!(!prompt.contains("same_values"), "{prompt}");
+            assert!(!prompt.contains("refusal"), "{prompt}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+            assert!(prompt.contains("same_values"), "{prompt}");
+        }
+    }
 }

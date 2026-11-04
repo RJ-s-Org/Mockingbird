@@ -7,7 +7,8 @@
 //! `spotify:track:<id>`), by a short id in an object named after its type (Jira's
 //! `transition: {id: "21"}`), or by a member value only that record holds (a ticket
 //! created with its requester's `email`). Each record this runtime stores is indexed, per
-//! session, by its identity and by the plain string members its read declares. A
+//! session, by its identity and, with a store only this process writes to, by the string
+//! members its read declares that identify it ([`Kind::Identifying`]). A
 //! request's values, at any depth of its body, query or path, are matched against it:
 //!
 //! - a whole value of an id's shape (see [`id_like`]) matches the one record it is the
@@ -38,16 +39,17 @@
 //! A create whose operation declares a refusal status is also shown the records of the
 //! type it creates that already hold what it asks for ([`same_values`]): a top-level
 //! request member's whole string value, held by a stored record of that type under the
-//! very same member. A value that identifies what holds it (as above) matches the
-//! records holding it, a few at most. A plain string (a name, a slug), indexed apart
-//! under its own cap and never a reference, matches only the one record holding it, and
-//! only when that record agrees with every other value the request sets that it holds,
-//! one of them a reference, and when a refusal status the create may be offered names
-//! the member in its description ([`mb_engine::guards::a_refusal_names`]): a folder's
-//! name in the same parent, not in another, and never a title alone. Any record must
-//! agree with the references the body sets, and must have been created in the
-//! collection the create runs in: the same one under a parent path, none at the top. Trivial
-//! values (enums, dates, booleans, short words) are never indexed, and a value two
+//! very same member. These are found by asking the store, not through the index, so
+//! every backend finds the same, records another node, the Admin API or a seed stored
+//! included. A value that identifies what holds it (as above) matches the records
+//! holding it, a few at most. A plain string (a name, a slug), never a reference,
+//! matches only the one record holding it, and only when that record agrees with every
+//! other value the request sets that it holds, one of them a reference, and when a
+//! refusal status the create may be offered names the member in its description
+//! ([`mb_engine::guards::a_refusal_names`]): a folder's name in the same parent, not in
+//! another, and never a title alone. Any record must agree with the references the body
+//! sets, and must be in the collection the create runs in (see [`same_values`]).
+//! Trivial values (enums, dates, booleans, short words) never match, and a value two
 //! records hold is no plain match.
 //!
 //! The index is a hint of this runtime's writes, as [`PathAliases`] is: records the
@@ -66,7 +68,8 @@
 //! store. A member value's uniqueness is known only where this process sees every write:
 //! with a store other nodes write to (SQL, Redis, a bus to other nodes; see
 //! [`mb_state::StateStore::local_only`]), members are not indexed and only identities
-//! match. A single node's store, the in-memory one behind a local bus, is local only.
+//! match. A single node's store, the in-memory one or a private in-memory SQLite
+//! database behind a local bus, is local only.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -98,13 +101,8 @@ const MIN_SHAPED_LEN: usize = 8;
 const IDENTIFYING_FORMATS: [&str; 4] = ["email", "uuid", "uri", "hostname"];
 /// Values of one request matched, at most.
 const MAX_CANDIDATES: usize = 16;
-/// Shortest plain string indexed, in bytes (see [`plain_value`]).
+/// Shortest plain string a create may repeat, in bytes (see [`plain_value`]).
 const MIN_PLAIN_LEN: usize = 6;
-/// Plain values one session keeps at most, apart from [`MAX_SESSION_ENTRIES`]: the
-/// oldest records' go first, and their other entries stay.
-const MAX_PLAIN_SESSION_ENTRIES: usize = 512;
-/// Members of one record indexed as plain values, at most.
-const MAX_PLAIN_MEMBERS: usize = 8;
 /// Records [`same_values`] shows, at most.
 const MAX_SAME_VALUES: usize = 3;
 /// How deep a request is walked.
@@ -115,14 +113,11 @@ const MAX_HOLDERS: usize = 4;
 const MAX_READS: usize = 8;
 
 /// Who holds an indexed value: a record, by its identity (`member` `None`) or a member.
-/// A `plain` value identifies nothing: it only says what a create would repeat
-/// ([`same_values`]), and is no reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Holder {
     resource_type: String,
     id: String,
     member: Option<String>,
-    plain: bool,
 }
 
 impl Holder {
@@ -131,13 +126,11 @@ impl Holder {
     }
 }
 
-/// A record as one session's index holds it: when it was indexed, and under what, its
-/// plain values apart.
+/// A record as one session's index holds it: when it was indexed, and under what.
 #[derive(Debug)]
 struct Record {
     at: u64,
     values: Vec<String>,
-    plain: Vec<String>,
 }
 
 /// One session's index.
@@ -149,10 +142,8 @@ struct SessionEntries {
     by_record: HashMap<(String, String), Record>,
     /// The records by when they were indexed, oldest first.
     order: BTreeMap<u64, (String, String)>,
-    /// Entries held: holders, over every value, but plain ones.
+    /// Entries held: holders, over every value.
     len: usize,
-    /// Plain holders held, within their own cap ([`MAX_PLAIN_SESSION_ENTRIES`]).
-    plain_len: usize,
     /// When the session was last written.
     used: u64,
 }
@@ -164,22 +155,11 @@ impl SessionEntries {
             return;
         };
         self.order.remove(&record.at);
-        self.drop_holders(t, id, &record.values, false);
-        self.drop_holders(t, id, &record.plain, true);
-    }
-
-    /// Drops the holders of `values` that are record `id` of type `t`, plain or not.
-    fn drop_holders(&mut self, t: &str, id: &str, values: &[String], plain: bool) {
-        for value in values {
+        for value in &record.values {
             if let Some(holders) = self.by_value.get_mut(value) {
                 let before = holders.len();
-                holders.retain(|h| !(h.is(t, id) && h.plain == plain));
-                let dropped = before - holders.len();
-                if plain {
-                    self.plain_len = self.plain_len.saturating_sub(dropped);
-                } else {
-                    self.len = self.len.saturating_sub(dropped);
-                }
+                holders.retain(|h| !h.is(t, id));
+                self.len = self.len.saturating_sub(before - holders.len());
                 if holders.is_empty() {
                     self.by_value.remove(value);
                 }
@@ -194,27 +174,6 @@ impl SessionEntries {
                 return;
             };
             self.forget(&t, &id);
-        }
-    }
-
-    /// Drops the plain values of the oldest records until `room` more fit: a record's
-    /// identity and identifying values stay.
-    fn make_plain_room(&mut self, room: usize) {
-        while self.plain_len + room > MAX_PLAIN_SESSION_ENTRIES {
-            let oldest = self.order.values().find(|key| {
-                self.by_record
-                    .get(*key)
-                    .is_some_and(|r| !r.plain.is_empty())
-            });
-            let Some((t, id)) = oldest.cloned() else {
-                return;
-            };
-            let plain = self
-                .by_record
-                .get_mut(&(t.clone(), id.clone()))
-                .map(|r| std::mem::take(&mut r.plain))
-                .unwrap_or_default();
-            self.drop_holders(&t, &id, &plain, true);
         }
     }
 }
@@ -280,46 +239,26 @@ impl ValueIndex {
         if values.is_empty() {
             return;
         }
-        let plains = values.iter().filter(|v| v.plain).count();
-        held.make_room(values.len() - plains);
-        held.make_plain_room(plains);
-        let (mut kept, mut kept_plain) = (Vec::new(), Vec::new());
-        for IndexedValue {
-            member,
-            value,
-            plain,
-        } in values
-        {
+        held.make_room(values.len());
+        let mut kept = Vec::new();
+        for IndexedValue { member, value } in values {
             let holder = Holder {
                 resource_type: resource_type.clone(),
                 id: id.clone(),
                 member,
-                plain,
             };
             let holders = held.by_value.entry(value.clone()).or_default();
             if !holders.contains(&holder) {
                 holders.push(holder);
-                if plain {
-                    held.plain_len += 1;
-                } else {
-                    held.len += 1;
-                }
+                held.len += 1;
             }
-            let list = if plain { &mut kept_plain } else { &mut kept };
-            if !list.contains(&value) {
-                list.push(value);
+            if !kept.contains(&value) {
+                kept.push(value);
             }
         }
         let key = (resource_type, id);
         held.order.insert(at, key.clone());
-        held.by_record.insert(
-            key,
-            Record {
-                at,
-                values: kept,
-                plain: kept_plain,
-            },
-        );
+        held.by_record.insert(key, Record { at, values: kept });
     }
 
     /// Forgets record `id` of type `t` of `session`: deleted, or found gone or changed.
@@ -460,8 +399,6 @@ fn identifies(bundle: &mb_mcm::Bundle, schema: &Value, text: &str) -> bool {
 struct IndexedValue {
     member: Option<String>,
     value: String,
-    /// A plain string, which identifies nothing (see [`Holder`]).
-    plain: bool,
 }
 
 /// What a record is indexed under, taken before it is handed to the store.
@@ -491,11 +428,44 @@ fn plain_value(text: &str) -> bool {
         && !date_or_time_shaped(text)
 }
 
+/// How a string member of a record counts for a match (see [`member_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A value that identifies what holds it ([`identifies`]), of an id's shape.
+    Identifying,
+    /// A [`plain_value`], which identifies nothing: it only says what a create would
+    /// repeat ([`same_values`]), and is no reference.
+    Plain,
+}
+
+/// How member `name`, holding `text`, of a record whose read's schema has `parts` counts
+/// for a match: not at all when the schema does not declare it, it is trivial
+/// ([`trivial_member`]), a reference to another record, or a credential's (by name or
+/// value); else [`Kind::Identifying`] or [`Kind::Plain`] by its value, or not at all.
+fn member_kind(rt: &MockRuntime, parts: &[&Value], name: &str, text: &str) -> Option<Kind> {
+    if reference_prefix(name).is_some()
+        || entity_type(rt.index(), None, name).is_some()
+        || write_memory::is_credential_name(rt, name)
+        || mb_mcm::credentials::hides_in_context(name)
+        || mb_mcm::credentials::is_credential_value(text)
+    {
+        return None;
+    }
+    let bundle = rt.bundle();
+    let member = parts
+        .iter()
+        .find_map(|part| part.get("properties")?.get(name))
+        .filter(|member| !trivial_member(bundle, member))?;
+    if id_like(text) && identifies(bundle, member, text) {
+        Some(Kind::Identifying)
+    } else {
+        plain_value(text).then_some(Kind::Plain)
+    }
+}
+
 /// What `record` is indexed under: its identity and, with a store only this process
-/// writes to, the string members its read's schema declares that have an id's shape,
-/// identify what holds them ([`identifies`]), are not trivial ([`trivial_member`]), are
-/// no reference to another record and hold no credential; then, as plain values, up to
-/// [`MAX_PLAIN_MEMBERS`] of the other such members holding a [`plain_value`].
+/// writes to, up to [`MAX_MEMBERS`] of its string members that identify it
+/// ([`Kind::Identifying`]), other than its identity.
 fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue> {
     let mut out = Vec::new();
     let id = record.id.as_str();
@@ -506,7 +476,6 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
         out.push(IndexedValue {
             member: None,
             value: id.to_string(),
-            plain: false,
         });
     }
     if !rt.state.local_only() {
@@ -518,9 +487,8 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
     ) else {
         return out;
     };
-    let bundle = rt.bundle();
-    let parts = schema_parts(bundle, Some(schema)).0;
-    let (mut kept, mut plain) = (0, Vec::new());
+    let parts = schema_parts(rt.bundle(), Some(schema)).0;
+    let mut kept = 0;
     for (name, value) in members {
         if kept >= MAX_MEMBERS {
             break;
@@ -528,37 +496,14 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
         let Value::String(text) = value else {
             continue;
         };
-        if text == id
-            || reference_prefix(name).is_some()
-            || entity_type(rt.index(), None, name).is_some()
-            || write_memory::is_credential_name(rt, name)
-            || mb_mcm::credentials::hides_in_context(name)
-            || mb_mcm::credentials::is_credential_value(text)
-        {
-            continue;
-        }
-        let declared = parts
-            .iter()
-            .find_map(|part| part.get("properties")?.get(name.as_str()));
-        let Some(member) = declared.filter(|member| !trivial_member(bundle, member)) else {
-            continue;
-        };
-        if id_like(text) && identifies(bundle, member, text) {
+        if text != id && member_kind(rt, &parts, name, text) == Some(Kind::Identifying) {
             out.push(IndexedValue {
                 member: Some(name.clone()),
                 value: text.clone(),
-                plain: false,
             });
             kept += 1;
-        } else if plain.len() < MAX_PLAIN_MEMBERS && plain_value(text) {
-            plain.push(IndexedValue {
-                member: Some(name.clone()),
-                value: text.clone(),
-                plain: true,
-            });
         }
     }
-    out.extend(plain);
     out
 }
 
@@ -699,8 +644,7 @@ fn eligible<R: Fn(&str) -> bool>(
             let held: Vec<Holder> = holders
                 .into_iter()
                 .filter(|h| {
-                    !h.plain
-                        && h.member.as_deref().is_some_and(|m| same_name(member, m))
+                    h.member.as_deref().is_some_and(|m| same_name(member, m))
                         && cx.own_type != Some(h.resource_type.as_str())
                 })
                 .collect();
@@ -883,13 +827,28 @@ fn repeated_by(
 /// its request (see the module's doc), at most [`MAX_SAME_VALUES`], each with the member
 /// it holds it under, other than what `known(type, id)` says is in hand (its target).
 /// Only for a create that may be offered a refusal ([`mb_engine::Engine::may_refuse`]),
-/// with no forced status or scenario to decide its answer, and that carries no
-/// idempotency key ([`mb_engine::guards::carries_an_idempotency_key`]), which makes a
-/// repeat a retry: anything else finds nothing and pays nothing. A create in a collection
-/// under a parent path (`/orgs/acme/members`) counts only records created in that very
-/// collection, and every record must agree with the references its body sets (see
-/// [`repeated_by`]). Each record is read back, and returned as stored; what the prompt
-/// shows of it is the caller's to scrub.
+/// with no forced status or scenario to decide its answer, that carries no idempotency
+/// key ([`mb_engine::guards::carries_an_idempotency_key`]), which makes a repeat a retry,
+/// and that sets a top-level string that could match: one that identifies what holds it
+/// ([`Kind::Identifying`]), or a plain one ([`Kind::Plain`]) under a member a refusal
+/// the create may be offered names ([`mb_engine::guards::a_refusal_names`]). Anything
+/// else finds nothing and pays nothing.
+///
+/// The store is asked, whatever it is: the session's records of the type, at most
+/// [`MAX_SCAN`], newest first, in one listing. A listing the store failed, or the breaker
+/// held off, decides nothing. A value more than [`MAX_HOLDERS`] records hold is common;
+/// a listing cut at [`MAX_SCAN`] may leave holders out, so it decides only a value it
+/// shows one record holding, and never a plain one.
+///
+/// Every record must agree with the references the body sets ([`repeated_by`]), and be
+/// in the collection the create runs in. Where a record is, only this runtime's writes
+/// tell ([`Collections`]): when the contract creates the type under a parent path too
+/// (`POST /groups/{group}/contacts`), a record counts only where this runtime knows it
+/// is, in that very collection for a create under a parent path, in none for a
+/// top-level one, so another node's records, a seed's or what was forgotten never count.
+/// When it does not, every record of the type is in none, and a top-level create counts
+/// any. Each record is returned as stored; what the prompt shows of it is the caller's to
+/// scrub.
 pub(super) async fn same_values(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -910,73 +869,68 @@ pub(super) async fn same_values(
     {
         return Vec::new();
     }
+    let Some(schema) = write_memory::read_schema(rt, own) else {
+        return Vec::new();
+    };
+    let parts = schema_parts(rt.bundle(), Some(schema)).0;
+    let asked: Vec<(&String, &str, Kind)> = body
+        .iter()
+        .filter_map(|(name, value)| {
+            let text = value.as_str()?;
+            let kind = member_kind(rt, &parts, name, text)?;
+            (kind == Kind::Identifying || mb_engine::guards::a_refusal_names(op, name))
+                .then_some((name, text, kind))
+        })
+        .collect();
+    if asked.is_empty() {
+        return Vec::new();
+    }
     let session = &plan.session;
+    let listed = state.list(session, own, MAX_SCAN).await;
+    if !state.available() {
+        return Vec::new();
+    }
+    let whole = listed.len() < MAX_SCAN;
     let collection = collection_of(op, call);
-    // The collection the hit was created or listed under must be the create's: none
-    // for a top-level create, and the very same one under a parent path.
-    let in_collection =
-        |hit: &StoredResource| rt.collections().get(session, hit).as_ref() == collection.as_ref();
-    let mut reads = 0;
+    let placed = created_in_collections(rt.bundle(), own);
+    let in_collection = |hit: &StoredResource| match rt.collections().placement(session, hit) {
+        Some(at) => at == collection,
+        None => !placed && collection.is_none(),
+    };
     let mut out: Vec<(StoredResource, String)> = Vec::new();
-    'members: for (name, value) in body {
+    for (name, text, kind) in asked {
         if out.len() >= MAX_SAME_VALUES {
             break;
         }
-        let Value::String(text) = value else {
-            continue;
-        };
-        if write_memory::is_credential_name(rt, name)
-            || mb_mcm::credentials::is_credential_value(text)
+        let holders: Vec<&StoredResource> = listed
+            .iter()
+            .filter(|r| r.id != text && r.data.get(name).and_then(Value::as_str) == Some(text))
+            .collect();
+        let plain = kind == Kind::Plain;
+        let unique = holders.len() == 1;
+        // A value this many hold is common, whatever its shape; a plain value two hold
+        // is no match; and a listing cut short decides only a value one record holds.
+        if holders.is_empty()
+            || holders.len() > MAX_HOLDERS
+            || (plain && !unique)
+            || (!whole && (plain || !unique))
         {
             continue;
         }
-        let holders: Vec<Holder> = rt
-            .value_index()
-            .holders(session, text)
-            .into_iter()
-            .filter(|h| h.resource_type == own && h.member.as_deref() == Some(name.as_str()))
-            .collect();
-        // A value this many hold is common, whatever its shape.
-        if holders.is_empty() || holders.len() > MAX_HOLDERS {
-            continue;
-        }
-        let plain = holders.iter().any(|h| h.plain);
-        let mut live: Vec<StoredResource> = Vec::new();
-        for holder in &holders {
-            if reads >= MAX_READS {
-                break 'members;
-            }
-            reads += 1;
-            let hit = state.get(session, &holder.resource_type, &holder.id).await;
-            let holds_it = hit
-                .as_ref()
-                .is_some_and(|hit| hit.data.get(name).and_then(Value::as_str) == Some(text));
-            match hit {
-                Some(hit) if holds_it => live.push(hit),
-                _ if !state.available() => break 'members,
-                _ => rt
-                    .value_index()
-                    .forget(session, &holder.resource_type, &holder.id),
-            }
-        }
-        // A plain value two live records hold is no match, nor one no refusal the
-        // create may be offered names the member of.
-        if plain && (live.len() != 1 || !mb_engine::guards::a_refusal_names(op, name)) {
-            continue;
-        }
-        live.retain(|hit| in_collection(hit) && repeated_by(rt, body, name, plain, hit));
-        for hit in live {
+        for hit in holders {
             if out.len() >= MAX_SAME_VALUES {
                 break;
             }
-            if known(&hit.resource_type, &hit.id)
+            if !in_collection(hit)
+                || !repeated_by(rt, body, name, plain, hit)
+                || known(&hit.resource_type, &hit.id)
                 || out
                     .iter()
                     .any(|(r, _)| r.resource_type == hit.resource_type && r.id == hit.id)
             {
                 continue;
             }
-            out.push((hit, name.clone()));
+            out.push((hit.clone(), name.clone()));
         }
     }
     out
@@ -1159,19 +1113,15 @@ components:
                 "account": "acc-000001", "state": "on-hold", "undeclared": "und-000001",
             }),
         };
-        let values: Vec<(Option<String>, String, bool)> = indexed_values(&rt, &record)
+        let values: Vec<(Option<String>, String)> = indexed_values(&rt, &record)
             .into_iter()
-            .map(|v| (v.member, v.value, v.plain))
+            .map(|v| (v.member, v.value))
             .collect();
         assert_eq!(
             values,
             vec![
-                (None, "ct-000101".to_string(), false),
-                (
-                    Some("email".to_string()),
-                    "jane@example.com".to_string(),
-                    false
-                ),
+                (None, "ct-000101".to_string()),
+                (Some("email".to_string()), "jane@example.com".to_string()),
             ]
         );
     }
@@ -1193,41 +1143,6 @@ components:
         assert_eq!(index.holders(&b, &thing(0).id).len(), 1);
         index.forget(&a, "things", &newest);
         assert!(index.holders(&a, &newest).is_empty());
-    }
-
-    /// Plain values have a cap of their own: many of them drop the oldest plain values,
-    /// never a record's identity or identifying values.
-    #[test]
-    fn plain_values_never_evict_references() {
-        let rt = runtime();
-        let index = ValueIndex::default();
-        let a = session("a");
-        let contact = |n: usize| StoredResource {
-            resource_type: "contacts".into(),
-            id: format!("ct-{n:06}"),
-            data: serde_json::json!({
-                "id": format!("ct-{n:06}"),
-                "email": format!("c{n}@example.com"),
-                "name": format!("plain name {n}"),
-            }),
-        };
-        let records = MAX_PLAIN_SESSION_ENTRIES + 10;
-        for n in 0..records {
-            index.remember(&rt, &a, &contact(n));
-        }
-        assert!(records * 2 <= MAX_SESSION_ENTRIES, "references all fit");
-        assert_eq!(index.len(&a), records * 2, "every reference entry stays");
-        assert_eq!(index.holders(&a, "ct-000000").len(), 1);
-        assert_eq!(index.holders(&a, "c0@example.com").len(), 1);
-        assert!(
-            index.holders(&a, "plain name 0").is_empty(),
-            "oldest plain went"
-        );
-        let newest = format!("plain name {}", records - 1);
-        assert_eq!(index.holders(&a, &newest).len(), 1);
-        // Forgetting a record whose plain values went already is clean.
-        index.forget(&a, "contacts", "ct-000000");
-        assert!(index.holders(&a, "ct-000000").is_empty());
     }
 
     #[test]
