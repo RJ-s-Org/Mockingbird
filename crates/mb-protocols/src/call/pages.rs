@@ -9,9 +9,12 @@
 //! empty, while the session holds records the query asks for that it does not show, is
 //! a cut too: those records are its rest ([`lists::stored_rest`]), after any the page
 //! size cut. So is such a page whose token the model gave: the stored records come
-//! before the model's own next page, and a minted token replaces the model's (its count
-//! stays, raised only as below). With no such records, the model's token stays, with its
-//! count, as it leads to the model's own next page. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
+//! before the model's own next page: a minted token takes the place of the model's,
+//! which is kept with the cut, and the last page of the rest carries it, where the
+//! answer validates so, leading on to the model's own pages. The count stays, raised
+//! only as below. A cut the page size made of the model's own items alone writes its
+//! token over the model's, which the last page does not carry; a page that is no cut
+//! keeps the model's token as it is. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
 //! a session). Its records are stored already, so they are not seeded again. A count of
 //! the list beside the token that counts fewer than the page and its rest (see
 //! [`deleted::with_count_at_least`]) is raised to them. A minted token's more flag
@@ -81,8 +84,9 @@
 //! Prose never ties one (`q`, "sent again with the next request"). None, two, or two
 //! such members, are no place. A URL the model wrote there to another page of the route by anything but the
 //! cursor (`page=2`) stays as it is: there is no place. One carrying the cursor is its
-//! token, and stays too when no cut serves it: a cut the page size made of the model's
-//! own items leaves it, and one holding stored records replaces it, as a token is. The token is written as the URL of its page:
+//! token, and stays too when no stored records are left for a next page: a cut the page
+//! size made of the model's own items leaves it. A cut holding stored records takes its
+//! place, and its last page carries the model's URL, as for a token. The token is written as the URL of its page:
 //! the mock's own, as the request reached it ([`CallPlan::page_url`]: the scheme and
 //! host [`crate::base_url::of`] gives, the mount prefix, and the request's path as sent,
 //! its values encoded as they came), never a host the model wrote, with the request's
@@ -895,6 +899,9 @@ struct Cut {
     /// The page as answered, with its token.
     page: Value,
     rest: Vec<Value>,
+    /// The token or URL the model gave at the slot, which the last page carries on to
+    /// the model's own next page.
+    then: Option<Value>,
 }
 
 impl Cut {
@@ -911,6 +918,7 @@ impl Cut {
             "size_param": self.size_param,
             "page": self.page,
             "rest": self.rest,
+            "then": self.then,
         })
     }
 
@@ -939,6 +947,7 @@ impl Cut {
             size_param: text(&value, "size_param")?,
             page: value.get_mut("page")?.take(),
             rest,
+            then: value.get("then").filter(|then| !then.is_null()).cloned(),
         })
     }
 }
@@ -979,7 +988,8 @@ pub(super) async fn mint(
         &cut.size_param,
     )
     // A URL the model gave to its own next page stays, as no cut serves it, unless the
-    // store holds records for a next page: those come first.
+    // store holds records for a next page: those come first, and the URL follows them
+    // on the last of their pages.
     .filter(|slot| slot.url.is_none() || slot.given(body).is_none() || cut.stored > 0);
     if slot.is_none() && !runs::starts(rt.bundle(), (op, call), &cut.size_param) {
         return false;
@@ -1014,7 +1024,14 @@ pub(super) async fn mint(
         return false;
     }
     let kept = match slot {
-        Some(slot) => tokened(rt, plan, call, body, slot, (cut.size, cut.size_param), rest),
+        Some(slot) => tokened(
+            rt,
+            (plan, call),
+            body,
+            slot,
+            (cut.size, cut.size_param),
+            (rest, cut.stored > 0),
+        ),
         None => runs::first_page(
             rt,
             (plan, call),
@@ -1064,14 +1081,21 @@ pub(super) async fn mint(
 /// `None` when no such page validates.
 fn tokened(
     rt: &MockRuntime,
-    plan: &CallPlan<'_>,
-    call: &OperationCall,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
     body: &Value,
     slot: Slot,
     (size, size_param): (usize, String),
-    rest: Vec<Value>,
+    (rest, stored): (Vec<Value>, bool),
 ) -> Option<(Value, StoredResource)> {
     let op = plan.op;
+    // What the model gave there leads on after stored records, to the model's own next
+    // page. A rest of the model's own items only is what its token passed already.
+    let then = slot.given(body).filter(|_| stored).and_then(|_| {
+        slot.path
+            .iter()
+            .try_fold(body, |at, name| at.get(name))
+            .cloned()
+    });
     let (nonce, place) = new_cut(&plan.session, op);
     let first = token(&nonce, place, 0);
     let valid = |candidate: &Value| {
@@ -1104,6 +1128,7 @@ fn tokened(
         size_param,
         page: page.clone(),
         rest,
+        then,
     };
     let document = StoredResource {
         resource_type: INTERNAL_TYPE.to_string(),
@@ -1175,6 +1200,14 @@ pub(super) async fn serve(
         filled(&body, &cut.slot, (op, call), &token)
             .iter()
             .find_map(valid)?
+    } else if let Some(then) = cut
+        .then
+        .as_ref()
+        .and_then(|then| placed(&body, &cut.slot.path, Some(then.clone())))
+        .and_then(|page| valid(&page))
+    {
+        // The last page of the rest leads on to the model's own next page.
+        then
     } else {
         // The last page: no token, as the answer allows.
         let flag = more_flag(rt.bundle(), op, &cut.slot.path);

@@ -3548,13 +3548,14 @@ async fn next_of(api: &Api, first: &Value, query: &str) -> Value {
 
 /// A scope value no record holds (`org=acme`), which the create of each record carried
 /// as well, excludes none of them: the next page is the other task the organization's
-/// create made, and not the one another organization's made.
+/// create made, and not the one another organization's made, though its title holds
+/// `acme`.
 #[tokio::test]
 async fn a_value_the_create_carried_excludes_no_stored_record() {
     let tasks = [
         ("t1", "A", "acme"),
         ("t2", "B", "acme"),
-        ("t3", "C", "other"),
+        ("t3", "acme rival", "other"),
     ];
     let mut script = scoped_answers(&tasks);
     let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
@@ -3630,12 +3631,16 @@ async fn an_expression_the_mock_cannot_read_pages_nothing() {
 }
 
 /// A token the model gave, while the session holds a matching record the page does not
-/// show, gives way to a minted one: the next page is the stored record, not the model's.
+/// show, gives way to a minted one: the next page is the stored record, and it carries
+/// the model's token on to the model's own next page.
 #[tokio::test]
-async fn a_stored_rest_replaces_the_model_s_token() {
+async fn a_stored_rest_comes_before_the_model_s_token() {
     let mut script = created("open");
     let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc", "total": 50});
     script.push(Ok(page.to_string()));
+    let third =
+        json!({"data": [stored_task("x3", "X", "open")], "next_cursor": "def", "total": 50});
+    script.push(Ok(third.to_string()));
     let api = api_of(&stored_pages(BY_CURSOR), true, script);
     two_tasks(&api).await;
     let first = api.get("/tasks?limit=1").await;
@@ -3644,7 +3649,11 @@ async fn a_stored_rest_replaces_the_model_s_token() {
     let cursor = first["next_cursor"].as_str().unwrap_or_default();
     let second = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
     assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    assert_eq!(second["next_cursor"], "abc", "{second}");
     assert_eq!(api.provider.requests().len(), 3);
+    // The model's token is the model's: its next page is generated.
+    assert_eq!(api.get("/tasks?limit=1&cursor=abc").await, third);
+    assert_eq!(api.provider.requests().len(), 4);
 }
 
 /// A next link the model gave, carrying the cursor, gives way to the mock's own while
@@ -3665,5 +3674,123 @@ async fn a_stored_rest_replaces_the_model_s_next_link() {
     assert_ne!(href, next, "{first}");
     let second = api.get(followed(href)).await;
     assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    // The last stored page leads on to the model's own next page.
+    assert_eq!(second["_links"]["next"]["href"], next, "{second}");
     assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A record the create made under `org=acme`, whose title holds `other`, is no record
+/// of `org=other`: the scope its create carried decides, not its text.
+#[tokio::test]
+async fn review_a_record_of_another_scope_does_not_leak_by_containment() {
+    let tasks = [
+        ("t1", "Another", "acme"),
+        ("t2", "X", "other"),
+        ("t3", "Y", "other"),
+    ];
+    let mut script = scoped_answers(&tasks);
+    let page = json!({"data": [stored_task("t2", "X", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    let api = api_of(SCOPED_PAGES, true, script);
+    scoped_tasks(&api, &tasks).await;
+    let first = api.get("/tasks?org=other&limit=1").await;
+    let second = next_of(&api, &first, "org=other&limit=1").await;
+    assert_eq!(ids_in(&second, "data"), ["t3"], "{second}");
+}
+
+/// After the stored rest is served, the model's own next page (total 50) still follows.
+#[tokio::test]
+async fn review_the_model_s_continuation_survives_the_stored_rest() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc", "total": 50});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    let cursor = first["next_cursor"].as_str().unwrap_or_default();
+    let second = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    assert!(
+        second["next_cursor"].is_string(),
+        "model's continuation lost: {second}"
+    );
+}
+
+const DEFAULT_CHOICE: &str = r##"
+openapi: 3.1.0
+info: {title: Default choice, version: "1"}
+paths:
+  /tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: show, in: query, schema: {type: string, enum: [open, done], default: open}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  next_cursor: {type: [string, "null"]}
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, title, status]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        status: {type: string, enum: [open, done]}
+"##;
+
+/// `show=open` is the default, but it is a choice records hold: a done task does not
+/// follow on the next page.
+#[tokio::test]
+async fn review_a_default_that_records_hold_still_excludes() {
+    let mut script = created("done");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    let api = api_of(DEFAULT_CHOICE, true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1&show=open").await;
+    assert!(
+        first["next_cursor"].is_null(),
+        "done task paged under show=open: {first}"
+    );
+}
+
+/// A free-text value is looked for in the items' declared plain text only: an email
+/// the items do not declare (`b@example.org`) does not match `q=example`.
+#[tokio::test]
+async fn review_free_text_matches_only_declared_text() {
+    let tasks = [("t1", "A", "acme"), ("t2", "B", "acme")];
+    let mut script = vec![
+        Ok(json!({"id": "t1", "title": "A", "status": "open"}).to_string()),
+        Ok(
+            json!({"id": "t2", "title": "B", "status": "open", "owner_email": "b@example.org"})
+                .to_string(),
+        ),
+    ];
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": null});
+    script.push(Ok(page.to_string()));
+    let api = api_of(SCOPED_PAGES, true, script);
+    scoped_tasks(&api, &tasks).await;
+    let first = api.get("/tasks?org=acme&limit=1&q=example").await;
+    assert!(
+        first["next_cursor"].is_null(),
+        "undeclared email matched q: {first}"
+    );
 }
