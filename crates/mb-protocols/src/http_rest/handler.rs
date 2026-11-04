@@ -541,12 +541,9 @@ async fn serve(
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
-    let record = call::etag_record(rt, &plan, &call, &generated);
     let mut resp =
         tracing::info_span!("mb.encode").in_scope(|| log.generated(as_xml(rt, op, generated)));
     add_headers(&mut resp, rt, op, plan.scenario);
-    // The record's entity tag, which a later `If-Match` is compared with.
-    call::serve_etag(rt, &plan, record, resp.headers_mut()).await;
     if plan.chaos.inject_error {
         mark_chaos(&mut resp);
     }

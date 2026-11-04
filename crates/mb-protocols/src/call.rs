@@ -36,8 +36,6 @@ mod minted;
 mod pages;
 mod runs;
 mod tokens;
-#[cfg(feature = "http-rest")]
-pub(crate) use tokens::{etag_record, serve_etag};
 mod value_index;
 mod world;
 

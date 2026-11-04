@@ -60,7 +60,6 @@ pub mod extract;
 pub mod faker;
 pub mod guards;
 pub mod headers;
-pub mod json_patch_body;
 mod media;
 pub mod message;
 pub mod ndjson;
@@ -2347,9 +2346,6 @@ fn reflect(
             overlay_request(validator, body, call.body.as_ref())
         }
         OperationKind::Command(Effect::Update) => {
-            // A JSON Patch names what its operations change on the stored target.
-            let patched = ctx.target.and_then(|target| patch_as_body(call, target));
-            let call = patched.as_ref().unwrap_or(call);
             let overlaid = overlay_request(validator, body.clone(), call.body.as_ref());
             if is_new_record(op, call, ctx.target, &response, &overlaid) {
                 response.new_record = true;
@@ -2429,20 +2425,6 @@ fn without_members(call: &OperationCall, members: &[String]) -> OperationCall {
     }
     out.query.retain(|k, _| !members.contains(k));
     out
-}
-
-/// `call` with its JSON Patch body, applied to `target`, as the object of the top-level
-/// members it changes (see [`json_patch_body`]). `None` for any other body, or a patch
-/// that does not apply.
-fn patch_as_body(call: &OperationCall, target: &StoredResource) -> Option<OperationCall> {
-    let body = call.body.as_ref()?;
-    match json_patch_body::apply(&target.data, body) {
-        json_patch_body::Applied::Applied(after) => Some(OperationCall {
-            body: Some(json_patch_body::changed_members(&target.data, &after)),
-            ..call.clone()
-        }),
-        _ => None,
-    }
 }
 
 /// `body` with each of `members` holding what the LLM's `raw` answer gave it, when that

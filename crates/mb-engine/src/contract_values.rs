@@ -12,9 +12,10 @@
 //!    backticks, or in `<code>`), when the description ties it to the member: the
 //!    member's `enum` holds it and no other value the description names, or the
 //!    description names the member itself in code position (its name, or its dotted
-//!    path such as `error.code`) right before one value, and before no other. A text
-//!    that is the name of a member of the body is no value (`` The `code` and `message`
-//!    members `` names two members, not a code);
+//!    path such as `error.code`) and, after it in the same sentence, one value only:
+//!    `` `code` is `version_conflict` or `edit_conflict` `` names two, and is no guess.
+//!    A text that is the name of a member of the body is no value (`` The `code` and
+//!    `message` members `` names two members, not a code);
 //! 3. its schema's example (`example`, else the first of `examples`, not a boolean's),
 //!    only where no other status's response uses that schema: an example of a shared
 //!    `Error` says nothing of this status.
@@ -56,7 +57,7 @@ pub(crate) fn fill(
     if !validator.is_valid(&body) {
         return body;
     }
-    let spans = description.map(code_spans).unwrap_or_default();
+    let spans = description.map(sentenced_spans).unwrap_or_default();
     let mut names = HashSet::new();
     property_names(bundle, schema, 0, &mut HashSet::new(), &mut names);
     let mut walk = Walk {
@@ -87,35 +88,55 @@ pub(crate) fn fill(
 /// backticks, and inside `<code>`, trimmed, when it is short and not empty.
 #[must_use]
 pub fn code_spans(text: &str) -> Vec<String> {
+    sentenced_spans(text).into_iter().map(|(span, _)| span).collect()
+}
+
+/// [`code_spans`], each with the number of the sentence it stands in: a `.`, `!` or `?`
+/// outside code, followed by a space or the end, ends one.
+fn sentenced_spans(text: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     let mut rest = text;
+    let mut sentence = 0;
     while out.len() < MAX_SPANS {
         let tick = rest.find('`');
         let tag = rest.find("<code>");
-        let (inner, after) = match (tick, tag) {
+        let (start, inner, after) = match (tick, tag) {
             (Some(t), g) if g.is_none_or(|g| t < g) => {
                 let open = rest[t..].bytes().take_while(|b| *b == b'`').count();
                 let fence = "`".repeat(open);
                 let body = &rest[t + open..];
                 let Some(end) = body.find(&fence) else { break };
-                (&body[..end], &body[end + open..])
+                (t, &body[..end], &body[end + open..])
             }
             (_, Some(g)) => {
                 let body = &rest[g + "<code>".len()..];
                 let Some(end) = body.find("</code>") else {
                     break;
                 };
-                (&body[..end], &body[end + "</code>".len()..])
+                (g, &body[..end], &body[end + "</code>".len()..])
             }
             _ => break,
         };
+        sentence += sentence_ends(&rest[..start]);
         let inner = inner.trim();
         if !inner.is_empty() && inner.chars().count() <= MAX_SPAN_CHARS {
-            out.push(inner.to_string());
+            out.push((inner.to_string(), sentence));
         }
         rest = after;
     }
     out
+}
+
+/// How many sentences `prose` ends.
+fn sentence_ends(prose: &str) -> usize {
+    let chars: Vec<char> = prose.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            matches!(c, '.' | '!' | '?') && chars.get(i + 1).is_none_or(|n| n.is_whitespace())
+        })
+        .count()
 }
 
 /// Every member name `schema` declares, at any depth, through `$ref`s and compositions.
@@ -219,7 +240,8 @@ fn statuses_by_def(bundle: &Bundle) -> HashMap<String, HashSet<Option<u16>>> {
 
 struct Walk<'a> {
     bundle: &'a Bundle,
-    spans: &'a [String],
+    /// What the description names in code position, with its sentence.
+    spans: &'a [(String, usize)],
     /// Every member name the body's schema declares.
     names: &'a HashSet<String>,
     /// The response's HTTP status.
@@ -363,20 +385,28 @@ impl Walk<'_> {
         if let Some(values) = values {
             let mut named = values
                 .iter()
-                .filter(|v| self.spans.iter().any(|s| matches_span(v, s)));
+                .filter(|v| self.spans.iter().any(|(s, _)| matches_span(v, s)));
             return match (named.next(), named.next()) {
                 (Some(one), None) => scalar(one),
                 _ => None,
             };
         }
         let mut found: Vec<Value> = Vec::new();
-        for pair in self.spans.windows(2) {
-            if (pair[0] == name || pair[0] == dotted)
-                && !self.names.contains(&pair[1])
-                && let Some(value) = typed(node, &pair[1])
-                && !found.contains(&value)
-            {
-                found.push(value);
+        // Every value after the member's name, to the end of its sentence.
+        for (at, (span, sentence)) in self.spans.iter().enumerate() {
+            if span != name && span != dotted {
+                continue;
+            }
+            let after = self.spans[at + 1..]
+                .iter()
+                .take_while(|(_, s)| s == sentence)
+                .filter(|(value, _)| !self.names.contains(value));
+            for (value, _) in after {
+                if let Some(value) = typed(node, value)
+                    && !found.contains(&value)
+                {
+                    found.push(value);
+                }
             }
         }
         match found.as_slice() {

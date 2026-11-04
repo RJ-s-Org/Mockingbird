@@ -252,3 +252,20 @@ fn a_singular_example_counts() {
     schema["properties"]["code"]["example"] = Value::from("held_elsewhere");
     assert_eq!(conflict_body(&bundle)["code"], "held_elsewhere");
 }
+
+/// Every value after the member's name to the end of its sentence counts: two are no
+/// guess, and a value in the next sentence is not the member's.
+#[test]
+fn values_after_a_member_count_to_the_end_of_its_sentence() {
+    let bundle = contract(
+        (PLAIN, "Not found."),
+        (PLAIN, "`code` is `version_conflict` or `edit_conflict`."),
+    );
+    let code = conflict_body(&bundle)["code"].clone();
+    assert!(code != "version_conflict" && code != "edit_conflict", "{code}");
+    let bundle = contract(
+        (PLAIN, "Not found."),
+        (PLAIN, "Its `code` is `version_conflict`. Retry with `If-Match`."),
+    );
+    assert_eq!(conflict_body(&bundle)["code"], "version_conflict");
+}
