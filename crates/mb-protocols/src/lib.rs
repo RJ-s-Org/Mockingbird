@@ -64,6 +64,8 @@ use mb_ext::Extensions;
 use mb_mcm::Bundle;
 use mb_state::StateStore;
 
+#[cfg(any(feature = "http-rest", feature = "soap"))]
+mod base_url;
 // Until an adapter is compiled in, nothing calls the shared pipeline.
 #[cfg_attr(
     not(any(
@@ -74,8 +76,6 @@ use mb_state::StateStore;
     )),
     allow(dead_code)
 )]
-#[cfg_attr(not(any(feature = "http-rest", feature = "soap")), allow(dead_code))]
-mod base_url;
 mod call;
 pub mod chaos;
 #[cfg_attr(
