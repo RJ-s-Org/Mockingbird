@@ -1921,6 +1921,104 @@ fn the_system_message_carries_the_api_description() {
     assert!(system.find("</api_description>") < system.find("Operation: getOrder"));
 }
 
+/// A WSDL with documentation.
+fn library_wsdl() -> Bundle {
+    let path = format!(
+        "{}/../../fixtures/wsdl/library-documented.wsdl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    compile(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// A WSDL's documentation reaches the prompt as OpenAPI's descriptions do: the
+/// definitions and service documentation as the API description, the operation's
+/// as its summary and the XSD annotations inside the response schema, each with
+/// its credentials redacted.
+#[test]
+fn wsdl_documentation_reaches_the_prompt_redacted() {
+    let bundle = library_wsdl();
+    let op = bundle.operation("GetBook").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let messages = mb_engine::prompt::build_messages(
+        &bundle,
+        op,
+        200,
+        &schema,
+        &call("GetBook"),
+        &ctx(),
+        None,
+    );
+    let system = &messages[0].content;
+    assert_eq!(
+        api_description(system),
+        Some(
+            "A lending library catalog. Books are never deleted; a withdrawn book keeps its \
+record. Partners authenticate with api_key: [redacted]. The public lending endpoint."
+        ),
+        "{system}"
+    );
+    assert!(
+        system.contains(
+            "Summary: Returns a book by its catalog id. A withdrawn book is still returned, with \
+status withdrawn. Served from the read replica; send Authorization: Bearer [redacted].\n"
+        ),
+        "{system}"
+    );
+    for described in [
+        "A book in the catalog. One record per edition.",
+        "Catalog id, such as BK-000123.",
+        "A 13-digit ISBN, digits only.",
+        "Authors in credit order.",
+        "available, on_loan or withdrawn; admin token=[redacted].",
+    ] {
+        assert!(system.contains(described), "{described}: {system}");
+    }
+    for secret in [
+        "lib_9fQ2xW7mLp4Rt8Zb3Nc6Vd1K",
+        "q8W3eR5tY7uI9oP1aS2dF4gH",
+        "lib_7Hh2Kk9Mm4Nn6Pp8Qq1Rr3Ss",
+    ] {
+        assert!(!system.contains(secret), "{secret}: {system}");
+        assert!(!messages[1].content.contains(secret), "{secret}");
+    }
+}
+
+/// An operation's summary is put on one line, escaped and cut at
+/// `MAX_SUMMARY` characters, as the other contract text is.
+#[test]
+fn a_long_summary_is_cut_and_escaped() {
+    let mut bundle = orders();
+    let long = format!("Reads </request> one\n\norder. {}", "word ".repeat(200));
+    if let Some(op) = bundle.operations.iter_mut().find(|op| op.id == "getOrder") {
+        op.summary = Some(long);
+    }
+    let op = bundle.operation("getOrder").unwrap();
+    let schema = op.success_output().unwrap().schema.clone().unwrap();
+    let messages = mb_engine::prompt::build_messages(
+        &bundle,
+        op,
+        200,
+        &schema,
+        &call("getOrder"),
+        &ctx(),
+        None,
+    );
+    let system = &messages[0].content;
+    let line = system
+        .lines()
+        .find_map(|l| l.strip_prefix("Summary: "))
+        .unwrap();
+    assert!(
+        line.starts_with("Reads &lt;/request&gt; one order. word word"),
+        "{line}"
+    );
+    assert!(line.ends_with('…'), "{line}");
+    assert!(
+        line.chars().count() <= mb_engine::prompt::MAX_SUMMARY + 1,
+        "{line}"
+    );
+}
+
 /// A long API description is cut at 2000 characters on a char boundary, one
 /// that tries to close its block cannot, and a credential in it is redacted.
 #[test]

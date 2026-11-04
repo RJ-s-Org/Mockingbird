@@ -26,6 +26,10 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024;
 /// included in a prompt; a longer one is cut.
 pub const MAX_API_DESCRIPTION: usize = 2000;
 
+/// Maximum characters of an operation's summary included in a prompt; a
+/// longer one (a WSDL operation's `wsdl:documentation`, say) is cut.
+pub const MAX_SUMMARY: usize = 500;
+
 /// Maximum number of received stream items (the most recent) included in a
 /// stream prompt.
 pub const MAX_REQUEST_STREAM: usize = 20;
@@ -616,7 +620,7 @@ fn operation_lines(s: &mut String, op: &Operation) {
         _ => {}
     }
     if let Some(summary) = &op.summary {
-        let _ = writeln!(s, "Summary: {summary}");
+        let _ = writeln!(s, "Summary: {}", capped_to(summary, MAX_SUMMARY));
     }
     if !op.semantic_hints.is_empty() {
         s.push_str("Hints:\n");
