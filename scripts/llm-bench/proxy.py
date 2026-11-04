@@ -151,6 +151,59 @@ def load_prices(path: Optional[str]) -> Dict[str, Tuple[float, float]]:
 
 
 # --------------------------------------------------------------------------
+# Provider pins
+
+DEFAULT_PROVIDER_PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "providers.json")
+# What OpenRouter answers (400/404) when no allowed provider can serve the call.
+PIN_UNAVAILABLE_STATUSES = (400, 404)
+PIN_UNAVAILABLE_MARKERS = ("endpoint", "provider")
+
+
+def load_provider_pins(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """OpenRouter `provider` objects by model id, from `providers.json`.
+
+    The file is `{"pins": {"<model id>": {"provider": {...}, "basis": "..."}}}`;
+    a pin without a non-empty `provider.order` is ignored. No path: no pins.
+    """
+    pins: Dict[str, Dict[str, Any]] = {}
+    if not path:
+        return pins
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    entries = doc.get("pins") if isinstance(doc, dict) else None
+    for model, entry in (entries or {}).items():
+        prov = entry.get("provider") if isinstance(entry, dict) else None
+        if isinstance(prov, dict) and isinstance(prov.get("order"), list) and prov["order"]:
+            pins[str(model)] = copy.deepcopy(prov)
+    return pins
+
+
+def provider_key(name: Any) -> str:
+    """`Io Net`, `io-net` and `io-net/fp8` all give `ionet`."""
+    return "".join(ch for ch in str(name).split("/", 1)[0].lower() if ch.isalnum())
+
+
+def pin_allows(pin: Dict[str, Any], served: Optional[str]) -> bool:
+    """Whether the provider that served a call is one the pin allows (unknown: yes)."""
+    if not served:
+        return True
+    return provider_key(served) in {provider_key(p) for p in pin.get("order") or []}
+
+
+def apply_provider_pin(up: Dict[str, Any], pin: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Adds `pin` as the upstream body's `provider` unless the client sent one.
+
+    Returns who set the routing: "proxy", "client" or None.
+    """
+    if "provider" in up:
+        return "client"
+    if pin:
+        up["provider"] = copy.deepcopy(pin)
+        return "proxy"
+    return None
+
+
+# --------------------------------------------------------------------------
 # Ledger and budget
 
 
@@ -210,9 +263,13 @@ class Ledger:
         self.calls += 1
         label = rec.get("label") or "?"
         s = self.per_label.setdefault(
-            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "providers": {}}
         )
         s["calls"] += 1
+        prov = rec.get("provider")
+        if prov:
+            s["providers"][prov] = s["providers"].get(prov, 0) + 1
         s["cost_usd"] += cost
         if rec.get("error_kind"):
             s["errors"] += 1
@@ -281,7 +338,8 @@ class Ledger:
                 "calls": self.calls,
                 "tripped": self.tripped,
                 "per_label": {
-                    k: dict(v, cost_usd=round(v["cost_usd"], 6)) for k, v in sorted(self.per_label.items())
+                    k: dict(v, cost_usd=round(v["cost_usd"], 6), providers=dict(v["providers"]))
+                    for k, v in sorted(self.per_label.items())
                 },
             }
 
@@ -454,6 +512,7 @@ class Proxy:
         self.dump_lock = threading.Lock()
         self.ledger = Ledger(args.ledger, args.budget_usd, args.prior_ledger or [])
         self.prices = load_prices(args.prices)
+        self.pins = load_provider_pins(getattr(args, "provider_pins", None))
         if self.prices:
             self.fallback = (
                 max(p for p, _ in self.prices.values()),
@@ -477,6 +536,9 @@ class Proxy:
 
     def price(self, model: str) -> Tuple[float, float]:
         return self.prices.get(base_model(model), self.fallback)
+
+    def pin(self, model: str) -> Optional[Dict[str, Any]]:
+        return self.pins.get(model) or self.pins.get(base_model(model))
 
     def estimate(self, model: str, body: Dict[str, Any]) -> float:
         p_in, p_out = self.price(model)
@@ -611,6 +673,8 @@ class Handler(BaseHTTPRequestHandler):
             "response_format_stripped": False,
             "finish_reason": None,
             "attempts": 0,
+            "provider_pin": None,
+            "provider_pin_by": None,
         }
         estimate = px.estimate(model, body)
         if not px.ledger.reserve(estimate):
@@ -643,6 +707,13 @@ class Handler(BaseHTTPRequestHandler):
             up["model"] = base_model(model)
             if up.pop("response_format", None) is not None:
                 rec["response_format_stripped"] = True
+        # The proxy's own pin is enforced; a client's `provider` is passed on as sent.
+        routing = apply_provider_pin(up, px.pin(model))
+        rec["provider_pin_by"] = routing
+        sent = up.get("provider") if isinstance(up.get("provider"), dict) else {}
+        if routing and isinstance(sent.get("order"), list):
+            rec["provider_pin"] = list(sent["order"])
+        pinned = sent if routing == "proxy" else None
         with px.memo_lock:
             no_reasoning = model in px.reasoning_rejected
             no_rf = model in px.response_format_rejected
@@ -706,6 +777,19 @@ class Handler(BaseHTTPRequestHandler):
                 with px.memo_lock:
                     px.response_format_rejected.add(model)
                 continue
+            if (
+                pinned
+                and status in PIN_UNAVAILABLE_STATUSES
+                and any(m in low for m in PIN_UNAVAILABLE_MARKERS)
+            ):
+                # No pinned provider can take the call. That is the provider's failure,
+                # so the client gets a 503 (an infra fallback), not a request error.
+                msg = excerpt(f"pinned provider {','.join(map(str, pinned['order']))} unavailable: "
+                              + redact_bytes(err_body).decode("utf-8", "replace"))
+                rec.update(status=503, error_kind="provider_unavailable", error_excerpt=msg)
+                rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
+                self.send_json(503, {"error": {"message": msg, "code": 503}})
+                return
             kind = "http_4xx" if status < 500 else "http_5xx"
             err_body = redact_bytes(err_body)
             rec.update(status=status, error_kind=kind, error_excerpt=excerpt(err_body.decode("utf-8", "replace")))
@@ -739,6 +823,14 @@ class Handler(BaseHTTPRequestHandler):
             out.error_excerpt = out.error_excerpt or excerpt(f"bad upstream response: {e}")
         finally:
             resp.close()
+        if pinned and not out.error_kind and not pin_allows(pinned, out.provider):
+            # allow_fallbacks false should make this impossible; never pass on an
+            # answer from a provider the pin does not allow.
+            rec["provider_pin_mismatch"] = True
+            msg = f"served by {out.provider}, not the pinned {','.join(map(str, pinned['order']))}"
+            out.error_kind = "provider_unavailable"
+            out.error_excerpt = excerpt(msg)
+            out.error_body = json.dumps({"error": {"message": msg, "code": 503}}).encode()
         p_in, _ = px.price(model)
         prompt_est = len(json.dumps(body.get("messages", []), ensure_ascii=False)) / 3.0 * p_in
         self.complete(px, model, rec, out, client_stream, received, prompt_est)
@@ -833,8 +925,9 @@ class Handler(BaseHTTPRequestHandler):
             cached_tokens=as_int(pdetails.get("cached_tokens")),
             finish_reason=out.finish_reason,
         )
+        err_status = 503 if out.error_kind == "provider_unavailable" else 502
         if out.error_kind:
-            rec.update(status=502, error_kind=out.error_kind, error_excerpt=out.error_excerpt)
+            rec.update(status=err_status, error_kind=out.error_kind, error_excerpt=out.error_excerpt)
         elif out.finish_reason == "content_filter" or out.refusal:
             rec.update(status=200, error_kind="refusal", error_excerpt=excerpt(out.refusal or "content_filter"))
         elif not out.text().strip() and not out.reasoning_text().strip():
@@ -847,7 +940,7 @@ class Handler(BaseHTTPRequestHandler):
                 rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
             return
         if out.error_kind:
-            self.send_bytes(502, redact_bytes(out.error_body or b"") or json.dumps({"error": {"message": out.error_excerpt}}).encode(),
+            self.send_bytes(err_status, redact_bytes(out.error_body or b"") or json.dumps({"error": {"message": out.error_excerpt}}).encode(),
                             "application/json")
             return
         message: Dict[str, Any] = {"role": "assistant", "content": out.text()}
@@ -873,6 +966,8 @@ def main() -> int:
     ap.add_argument("--ledger", required=True, help="calls.jsonl to append to")
     ap.add_argument("--budget-usd", type=float, default=9.0)
     ap.add_argument("--prices", help="roster.json (per-token prices)")
+    ap.add_argument("--provider-pins", default=DEFAULT_PROVIDER_PINS,
+                    help="providers.json: per-model OpenRouter provider pins (default: the bench's; '' for none)")
     ap.add_argument(
         "--prior-ledger",
         action="append",
@@ -902,7 +997,7 @@ def main() -> int:
     print(
         f"proxy: listening on http://127.0.0.1:{server.server_address[1]} "
         f"(spent ${st['spent_usd']:.4f} of ${args.budget_usd:.2f}, tripped={st['tripped']}, "
-        f"{len(proxy.prices)} priced models)",
+        f"{len(proxy.prices)} priced models, {len(proxy.pins)} provider pins)",
         file=sys.stderr,
         flush=True,
     )

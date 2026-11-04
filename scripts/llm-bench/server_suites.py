@@ -6095,7 +6095,28 @@ def run_suite(suite, args):
     n_infra = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra"))
     infra = f", {n_infra} failed on provider errors" if n_infra else ""
     print(f"  {suite}: {n_ok}/{len(sink.rows)} ok{infra}", file=sys.stderr)
+    mix = provider_mix(args, suite)
+    if mix:
+        print(f"  {suite}: providers {mix}", file=sys.stderr)
     return failed
+
+
+def provider_mix(args, suite):
+    """The suite's calls per serving provider, from the bench proxy's /stats
+    (`Fireworks 412 (98.6%), Darkbloom 6 (1.4%)`); None when the proxy has none."""
+    label = f"{slug_of(args.model)}~{suite}"
+    try:
+        with urllib.request.urlopen(f"{args.proxy_base.rstrip('/')}/stats", timeout=5) as r:
+            stats = json.load(r)
+    except (OSError, ValueError):
+        return None
+    entry = (stats.get("per_label") or {}).get(label) if isinstance(stats, dict) else None
+    counts = (entry or {}).get("providers") or {}
+    total = sum(counts.values())
+    if not total:
+        return None
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{p} {n} ({100.0 * n / total:.1f}%)" for p, n in ranked)
 
 
 if __name__ == "__main__":

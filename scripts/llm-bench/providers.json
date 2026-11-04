@@ -1,0 +1,17 @@
+{
+  "about": "Per-model OpenRouter provider pins. proxy.py adds `provider` = the pin's `provider` object to a call for that model, unless the client sent its own `provider`. Keys are model ids without a bench variant suffix (`@nojson`). Each pin is the provider that served most of the model's calls in full6 (2026-11-04, scratchpad full6/server/calls.jsonl); `basis` records that share. Change a pin here, not in code.",
+  "pins": {
+    "nvidia/nemotron-3.5-lightning": {
+      "provider": {"order": ["fireworks"], "allow_fallbacks": false},
+      "basis": "full6: Fireworks served 2089 of 2114 calls (98.8%)"
+    },
+    "openai/gpt-6-luna": {
+      "provider": {"order": ["openai"], "allow_fallbacks": false},
+      "basis": "full6: OpenAI served 1913 of 2108 calls (90.7%)"
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "provider": {"order": ["wafer"], "allow_fallbacks": false},
+      "basis": "full6: Wafer served 378 of 2090 calls (18.1%); about 25 providers served the rest"
+    }
+  }
+}

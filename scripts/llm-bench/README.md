@@ -5,6 +5,7 @@ This harness runs OpenRouter models through Mockingbird's real LLM code paths: t
 | file | role |
 |---|---|
 | `proxy.py` | Recording proxy in front of OpenRouter. It enforces the budget and measures latency and cost. |
+| `providers.json` | Per-model OpenRouter provider pins, which the proxy sends (see [Provider pins](#provider-pins)). |
 | `run.py` | Orchestrator with three subcommands: `preflight`, `pilot` and `full`. |
 | `server_suites.py` | The `mockingbird serve` workloads: consistency, SSE, smart import, the multi-step journeys and the held-out journeys. |
 | `grade.py` | Deterministic schema conformance grading of the samples. |
@@ -97,6 +98,30 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 - If the upstream rejects `reasoning: {"enabled": false}` (400/404/422 with "reasoning" in the body), the proxy retries once without it and remembers that for the model. It does the same for `response_format` (400/422 that mentions response_format or JSON mode).
 - When there is no usage chunk (cut stream or timeout), cost is estimated from the prompt plus the output seen so far, with `cost_source: "estimate"`. A model the roster does not price is reserved at deliberately high fallback prices.
 - `error_kind: empty` means both content and reasoning were empty. `refusal` means `finish_reason == "content_filter"` or a non-null `refusal`.
+
+## Provider pins
+
+OpenRouter can send one model to different upstream providers from one run to the next. Between full6 and full7, Nemotron went from Fireworks (2089 of 2114 calls) to a mix of CoreWeave, DeepInfra, Fireworks, Io Net and Darkbloom. Its timeouts and truncations went up with the change, and about 80 Nemotron checks moved with them. To stop this, the proxy pins each model to one provider.
+
+- **Where pins live.** [`providers.json`](providers.json) maps a model id to an OpenRouter `provider` object: `{"order": [...], "allow_fallbacks": false}`. Each pin's `basis` field records why it was picked. Change a pin there, not in code. `proxy.py --provider-pins <file>` and `run.py --provider-pins <file>` read another file, and `''` turns pins off. `run.py preflight` copies each model's pin into `roster.json` as `provider_pin`.
+- **Current pins.** Each model is pinned to the provider that served most of its full6 calls:
+
+  | model | pin | full6 share |
+  |---|---|---|
+  | `nvidia/nemotron-3.5-lightning` | `fireworks` | 2089 of 2114 calls (98.8%) |
+  | `openai/gpt-6-luna` | `openai` | 1913 of 2108 calls (90.7%) |
+  | `deepseek/deepseek-v4.1-flash-1017` | `wafer` | 378 of 2090 calls (18.1%). About 25 providers served the rest, so this pin changes DeepSeek's conditions the most. |
+
+- **How a pin is added.** The proxy adds the pin as the call's `provider` field. If the client already sent a `provider` field, the proxy passes it on as sent and does not enforce it. A model with no pin is forwarded unchanged. A bench variant (`<id>@nojson`) uses its base model's pin.
+- **When the pinned provider is unavailable.** OpenRouter answers 400 or 404 about endpoints or providers when the pinned provider cannot take the call. The proxy turns that into a 503 with `error_kind: provider_unavailable`. Mockingbird then reports `LLM returned HTTP 503: pinned provider ... unavailable`, which the journeys label as `detail.infra` (see the blind7 notes below). The call is not sent to another provider. If an answer still comes back from a provider the pin does not allow, the proxy refuses it the same way and sets `provider_pin_mismatch: true` in the ledger. It can only refuse when the client did not stream.
+- **What the ledger records.** Every ledger line has `provider` (who served the call), `provider_pin` (the `provider.order` it was sent with) and `provider_pin_by` (`proxy`, `client` or null).
+- **Where the provider mix is reported.**
+  - `/stats` counts providers per label.
+  - `server_suites.py` prints each suite's provider mix under its ok count.
+  - `run.py full` logs each model's mix when the model finishes and stores it as `providers` in `run.json`.
+  - `aggregate.py` shows the pin and the pin-unavailable count next to the served-provider shares in section 6 of `tables.md`.
+
+  Read a score together with its model's provider mix.
 
 ## Journeys
 
