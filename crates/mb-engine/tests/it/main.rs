@@ -8,6 +8,7 @@
 #![cfg(test)]
 
 mod budget;
+mod contract_values;
 mod debug;
 mod faker;
 mod faker_validity;

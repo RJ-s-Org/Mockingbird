@@ -40,7 +40,7 @@ class FlowMappingLintTest(unittest.TestCase):
 
     def test_every_contract_is_clean(self):
         files = flow_yaml_lint.contract_files()
-        for blind in ("blind3", "blind4", "blind5", "blind6", "blind7", "blind8"):
+        for blind in ("blind3", "blind4", "blind5", "blind6", "blind7", "blind8", "blind9"):
             self.assertTrue(any(f"/contracts/{blind}/" in f for f in files), blind)
         found = [f"{os.path.relpath(path, flow_yaml_lint.REPO)}:{line}: {message}"
                  for path in files for line, message in flow_yaml_lint.lint_file(path)]

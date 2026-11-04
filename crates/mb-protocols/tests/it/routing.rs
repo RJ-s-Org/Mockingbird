@@ -1,8 +1,9 @@
 //! REST routing: OData-style keys served end to end, every contract of the
-//! repository routed, and the router agreeing with `matchit` (which it
-//! replaced) on every request `matchit` matched. The seeded comparison
-//! with `matchit` and a brute-force oracle of the stated precedence is a
-//! unit test (`src/http_rest/routing/tests/compare.rs`).
+//! repository routed, every probe of every contract answered as a
+//! brute-force oracle of the stated precedence answers it, and the router
+//! agreeing with `matchit` (which it replaced) on every request `matchit`
+//! matched. The seeded comparison of random route sets is a unit test
+//! (`src/http_rest/routing/tests/compare.rs`).
 //!
 //! The corpus tests never print contract text: a failure names the file
 //! and counts or indexes operations.
@@ -461,6 +462,191 @@ fn theirs(
     Some((matched.value.clone(), params))
 }
 
+/// A brute-force oracle of the stated precedence, independent of the
+/// router: every route is matched on its own, and the one whose first
+/// differing segment ranks highest wins (static, then a template with more
+/// literal text, then a parameter, then a catch-all).
+mod oracle {
+    use std::cmp::Reverse;
+
+    use super::{Found, normalize};
+
+    enum Part {
+        Lit(String),
+        Param(String),
+    }
+
+    enum Segment {
+        Static(String),
+        Template(Vec<Part>),
+        Param(String),
+        CatchAll(String),
+    }
+
+    /// Class, then more literal text first, then the pieces (a literal,
+    /// `false` and its text, before a parameter).
+    type Rank = (u8, Reverse<usize>, Vec<(bool, String)>);
+
+    pub struct Route {
+        op: String,
+        segments: Vec<Segment>,
+        rank: Vec<Rank>,
+    }
+
+    /// `pattern` (normalized) for `op`; `None` when it is no valid pattern.
+    pub fn route(op: &str, pattern: &str) -> Option<Route> {
+        let segments: Vec<Segment> = pattern.split('/').map(segment).collect::<Option<_>>()?;
+        let rank = segments.iter().map(rank).collect();
+        Some(Route {
+            op: op.to_owned(),
+            segments,
+            rank,
+        })
+    }
+
+    fn segment(token: &str) -> Option<Segment> {
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        let mut chars = token.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' if chars.peek() == Some(&'{') => {
+                    chars.next();
+                    literal.push('{');
+                }
+                '}' if chars.peek() == Some(&'}') => {
+                    chars.next();
+                    literal.push('}');
+                }
+                '{' => {
+                    let name: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                    if !literal.is_empty() {
+                        parts.push(Part::Lit(std::mem::take(&mut literal)));
+                    }
+                    parts.push(Part::Param(name));
+                }
+                c => literal.push(c),
+            }
+        }
+        if !literal.is_empty() {
+            parts.push(Part::Lit(literal));
+        }
+        Some(match parts.as_slice() {
+            [] => Segment::Static(String::new()),
+            [Part::Lit(t)] => Segment::Static(t.clone()),
+            [Part::Param(n)] => match n.strip_prefix('*') {
+                Some(n) => Segment::CatchAll(n.to_owned()),
+                None => Segment::Param(n.clone()),
+            },
+            _ => Segment::Template(parts),
+        })
+    }
+
+    fn rank(segment: &Segment) -> Rank {
+        match segment {
+            Segment::Static(t) => (0, Reverse(t.len()), vec![(false, t.clone())]),
+            Segment::Template(parts) => {
+                let pieces: Vec<(bool, String)> = parts
+                    .iter()
+                    .map(|p| match p {
+                        Part::Lit(t) => (false, t.clone()),
+                        Part::Param(_) => (true, String::new()),
+                    })
+                    .collect();
+                let literal = pieces.iter().map(|(_, t)| t.len()).sum();
+                (1, Reverse(literal), pieces)
+            }
+            Segment::Param(_) => (2, Reverse(0), vec![(true, String::new())]),
+            Segment::CatchAll(_) => (3, Reverse(0), vec![(true, String::new())]),
+        }
+    }
+
+    /// Every split of `token` by `parts` in the stated order (a literal
+    /// between parameters at its earliest workable occurrence, a final
+    /// literal at the end); the first wins.
+    fn split(parts: &[Part], token: &str, out: &mut Vec<(String, String)>) -> bool {
+        match parts {
+            [] => token.is_empty(),
+            [Part::Lit(t), rest @ ..] => token
+                .strip_prefix(t.as_str())
+                .is_some_and(|token| split(rest, token, out)),
+            [Part::Param(n)] if !token.is_empty() => {
+                out.push((n.clone(), token.to_owned()));
+                true
+            }
+            [Part::Param(_)] => false,
+            [Part::Param(n), Part::Lit(t)] => match token.strip_suffix(t.as_str()) {
+                Some(v) if !v.is_empty() => {
+                    out.push((n.clone(), v.to_owned()));
+                    true
+                }
+                _ => false,
+            },
+            [Part::Param(n), Part::Lit(t), rest @ ..] => {
+                for end in (1..=token.len()).filter(|&i| token.is_char_boundary(i)) {
+                    if token[end..].starts_with(t.as_str()) {
+                        out.push((n.clone(), token[..end].to_owned()));
+                        if split(rest, &token[end + t.len()..], out) {
+                            return true;
+                        }
+                        out.pop();
+                    }
+                }
+                false
+            }
+            [Part::Param(_), Part::Param(_), ..] => false,
+        }
+    }
+
+    fn matches(route: &Route, path: &str) -> Option<Vec<(String, String)>> {
+        let tokens: Vec<&str> = path.split('/').collect();
+        let mut out = Vec::new();
+        for (i, segment) in route.segments.iter().enumerate() {
+            let token = *tokens.get(i)?;
+            match segment {
+                Segment::Static(t) => {
+                    if t != token {
+                        return None;
+                    }
+                }
+                Segment::Param(n) => {
+                    if token.is_empty() {
+                        return None;
+                    }
+                    out.push((n.clone(), token.to_owned()));
+                }
+                Segment::Template(parts) => {
+                    if !split(parts, token, &mut out) {
+                        return None;
+                    }
+                }
+                Segment::CatchAll(n) => {
+                    let rest = tokens[i..].join("/");
+                    if rest.is_empty() {
+                        return None;
+                    }
+                    out.push((n.clone(), rest));
+                    return Some(out);
+                }
+            }
+        }
+        (tokens.len() == route.segments.len()).then_some(out)
+    }
+
+    /// The winning route's operation and its (sorted) parameters.
+    pub fn find(routes: &[Route], path: &str) -> Found {
+        let path = normalize(path);
+        routes
+            .iter()
+            .filter_map(|r| Some((r, matches(r, path)?)))
+            .min_by(|(a, _), (b, _)| a.rank.cmp(&b.rank))
+            .map(|(r, mut params)| {
+                params.sort();
+                (r.op.clone(), params)
+            })
+    }
+}
+
 /// The routes, as a one-method bundle: operation `i` is `routes[i]`.
 fn get_bundle(routes: &[&str]) -> Bundle {
     let paths: serde_json::Map<String, Value> = routes
@@ -478,7 +664,7 @@ fn get_bundle(routes: &[&str]) -> Bundle {
 }
 
 #[test]
-fn routes_every_request_matchit_matched_as_matchit_did() {
+fn routes_by_the_stated_precedence_and_as_matchit_wherever_it_matched() {
     let mut sets: Vec<(String, Bundle)> = [
         &["/a/b/c", "/a/{x}/d"][..],
         &["/a/b/{y}/c", "/a/{x}/d/e"],
@@ -514,21 +700,14 @@ fn routes_every_request_matchit_matched_as_matchit_did() {
         sets.push((contract.file, contract.bundle));
     }
 
-    let mut compared = 0;
-    let mut refused = Vec::new();
+    let (mut by_oracle, mut by_matchit, mut refused) = (0, 0, 0);
     let mut differences = Vec::new();
     for (name, bundle) in &sets {
-        // Routes matchit refused are checked by the oracle comparison and
-        // by `every_http_operation_of_every_repository_contract_is_routed`.
-        let Some(routers) = matchit_routers(bundle) else {
-            refused.push(name.as_str());
-            continue;
-        };
         let table = RouteTable::new(bundle);
-        assert!(
-            table.skipped().is_empty(),
-            "{name}: matchit took every route"
-        );
+        // A contract matchit refused (the mock did not mount before this
+        // router) is checked against the oracle alone.
+        let routers = matchit_routers(bundle);
+        refused += usize::from(routers.is_none());
         let routes: Vec<&str> = http_routes(bundle).map(|(_, _, _, path)| path).collect();
         let paths = probes(&routes);
         let mut methods: Vec<HttpMethod> = Vec::new();
@@ -537,26 +716,44 @@ fn routes_every_request_matchit_matched_as_matchit_did() {
                 methods.push(method);
             }
         }
-        let mut differ = 0;
+        let (mut against_oracle, mut against_matchit) = (0, 0);
         for &method in &methods {
+            let oracle: Vec<oracle::Route> = http_routes(bundle)
+                .filter(|(_, _, m, _)| *m == method)
+                .filter_map(|(_, id, _, path)| oracle::route(id, normalize(path)))
+                .collect();
             for path in &paths {
+                let found = ours(&table, method, path);
+                by_oracle += 1;
+                if found != oracle::find(&oracle, path) {
+                    against_oracle += 1;
+                }
                 // Where matchit answered 404, the router may match (it
                 // backtracks out of templates).
-                let Some(theirs) = theirs(&routers, method, path) else {
+                let Some(theirs) = routers.as_ref().and_then(|r| theirs(r, method, path)) else {
                     continue;
                 };
-                compared += 1;
-                if ours(&table, method, path) != Some(theirs) {
-                    differ += 1;
+                by_matchit += 1;
+                if found != Some(theirs) {
+                    against_matchit += 1;
                 }
             }
         }
-        if differ > 0 {
+        if against_oracle + against_matchit > 0 {
             // Counts only: no contract text in the output.
-            differences.push(format!("{name}: {differ} probes routed differently"));
+            differences.push(format!(
+                "{name}: {against_oracle} probes differ from the oracle, \
+                 {against_matchit} from matchit"
+            ));
         }
     }
     assert!(differences.is_empty(), "{differences:#?}");
-    assert!(refused.is_empty(), "matchit refused {refused:?}");
-    assert!(compared >= 1000, "only {compared} probes compared");
+    assert!(
+        by_oracle >= 2000,
+        "only {by_oracle} probes checked ({refused} sets matchit refused)"
+    );
+    assert!(
+        by_matchit >= 1000,
+        "only {by_matchit} probes compared with matchit"
+    );
 }

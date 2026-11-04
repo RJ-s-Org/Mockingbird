@@ -1936,12 +1936,33 @@ paths:
       parameters: [{name: sku, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /notes/{id}:
+    get:
+      operationId: getNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {}}}}}
+  /pets/{id}:
+    get:
+      operationId: getPet
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Pet"}}}}
 components:
   schemas:
     Booking:
       type: object
       required: [id, status]
-      properties: {id: {type: string}, status: {type: string}, number: {type: integer}}
+      properties:
+        id: {type: string}
+        status: {type: string}
+        number: {type: integer}
+        note: {type: string}
+        memo: {type: string, nullable: true}
+        guest:
+          type: object
+          required: [name]
+          properties: {name: {type: string}, phone: {type: string}}
     Cancellation:
       type: object
       required: [reason]
@@ -1958,6 +1979,14 @@ components:
       type: object
       required: [sku, status]
       properties: {sku: {type: string}, status: {type: string}}
+    Pet:
+      oneOf:
+        - type: object
+          required: [id, kind, name]
+          properties: {id: {type: string}, kind: {type: string, enum: [cat]}, name: {type: string}}
+        - type: object
+          required: [id, kind]
+          properties: {id: {type: string}, kind: {type: string, enum: [dog]}, name: {type: string}}
 "##;
 
 fn effects_runtime(
@@ -2209,6 +2238,168 @@ fn an_effect_on_its_types_own_identity_field_is_rejected() {
 #[test]
 fn an_effect_breaking_the_schema_is_rejected() {
     rejected(json!({"type": "bookings", "id": "b1", "set": {"status": 5}}));
+}
+
+/// One call holding booking `b1` as `held`, answered with `effects`; what is stored of
+/// `b1` after it, and the effects applied and rejected.
+fn after_effects(held: Value, effects: Value) -> (Value, (u64, u64)) {
+    after_effects_on("bookings", "b1", held, effects)
+}
+
+/// [`after_effects`] with record `id` of type `t` held (beside booking `b1`, which
+/// the call cancels).
+fn after_effects_on(t: &str, id: &str, held: Value, effects: Value) -> (Value, (u64, u64)) {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+    let seen = std::sync::Arc::clone(&out);
+    let (t, id) = (t.to_string(), id.to_string());
+    let counted = counting_effects(async move {
+        let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        if t != "bookings" {
+            store(
+                &state,
+                "bookings",
+                "b1",
+                json!({"id": "b1", "status": "held"}),
+            )
+            .await;
+        }
+        store(&state, &t, &id, held).await;
+        let answer = json!({"response": {"reason": "asked"}, "effects": effects});
+        let api = effects_runtime(
+            true,
+            Arc::clone(&state) as Arc<dyn StateStore>,
+            vec![Ok(answer.to_string())],
+        );
+        let (status, _, _) = api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(status, StatusCode::OK);
+        *seen.lock().unwrap() = stored_data(&state, &t, &id).await;
+    });
+    let stored = out.lock().unwrap().clone();
+    (stored, counted)
+}
+
+/// A null for an optional member whose schema does not admit it removes the member;
+/// one whose schema does is stored.
+#[test]
+fn a_null_for_an_optional_member_removes_it() {
+    let held = json!({"id": "b1", "status": "held", "note": "late", "memo": "x"});
+    let (stored, counted) = after_effects(
+        held,
+        json!([{"type": "bookings", "id": "b1", "set": {"note": null, "memo": null, "status": "cancelled"}}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "cancelled", "memo": null})
+    );
+    assert_eq!(counted, (1, 0));
+}
+
+/// A null for a required member rejects the whole effect: nothing of it is written.
+#[test]
+fn a_null_for_a_required_member_rejects_the_effect() {
+    let held = json!({"id": "b1", "status": "held", "note": "late"});
+    for set in [
+        json!({"status": null, "note": "early"}),
+        json!({"status": null}),
+    ] {
+        let (stored, counted) = after_effects(
+            held.clone(),
+            json!([{"type": "bookings", "id": "b1", "set": set}]),
+        );
+        assert_eq!((stored, counted), (held.clone(), (0, 1)), "{set}");
+    }
+}
+
+/// Inside a value object an optional member goes; a required one set to null rejects
+/// the effect.
+#[test]
+fn a_null_inside_a_value_object_goes_as_its_place_says() {
+    let held = json!({"id": "b1", "status": "held", "guest": {"name": "Ada", "phone": "1"}});
+    let (stored, counted) = after_effects(
+        held.clone(),
+        json!([{"type": "bookings", "id": "b1", "set": {"guest": {"phone": null}}}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "held", "guest": {"name": "Ada"}})
+    );
+    assert_eq!(counted, (1, 0));
+    let (stored, counted) = after_effects(
+        held.clone(),
+        json!([{"type": "bookings", "id": "b1", "set": {"guest": {"name": null, "phone": "2"}}}]),
+    );
+    assert_eq!((stored, counted), (held, (0, 1)));
+}
+
+/// With no value object held, a new one's optional null is left out too.
+#[test]
+fn a_null_in_a_new_value_object_is_left_out() {
+    let (stored, counted) = after_effects(
+        json!({"id": "b1", "status": "held"}),
+        json!([{"type": "bookings", "id": "b1", "set": {"guest": {"name": "A", "phone": null}}}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "held", "guest": {"name": "A"}})
+    );
+    assert_eq!(counted, (1, 0));
+}
+
+/// In a union, the variant the held record is says what is required: a dog's name is
+/// optional, so a null removes it, while a cat's is required, so the effect is refused.
+#[test]
+fn a_null_in_a_union_goes_by_the_held_variant() {
+    let dog = json!({"id": "p1", "kind": "dog", "name": "Rex"});
+    let (stored, counted) = after_effects_on(
+        "pets",
+        "p1",
+        dog,
+        json!([{"type": "pets", "id": "p1", "set": {"name": null}}]),
+    );
+    assert_eq!(stored, json!({"id": "p1", "kind": "dog"}));
+    assert_eq!(counted, (1, 0));
+    let cat = json!({"id": "p1", "kind": "cat", "name": "Tom"});
+    let (stored, counted) = after_effects_on(
+        "pets",
+        "p1",
+        cat.clone(),
+        json!([{"type": "pets", "id": "p1", "set": {"name": null}}]),
+    );
+    assert_eq!((stored, counted), (cat, (0, 1)));
+}
+
+/// A type whose schema is `properties: {}` declares nothing to tell its records by:
+/// any object is one, and an effect on it applies.
+#[test]
+fn a_free_form_record_with_empty_properties_takes_an_effect() {
+    let (stored, counted) = after_effects_on(
+        "notes",
+        "n1",
+        json!({"id": "n1", "text": "a"}),
+        json!([{"type": "notes", "id": "n1", "set": {"text": "b"}}]),
+    );
+    assert_eq!(stored, json!({"id": "n1", "text": "b"}));
+    assert_eq!(counted, (1, 0));
+}
+
+/// An effect's member names written with JSON around them are the declared ones; a
+/// name that mends to none the schema declares is left as it is.
+#[test]
+fn an_effects_corrupted_member_names_are_mended() {
+    let held = json!({"id": "b1", "status": "held", "guest": {"name": "Ada"}});
+    let (stored, counted) = after_effects(
+        held,
+        json!([{"type": "bookings", "id": "b1", "set": {
+            "status:": "cancelled",
+            " note": "late",
+            "guest": {"phone\":\"2\"},": "2"}
+        }}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "cancelled", "note": "late", "guest": {"name": "Ada", "phone": "2"}})
+    );
+    assert_eq!(counted, (1, 0));
 }
 
 /// One effect's rejection leaves the next alone.

@@ -1,0 +1,388 @@
+openapi: 3.0.3
+info:
+  title: Cloud Resource Manager API v3 (folders and operations)
+  version: v3
+  description: |
+    A subset of Google's Cloud Resource Manager API v3, written from its public
+    documentation. Folders form a tree under an organization: a folder's `parent` is
+    `organizations/{organization_id}` or `folders/{folder_id}`, and a folder's `name` is
+    `folders/{folder_id}`, with a numeric id the service assigns.
+
+    Changes to folders are long-running operations. `POST /v3/folders`,
+    `PATCH /v3/folders/{folder}`, `POST /v3/folders/{folder}:move`,
+    `DELETE /v3/folders/{folder}` and `POST /v3/folders/{folder}:undelete` each answer
+    200 with an `Operation`: `name` (`operations/{operation_id}`), `metadata` describing
+    the request, and `done`. While `done` is false the change is still running; a client
+    polls `GET /v3/operations/{operation_id}` until `done` is true. A finished operation
+    holds either `response`, the folder as the change left it, or `error`. The change is
+    visible to every read once its operation is done.
+
+    A folder's `displayName` must be unique among the folders that share its parent
+    (folders in `DELETE_REQUESTED` do not count). A create, update or move that would
+    give a parent two folders with the same `displayName` is refused at once with 400
+    and `error.status` `FAILED_PRECONDITION`, and nothing changes.
+
+    `POST /v3/folders/{folder}:move` takes `destinationParent` and moves the folder,
+    with everything under it, to that parent: afterwards it lists under the new parent
+    and no longer under the old one, and its `parent` is the new one.
+
+    Deleting is soft. `DELETE /v3/folders/{folder}` moves an `ACTIVE` folder with no
+    active children to `DELETE_REQUESTED` and sets `deleteTime`; the folder is removed
+    for good about 30 days later. Until then it still reads by name, and
+    `POST /v3/folders/{folder}:undelete` makes it `ACTIVE` again (clearing `deleteTime`).
+    `GET /v3/folders?parent=` lists the direct children of a parent, leaving out folders
+    in `DELETE_REQUESTED` unless `showDeleted=true`. Lists are sorted by `displayName`,
+    ascending, and paged by `pageSize` and `pageToken`: when more folders follow, the page
+    answers `nextPageToken`, which the next request sends as `pageToken` with the same
+    other parameters; the last page answers no `nextPageToken`.
+
+    `GET /v3/folders:search` takes a `query` over `displayName`, `parent` and `state`
+    (`displayName="Test String"`, `parent=folders/123`, `state=ACTIVE`, joined with
+    `AND`; `displayName:Test*` matches a prefix) and answers the matching folders the
+    caller can see, active or not, paged the same way.
+
+    Every method takes the standard `fields` parameter, a comma-separated list of the
+    response fields to answer (a partial response); fields not listed are left out.
+    Errors are `{error: {code, message, status}}`, with `code` the HTTP status and
+    `status` the canonical name (`INVALID_ARGUMENT`, `FAILED_PRECONDITION`,
+    `PERMISSION_DENIED`, `NOT_FOUND`).
+servers:
+  - url: https://cloudresourcemanager.googleapis.com
+security:
+  - oauth2: [https://www.googleapis.com/auth/cloud-platform]
+tags:
+  - name: Folders
+  - name: Operations
+paths:
+  /v3/folders:
+    get:
+      tags: [Folders]
+      operationId: folders.list
+      summary: List the direct children of a parent
+      description: "Folders whose parent is `parent`, sorted by `displayName` ascending. Folders in `DELETE_REQUESTED` are left out unless `showDeleted` is true."
+      parameters:
+        - name: parent
+          in: query
+          required: true
+          description: "`organizations/{organization_id}` or `folders/{folder_id}`."
+          schema: {type: string, example: organizations/123456789012}
+        - name: showDeleted
+          in: query
+          description: Also list folders in DELETE_REQUESTED.
+          schema: {type: boolean, default: false}
+        - $ref: "#/components/parameters/pageSize"
+        - $ref: "#/components/parameters/pageToken"
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: A page of folders.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ListFoldersResponse"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Folders]
+      operationId: folders.create
+      summary: Create a folder
+      description: "Answers the operation that creates the folder. A `displayName` already used by an active folder of the same parent is refused with 400 FAILED_PRECONDITION."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent, displayName]
+              properties:
+                parent: {type: string, description: "`organizations/{organization_id}` or `folders/{folder_id}`."}
+                displayName:
+                  type: string
+                  maxLength: 30
+                  description: "Letters, digits, spaces, hyphens and underscores; starts and ends with a letter or digit."
+      responses:
+        "200":
+          description: The operation; its metadata is a CreateFolderMetadata and its response the new Folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+  /v3/folders:search:
+    get:
+      tags: [Folders]
+      operationId: folders.search
+      summary: Search folders
+      description: "Folders the caller can see that match `query`, in any state, sorted by `displayName` ascending."
+      parameters:
+        - name: query
+          in: query
+          description: |
+            Restrictions over `displayName`, `parent` and `state`, joined with `AND`:
+            `displayName="Test String"` matches the name exactly, `displayName:Test*` a
+            prefix, `parent=folders/123` the direct children of a parent and
+            `state=ACTIVE` or `state=DELETE_REQUESTED` a state. Empty matches every folder.
+          schema: {type: string, example: "displayName=\"Finance\" AND state=ACTIVE"}
+        - $ref: "#/components/parameters/pageSize"
+        - $ref: "#/components/parameters/pageToken"
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: A page of matching folders.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  folders:
+                    type: array
+                    items: {$ref: "#/components/schemas/Folder"}
+                  nextPageToken: {type: string, description: Absent on the last page.}
+        "400": {$ref: "#/components/responses/Error"}
+  /v3/folders/{folder}:
+    parameters:
+      - $ref: "#/components/parameters/folder"
+    get:
+      tags: [Folders]
+      operationId: folders.get
+      summary: Get a folder
+      description: "Answers the folder in any state, including DELETE_REQUESTED."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: The folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Folder"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Folders]
+      operationId: folders.patch
+      summary: Update a folder
+      description: "Only `displayName` can be changed, and only when `updateMask` names it."
+      parameters:
+        - name: updateMask
+          in: query
+          required: true
+          description: "Comma-separated fields to update: `displayName`."
+          schema: {type: string, example: displayName}
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Folder"}
+      responses:
+        "200":
+          description: The operation; its metadata is an UpdateFolderMetadata and its response the updated Folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Folders]
+      operationId: folders.delete
+      summary: Request deletion of a folder
+      description: "Moves an ACTIVE folder with no active children to DELETE_REQUESTED and sets `deleteTime`. A folder that is not ACTIVE, or has active children, is refused with 400 FAILED_PRECONDITION."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: The operation; its metadata is a DeleteFolderMetadata and its response the Folder in DELETE_REQUESTED.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v3/folders/{folder}:move:
+    parameters:
+      - $ref: "#/components/parameters/folder"
+    post:
+      tags: [Folders]
+      operationId: folders.move
+      summary: Move a folder to another parent
+      description: "Moves the folder, with everything under it, to `destinationParent`."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [destinationParent]
+              properties:
+                destinationParent: {type: string, description: "`organizations/{organization_id}` or `folders/{folder_id}`."}
+      responses:
+        "200":
+          description: The operation; its metadata is a MoveFolderMetadata and its response the moved Folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v3/folders/{folder}:undelete:
+    parameters:
+      - $ref: "#/components/parameters/folder"
+    post:
+      tags: [Folders]
+      operationId: folders.undelete
+      summary: Cancel the deletion of a folder
+      description: "Makes a folder in DELETE_REQUESTED ACTIVE again. A folder that is not in DELETE_REQUESTED is refused with 400 FAILED_PRECONDITION."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200":
+          description: The operation; its metadata is an UndeleteFolderMetadata and its response the ACTIVE Folder.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v3/operations/{operation}:
+    get:
+      tags: [Operations]
+      operationId: operations.get
+      summary: Get the latest state of a long-running operation
+      parameters:
+        - name: operation
+          in: path
+          required: true
+          description: "The operation id: the part of the operation's `name` after `operations/`."
+          schema: {type: string, example: fc.4378295620394847}
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: The operation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://accounts.google.com/o/oauth2/auth
+          tokenUrl: https://oauth2.googleapis.com/token
+          scopes:
+            https://www.googleapis.com/auth/cloud-platform: See, edit, configure and delete your Google Cloud data.
+  parameters:
+    folder:
+      name: folder
+      in: path
+      required: true
+      description: "The folder id: the part of the folder's `name` after `folders/`."
+      schema: {type: string, pattern: "^[0-9]+$", example: "234567890123"}
+    pageSize:
+      name: pageSize
+      in: query
+      description: The most folders to answer, at most 1000; the service may answer fewer.
+      schema: {type: integer, minimum: 0, maximum: 1000}
+    pageToken:
+      name: pageToken
+      in: query
+      description: The `nextPageToken` of the previous page.
+      schema: {type: string}
+    fields:
+      name: fields
+      in: query
+      description: |
+        A partial response: the comma-separated response fields to answer, such as
+        `name,displayName` or `folders(name,displayName),nextPageToken`. Fields not
+        listed are left out of the answer.
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{error: {code, message, status}}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Status"}
+  schemas:
+    Status:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, status]
+          properties:
+            code: {type: integer, description: The HTTP status code., example: 400}
+            message: {type: string}
+            status:
+              type: string
+              enum: [INVALID_ARGUMENT, FAILED_PRECONDITION, PERMISSION_DENIED, NOT_FOUND, ALREADY_EXISTS, ABORTED, INTERNAL, UNAVAILABLE]
+            details:
+              type: array
+              items: {type: object, additionalProperties: true}
+    Folder:
+      type: object
+      properties:
+        name: {type: string, readOnly: true, pattern: "^folders/[0-9]+$", example: folders/234567890123}
+        parent: {type: string, example: organizations/123456789012}
+        displayName: {type: string, maxLength: 30}
+        state:
+          type: string
+          readOnly: true
+          enum: [STATE_UNSPECIFIED, ACTIVE, DELETE_REQUESTED]
+        createTime: {type: string, format: date-time, readOnly: true}
+        updateTime: {type: string, format: date-time, readOnly: true}
+        deleteTime: {type: string, format: date-time, readOnly: true, description: Set while the folder is in DELETE_REQUESTED.}
+        etag: {type: string, readOnly: true, description: Changes whenever the folder changes.}
+    ListFoldersResponse:
+      type: object
+      properties:
+        folders:
+          type: array
+          items: {$ref: "#/components/schemas/Folder"}
+        nextPageToken: {type: string, description: Absent on the last page.}
+    Operation:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, pattern: "^operations/.+$", example: operations/fc.4378295620394847}
+        metadata:
+          type: object
+          description: |
+            By method, with `@type` naming it:
+            `type.googleapis.com/google.cloud.resourcemanager.v3.CreateFolderMetadata`
+            (`displayName`, `parent`), `...MoveFolderMetadata` (`displayName`,
+            `sourceParent`, `destinationParent`), `...UpdateFolderMetadata`,
+            `...DeleteFolderMetadata` and `...UndeleteFolderMetadata` (both empty).
+          additionalProperties: true
+          properties:
+            "@type": {type: string}
+            displayName: {type: string}
+            parent: {type: string}
+            sourceParent: {type: string}
+            destinationParent: {type: string}
+        done: {type: boolean, description: True once the change has finished.}
+        error:
+          type: object
+          description: Set when a finished operation failed.
+          properties:
+            code: {type: integer, description: A google.rpc.Code value.}
+            message: {type: string}
+            details:
+              type: array
+              items: {type: object, additionalProperties: true}
+        response:
+          description: "Set when a finished operation succeeded: the Folder, with `@type` `type.googleapis.com/google.cloud.resourcemanager.v3.Folder`."
+          allOf:
+            - $ref: "#/components/schemas/Folder"
+            - type: object
+              properties:
+                "@type": {type: string}
