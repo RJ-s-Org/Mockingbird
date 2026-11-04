@@ -369,7 +369,7 @@ pub(super) async fn drop_from_list(
     let field = item_identity(rt.bundle(), op, body);
     let mut gone = Vec::new();
     for (at, item) in items.iter().enumerate() {
-        if let Some(id) = item.get(&field).and_then(id_string)
+        if let Some(id) = mb_mcm::member_at(item, &field).and_then(id_string)
             && is_deleted(state, session, t, scope, &id).await
         {
             gone.push(at);
@@ -403,7 +403,7 @@ pub(super) async fn drop_from_list(
                 break;
             }
         }
-        let held = match item.get(&field).and_then(id_string) {
+        let held = match mb_mcm::member_at(item, &field).and_then(id_string) {
             Some(id) if marked => state.get(session, &item_type, &id).await.is_some(),
             _ => false,
         };

@@ -80,7 +80,7 @@ pub fn item_identity(bundle: &Bundle, op: &Operation, body: &Value) -> String {
     let Some(first) = first else {
         return field;
     };
-    if first.get(&field).is_some() {
+    if mb_mcm::member_at(first, &field).is_some() {
         return field;
     }
     let singular = match body {
@@ -236,8 +236,26 @@ pub fn enumerates(bundle: &Bundle, schema: &Value, value: &Value) -> bool {
 }
 
 /// The schema of `field` in object `schema`, looking through `$ref`s and
-/// `allOf`/`oneOf`/`anyOf` members.
+/// `allOf`/`oneOf`/`anyOf` members. A dotted field that names no member of its own
+/// (`metadata.name`, see [`mb_mcm::member_at`]) is followed step by step.
 pub fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<Value> {
+    if let Some(found) = member_property_schema(bundle, schema, field) {
+        return Some(found);
+    }
+    if !field.contains('.') {
+        return None;
+    }
+    field.split('.').try_fold(schema.clone(), |at, step| {
+        member_property_schema(bundle, &at, step)
+    })
+}
+
+/// [`property_schema`] of one member's very name, a dotted one too.
+pub(crate) fn member_property_schema(
+    bundle: &Bundle,
+    schema: &Value,
+    field: &str,
+) -> Option<Value> {
     fn find(bundle: &Bundle, schema: &Value, field: &str, depth: usize) -> Option<Value> {
         if depth > 8 {
             return None;

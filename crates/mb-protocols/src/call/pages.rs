@@ -1127,7 +1127,7 @@ pub(super) fn drop_served(
     };
     let was = items.len();
     items.retain(|item| {
-        item.get(&field)
+        mb_mcm::member_at(item, &field)
             .and_then(id_string)
             .is_none_or(|id| !followed.ids.contains(&id))
     });
@@ -1290,7 +1290,7 @@ pub(super) async fn mint(
             truncated = true;
             break;
         }
-        let gone = match (t, item.get(&field).and_then(id_string)) {
+        let gone = match (t, mb_mcm::member_at(&item, &field).and_then(id_string)) {
             (Some(t), Some(id)) if state.tracks_deleted => {
                 deleted::is_deleted(state, session, t, scope.as_deref(), &id).await
             }
@@ -1312,7 +1312,7 @@ pub(super) async fn mint(
         let then = slot.given(body).filter(|_| cut.stored > 0).map(|token| {
             let ids: Vec<String> = rest
                 .iter()
-                .filter_map(|item| item.get(&field).and_then(id_string))
+                .filter_map(|item| mb_mcm::member_at(item, &field).and_then(id_string))
                 .collect();
             (token, ids)
         });

@@ -62,6 +62,7 @@ pub mod guards;
 pub mod headers;
 mod media;
 pub mod member_names;
+mod merge_patch;
 pub mod message;
 pub mod ndjson;
 pub mod persona;
@@ -1564,6 +1565,17 @@ impl Engine {
         // `set` still beats them.
         let defaulted = prompt::with_body_defaults(bundle, op, call);
         let reflected = defaulted.as_ref().unwrap_or(call);
+        // A `PATCH`'s `null`s that remove a member are no value to reflect: the member
+        // goes from the answer after (see [`merge_patch`]).
+        let removed = merge_patch::removals(bundle, op, reflected, schema);
+        let stripped = (!removed.is_empty()).then(|| OperationCall {
+            body: reflected
+                .body
+                .as_ref()
+                .map(|body| merge_patch::without(body, &removed)),
+            ..reflected.clone()
+        });
+        let reflected = stripped.as_ref().unwrap_or(reflected);
         let response = match self.record_target(bundle, op, schema) {
             Some((record_op, record_validator)) => reflect_record(
                 (validator, &record_validator),
@@ -1574,6 +1586,7 @@ impl Engine {
             ),
             None => reflect(validator, op, reflected, ctx, response),
         };
+        let response = without_removed(validator, response, &removed);
         let response = self.keep_persona_formats(validator, call, response, draws);
         let response = if matches!(op.kind, OperationKind::Query)
             && ctx.target.is_none()
@@ -1637,7 +1650,7 @@ impl Engine {
         let mut seen = std::collections::HashSet::new();
         let duplicate = items
             .iter()
-            .filter_map(|item| item.get(&field))
+            .filter_map(|item| mb_mcm::member_at(item, &field))
             .any(|id| !seen.insert(id.to_string()));
         if !duplicate {
             return response;
@@ -1653,12 +1666,12 @@ impl Engine {
         };
         let mut used: std::collections::HashSet<String> = items
             .iter()
-            .filter_map(|item| item.get(&field))
+            .filter_map(|item| mb_mcm::member_at(item, &field))
             .map(Value::to_string)
             .collect();
         let mut kept = std::collections::HashSet::new();
         for item in items.iter_mut() {
-            let Some(id) = item.get(&field) else {
+            let Some(id) = mb_mcm::member_at(item, &field) else {
                 continue;
             };
             if kept.insert(id.to_string()) {
@@ -1667,10 +1680,10 @@ impl Engine {
             let fresh = (0..IDENTITY_DRAWS)
                 .map(|_| self.fake_field(bundle, &field, &id_schema, draws))
                 .find(|v| !v.is_null() && !used.contains(&v.to_string()));
-            if let (Some(fresh), Value::Object(obj)) = (fresh, &mut *item) {
+            if let Some(fresh) = fresh {
                 used.insert(fresh.to_string());
                 kept.insert(fresh.to_string());
-                obj.insert(field.clone(), fresh);
+                mb_mcm::set_member_at(item, &field, fresh);
             }
         }
         if validator.is_valid(&fixed) {
@@ -1732,7 +1745,7 @@ impl Engine {
         if !record.is_object() {
             return None;
         }
-        let current = record.get(field).filter(|v| !v.is_null());
+        let current = mb_mcm::member_at(record, field).filter(|v| !v.is_null());
         let record_schema = match identity {
             Some(identity) if identity.record.is_some() => record_schema(bundle, identity, schema)?,
             _ => schema.clone(),
@@ -1758,7 +1771,7 @@ impl Engine {
                 Some(identity) => identity.record_in_mut(&mut candidate)?,
                 None => &mut candidate,
             };
-            record.as_object_mut()?.insert(field.to_string(), fresh);
+            mb_mcm::set_member_at(record, field, fresh).then_some(())?;
             validator.is_valid(&candidate).then_some(candidate)
         })
     }
@@ -1847,6 +1860,7 @@ impl Engine {
         schema: &Value,
         draws: &mut seed::Draws,
     ) -> Value {
+        let field = mb_mcm::leaf_member(field);
         let wrapper = serde_json::json!({
             "type": "object",
             "required": [field],
@@ -2674,6 +2688,34 @@ fn reflected(
     response
 }
 
+/// `response` without the members a `PATCH` removed ([`merge_patch::removals`]), on a
+/// success: all of them where the answer stays valid, else each that keeps it so.
+fn without_removed(
+    validator: &SchemaValidator,
+    mut response: GeneratedResponse,
+    removed: &[Vec<String>],
+) -> GeneratedResponse {
+    if removed.is_empty() || !(200..300).contains(&response.status) {
+        return response;
+    }
+    let Some(mut body) = response.body.take() else {
+        return response;
+    };
+    let all = apply_set(&body, &merge_patch::as_patch(removed));
+    if validator.is_valid(&all) {
+        body = all;
+    } else {
+        for path in removed {
+            let one = apply_set(&body, &merge_patch::as_patch(std::slice::from_ref(path)));
+            if validator.is_valid(&one) {
+                body = one;
+            }
+        }
+    }
+    response.body = Some(body);
+    response
+}
+
 /// [`overlay_request`] onto an answer no stored record settled: a member the request
 /// sends as a list of objects, where the answer holds as many, goes item by item
 /// ([`echo_items`]), so the request's items never take away what the answer's say
@@ -2688,10 +2730,19 @@ fn echo_request(
         return overlay_request(validator, base, body);
     };
     let mut fields = fields.clone();
+    let root = validator.schema();
     for (name, sent) in &mut fields {
         let Some(answered) = answer.get(name) else {
             continue;
         };
+        // An object goes member by member, so what the answer holds beside what the
+        // request names (an id, a version the server assigned) stays. A map the request
+        // sends is whole: its members are all it names.
+        if answered.is_object() && sent.is_object() {
+            let inner = schema_level(root, root, Some(name), 0).1;
+            *sent = merged_member(root, inner, answered, sent, Maps::Replace);
+            continue;
+        }
         match echo_items(answered, sent, answer_wins) {
             Echo::Paired(items) => *sent = items,
             // The LLM's list stands as it answered it.
@@ -2907,7 +2958,7 @@ fn is_new_record(
     let (Some(identity), Some(target)) = (op.identity.as_ref(), target) else {
         return false;
     };
-    let member = |name: &str| body.get(name).and_then(text);
+    let member = |name: &str| mb_mcm::member_at(body, name).and_then(text);
     let Some(id) = member(&identity.field) else {
         return false;
     };
@@ -2922,7 +2973,7 @@ fn is_new_record(
         .and_then(text);
     in_path.as_ref() != Some(&named)
         && target.id != id
-        && target.data.get(&identity.field).and_then(text).as_ref() != Some(&id)
+        && identity.id_in(&target.data).and_then(text).as_ref() != Some(&id)
 }
 
 /// After a scenario `set`: re-apply only the request-body overlay (creates
@@ -3012,7 +3063,7 @@ fn merge_request(validator: &SchemaValidator, base: Value, body: Option<&Value>)
         .map(|(k, v)| {
             let inner = schema_level(root, root, Some(k), 0).1;
             let value = match current.get(k) {
-                Some(held) => merged_member(root, inner, held, v),
+                Some(held) => merged_member(root, inner, held, v, Maps::Merge),
                 None => v.clone(),
             };
             (k.clone(), value)
@@ -3026,20 +3077,39 @@ fn merge_request(validator: &SchemaValidator, base: Value, body: Option<&Value>)
     overlay(validator, applied, Some(&Value::Object(whole)))
 }
 
+/// What [`merged_member`] does with a map (an object whose schema declares no members,
+/// only `additionalProperties`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Maps {
+    /// Member by member, as a `PATCH` names the keys it sets.
+    Merge,
+    /// Whole, as a create's request names every key the map holds.
+    Replace,
+}
+
 /// `over` on `held`, objects member by member. An object under a `oneOf` or `anyOf` is
-/// replaced, as its members could mix with another branch's.
-fn merged_member(root: &Value, schema: Option<&Value>, held: &Value, over: &Value) -> Value {
+/// replaced, as its members could mix with another branch's, and so is a map when
+/// `maps` says so.
+fn merged_member(
+    root: &Value,
+    schema: Option<&Value>,
+    held: &Value,
+    over: &Value,
+    maps: Maps,
+) -> Value {
     let (Value::Object(held_members), Value::Object(over_members)) = (held, over) else {
         return over.clone();
     };
-    if schema.is_some_and(|node| schema_level(root, node, None, 0).0) {
+    if schema.is_some_and(|node| {
+        schema_level(root, node, None, 0).0 || (maps == Maps::Replace && is_map(root, node, 0))
+    }) {
         return over.clone();
     }
     let mut out = held_members.clone();
     for (k, v) in over_members {
         let inner = schema.and_then(|node| schema_level(root, node, Some(k), 0).1);
         let merged = match out.get(k) {
-            Some(below) => merged_member(root, inner, below, v),
+            Some(below) => merged_member(root, inner, below, v, maps),
             None => v.clone(),
         };
         out.insert(k.clone(), merged);
@@ -3226,6 +3296,44 @@ fn caught_up(
         })
         .collect();
     overlay(validator, body, Some(&Value::Object(over)))
+}
+
+/// Whether `node` (by its `$ref`s and `allOf`s) is a map: it declares no members and
+/// allows others by `additionalProperties`.
+fn is_map(root: &Value, node: &Value, depth: usize) -> bool {
+    fn walk(root: &Value, node: &Value, depth: usize, declares: &mut bool, open: &mut bool) {
+        if depth > 8 {
+            return;
+        }
+        if let Some(target) = node
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix('#'))
+            .and_then(|pointer| root.pointer(pointer))
+        {
+            return walk(root, target, depth + 1, declares, open);
+        }
+        *declares |= node
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|p| !p.is_empty());
+        *open |= match node.get("additionalProperties") {
+            Some(Value::Bool(allowed)) => *allowed,
+            Some(Value::Object(_)) => true,
+            _ => false,
+        };
+        for branch in node
+            .get("allOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            walk(root, branch, depth + 1, declares, open);
+        }
+    }
+    let (mut declares, mut open) = (false, false);
+    walk(root, node, depth, &mut declares, &mut open);
+    open && !declares
 }
 
 /// What one level of a schema in `root` says, by its `$ref`s and `allOf`s: whether it
@@ -3430,18 +3538,127 @@ fn force_identity(
     let Some(record) = identity.record_in(&body) else {
         return body;
     };
+    if !record.is_object() {
+        return body;
+    }
+    if from_path.is_some()
+        && let Some(alternatives) = compound_members(identity)
+    {
+        return force_alternative(validator, identity, call, body, id, alternatives);
+    }
     // A path naming another member than the key (`/issues/{issue_iid}`) sets that
     // member, and the key keeps the answer's own value. A record without the member
     // (an action's own record) takes the value in its key, as before.
     let named = identity.path_member();
-    let field = if from_path.is_some() && record.get(named).is_some() {
+    let field = if from_path.is_some() && mb_mcm::member_at(record, named).is_some() {
         named
     } else {
         identity.field.as_str()
     };
-    if !record.is_object() || record.get(field) == Some(id) {
+    if mb_mcm::member_at(record, field) == Some(id) {
         return body;
     }
+    for forced in id_candidates(id) {
+        let mut forced_body = body.clone();
+        if let Some(record) = identity.record_in_mut(&mut forced_body) {
+            mb_mcm::set_member_at(record, field, forced);
+        }
+        if validator.is_valid(&forced_body) {
+            return forced_body;
+        }
+    }
+    body
+}
+
+/// The members a path parameter that names both the key and another member may hold
+/// (Heroku's `{app_id_or_name}`: `id` and `name`), key first; `None` for a parameter
+/// that names one.
+fn compound_members(identity: &mb_mcm::Identity) -> Option<[&str; 2]> {
+    let param = identity.path_param.as_deref()?;
+    let other = identity.path_field.as_deref()?;
+    (other != identity.field
+        && mb_mcm::names_member(param, &identity.field)
+        && mb_mcm::names_member(param, other))
+    .then_some([identity.field.as_str(), other])
+}
+
+/// [`force_identity`] for a compound path parameter ([`compound_members`]): the value
+/// goes to the key, as the key comes first, unless the key's schema refuses it (a name
+/// in a `format: uuid` key); then to the other member, when that takes it. A record
+/// holding the value in either already is left as it is, and so is a member the
+/// request body sets (a rename): it is the request's. With neither to take it, nothing
+/// is set.
+fn force_alternative(
+    validator: &SchemaValidator,
+    identity: &mb_mcm::Identity,
+    call: &OperationCall,
+    body: Value,
+    id: &Value,
+    [key, other]: [&str; 2],
+) -> Value {
+    // An item of a list is held nowhere this tells apart.
+    if matches!(
+        identity.record,
+        Some(mb_mcm::RecordAt::Item | mb_mcm::RecordAt::MemberItem(_))
+    ) {
+        return body;
+    }
+    let Some(record) = identity.record_in(&body) else {
+        return body;
+    };
+    let same = |held: &Value| match (held, id) {
+        (Value::Number(a), Value::String(b)) | (Value::String(b), Value::Number(a)) => {
+            a.to_string() == *b
+        }
+        (a, b) => a == b,
+    };
+    if [key, other]
+        .iter()
+        .any(|m| mb_mcm::member_at(record, m).is_some_and(same))
+    {
+        return body;
+    }
+    let sent = |member: &str| {
+        call.body
+            .as_ref()
+            .and_then(|b| identity.record_in(b).or(Some(b)))
+            .and_then(|b| mb_mcm::member_at(b, member))
+            .is_some()
+    };
+    let chosen = fitted(validator, identity, &body, key, id)
+        .map(|forced| (key, forced))
+        .or_else(|| fitted(validator, identity, &body, other, id).map(|forced| (other, forced)));
+    match chosen {
+        Some((member, forced)) if !sent(member) => forced,
+        _ => body,
+    }
+}
+
+/// `body` with `id` in `member` of its record, when the answer's schema takes it there,
+/// its formats too; a format the answer breaks elsewhere says nothing of this member.
+fn fitted(
+    validator: &SchemaValidator,
+    identity: &mb_mcm::Identity,
+    body: &Value,
+    member: &str,
+    id: &Value,
+) -> Option<Value> {
+    let prefix = identity
+        .envelope_member()
+        .map_or_else(String::new, |m| format!("/{m}"));
+    let at = format!("{prefix}/{}", member.replace('.', "/"));
+    let elsewhere = |location: &str, _: &Value| location != at;
+    id_candidates(id).into_iter().find_map(|candidate| {
+        let mut forced = body.clone();
+        mb_mcm::set_member_at(identity.record_in_mut(&mut forced)?, member, candidate);
+        (validator.is_valid(&forced) && validator.formats_hold(&forced, &elsewhere))
+            .then_some(forced)
+    })
+}
+
+/// A path's value as the forms a member may hold it in: as sent, and a string of
+/// digits as a number or a number as a string.
+fn id_candidates(id: &Value) -> Vec<Value> {
     let mut candidates = vec![id.clone()];
     match id {
         Value::String(s) => {
@@ -3454,16 +3671,7 @@ fn force_identity(
         Value::Number(n) => candidates.push(Value::String(n.to_string())),
         _ => {}
     }
-    for candidate in candidates {
-        let mut forced = body.clone();
-        if let Some(Value::Object(obj)) = identity.record_in_mut(&mut forced) {
-            obj.insert(field.to_owned(), candidate);
-        }
-        if validator.is_valid(&forced) {
-            return forced;
-        }
-    }
-    body
+    candidates
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: its

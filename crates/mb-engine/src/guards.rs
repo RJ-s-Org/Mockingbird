@@ -1059,7 +1059,7 @@ pub fn asked_identity(
         return None;
     }
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    let asked = match call.body.as_ref()?.get(field)? {
+    let asked = match mb_mcm::member_at(call.body.as_ref()?, field)? {
         Value::String(s) if !s.is_empty() => s.clone(),
         Value::Number(n) => n.to_string(),
         _ => return None,
@@ -1072,10 +1072,9 @@ pub fn asked_identity(
         .flatten()
         .map(|part| crate::consistency::deref(bundle, part));
     let writable = std::iter::once(schema).chain(parts).any(|part| {
-        part.get("properties")
-            .and_then(|p| p.get(field))
-            .map(|member| crate::consistency::deref(bundle, member))
-            .is_some_and(|member| member.get("readOnly") != Some(&Value::Bool(true)))
+        crate::consistency::property_schema(bundle, part, field).is_some_and(|member| {
+            crate::consistency::deref(bundle, &member).get("readOnly") != Some(&Value::Bool(true))
+        })
     });
     writable.then_some(asked)
 }

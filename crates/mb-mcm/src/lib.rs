@@ -613,7 +613,10 @@ pub struct OutputVariant {
 pub struct Identity {
     /// The path parameter carrying the id.
     pub path_param: Option<String>,
-    /// The resource's id field.
+    /// The resource's id field: a top-level member (`id`), or a dotted path to a member
+    /// of an object member (`metadata.name`, an object-metadata convention). A dotted
+    /// field is read as a path only where the record has no member of that very name
+    /// (see [`member_at`]), so a plain field reads as it always has.
     pub field: String,
     /// Top-level request-body field carrying the target id (non-HTTP protocols).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -723,6 +726,73 @@ impl Identity {
             _ => &self.field,
         }
     }
+
+    /// The record's key, as [`member_at`] reads [`Identity::field`].
+    #[must_use]
+    pub fn id_in<'a>(&self, record: &'a Value) -> Option<&'a Value> {
+        member_at(record, &self.field)
+    }
+}
+
+/// The member of `record` that `field` names: the member of that very name, else, for
+/// a dotted field whose record has no member of that name (an [`Identity::field`] of
+/// `metadata.name`, a key held in a nested object), the member each step names in
+/// turn. `None` when a step is missing or is not an object.
+#[must_use]
+pub fn member_at<'a>(record: &'a Value, field: &str) -> Option<&'a Value> {
+    if let Some(found) = record.get(field) {
+        return Some(found);
+    }
+    if !field.contains('.') {
+        return None;
+    }
+    field.split('.').try_fold(record, |at, step| at.get(step))
+}
+
+/// [`member_at`], mutably.
+pub fn member_at_mut<'a>(record: &'a mut Value, field: &str) -> Option<&'a mut Value> {
+    if !field.contains('.') || record.get(field).is_some() {
+        return record.get_mut(field);
+    }
+    field
+        .split('.')
+        .try_fold(record, |at, step| at.get_mut(step))
+}
+
+/// Sets the member of object `record` that `field` names, as [`member_at`] reads it, to
+/// `value`. A dotted field's missing steps are added as objects; a step that is there
+/// but not an object is left as it is, and nothing is set. Whether it was set.
+pub fn set_member_at(record: &mut Value, field: &str, value: Value) -> bool {
+    let Some(obj) = record.as_object_mut() else {
+        return false;
+    };
+    if !field.contains('.') || obj.contains_key(field) {
+        obj.insert(field.to_owned(), value);
+        return true;
+    }
+    let mut steps: Vec<&str> = field.split('.').collect();
+    let Some(last) = steps.pop() else {
+        return false;
+    };
+    let mut at = obj;
+    for step in steps {
+        let next = at
+            .entry(step.to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let Some(next) = next.as_object_mut() else {
+            return false;
+        };
+        at = next;
+    }
+    at.insert(last.to_owned(), value);
+    true
+}
+
+/// The last step of `field` ([`member_at`]): the member's own name, `name` for
+/// `metadata.name`, and the field itself when it is not dotted.
+#[must_use]
+pub fn leaf_member(field: &str) -> &str {
+    field.rsplit('.').next().unwrap_or(field)
 }
 
 /// The words of a name, split at `_`, `-`, `.` and changes of case: `issueIdOrKey` is
@@ -1277,5 +1347,46 @@ impl Operation {
         self.outputs
             .iter()
             .find(|o| o.status == StatusSelector::Default)
+    }
+}
+
+#[cfg(test)]
+mod member_path_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_dotted_field_reads_a_nested_member_unless_the_record_has_one_of_its_name() {
+        let record = json!({"metadata": {"name": "web"}, "odata.id": "x"});
+        assert_eq!(member_at(&record, "metadata.name"), Some(&json!("web")));
+        assert_eq!(member_at(&record, "odata.id"), Some(&json!("x")));
+        assert_eq!(member_at(&record, "metadata.uid"), None);
+        assert_eq!(member_at(&record, "name"), None);
+        assert_eq!(
+            member_at(&json!({"metadata": "flat"}), "metadata.name"),
+            None
+        );
+    }
+
+    #[test]
+    fn setting_a_dotted_field_adds_the_missing_steps_and_keeps_the_rest() {
+        let mut record = json!({"metadata": {"uid": "u"}});
+        assert!(set_member_at(&mut record, "metadata.name", json!("web")));
+        assert_eq!(record, json!({"metadata": {"uid": "u", "name": "web"}}));
+        let mut bare = json!({});
+        assert!(set_member_at(&mut bare, "a.b", json!(1)));
+        assert_eq!(bare, json!({"a": {"b": 1}}));
+        let mut flat = json!({"metadata": "flat"});
+        assert!(!set_member_at(&mut flat, "metadata.name", json!("web")));
+        assert_eq!(flat, json!({"metadata": "flat"}));
+        let mut plain = json!({"id": 1});
+        assert!(set_member_at(&mut plain, "id", json!(2)));
+        assert_eq!(plain, json!({"id": 2}));
+        if let Some(name) = member_at_mut(&mut record, "metadata.name") {
+            *name = json!("api");
+        }
+        assert_eq!(member_at(&record, "metadata.name"), Some(&json!("api")));
+        assert_eq!(leaf_member("metadata.name"), "name");
+        assert_eq!(leaf_member("id"), "id");
     }
 }

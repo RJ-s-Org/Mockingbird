@@ -109,10 +109,11 @@ pub(super) async fn enforced(
 /// `existing: true`, may stand beside them). Such an answer is right, and is never
 /// replaced by a refusal.
 pub(super) fn answers_the_held(answer: Option<&Value>, held: &StoredResource, field: &str) -> bool {
+    let whole = answer.and_then(|a| mb_mcm::member_at(a, field));
     let (Some(Value::Object(answer)), Value::Object(stored)) = (answer, &held.data) else {
         return false;
     };
-    let same_id = answer.get(field).is_some_and(|id| match id {
+    let same_id = whole.is_some_and(|id| match id {
         Value::String(s) => *s == held.id,
         Value::Number(n) => n.to_string() == held.id,
         _ => false,
@@ -139,10 +140,11 @@ fn names_the_held(
     held: &StoredResource,
     (field, member): (&str, &str),
 ) -> bool {
+    let whole = answer.and_then(|a| mb_mcm::member_at(a, field));
     let Some(Value::Object(answer)) = answer else {
         return false;
     };
-    let same_id = answer.get(field).is_some_and(|id| match id {
+    let same_id = whole.is_some_and(|id| match id {
         Value::String(s) => *s == held.id,
         Value::Number(n) => n.to_string() == held.id,
         _ => false,

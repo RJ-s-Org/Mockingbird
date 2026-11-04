@@ -1029,7 +1029,7 @@ async fn stored_records(
     }
     let field = item_identity(bundle, op, body);
     let texts = text_members(bundle, &item_parts, &field);
-    let identity = |item: &Value| item.get(&field).and_then(id_string);
+    let identity = |item: &Value| mb_mcm::member_at(item, &field).and_then(id_string);
     let mut known: Vec<String> = served.iter().filter_map(identity).collect();
     if let Some(cut) = &cut {
         known.extend(cut.rest.iter().filter_map(identity));
@@ -1250,7 +1250,10 @@ pub(super) async fn overlay_stored(
     };
     let mut overlaid: Vec<(usize, Value)> = Vec::new();
     for (at, item) in items.iter().enumerate().take(MAX_OVERLAID) {
-        let (Some(own), Some(id)) = (item.as_object(), item.get(&field).and_then(id_string)) else {
+        let (Some(own), Some(id)) = (
+            item.as_object(),
+            mb_mcm::member_at(item, &field).and_then(id_string),
+        ) else {
             continue;
         };
         let Some(stored) = state.get(&plan.session, &item_type, &id).await else {
