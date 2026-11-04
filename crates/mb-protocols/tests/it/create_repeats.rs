@@ -249,8 +249,8 @@ async fn a_create_asking_for_a_taken_id_is_shown_its_holder_and_offered_the_refu
 }
 
 /// Answered as a success for the taken id anyway, the create does not replace the stored
-/// customer: a read still serves Ana, and a later create with Ana's email is shown Ana,
-/// not a customer that took Rui's.
+/// customer, and answers the declared refusal it was offered, not the model's body: a
+/// read still serves Ana, and a later create with Rui's email is shown no holder.
 #[tokio::test]
 async fn a_success_for_a_taken_id_never_replaces_the_stored_record() {
     let h = harness(
@@ -263,10 +263,12 @@ async fn a_success_for_a_taken_id_never_replaces_the_stored_record() {
     );
     h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
         .await;
-    let (status, _) = h
+    let (status, body) = h
         .post("/customers", customer(ANA, "Rui", "rui@example.com"))
         .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["message"].is_string(), "the contract's 400: {body}");
+    assert!(!body.to_string().contains("Rui"), "{body}");
     assert_eq!(
         h.held("customers", ANA).await,
         customer(ANA, "Ana", "ana@example.com"),
@@ -449,4 +451,36 @@ async fn a_create_s_effects_on_what_it_names_still_apply() {
         "{}",
         h.prompt(3)
     );
+}
+
+/// With no refusal declared, a success for a taken id answers the held record, as an
+/// idempotent create would: the answer agrees with the store, never the model's
+/// replacement.
+#[tokio::test]
+async fn a_success_for_a_taken_id_with_no_refusal_answers_the_held_record() {
+    let contract = CONTRACT.replacen(
+        "        \"400\": {description: The request is invalid., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n",
+        "",
+        1,
+    );
+    assert_ne!(contract, CONTRACT);
+    let h = harness(
+        &contract,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            customer(ANA, "Rui", "rui@example.com"),
+        ],
+    );
+    h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    let (status, body) = h
+        .post("/customers", customer(ANA, "Rui", "rui@example.com"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, customer(ANA, "Ana", "ana@example.com"));
+    assert_eq!(
+        h.held("customers", ANA).await,
+        customer(ANA, "Ana", "ana@example.com")
+    );
+    assert_eq!(h.count("customers").await, 1);
 }

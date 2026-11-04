@@ -841,6 +841,13 @@ pub(crate) fn refusals(
     offered_codes(op)
 }
 
+/// The statuses a refusal of `op` may name (see [`offered_codes`]), whatever a prompt
+/// was shown: empty when it declares none.
+#[must_use]
+pub fn refusal_codes(op: &mb_mcm::Operation) -> Vec<u16> {
+    offered_codes(op)
+}
+
 /// The statuses of [`REFUSAL_STATUSES`] `op` declares by code that a refusal may name,
 /// in order: a create's `400` only when it declares none of the others.
 fn offered_codes(op: &mb_mcm::Operation) -> Vec<u16> {

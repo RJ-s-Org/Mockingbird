@@ -1264,12 +1264,24 @@ pub(crate) async fn complete(
                 .await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
                 // A create answered for the id of a record held already does not replace
-                // it: nothing comes of it.
-                if let Some(id) =
+                // it: nothing comes of it, and the answer agrees with the store. It is the
+                // refusal it was offered, when the contract declares one, and otherwise
+                // the held record, as an idempotent create answers.
+                if let Some(held) =
                     repeated_record(&mut state, (session, op, t, state_call), &generated).await
                 {
                     unstored = true;
-                    drop_all_effects(rt, op, &id, &mut generated);
+                    drop_all_effects(rt, op, &held.id, &mut generated);
+                    match plan.engine.refuse_repeat(rt.bundle(), op, call, &generated) {
+                        Some(mut refusal) => {
+                            refusal.effect_outcomes =
+                                std::mem::take(&mut generated.effect_outcomes);
+                            refusal.dropped_effects = generated.dropped_effects;
+                            answered = None;
+                            generated = refusal;
+                        }
+                        None => generated.body = Some(held.data),
+                    }
                 }
             }
             // An action's new record goes under its own id, not over another's.
@@ -2520,7 +2532,7 @@ fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
     out
 }
 
-/// The id of a create's answer when it is the one the request asked for, by its body's
+/// The record held under the id of a create's answer when it is the one the request asked for, by its body's
 /// identity field ([`mb_engine::guards::asked_identity`]) or by the path parameter of its
 /// identity, and the session holds a record of the type under it already: a create
 /// answered as a success for a client-chosen id that is taken. Storing it would replace
@@ -2531,7 +2543,7 @@ async fn repeated_record(
     state: &mut StateAccess<'_>,
     (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
     generated: &GeneratedResponse,
-) -> Option<String> {
+) -> Option<StoredResource> {
     if !matches!(op.kind, OperationKind::Command(Effect::Create))
         || matches!(
             op.binding,
@@ -2556,7 +2568,7 @@ async fn repeated_record(
     if asked.as_deref() != Some(id.as_str()) {
         return None;
     }
-    state.get(session, resource_type, &id).await.map(|_| id)
+    state.get(session, resource_type, &id).await
 }
 
 /// Drops every effect of `generated`, a create's answer that is not stored as it
