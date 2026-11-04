@@ -1,71 +1,79 @@
-//! Optimistic concurrency: a write carrying a stale token is refused before any LLM
-//! call, as the API would.
+//! Optimistic concurrency: a write the contract says is checked, sent with a token that
+//! is not the record's current one, is refused before any LLM call, as the API would.
 //!
-//! An API guarding its records against lost updates has the client send back what it
-//! read: a `version` member in the body, an `If-Match` header holding the record's
-//! etag, a JSON Patch `test` of `/rev`. Left to the model, a write sending an old value
-//! was accepted. Nothing names such a member, so the mock goes by what it has seen of
-//! each stored record. A top-level member of a record is a *token* when:
+//! Only the contract ties a value to a refusal, in one of three ways:
 //!
-//! - its read's schema declares it an integer or a string, not a date or a time (a
-//!   timestamp changes on every write by nature, which says nothing of its being
-//!   checked), and it is no identity or path member;
-//! - the type's write carries it: the write's body schema declares it and the body sends
-//!   it, the write declares an `If-Match`-style header (`If-Match`, or a name ending in
-//!   `-If-Match`) and sends it, or its body is a JSON Patch whose `test` names it;
-//! - a write sent its held value (*echoed* it back) and the answer changed it, and since
-//!   that first write every 2xx update of the record the model answered changed it: one
-//!   answer that left it as it was ends it for that record, for good.
+//! - **A body member.** A top-level member of the record is a token for a write when the
+//!   write declares a `409` or a `412` whose description names it in code position
+//!   (`` `version` ``), or whose schema declares a member of that name and type. The
+//!   member is an integer or a string with no `enum` or `const` (a state, not a version)
+//!   and no identity or path member. Once an update answered by the model changed it
+//!   (see below), a write sending another value than the record's current one is
+//!   refused. A record's first write is never refused this way, as nothing was seen of
+//!   how its token moves.
+//! - **An `If-Match` header** (`If-Match`, or a name ending in `-If-Match`) the write
+//!   declares. It is compared only with the entity tag the mock itself served in an
+//!   `ETag` response header for that record in this session, never with a member. A
+//!   read serves the record's current tag again, so it stays put between writes; a 2xx
+//!   create or update serves a new one. A write whose tags are none of the current one
+//!   is refused; `If-Match: *`, and a record the mock served no tag for, are not.
+//! - **A JSON Patch `test`.** A patch is applied in order to the stored record, and a
+//!   `test` failing against a value the record holds fails it (RFC 6902), with no
+//!   history needed; a path the stored copy lacks decides nothing. An update's patch
+//!   also names, for its answer to settle on, the members its operations change (see
+//!   [`mb_engine::json_patch_body`]).
 //!
-//! While a member is echoed or a token, an update's answer advances it: the model's new
-//! value (another string, a greater integer) is stored over the copy's, which the
-//! settling of an update otherwise keeps (see [`mb_engine::UpdateGuard::advances`]).
-//! Each change is remembered: the value the record held before it, the newest
-//! [`MAX_HISTORY`].
+//! A refusal is the operation's declared `409` or `412` (a header the `412` first, a
+//! body or a patch the `409` first); with neither declared, nothing is refused. It
+//! changes nothing. Values are compared as text, an entity tag's `W/` and quotes dropped.
+//! A request sending no token is never refused.
 //!
-//! A write (an update or a delete) whose token is not the record's current value, but
-//! one it held before, is refused with the operation's declared `412` or `409` (an
-//! `If-Match` header the `412` first, a body or a patch the `409` first) before any LLM
-//! call, and nothing changes. A value the record never held is left to the model as
-//! before: it may be another spelling of the token (an etag the faker made for a
-//! response header, a hash of it) that the mock cannot read, and a refusal on it would
-//! be a guess; a value seen and since replaced is a stale read beyond doubt. Values are
-//! compared as text, with an entity tag's `W/` and quotes dropped. `If-Match: *` and a
-//! request sending no token are never refused, nor is a write to an operation declaring
-//! neither status, nor a record's first write.
+//! A body token the request sends no new value for (it sends none, or the held one) is
+//! *advanced* by the update: the model's new value (another string, a greater integer)
+//! is stored, even for a `readOnly` member, where the settling of an update otherwise
+//! keeps the copy's, and the request's echo does not stand over it. Nothing else of the
+//! request is touched, and the target's identity and owner are kept (see
+//! [`mb_engine::UpdateGuard::advances`]). A member the request sets to a new value is the
+//! client's, as before.
 //!
-//! Kept under the store's reserved type ([`mb_state::INTERNAL_TYPE`]), one document per
-//! record that has a member echoed, so every backend and node sees the same, and
-//! sessions, TTLs and resets clear it; a delete of the record ends it. A session keeps
-//! [`MAX_RECORDS`] of them, the newest. A write reads its record's document once, and
-//! writes it after a 2xx update when a member was echoed or a token. The document is
-//! read, changed and written back: two writes to one record at once can lose a change,
-//! which only leaves the next stale write to the model.
+//! Kept under the store's reserved type ([`mb_state::INTERNAL_TYPE`]), per record: which
+//! body tokens an update was seen to change, and the current entity tag. So every
+//! backend and node sees the same, sessions, TTLs and resets clear it, a session keeps
+//! [`MAX_RECORDS`] records' worth, the newest, and a delete of the record ends it. A
+//! document is read, changed and written back: two writes to one record at once can lose
+//! a change, which only leaves a stale write to the model.
 //!
 //! HTTP, an LLM and `consistency: on` only, with no scenario or forced status:
 //! everything else is as it was.
 
+#[cfg(feature = "http-rest")]
+use axum::http::{HeaderMap, HeaderValue};
+use mb_engine::json_patch_body::{self, Applied};
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
 
 use super::*;
 
-/// Values a token is remembered to have held, the newest.
-const MAX_HISTORY: usize = 16;
 /// Records whose tokens a session keeps, the newest.
 const MAX_RECORDS: usize = 1024;
 /// The document listing them, oldest first, and the prefix of their ids.
 const INDEX: &str = "#tokens";
-/// Longest token value remembered, as text.
+/// Where a record's entity tag is kept, beside its tokens.
+const ETAGS: &str = "#etags";
+/// Longest token value compared, as text.
 const MAX_VALUE_CHARS: usize = 256;
+/// How deep an error schema is searched for a member.
+const MAX_DEPTH: usize = 6;
 
 /// What a write found of its record's tokens, for its answer and for after it.
 #[derive(Default)]
 pub(super) struct Tokens {
-    /// The members the update advances: its record's tokens, and those it echoed.
+    /// The body tokens the update advances.
     pub(super) advancing: Vec<String>,
-    /// The record's document as read, when it has one.
-    held: Option<Map<String, Value>>,
+    /// The body tokens an update was seen to change, as read.
+    confirmed: Vec<String>,
+    /// Whether the record has a document of its tokens.
+    kept: bool,
 }
 
 /// Whether this call keeps and honours tokens.
@@ -74,126 +82,14 @@ pub(super) fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
         && plan.engine.has_provider()
         && plain(plan)
         && matches!(plan.op.binding, Binding::Http { .. })
-        && matches!(
-            plan.op.kind,
-            OperationKind::Command(Effect::Update | Effect::Delete)
-        )
 }
 
-/// How a write sent a token.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Channel {
-    Body,
-    Header,
-    Patch,
-}
-
-/// One value a write sent for a member, as text: a header names none.
-struct Sent {
-    member: Option<String>,
-    value: String,
-    channel: Channel,
-}
-
-/// What `call` sends that may be a token of `held`'s: its body's members the write's
-/// body schema declares, the entity tags of an `If-Match`-style header it declares, and
-/// the values of its JSON Patch `test`s of a top-level member. Only a string or an
-/// integer.
-fn sent(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Vec<Sent> {
-    let bundle = rt.bundle();
-    let mut out = Vec::new();
-    let body_schema = op.input.body.as_ref();
-    match call.body.as_ref() {
-        Some(Value::Object(members)) => {
-            for (member, value) in members {
-                let declared = body_schema.is_some_and(|s| {
-                    mb_engine::consistency::property_schema(bundle, s, member).is_some()
-                });
-                if let (true, Some(value)) = (declared, as_text(value)) {
-                    out.push(Sent {
-                        member: Some(member.clone()),
-                        value,
-                        channel: Channel::Body,
-                    });
-                }
-            }
-        }
-        Some(Value::Array(ops)) if is_json_patch(ops) => {
-            for item in ops {
-                if item.get("op").and_then(Value::as_str) != Some("test") {
-                    continue;
-                }
-                let member = item
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .and_then(top_member);
-                let value = item.get("value").and_then(as_text);
-                if let (Some(member), Some(value)) = (member, value) {
-                    out.push(Sent {
-                        member: Some(member),
-                        value,
-                        channel: Channel::Patch,
-                    });
-                }
-            }
-        }
-        _ => {}
-    }
-    for name in if_match_headers(op) {
-        let Some(text) = call
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(&name))
-            .and_then(|(_, v)| v.as_str())
-        else {
-            continue;
-        };
-        let tags: Vec<&str> = text.split(',').map(str::trim).collect();
-        // Any current representation matches `*`: no token is sent.
-        if tags.contains(&"*") {
-            continue;
-        }
-        for tag in tags.into_iter().filter(|t| !t.is_empty()) {
-            out.push(Sent {
-                member: None,
-                value: normalized(tag),
-                channel: Channel::Header,
-            });
-        }
-    }
-    out
-}
-
-/// The `If-Match`-style headers `op` declares, as declared.
-fn if_match_headers(op: &Operation) -> Vec<String> {
-    let Some(Value::Object(properties)) =
-        op.input.headers.as_ref().and_then(|s| s.get("properties"))
-    else {
-        return Vec::new();
-    };
-    properties
-        .keys()
-        .filter(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower == "if-match" || lower.ends_with("-if-match")
-        })
-        .cloned()
-        .collect()
-}
-
-/// Whether `ops` is a JSON Patch (RFC 6902): objects, each naming its `op` and `path`.
-fn is_json_patch(ops: &[Value]) -> bool {
-    !ops.is_empty()
-        && ops.iter().all(|item| {
-            item.get("op").is_some_and(Value::is_string)
-                && item.get("path").is_some_and(Value::is_string)
-        })
-}
-
-/// The top-level member a JSON Pointer names (`/rev`), unescaped; none for a deeper one.
-fn top_member(pointer: &str) -> Option<String> {
-    let rest = pointer.strip_prefix('/')?;
-    (!rest.is_empty() && !rest.contains('/')).then(|| rest.replace("~1", "/").replace("~0", "~"))
+/// Whether `plan` is a write tokens guard.
+fn guards(plan: &CallPlan<'_>) -> bool {
+    matches!(
+        plan.op.kind,
+        OperationKind::Command(Effect::Update | Effect::Delete)
+    )
 }
 
 /// A string or an integer as the text a token is compared by.
@@ -216,33 +112,15 @@ fn normalized(text: &str) -> String {
         .to_string()
 }
 
-/// Whether member `member` of a stored `t` may be a token by its type (see the module's
-/// documentation): its read declares it an integer or a string, not a date or a time,
-/// and it is no identity or path member.
-fn may_be_token(rt: &MockRuntime, t: &str, member: &str) -> bool {
-    let index = rt.index();
-    if index.identity_fields(t).iter().any(|f| f == member)
-        || index.path_fields(t).iter().any(|f| f == member)
-    {
-        return false;
-    }
-    let bundle = rt.bundle();
-    let Some(schema) = write_memory::read_schema(rt, t)
-        .and_then(|s| mb_engine::consistency::property_schema(bundle, s, member))
-    else {
-        return false;
-    };
-    let node = deref_schema(bundle, &schema);
-    let types: Vec<&str> = match node.get("type") {
+/// `schema`'s `type`s, through `$ref`s.
+fn types<'a>(bundle: &'a mb_mcm::Bundle, schema: &'a Value) -> (Vec<&'a str>, &'a Value) {
+    let node = deref_schema(bundle, schema);
+    let types = match node.get("type") {
         Some(Value::String(t)) => vec![t.as_str()],
         Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
-    let dated = node
-        .get("format")
-        .and_then(Value::as_str)
-        .is_some_and(|f| matches!(f, "date-time" | "date" | "time"));
-    types.iter().any(|t| matches!(*t, "integer" | "string")) && !dated
+    (types, node)
 }
 
 /// `schema` with `$ref`s to the bundle's definitions followed (bounded).
@@ -261,32 +139,147 @@ fn deref_schema<'a>(bundle: &'a mb_mcm::Bundle, mut schema: &'a Value) -> &'a Va
     schema
 }
 
-/// The document of `t` `id`'s tokens.
-fn key(t: &str, id: &str) -> String {
+/// The kind of token member `member` of a stored `t` is by its read's schema: `integer`
+/// or `string`, with no `enum` or `const`, and no identity or path member.
+fn token_kind(rt: &MockRuntime, t: &str, member: &str) -> Option<&'static str> {
+    let index = rt.index();
+    if index.identity_fields(t).iter().any(|f| f == member)
+        || index.path_fields(t).iter().any(|f| f == member)
+    {
+        return None;
+    }
+    let bundle = rt.bundle();
+    let schema = write_memory::read_schema(rt, t)
+        .and_then(|s| mb_engine::consistency::property_schema(bundle, s, member))?;
+    let (types, node) = types(bundle, &schema);
+    if node.get("enum").is_some() || node.get("const").is_some() {
+        return None;
+    }
+    if types.contains(&"integer") {
+        Some("integer")
+    } else if types.contains(&"string") {
+        Some("string")
+    } else {
+        None
+    }
+}
+
+/// Whether `op` ties member `member` of a stored `t` to a refusal (see the module's
+/// documentation): it is a token by its kind, and a `409` or `412` of `op` names it in
+/// code position in its description, or declares a member of that name and kind.
+fn tied(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
+    let Some(kind) = token_kind(rt, t, member) else {
+        return false;
+    };
+    let bundle = rt.bundle();
+    op.outputs.iter().any(|variant| {
+        if !matches!(
+            variant.status,
+            mb_mcm::StatusSelector::Code(409) | mb_mcm::StatusSelector::Code(412)
+        ) {
+            return false;
+        }
+        let described = variant.description.as_deref().is_some_and(|d| {
+            mb_engine::contract_values::code_spans(d)
+                .iter()
+                .any(|s| s == member)
+        });
+        described
+            || variant
+                .schema
+                .as_ref()
+                .is_some_and(|s| declares(bundle, s, member, kind, 0))
+    })
+}
+
+/// Whether `schema` declares a member `member` of `kind` at any depth.
+fn declares(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    member: &str,
+    kind: &str,
+    depth: usize,
+) -> bool {
+    if depth > MAX_DEPTH {
+        return false;
+    }
+    let node = deref_schema(bundle, schema);
+    if let Some(Value::Object(properties)) = node.get("properties") {
+        for (name, inner) in properties {
+            if name == member {
+                let (found, _) = types(bundle, inner);
+                let fits = match kind {
+                    "integer" => found.contains(&"integer") || found.contains(&"number"),
+                    _ => found.contains(&kind),
+                };
+                if fits {
+                    return true;
+                }
+            }
+            if declares(bundle, inner, member, kind, depth + 1) {
+                return true;
+            }
+        }
+    }
+    let parts = ["allOf", "oneOf", "anyOf"]
+        .into_iter()
+        .filter_map(|k| node.get(k).and_then(Value::as_array))
+        .flatten();
+    let items = node.get("items").into_iter();
+    parts
+        .chain(items)
+        .any(|inner| declares(bundle, inner, member, kind, depth + 1))
+}
+
+/// The `If-Match`-style headers `op` declares, as declared.
+fn if_match_headers(op: &Operation) -> Vec<String> {
+    let Some(Value::Object(properties)) =
+        op.input.headers.as_ref().and_then(|s| s.get("properties"))
+    else {
+        return Vec::new();
+    };
+    properties
+        .keys()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower == "if-match" || lower.ends_with("-if-match")
+        })
+        .cloned()
+        .collect()
+}
+
+/// The entity tags `call` sends in a declared `If-Match`-style header, normalized; none
+/// for `*`, which any current representation matches.
+fn sent_tags(op: &Operation, call: &OperationCall) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in if_match_headers(op) {
+        let Some(text) = call
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&name))
+            .and_then(|(_, v)| v.as_str())
+        else {
+            continue;
+        };
+        let tags: Vec<&str> = text.split(',').map(str::trim).collect();
+        if tags.contains(&"*") {
+            continue;
+        }
+        out.extend(tags.into_iter().filter(|t| !t.is_empty()).map(normalized));
+    }
+    out
+}
+
+/// The document of `t` `id`'s `kind` (tokens or entity tag).
+fn key(kind: &str, t: &str, id: &str) -> String {
     let mut hasher = Sha256::new();
-    for part in [t, id] {
+    for part in [kind, t, id] {
         hasher.update(part.as_bytes());
         hasher.update([0]);
     }
     let digest = hasher.finalize();
     let hash: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
     format!("{INDEX}/{hash}")
-}
-
-/// Whether the kept `entry` is a token: written, and changed by every write. An entry
-/// keeps a member's observed `writes`, the values it held before each (`history`), and
-/// whether one left it as it was (`ended`).
-fn is_token(entry: &Value) -> bool {
-    entry.get("writes").and_then(Value::as_u64).unwrap_or(0) > 0
-        && entry.get("ended").and_then(Value::as_bool) != Some(true)
-}
-
-/// Whether the kept `entry` remembers `value` as one its member held before.
-fn held_before(entry: &Value, value: &str) -> bool {
-    entry
-        .get("history")
-        .and_then(Value::as_array)
-        .is_some_and(|h| h.iter().any(|v| v.as_str() == Some(value)))
 }
 
 /// What a write `plan` to `target` decides of its tokens, before any generation: the
@@ -298,117 +291,119 @@ pub(super) async fn check(
     call: &OperationCall,
     target: &StoredResource,
 ) -> Result<Tokens, GeneratedResponse> {
+    if !guards(plan) {
+        return Ok(Tokens::default());
+    }
     let rt = state.rt;
     let op = plan.op;
     let t = target.resource_type.as_str();
-    let sent = sent(rt, op, call);
-    let held = read(state, &plan.session, t, &target.id).await;
-    let current = |member: &str| target.data.get(member).and_then(as_text);
-    let live: Vec<(&String, &Value)> = held
-        .iter()
-        .flatten()
-        .filter(|(member, entry)| is_token(entry) && may_be_token(rt, t, member))
-        .collect();
-    // A body's or a patch's token names its member.
-    let named = sent.iter().find(|s| {
-        let Some(member) = s.member.as_deref() else {
-            return false;
-        };
-        live.iter().any(|(m, entry)| {
-            m.as_str() == member
-                && current(member).is_some_and(|now| now != s.value)
-                && held_before(entry, &s.value)
-        })
-    });
-    // An entity tag names none: stale when it is no token's current value, and one a
-    // token held before.
-    let tags: Vec<&Sent> = sent
-        .iter()
-        .filter(|s| s.channel == Channel::Header)
-        .collect();
-    let tagged = !tags.is_empty()
-        && !tags.iter().any(|s| {
-            live.iter()
-                .any(|(m, _)| current(m).is_some_and(|now| now == s.value))
-        })
-        && tags.iter().any(|s| {
-            live.iter().any(|(m, entry)| {
-                current(m).is_some_and(|now| now != s.value) && held_before(entry, &s.value)
-            })
-        });
-    let codes: &[u16] = match (named, tagged) {
-        (Some(_), _) => &[409, 412],
-        (None, true) => &[412, 409],
-        (None, false) => &[],
+    let session = &plan.session;
+    let refuse = |codes: &[u16]| {
+        codes
+            .iter()
+            .find_map(|code| plan.engine.refuse_from_state(rt.bundle(), op, call, *code))
     };
-    if let Some(refusal) = codes
-        .iter()
-        .find_map(|code| plan.engine.refuse_from_state(rt.bundle(), op, call, *code))
+
+    // A JSON Patch: its tests, and what it changes.
+    let mut changed: Option<Value> = None;
+    if let Some(body) = call.body.as_ref() {
+        match json_patch_body::apply(&target.data, body) {
+            Applied::TestFailed => {
+                if let Some(refusal) = refuse(&[409, 412]) {
+                    log_refusal(rt, op, &refusal, "a JSON Patch test failed");
+                    return Err(refusal);
+                }
+            }
+            Applied::Applied(after) => {
+                changed = Some(json_patch_body::changed_members(&target.data, &after));
+            }
+            Applied::NotAPatch | Applied::Unknown => {}
+        }
+    }
+
+    // An entity tag, against the one the mock served.
+    let tags = sent_tags(op, call);
+    if !tags.is_empty()
+        && let Some(current) = current_etag(state, session, t, &target.id).await
+        && !tags.contains(&normalized(&current))
+        && let Some(refusal) = refuse(&[412, 409])
     {
-        tracing::info!(
-            mock = %rt.name,
-            operation = %op.id,
-            status = refusal.status,
-            "write refused: it sent a concurrency token its record held before"
+        log_refusal(
+            rt,
+            op,
+            &refusal,
+            "its If-Match is not the record's entity tag",
         );
         return Err(refusal);
     }
-    let mut advancing = tokens_of(rt, t, target, held.as_ref());
-    if op.kind == OperationKind::Command(Effect::Update) {
-        for member in echoed(rt, t, target, &sent) {
-            let ended = held
-                .as_ref()
-                .and_then(|h| h.get(&member))
-                .is_some_and(|e| e.get("ended") == Some(&Value::Bool(true)));
-            if !ended && !advancing.contains(&member) {
-                advancing.push(member);
+
+    // A body member the contract ties to a refusal.
+    let doc = state
+        .get(session, INTERNAL_TYPE, &key(INDEX, t, &target.id))
+        .await;
+    let confirmed: Vec<String> = doc
+        .as_ref()
+        .and_then(|d| d.data.get("confirmed"))
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
+    let body = match (&changed, call.body.as_ref()) {
+        (None, Some(Value::Object(members))) => Some(members),
+        _ => None,
+    };
+    let body_schema = op.input.body.as_ref();
+    for (member, sent) in body.into_iter().flatten() {
+        let declared = body_schema.is_some_and(|s| {
+            mb_engine::consistency::property_schema(rt.bundle(), s, member).is_some()
+        });
+        let (Some(sent), Some(now)) = (as_text(sent), target.data.get(member).and_then(as_text))
+        else {
+            continue;
+        };
+        if declared
+            && sent != now
+            && confirmed.contains(member)
+            && tied(rt, op, t, member)
+            && let Some(refusal) = refuse(&[409, 412])
+        {
+            log_refusal(rt, op, &refusal, "its body sent a stale concurrency token");
+            return Err(refusal);
+        }
+    }
+
+    // What the update advances: a tied member it sets no new value for.
+    let mut advancing = Vec::new();
+    if op.kind == OperationKind::Command(Effect::Update)
+        && let Value::Object(held) = &target.data
+    {
+        let sets = changed.as_ref().and_then(Value::as_object).or(body);
+        for (member, value) in held {
+            let new = sets
+                .and_then(|s| s.get(member))
+                .is_some_and(|sent| sent != value && as_text(sent) != as_text(value));
+            if !new && as_text(value).is_some() && tied(rt, op, t, member) {
+                advancing.push(member.clone());
             }
         }
     }
-    Ok(Tokens { advancing, held })
+    Ok(Tokens {
+        advancing,
+        confirmed,
+        kept: doc.is_some(),
+    })
 }
 
-/// The tokens `held` keeps of `target` that it still holds.
-fn tokens_of(
-    rt: &MockRuntime,
-    t: &str,
-    target: &StoredResource,
-    held: Option<&Map<String, Value>>,
-) -> Vec<String> {
-    held.into_iter()
-        .flatten()
-        .filter(|(member, entry)| {
-            is_token(entry)
-                && target.data.get(member.as_str()).is_some()
-                && may_be_token(rt, t, member)
-        })
-        .map(|(member, _)| member.clone())
-        .collect()
+fn log_refusal(rt: &MockRuntime, op: &Operation, refusal: &GeneratedResponse, why: &str) {
+    tracing::info!(
+        mock = %rt.name,
+        operation = %op.id,
+        status = refusal.status,
+        reason = why,
+        "write refused before generation"
+    );
 }
 
-/// The members of `target` whose held value the write `sent` back: by its body or a
-/// patch's `test`, or as an entity tag.
-fn echoed(rt: &MockRuntime, t: &str, target: &StoredResource, sent: &[Sent]) -> Vec<String> {
-    let Value::Object(members) = &target.data else {
-        return Vec::new();
-    };
-    members
-        .iter()
-        .filter(|(member, value)| {
-            let Some(now) = as_text(value) else {
-                return false;
-            };
-            sent.iter()
-                .any(|s| s.value == now && s.member.as_deref().is_none_or(|m| m == member.as_str()))
-                && may_be_token(rt, t, member)
-        })
-        .map(|(member, _)| member.clone())
-        .collect()
-}
-
-/// After a 2xx update of `before` the model answered: what each member it advanced did.
-/// One that changed keeps the value it held before; one left as it was is no token of
-/// this record any more.
+/// After a 2xx update of `before` the model answered: each advancing token it changed is
+/// confirmed, so a later write sending another value is refused.
 pub(super) async fn after_update(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -419,80 +414,71 @@ pub(super) async fn after_update(
         return;
     }
     let t = before.resource_type.as_str();
-    let after = state.get(session, t, &before.id).await;
-    let mut doc = tokens.held.clone().unwrap_or_default();
+    let Some(after) = state.get(session, t, &before.id).await else {
+        return;
+    };
+    let mut confirmed = tokens.confirmed.clone();
     for member in &tokens.advancing {
         let was = before.data.get(member).and_then(as_text);
-        let now = after
-            .as_ref()
-            .and_then(|a| a.data.get(member))
-            .and_then(as_text);
-        let mut entry = doc
-            .remove(member)
-            .and_then(|e| match e {
-                Value::Object(e) => Some(e),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let writes = entry.get("writes").and_then(Value::as_u64).unwrap_or(0) + 1;
-        entry.insert("writes".into(), Value::from(writes));
-        match (was, now) {
-            (Some(was), Some(now)) if was != now => {
-                let mut history: Vec<Value> = entry
-                    .get("history")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                history.retain(|v| v.as_str() != Some(was.as_str()));
-                history.push(Value::String(was));
-                let excess = history.len().saturating_sub(MAX_HISTORY);
-                history.drain(..excess);
-                entry.insert("history".into(), Value::Array(history));
-            }
-            _ => {
-                entry.insert("ended".into(), Value::Bool(true));
-            }
+        let now = after.data.get(member).and_then(as_text);
+        if was.is_some() && now.is_some() && was != now && !confirmed.contains(member) {
+            confirmed.push(member.clone());
         }
-        doc.insert(member.clone(), Value::Object(entry));
     }
-    let id = key(t, &before.id);
-    let new = tokens.held.is_none();
+    if confirmed == tokens.confirmed {
+        return;
+    }
+    let id = key(INDEX, t, &before.id);
+    let data = serde_json::json!({ "confirmed": confirmed });
+    store(state, session, id, data, !tokens.kept).await;
+}
+
+/// Writes document `id`, listing it in the index when it is `new`; the index keeps the
+/// newest [`MAX_RECORDS`] and ends those past it.
+async fn store(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    id: String,
+    data: Value,
+    new: bool,
+) {
     state
         .upsert(
             session,
             StoredResource {
                 resource_type: INTERNAL_TYPE.to_string(),
                 id: id.clone(),
-                data: Value::Object(doc),
+                data,
             },
         )
         .await;
-    if new {
-        let mut listed: Vec<String> = match state.get(session, INTERNAL_TYPE, INDEX).await {
-            Some(doc) => serde_json::from_value(doc.data).unwrap_or_default(),
-            None => Vec::new(),
-        };
-        listed.retain(|held| *held != id);
-        listed.push(id);
-        let excess = listed.len().saturating_sub(MAX_RECORDS);
-        for oldest in listed.drain(..excess) {
-            state.delete(session, INTERNAL_TYPE, &oldest).await;
-        }
-        state
-            .upsert(
-                session,
-                StoredResource {
-                    resource_type: INTERNAL_TYPE.to_string(),
-                    id: INDEX.to_string(),
-                    data: Value::from(listed),
-                },
-            )
-            .await;
+    if !new {
+        return;
     }
+    let mut listed: Vec<String> = match state.get(session, INTERNAL_TYPE, INDEX).await {
+        Some(doc) => serde_json::from_value(doc.data).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    listed.retain(|held| *held != id);
+    listed.push(id);
+    let excess = listed.len().saturating_sub(MAX_RECORDS);
+    for oldest in listed.drain(..excess) {
+        state.delete(session, INTERNAL_TYPE, &oldest).await;
+    }
+    state
+        .upsert(
+            session,
+            StoredResource {
+                resource_type: INTERNAL_TYPE.to_string(),
+                id: INDEX.to_string(),
+                data: Value::from(listed),
+            },
+        )
+        .await;
 }
 
-/// After a 2xx delete of `t` `id`: its tokens go with it. The index keeps the entry,
-/// which the bound takes out.
+/// After a 2xx delete of `t` `id`: its tokens and entity tag go with it. The index keeps
+/// the entries, which the bound takes out.
 pub(super) async fn after_delete(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -500,22 +486,95 @@ pub(super) async fn after_delete(
     id: &str,
     tokens: &Tokens,
 ) {
-    if tokens.held.is_some() {
-        state.delete(session, INTERNAL_TYPE, &key(t, id)).await;
+    if tokens.kept {
+        state
+            .delete(session, INTERNAL_TYPE, &key(INDEX, t, id))
+            .await;
     }
+    state
+        .delete(session, INTERNAL_TYPE, &key(ETAGS, t, id))
+        .await;
 }
 
-/// The document of `t` `id`'s tokens, when it has one.
-async fn read(
+/// The entity tag the mock last served for `t` `id`.
+async fn current_etag(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
     id: &str,
-) -> Option<Map<String, Value>> {
-    match state.get(session, INTERNAL_TYPE, &key(t, id)).await?.data {
-        Value::Object(doc) => Some(doc),
-        _ => None,
+) -> Option<String> {
+    let doc = state
+        .get(session, INTERNAL_TYPE, &key(ETAGS, t, id))
+        .await?;
+    doc.data.get("current")?.as_str().map(str::to_string)
+}
+
+#[cfg(feature = "http-rest")]
+/// The record a 2xx answer of `plan` is about, for its `ETag`: a create's by the identity
+/// its answer holds, any other's by its path.
+pub(crate) fn etag_record(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) -> Option<(String, String)> {
+    let op = plan.op;
+    if !applies(rt, plan) || !(200..300).contains(&generated.status) {
+        return None;
     }
+    let t = op.resource_type.clone()?;
+    let id = match op.kind {
+        OperationKind::Command(Effect::Create) => {
+            let identity = op.identity.as_ref();
+            let body = generated.body.as_ref()?;
+            let record = match identity.filter(|i| i.record.is_some()) {
+                Some(identity) => identity.record_in(body)?,
+                None => body,
+            };
+            let field = identity.map_or("id", |i| i.field.as_str());
+            id_string(record.get(field)?)?
+        }
+        _ => target_id(op, call)?,
+    };
+    Some((t, id))
+}
+
+#[cfg(feature = "http-rest")]
+/// After an answer about `record` was given its declared headers: its `ETag`, when it has
+/// one. A read serves the record's current tag again, or makes the one it drew current;
+/// a create or an update makes the one it drew current; a delete ends it.
+pub(crate) async fn serve_etag(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    record: Option<(String, String)>,
+    headers: &mut HeaderMap,
+) {
+    let Some((t, id)) = record else { return };
+    let session = &plan.session;
+    let mut state = StateAccess::new(rt);
+    let doc = key(ETAGS, &t, &id);
+    // A delete's ends with its record (see [`after_delete`]).
+    if plan.op.kind == OperationKind::Command(Effect::Delete) {
+        return;
+    }
+    let Some(drawn) = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let current = current_etag(&mut state, session, &t, &id).await;
+    if matches!(plan.op.kind, OperationKind::Query)
+        && let Some(current) = &current
+    {
+        if let Ok(value) = HeaderValue::from_str(current) {
+            headers.insert("etag", value);
+        }
+        return;
+    }
+    let data = serde_json::json!({ "current": drawn });
+    store(&mut state, session, doc, data, current.is_none()).await;
 }
 
 #[cfg(test)]
@@ -531,18 +590,5 @@ mod tests {
         assert_eq!(as_text(&json!(7)), Some("7".into()));
         assert_eq!(as_text(&json!(7.5)), None);
         assert_eq!(as_text(&json!(true)), None);
-    }
-
-    #[test]
-    fn a_patch_test_names_a_top_level_member_only() {
-        assert_eq!(top_member("/rev"), Some("rev".into()));
-        assert_eq!(top_member("/a~1b"), Some("a/b".into()));
-        assert_eq!(top_member("/meta/rev"), None);
-        assert_eq!(top_member("/"), None);
-        assert!(is_json_patch(&[
-            json!({"op": "test", "path": "/rev", "value": 1})
-        ]));
-        assert!(!is_json_patch(&[json!({"name": "x"})]));
-        assert!(!is_json_patch(&[]));
     }
 }

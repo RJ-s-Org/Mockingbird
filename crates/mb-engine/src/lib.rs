@@ -54,12 +54,13 @@ use crate::guards::{Checked, Checks, Echoes, Fill};
 pub mod budget;
 pub mod compact;
 pub mod consistency;
-mod contract_values;
+pub mod contract_values;
 mod encoded;
 pub mod extract;
 pub mod faker;
 pub mod guards;
 pub mod headers;
+pub mod json_patch_body;
 mod media;
 pub mod message;
 pub mod ndjson;
@@ -204,10 +205,10 @@ pub trait UpdateGuard: std::fmt::Debug + Sync {
     /// Whether `candidate` is still the target's owner's.
     fn keeps_owner(&self, candidate: &Value) -> bool;
     /// Whether the update advances the target's top-level `member`, a concurrency token
-    /// the runtime has seen change on its writes, or one this request sends the held
-    /// value of: an LLM answer's new value (a string, or an integer above the held one)
-    /// stands over the stored copy's, and the request's own value never stands over it.
-    /// None does by default.
+    /// the contract ties to a refusal that the request sends no new value for: an LLM
+    /// answer's new value (another string, a greater integer) stands over the stored
+    /// copy's, and the request's echo of the held value does not stand over it. The
+    /// target's identity and owner are kept after. None does by default.
     fn advances(&self, member: &str) -> bool {
         let _ = member;
         false
@@ -1383,7 +1384,7 @@ impl Engine {
             Ok(validator) => contract_values::fill(
                 bundle,
                 &validator,
-                schema,
+                (schema, response.status),
                 variant.description.as_deref(),
                 body,
             ),
@@ -2346,6 +2347,9 @@ fn reflect(
             overlay_request(validator, body, call.body.as_ref())
         }
         OperationKind::Command(Effect::Update) => {
+            // A JSON Patch names what its operations change on the stored target.
+            let patched = ctx.target.and_then(|target| patch_as_body(call, target));
+            let call = patched.as_ref().unwrap_or(call);
             let overlaid = overlay_request(validator, body.clone(), call.body.as_ref());
             if is_new_record(op, call, ctx.target, &response, &overlaid) {
                 response.new_record = true;
@@ -2383,9 +2387,9 @@ fn reflect(
                         overlay_request(validator, body, call.body.as_ref())
                     }
                 };
-                match (raw, ctx.target) {
-                    (Some(raw), Some(target)) => {
-                        advanced(validator, body, &raw, target, &advancing)
+                match (raw, ctx.target, ctx.update_guard) {
+                    (Some(raw), Some(target), Some(guard)) => {
+                        advanced(validator, guard, body, &raw, target, &advancing)
                     }
                     _ => body,
                 }
@@ -2427,11 +2431,27 @@ fn without_members(call: &OperationCall, members: &[String]) -> OperationCall {
     out
 }
 
+/// `call` with its JSON Patch body, applied to `target`, as the object of the top-level
+/// members it changes (see [`json_patch_body`]). `None` for any other body, or a patch
+/// that does not apply.
+fn patch_as_body(call: &OperationCall, target: &StoredResource) -> Option<OperationCall> {
+    let body = call.body.as_ref()?;
+    match json_patch_body::apply(&target.data, body) {
+        json_patch_body::Applied::Applied(after) => Some(OperationCall {
+            body: Some(json_patch_body::changed_members(&target.data, &after)),
+            ..call.clone()
+        }),
+        _ => None,
+    }
+}
+
 /// `body` with each of `members` holding what the LLM's `raw` answer gave it, when that
 /// advances what `target` holds: another string, or a greater integer. Each only where
-/// `body` stays valid (see [`overlay`]).
+/// `body` stays valid (see [`overlay`]); then the target's identity is kept, and an answer
+/// that would show another owner advances nothing.
 fn advanced(
     validator: &SchemaValidator,
+    guard: &dyn UpdateGuard,
     body: Value,
     raw: &Value,
     target: &StoredResource,
@@ -2455,7 +2475,16 @@ fn advanced(
     if moved.is_empty() {
         return body;
     }
-    overlay(validator, body, Some(&Value::Object(moved)))
+    let moved = guard.keep_identity(overlay(
+        validator,
+        body.clone(),
+        Some(&Value::Object(moved)),
+    ));
+    if guard.keeps_owner(&moved) && validator.is_valid(&moved) {
+        moved
+    } else {
+        body
+    }
 }
 
 /// What an update names of its resource, for its answer to settle on ([`settled_update`]):

@@ -176,3 +176,79 @@ fn a_refusal_needs_its_status_declared_by_code() {
             .is_none()
     );
 }
+
+/// A shared `Error` used by the `404` and the `409`: its example speaks for neither, the
+/// `409`'s description names its code, and the HTTP status the engine reflects stays.
+#[test]
+fn a_shared_schemas_example_never_overrides_the_status_or_its_description() {
+    let src = r##"
+openapi: 3.1.0
+info: {title: Things, version: "1"}
+paths:
+  /things/{id}:
+    put:
+      operationId: putThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+        "404": {description: Not found., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "409": {description: "Stale: `code` is `conflict`.", content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+components:
+  schemas:
+    Error:
+      type: object
+      required: [code, status, message]
+      properties:
+        code: {type: string, examples: [not_found]}
+        status: {type: integer, examples: [400]}
+        message: {type: string, examples: [Nothing here]}
+"##;
+    let bundle = compile(src.as_bytes()).unwrap();
+    let body = conflict_body(&bundle);
+    assert_eq!(body["code"], "conflict", "{body}");
+    assert_eq!(body["status"], 409, "{body}");
+    assert_ne!(body["message"], "Nothing here", "{body}");
+    let body = not_found_body(&bundle);
+    assert_ne!(body["code"], "not_found", "a shared example: {body}");
+    assert_eq!(body["status"], 404, "{body}");
+}
+
+/// A member name in code position is no value, and two values named for one member are
+/// no guess.
+#[test]
+fn member_names_and_several_values_are_no_code() {
+    let bundle = contract(
+        (PLAIN, "Not found."),
+        (
+            PLAIN,
+            "The `code` and `message` members say what went wrong.",
+        ),
+    );
+    assert_ne!(conflict_body(&bundle)["code"], "message");
+    let bundle = contract(
+        (PLAIN, "Not found."),
+        (PLAIN, "`code` is `stale_version`, or `code` is `locked`."),
+    );
+    let code = conflict_body(&bundle)["code"].clone();
+    assert!(code != "stale_version" && code != "locked", "{code}");
+}
+
+/// A singular `example`, where a schema keeps one, counts as `examples` do.
+#[test]
+fn a_singular_example_counts() {
+    let mut bundle = contract((PLAIN, "Not found."), (PLAIN, "Conflict."));
+    let op = bundle
+        .operations
+        .iter_mut()
+        .find(|op| op.id == "putThing")
+        .unwrap();
+    let variant = op
+        .outputs
+        .iter_mut()
+        .find(|o| o.status == mb_mcm::StatusSelector::Code(409))
+        .unwrap();
+    let schema = variant.schema.as_mut().unwrap();
+    schema["properties"]["code"]["example"] = Value::from("held_elsewhere");
+    assert_eq!(conflict_body(&bundle)["code"], "held_elsewhere");
+}

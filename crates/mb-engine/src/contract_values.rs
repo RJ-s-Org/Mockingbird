@@ -3,44 +3,53 @@
 //! A refusal (an LLM's, a repeated create's, a stale write's) and a `404` for what the
 //! session does not hold are rendered from the contract's response for that status,
 //! faker-filled. The faker draws a member it knows nothing more of at random, so an
-//! error's `code` read `lorem` where the response's schema gives it an example, or its
-//! description says the status answers `` `version_conflict` ``. After the faker, each
-//! scalar member of such a body takes the value the contract gives it, by the first of
-//! these sources that has one:
+//! error's `code` read `lorem` where the response's description says the status answers
+//! `` `version_conflict` ``. After the faker, each scalar member of such a body takes the
+//! value the contract gives it, by the first of these sources that has one:
 //!
-//! 1. its schema's `const`;
-//! 2. its schema's `enum`, when that holds one value;
-//! 3. its schema's example (`example`, else the first of `examples`), not a boolean's;
-//! 4. a value the response's description names in code position (between backticks, or
-//!    in `<code>`), when the description ties it to the member: the member's `enum`
-//!    holds it and no other value the description names, or the description names the
-//!    member itself in code position (its name, or its dotted path such as
-//!    `error.code`) right before the value.
+//! 1. its schema's `const`, or its `enum` when that holds one value;
+//! 2. a value this status's response description names in code position (between
+//!    backticks, or in `<code>`), when the description ties it to the member: the
+//!    member's `enum` holds it and no other value the description names, or the
+//!    description names the member itself in code position (its name, or its dotted
+//!    path such as `error.code`) right before one value, and before no other. A text
+//!    that is the name of a member of the body is no value (`` The `code` and `message`
+//!    members `` names two members, not a code);
+//! 3. its schema's example (`example`, else the first of `examples`, not a boolean's),
+//!    only where no other status's response uses that schema: an example of a shared
+//!    `Error` says nothing of this status.
 //!
-//! A member no source names keeps the faker's value. Each change is kept only while the
-//! whole body still validates, so a value that does not fit the branch the faker took
-//! changes nothing. Members are told apart by structure alone: no name is special.
+//! A member no source names keeps the faker's value, and a number that is the response's
+//! own HTTP status, as the engine reflects it into a problem's `status`, is never
+//! changed. Each change is kept only while the whole body still validates, so a value
+//! that does not fit the branch the faker took changes nothing. Members are told apart by
+//! structure alone: no name is special.
 
-use mb_mcm::Bundle;
+use std::collections::{HashMap, HashSet};
+
+use mb_mcm::{Bundle, StatusSelector};
 use serde_json::Value;
 
 use crate::consistency::{deref, example_value, property_schema};
 use crate::validate::SchemaValidator;
 
-/// How deep a body is walked.
+/// How deep a body or a schema is walked.
 const MAX_DEPTH: usize = 8;
 /// Longest text in code position taken as a value.
 const MAX_SPAN_CHARS: usize = 128;
 /// Values a description names that are looked at, at most.
 const MAX_SPANS: usize = 32;
+/// Definitions followed from one schema, at most.
+const MAX_DEFS: usize = 256;
 
 /// `body`, valid against `validator`, with each scalar member the contract names a
-/// value for (see the module's documentation) holding that value. `description` is the
-/// response's own. A body that is not valid to begin with is left as it is.
+/// value for (see the module's documentation) holding that value. `schema` and
+/// `description` are those of the response for `status`. A body that is not valid to
+/// begin with is left as it is.
 pub(crate) fn fill(
     bundle: &Bundle,
     validator: &SchemaValidator,
-    schema: &Value,
+    (schema, status): (&Value, u16),
     description: Option<&str>,
     body: Value,
 ) -> Value {
@@ -48,12 +57,18 @@ pub(crate) fn fill(
         return body;
     }
     let spans = description.map(code_spans).unwrap_or_default();
+    let mut names = HashSet::new();
+    property_names(bundle, schema, 0, &mut HashSet::new(), &mut names);
     let mut walk = Walk {
         bundle,
         spans: &spans,
+        names: &names,
+        status,
+        shared: None,
         changes: Vec::new(),
     };
-    walk.value(schema, &body, &mut String::new(), "", "", 0);
+    let alone = !walk.enters_shared(schema);
+    walk.value(schema, &body, &mut String::new(), ("", ""), alone, 0);
     let mut out = body;
     for (pointer, value) in walk.changes {
         let mut candidate = out.clone();
@@ -70,7 +85,8 @@ pub(crate) fn fill(
 
 /// What a description names in code position, in order: the text between a pair of
 /// backticks, and inside `<code>`, trimmed, when it is short and not empty.
-pub(crate) fn code_spans(text: &str) -> Vec<String> {
+#[must_use]
+pub fn code_spans(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while out.len() < MAX_SPANS {
@@ -102,27 +118,172 @@ pub(crate) fn code_spans(text: &str) -> Vec<String> {
     out
 }
 
+/// Every member name `schema` declares, at any depth, through `$ref`s and compositions.
+fn property_names(
+    bundle: &Bundle,
+    schema: &Value,
+    depth: usize,
+    seen: &mut HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if let Some(name) = def_ref(schema) {
+        if !seen.insert(name.to_string()) || seen.len() > MAX_DEFS {
+            return;
+        }
+        if let Some(target) = bundle.defs.get(name) {
+            property_names(bundle, target, depth + 1, seen, out);
+        }
+        return;
+    }
+    if let Some(Value::Object(properties)) = schema.get("properties") {
+        for (name, inner) in properties {
+            out.insert(name.clone());
+            property_names(bundle, inner, depth + 1, seen, out);
+        }
+    }
+    for key in ["items", "additionalProperties"] {
+        if let Some(inner) = schema.get(key).filter(|v| v.is_object()) {
+            property_names(bundle, inner, depth + 1, seen, out);
+        }
+    }
+    for key in ["allOf", "oneOf", "anyOf"] {
+        for inner in schema
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            property_names(bundle, inner, depth + 1, seen, out);
+        }
+    }
+}
+
+/// The definition `schema` refers to, by name.
+fn def_ref(schema: &Value) -> Option<&str> {
+    schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix("#/$defs/"))
+}
+
+/// Every definition `schema` reaches, by name.
+fn reached_defs(bundle: &Bundle, schema: &Value, out: &mut HashSet<String>) {
+    fn walk(bundle: &Bundle, value: &Value, out: &mut HashSet<String>, depth: usize) {
+        if depth > 64 || out.len() > MAX_DEFS {
+            return;
+        }
+        match value {
+            Value::Object(members) => {
+                if let Some(name) = def_ref(value)
+                    && out.insert(name.to_string())
+                    && let Some(target) = bundle.defs.get(name)
+                {
+                    walk(bundle, target, out, depth + 1);
+                }
+                for inner in members.values() {
+                    walk(bundle, inner, out, depth + 1);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|v| walk(bundle, v, out, depth + 1)),
+            _ => {}
+        }
+    }
+    walk(bundle, schema, out, 0);
+}
+
+/// The statuses whose responses reach each definition, across every operation: `None`
+/// for a `default` response, which answers any.
+fn statuses_by_def(bundle: &Bundle) -> HashMap<String, HashSet<Option<u16>>> {
+    let mut out: HashMap<String, HashSet<Option<u16>>> = HashMap::new();
+    for op in &bundle.operations {
+        for variant in &op.outputs {
+            let Some(schema) = variant.schema.as_ref() else {
+                continue;
+            };
+            let status = match variant.status {
+                StatusSelector::Code(code) => Some(code),
+                StatusSelector::Default => None,
+            };
+            let mut defs = HashSet::new();
+            reached_defs(bundle, schema, &mut defs);
+            for def in defs {
+                out.entry(def).or_default().insert(status);
+            }
+        }
+    }
+    out
+}
+
 struct Walk<'a> {
     bundle: &'a Bundle,
     spans: &'a [String],
+    /// Every member name the body's schema declares.
+    names: &'a HashSet<String>,
+    /// The response's HTTP status.
+    status: u16,
+    /// [`statuses_by_def`], made when first needed.
+    shared: Option<HashMap<String, HashSet<Option<u16>>>>,
     /// JSON pointers into the body, with the value the contract gives them.
     changes: Vec<(String, Value)>,
 }
 
 impl Walk<'_> {
-    /// `value` at `pointer`, of `schema`: the member `name` at the dotted path `dotted`.
+    /// Whether a definition `schema` is, or composes, is used by a response of another
+    /// status than this one.
+    fn enters_shared(&mut self, schema: &Value) -> bool {
+        let mut node = schema;
+        let mut names = Vec::new();
+        for _ in 0..16 {
+            let Some(name) = def_ref(node) else { break };
+            names.push(name.to_string());
+            match self.bundle.defs.get(name) {
+                Some(target) => node = target,
+                None => break,
+            }
+        }
+        for key in ["allOf", "oneOf", "anyOf"] {
+            for inner in node
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(name) = def_ref(inner) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        if names.is_empty() {
+            return false;
+        }
+        let bundle = self.bundle;
+        let shared = self.shared.get_or_insert_with(|| statuses_by_def(bundle));
+        let status = Some(self.status);
+        names.iter().any(|name| {
+            shared
+                .get(name)
+                .is_some_and(|statuses| statuses.iter().any(|s| *s != status))
+        })
+    }
+
+    /// `value` at `pointer`, of `schema`: the member named and dotted as `at`, under
+    /// examples this status alone uses when `alone`.
     fn value(
         &mut self,
         schema: &Value,
         value: &Value,
         pointer: &mut String,
-        name: &str,
-        dotted: &str,
+        at: (&str, &str),
+        alone: bool,
         depth: usize,
     ) {
         if depth > MAX_DEPTH {
             return;
         }
+        let (name, dotted) = at;
         match value {
             Value::Object(members) => {
                 for (key, member) in members {
@@ -133,10 +294,11 @@ impl Walk<'_> {
                         "" => key.clone(),
                         _ => format!("{dotted}.{key}"),
                     };
+                    let alone = alone && !self.enters_shared(&inner);
                     let len = pointer.len();
                     pointer.push('/');
                     pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
-                    self.value(&inner, member, pointer, key, &path, depth + 1);
+                    self.value(&inner, member, pointer, (key, &path), alone, depth + 1);
                     pointer.truncate(len);
                 }
             }
@@ -144,16 +306,21 @@ impl Walk<'_> {
                 let Some(inner) = deref(self.bundle, schema).get("items").cloned() else {
                     return;
                 };
+                let alone = alone && !self.enters_shared(&inner);
                 for (i, item) in items.iter().enumerate() {
                     let len = pointer.len();
                     pointer.push('/');
                     pointer.push_str(&i.to_string());
-                    self.value(&inner, item, pointer, name, dotted, depth + 1);
+                    self.value(&inner, item, pointer, at, alone, depth + 1);
                     pointer.truncate(len);
                 }
             }
             scalar => {
-                if let Some(named) = self.named(schema, name, dotted)
+                // What the engine reflects of the HTTP status stays.
+                if scalar.as_u64() == Some(u64::from(self.status)) {
+                    return;
+                }
+                if let Some(named) = self.named(schema, (name, dotted), alone)
                     && &named != scalar
                 {
                     self.changes.push((pointer.clone(), named));
@@ -162,9 +329,9 @@ impl Walk<'_> {
         }
     }
 
-    /// The value the contract gives a scalar member of `schema` named `name`, at the
-    /// dotted path `dotted` (see the module's documentation).
-    fn named(&self, schema: &Value, name: &str, dotted: &str) -> Option<Value> {
+    /// The value the contract gives a scalar member of `schema` named and dotted as `at`
+    /// (see the module's documentation).
+    fn named(&self, schema: &Value, (name, dotted): (&str, &str), alone: bool) -> Option<Value> {
         let node = deref(self.bundle, schema);
         if let Some(fixed) = node.get("const") {
             return scalar(fixed);
@@ -173,9 +340,23 @@ impl Walk<'_> {
         if let Some([only]) = values.map(Vec::as_slice) {
             return scalar(only);
         }
-        if let Some(example) = example_value(self.bundle, node) {
+        if let Some(described) = self.described(node, values, (name, dotted)) {
+            return Some(described);
+        }
+        if alone && let Some(example) = example_value(self.bundle, node) {
             return scalar(&example);
         }
+        None
+    }
+
+    /// What the description names for the member (source 2 of the module's
+    /// documentation): one value, or none.
+    fn described(
+        &self,
+        node: &Value,
+        values: Option<&Vec<Value>>,
+        (name, dotted): (&str, &str),
+    ) -> Option<Value> {
         if self.spans.is_empty() || name.is_empty() {
             return None;
         }
@@ -188,10 +369,20 @@ impl Walk<'_> {
                 _ => None,
             };
         }
-        self.spans
-            .windows(2)
-            .find(|pair| pair[0] == name || pair[0] == dotted)
-            .and_then(|pair| typed(node, &pair[1]))
+        let mut found: Vec<Value> = Vec::new();
+        for pair in self.spans.windows(2) {
+            if (pair[0] == name || pair[0] == dotted)
+                && !self.names.contains(&pair[1])
+                && let Some(value) = typed(node, &pair[1])
+                && !found.contains(&value)
+            {
+                found.push(value);
+            }
+        }
+        match found.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        }
     }
 }
 
