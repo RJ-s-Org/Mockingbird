@@ -327,7 +327,11 @@ fn cursor_member(
 
 /// The query parameters of `op` that a prompt hides by their name alone (see
 /// [`mb_mcm::credentials::hides_in_context`]) and that are the cursor of a member of its
-/// answer ([`cursor_member`]: Zoom's `next_page_token`), each with that member's path.
+/// answer, each with that member's path: free text the contract does not mark secret,
+/// under no name a security scheme carries, of a list answer declaring exactly one text
+/// member beside the list, or in an object beside it, that is the parameter or ends
+/// with its words (Zoom's `next_page_token` for `next_page_token`; a parameter of one
+/// word only by its very name).
 /// Such a parameter is shown only carrying a value the session's answers of `op` served
 /// at that member ([`GenerationContext::served_cursors`]): never a client's own.
 #[must_use]
