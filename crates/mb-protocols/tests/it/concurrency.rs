@@ -1,8 +1,7 @@
-//! Optimistic concurrency the contract declares: a body member a write's `409`/`412`
-//! names, an `If-Match` against the `ETag` the mock served, and a JSON Patch `test`. A
-//! stale one is refused before any LLM call and changes nothing; nothing else is ever
-//! refused, and nothing else of a request is rewritten. Driven over HTTP with a scripted
-//! LLM, counting the calls it was sent.
+//! Optimistic concurrency the contract declares: a server-managed body member a write's
+//! `409`/`412` names in its description. A stale one is refused before any LLM call and
+//! changes nothing; nothing else is ever refused, and nothing else of a request is
+//! rewritten. Driven over HTTP with a scripted LLM, counting the calls it was sent.
 #![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,9 +16,9 @@ use mb_state::{MemoryStore, SessionKey, StateStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-/// Docs whose `PUT` names `version` in its `409`, whose `PATCH` and `DELETE` take
-/// `If-Match` and answer `ETag`; notes patched by JSON Patch; tasks taking `If-Match`
-/// with no `ETag` served; drafts whose `PUT` declares neither a `409` nor a `412`.
+/// Docs whose `PUT` names the `readOnly` `version` in its `409`; items whose `409` is a
+/// problem with a `title`; projects whose `409` names the `name` a write sets; drafts
+/// whose `PUT` declares neither a `409` nor a `412`.
 const CONTRACT: &str = r##"
 openapi: 3.0.0
 info: {title: Docs, version: "1"}
@@ -31,19 +30,13 @@ paths:
         required: true
         content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}
       responses:
-        "201":
-          description: created
-          headers: {ETag: {schema: {type: string}}}
-          content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}
   /docs/{doc_id}:
     parameters: [{name: doc_id, in: path, required: true, schema: {type: string}}]
     get:
       operationId: getDoc
       responses:
-        "200":
-          description: ok
-          headers: {ETag: {schema: {type: string}}}
-          content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}
     put:
       operationId: replaceDoc
       requestBody:
@@ -52,79 +45,50 @@ paths:
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}
         "409": {description: "The `version` sent is stale: `error.code` is `version_conflict`. A doc whose `status` is closed conflicts too.", content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
-    patch:
-      operationId: updateDoc
-      parameters: [{name: If-Match, in: header, schema: {type: string}}]
+  /items:
+    post:
+      operationId: createItem
       requestBody:
         required: true
         content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}
       responses:
-        "200":
-          description: ok
-          headers: {ETag: {schema: {type: string}}}
-          content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}
-        "412": {description: Answers `precondition_failed`., content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
-    delete:
-      operationId: deleteDoc
-      parameters: [{name: If-Match, in: header, schema: {type: string}}]
-      responses:
-        "204": {description: deleted}
-        "412": {description: stale, content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
-  /notes:
-    post:
-      operationId: createNote
-      requestBody:
-        required: true
-        content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}
-      responses:
-        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
-  /notes/{note_id}:
-    parameters: [{name: note_id, in: path, required: true, schema: {type: string}}]
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+  /items/{item_id}:
+    parameters: [{name: item_id, in: path, required: true, schema: {type: string}}]
     get:
-      operationId: getNote
+      operationId: getItem
       responses:
-        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
-    patch:
-      operationId: patchNote
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+    put:
+      operationId: replaceItem
       requestBody:
         required: true
-        content:
-          application/json:
-            schema:
-              type: array
-              items:
-                type: object
-                required: [op, path]
-                properties:
-                  op: {type: string, enum: [add, remove, replace, move, copy, test]}
-                  path: {type: string}
-                  value: {}
+        content: {application/json: {schema: {type: object, properties: {title: {type: string}, notes: {type: string}}}}}
       responses:
-        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
-        "409": {description: "The `rev` tested is not the note's.", content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
-  /tasks:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "409": {description: Conflict., content: {application/problem+json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+  /projects:
     post:
-      operationId: createTask
+      operationId: createProject
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, properties: {priority: {type: integer}}}}}
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
       responses:
-        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
-  /tasks/{task_id}:
-    parameters: [{name: task_id, in: path, required: true, schema: {type: string}}]
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+  /projects/{project_id}:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
     get:
-      operationId: getTask
+      operationId: getProject
       responses:
-        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
-    patch:
-      operationId: updateTask
-      parameters: [{name: If-Match, in: header, schema: {type: string}}]
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+    put:
+      operationId: replaceProject
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, properties: {priority: {type: integer}}}}}
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
       responses:
-        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
-        "412": {description: "Fails unless `priority` matches.", content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}
+        "409": {description: "A project with this `name` already exists.", content: {application/json: {schema: {$ref: "#/components/schemas/Coded"}}}}
   /drafts:
     post:
       operationId: createDraft
@@ -168,19 +132,27 @@ components:
         view_count: {type: integer}
         updated: {type: integer}
         owner_id: {type: string, readOnly: true}
-    Note:
+    Item:
       type: object
-      required: [id, text, rev]
+      required: [id, title]
       properties:
         id: {type: string}
-        text: {type: string}
-        rev: {type: string}
-    Task:
+        title: {type: string}
+        notes: {type: string}
+    Project:
       type: object
-      required: [id, priority]
+      required: [id, name]
       properties:
         id: {type: string}
-        priority: {type: integer}
+        name: {type: string}
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
     Error:
       type: object
       required: [error]
@@ -301,14 +273,6 @@ fn doc(title: &str, version: i64) -> Value {
 /// An update's answer, in the effects envelope its prompt asks for.
 fn answer(body: Value) -> Value {
     json!({"effects": [], "response": body})
-}
-
-fn etag(headers: &HeaderMap) -> String {
-    headers
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// The `version` the `409` names advances with the model's answer, and a `PUT` sending
@@ -470,142 +434,65 @@ async fn writes_with_nothing_to_refuse_reach_the_llm() {
     assert_eq!(h.calls(), 3);
 }
 
-/// `If-Match` is compared with the `ETag` the mock served for the record: stable across
-/// reads, new after a write. An old one is refused with the declared `412`, for a
-/// `PATCH` and a `DELETE`; `*` and no header are not.
+/// A problem's `title` is no record's: a `409` declaring one ties nothing, so the
+/// model never rewrites a title the request left alone, and a rename goes through.
 #[tokio::test]
-async fn if_match_is_compared_with_the_served_etag() {
+async fn a_problem_409_ties_no_member() {
+    let item = |title: &str| json!({"id": "i1", "title": title});
     let h = harness(vec![
-        doc("a", 1),
-        answer(doc("b", 1)),
-        answer(doc("c", 1)),
-        answer(doc("d", 1)),
+        item("a"),
+        answer(item("rewritten")),
+        answer(item("rewritten again")),
+        answer(item("c")),
     ]);
-    let (_, headers, _) = h
-        .full("POST", "/docs", Some(json!({"title": "a"})), &[])
+    h.send("POST", "/items", Some(json!({"title": "a"})), &[])
         .await;
-    let first = etag(&headers);
-    assert!(!first.is_empty());
-    let (_, headers, _) = h.full("GET", "/docs/d1", None, &[]).await;
-    assert_eq!(etag(&headers), first, "a read serves the current tag");
-
-    let (status, headers, _) = h
-        .full(
-            "PATCH",
-            "/docs/d1",
-            Some(json!({"title": "b"})),
-            &[("If-Match", &first)],
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let second = etag(&headers);
-    assert_ne!(second, first);
-    let (_, headers, _) = h.full("GET", "/docs/d1", None, &[]).await;
-    assert_eq!(etag(&headers), second);
-
-    let weak = format!("W/{first}");
-    let (status, body) = h
-        .send(
-            "PATCH",
-            "/docs/d1",
-            Some(json!({"title": "x"})),
-            &[("If-Match", &weak)],
-        )
-        .await;
-    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
-    assert_eq!(body["code"], "precondition_failed", "{body}");
-    let (status, _) = h
-        .send("DELETE", "/docs/d1", None, &[("If-Match", &first)])
-        .await;
-    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(h.calls(), 2);
-    assert_eq!(h.held("docs", "d1").await["title"], "b");
-
-    let (status, _) = h
-        .send(
-            "PATCH",
-            "/docs/d1",
-            Some(json!({"title": "c"})),
-            &[("If-Match", "*")],
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _) = h
-        .send("PATCH", "/docs/d1", Some(json!({"title": "d"})), &[])
-        .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        h.put("/items/i1", json!({"notes": "x"})).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.put("/items/i1", json!({"notes": "y"})).await,
+        StatusCode::OK
+    );
+    assert_eq!(h.held("items", "i1").await["title"], "a", "untouched");
+    assert_eq!(
+        h.put("/items/i1", json!({"title": "c"})).await,
+        StatusCode::OK
+    );
+    assert_eq!(h.held("items", "i1").await["title"], "c");
     assert_eq!(h.calls(), 4);
 }
 
-/// With no `ETag` served for the record, `If-Match` decides nothing, and a member whose
-/// value it happens to hold is no token.
+/// "A project with this `name` already exists" names a member the write sets: no
+/// token, so renames reach the model, whatever it answered before.
 #[tokio::test]
-async fn an_entity_tag_is_never_compared_with_a_member() {
-    let task = |p: i64| json!({"id": "t1", "priority": p});
-    let h = harness(vec![task(1), answer(task(2)), answer(task(5))]);
-    h.send("POST", "/tasks", Some(json!({"priority": 1})), &[])
-        .await;
-    let (status, _) = h
-        .send(
-            "PATCH",
-            "/tasks/t1",
-            Some(json!({"priority": 2})),
-            &[("If-Match", "\"1\"")],
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _) = h
-        .send(
-            "PATCH",
-            "/tasks/t1",
-            Some(json!({"priority": 5})),
-            &[("If-Match", "\"1\"")],
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.held("tasks", "t1").await["priority"], 5);
-    assert_eq!(h.calls(), 3);
-}
-
-/// A JSON Patch applies to the stored note, and a `test` failing against it is refused
-/// with the declared `409`, from the first write on.
-#[tokio::test]
-async fn a_failed_json_patch_test_is_refused() {
-    let note = |text: &str, rev: &str| json!({"id": "n1", "text": text, "rev": rev});
+async fn a_member_the_write_sets_is_no_token() {
+    let project = |name: &str| json!({"id": "p1", "name": name});
     let h = harness(vec![
-        note("t", "1-a"),
-        answer(note("u", "2-b")),
-        answer(note("v", "3-c")),
+        project("a"),
+        answer(project("a2")),
+        answer(project("b")),
+        answer(project("c")),
     ]);
-    h.send("POST", "/notes", Some(json!({"text": "t"})), &[])
+    h.send("POST", "/projects", Some(json!({"name": "a"})), &[])
         .await;
-    let stale = json!([{"op": "test", "path": "/rev", "value": "0-z"}]);
-    let (status, body) = h.send("PATCH", "/notes/n1", Some(stale), &[]).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(h.calls(), 1);
-
-    let patch = json!([
-        {"op": "test", "path": "/rev", "value": "1-a"},
-        {"op": "replace", "path": "/text", "value": "u"},
-    ]);
-    let (status, body) = h.send("PATCH", "/notes/n1", Some(patch.clone()), &[]).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let held = h.held("notes", "n1").await;
-    assert_eq!(held["text"], "u", "the patch applied: {held}");
     assert_eq!(
-        held["rev"], "2-b",
-        "the `rev` the 409 names advanced: {held}"
+        h.put("/projects/p1", json!({"name": "a"})).await,
+        StatusCode::OK
     );
-
-    // The same patch again tests a revision no longer held.
-    let (status, _) = h.send("PATCH", "/notes/n1", Some(patch), &[]).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    // A test of what an earlier patch set passes.
-    let follow = json!([
-        {"op": "test", "path": "/text", "value": "u"},
-        {"op": "replace", "path": "/text", "value": "v"},
-    ]);
-    let (status, _) = h.send("PATCH", "/notes/n1", Some(follow), &[]).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.calls(), 3);
+    assert_eq!(
+        h.held("projects", "p1").await["name"],
+        "a",
+        "the request's name stands"
+    );
+    assert_eq!(
+        h.put("/projects/p1", json!({"name": "b"})).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.put("/projects/p1", json!({"name": "c"})).await,
+        StatusCode::OK
+    );
+    assert_eq!(h.calls(), 4);
 }

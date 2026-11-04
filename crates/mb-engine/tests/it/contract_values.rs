@@ -262,10 +262,16 @@ fn values_after_a_member_count_to_the_end_of_its_sentence() {
         (PLAIN, "`code` is `version_conflict` or `edit_conflict`."),
     );
     let code = conflict_body(&bundle)["code"].clone();
-    assert!(code != "version_conflict" && code != "edit_conflict", "{code}");
+    assert!(
+        code != "version_conflict" && code != "edit_conflict",
+        "{code}"
+    );
     let bundle = contract(
         (PLAIN, "Not found."),
-        (PLAIN, "Its `code` is `version_conflict`. Retry with `If-Match`."),
+        (
+            PLAIN,
+            "Its `code` is `version_conflict`. Retry with `If-Match`.",
+        ),
     );
     assert_eq!(conflict_body(&bundle)["code"], "version_conflict");
 }

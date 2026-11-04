@@ -88,7 +88,10 @@ pub(crate) fn fill(
 /// backticks, and inside `<code>`, trimmed, when it is short and not empty.
 #[must_use]
 pub fn code_spans(text: &str) -> Vec<String> {
-    sentenced_spans(text).into_iter().map(|(span, _)| span).collect()
+    sentenced_spans(text)
+        .into_iter()
+        .map(|(span, _)| span)
+        .collect()
 }
 
 /// [`code_spans`], each with the number of the sentence it stands in: a `.`, `!` or `?`

@@ -188,7 +188,9 @@ pub(super) async fn check(
     let rt = state.rt;
     let op = plan.op;
     let t = target.resource_type.as_str();
-    let doc = state.get(&plan.session, INTERNAL_TYPE, &key(t, &target.id)).await;
+    let doc = state
+        .get(&plan.session, INTERNAL_TYPE, &key(t, &target.id))
+        .await;
     let confirmed: Vec<String> = doc
         .as_ref()
         .and_then(|d| d.data.get("confirmed"))
