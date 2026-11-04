@@ -87,6 +87,27 @@ paths:
       operationId: deleteNote
       responses:
         "204": {description: gone}
+  /racks/{rack_id}/archived/books:
+    parameters: [{name: rack_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listArchivedRackBooks
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Book"}}}}}
+  /racks/{rack_id}/featured:
+    parameters: [{name: rack_id, in: path, required: true, schema: {type: string}}]
+    put:
+      operationId: setFeatured
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {book: {$ref: "#/components/schemas/Book"}, books: {type: array, items: {$ref: "#/components/schemas/Book"}}}}}}
+      responses:
+        "204": {description: set}
+  /bins/{bin_id}/books:
+    parameters: [{name: bin_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listBinBooks
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Book"}}}}}
   /books/{book_id}:
     parameters: [{name: book_id, in: path, required: true, schema: {type: string}}]
     get:
@@ -493,4 +514,145 @@ async fn a_childs_delete_under_no_held_parent_tells_nothing() {
         "only the delete's own markers: {kept:?}"
     );
     assert_eq!(h.calls(), 0);
+}
+
+/// A delete of a child the session never held tells the held parent nothing: there is
+/// nothing to name, and the parent's stored copy stands.
+#[tokio::test]
+async fn an_unheld_childs_delete_leaves_the_parent_as_stored() {
+    let h = harness(vec![
+        json!({"id": "s-1", "name": "Fiction", "note_count": 0}),
+    ]);
+    let rack = json!({"id": "s-1", "name": "Fiction", "note_count": 3});
+    h.hold("racks", "s-1", rack.clone()).await;
+    h.call("DELETE", "/racks/s-1/notes/n-unknown", None).await;
+    let (_, read) = h.call("GET", "/racks/s-1", None).await;
+    assert_eq!(h.calls(), 0, "the read answers from state");
+    assert_eq!(read, rack);
+    assert_eq!(h.held("racks", "s-1").await.unwrap(), rack);
+}
+
+// One level, by route.
+
+/// A list two literal segments under the parent is another list, even when it ends in
+/// the segment the write's route ends in.
+#[tokio::test]
+async fn a_list_two_segments_under_the_parent_is_not_told() {
+    let h = harness(vec![no_effects(), json!([])]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.hold(
+        "books",
+        "bk-4711",
+        json!({"id": "bk-4711", "title": "Dune"}),
+    )
+    .await;
+    h.call(
+        "POST",
+        "/racks/s-1/links/books",
+        Some(json!({"data": [{"type": "book", "id": "bk-4711"}]})),
+    )
+    .await;
+    h.call("GET", "/racks/s-1/archived/books", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    assert!(block(&prompt, "earlier_writes").is_none(), "{prompt}");
+}
+
+/// The same segment under another parent's literal is another parent's list.
+#[tokio::test]
+async fn the_same_segment_under_another_parent_is_not_told() {
+    let h = harness(vec![no_effects(), json!([]), json!([])]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.hold(
+        "books",
+        "bk-4711",
+        json!({"id": "bk-4711", "title": "Dune"}),
+    )
+    .await;
+    h.call(
+        "POST",
+        "/racks/s-1/links/books",
+        Some(json!({"data": [{"type": "book", "id": "bk-4711"}]})),
+    )
+    .await;
+    h.call("GET", "/bins/s-1/books", None).await;
+    let other = h.prompt(h.calls() - 1);
+    assert!(block(&other, "earlier_writes").is_none(), "{other}");
+    h.call("GET", "/racks/s-1/books", None).await;
+    let own = h.prompt(h.calls() - 1);
+    assert!(block(&own, "earlier_writes").is_some(), "{own}");
+}
+
+// By member.
+
+/// A member on a sibling route is no membership of the parent's list, even one named
+/// for it: only a write on the parent itself is told by member.
+#[tokio::test]
+async fn a_member_on_a_sibling_route_is_not_told() {
+    let h = harness(vec![no_effects(), json!([])]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.call(
+        "PUT",
+        "/racks/s-1/featured",
+        Some(json!({
+            "book": {"id": "bk-9", "title": "Emma"},
+            "books": [{"id": "bk-8", "title": "Ulysses"}],
+        })),
+    )
+    .await;
+    h.call("GET", "/racks/s-1/books", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    assert!(block(&prompt, "earlier_writes").is_none(), "{prompt}");
+}
+
+// Repeats.
+
+/// A retried bodyless write, the same operation, path and body, asks for its effects
+/// once, and is remembered once.
+#[tokio::test]
+async fn a_retried_bodyless_write_asks_for_effects_once() {
+    let h = harness(vec![no_effects(), json!([])]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.hold(
+        "books",
+        "bk-4711",
+        json!({"id": "bk-4711", "title": "Dune"}),
+    )
+    .await;
+    let links = json!({"data": [{"type": "book", "id": "bk-4711"}]});
+    for _ in 0..3 {
+        let (status, _) = h
+            .call("POST", "/racks/s-1/links/books", Some(links.clone()))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(h.calls(), 1, "one effects call");
+    h.call("GET", "/racks/s-1/books", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    let told = block(&prompt, "earlier_writes").unwrap_or_else(|| panic!("{prompt}"));
+    assert_eq!(told.matches("linkBooks").count(), 1, "{told}");
+}
+
+/// The same body after another write to the path is no repeat.
+#[tokio::test]
+async fn a_bodyless_write_after_another_is_asked_again() {
+    let h = harness(vec![no_effects(), no_effects(), no_effects()]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.hold(
+        "books",
+        "bk-4711",
+        json!({"id": "bk-4711", "title": "Dune"}),
+    )
+    .await;
+    let links = json!({"data": [{"type": "book", "id": "bk-4711"}]});
+    h.call("POST", "/racks/s-1/links/books", Some(links.clone()))
+        .await;
+    h.call("DELETE", "/racks/s-1/links/books", Some(links.clone()))
+        .await;
+    h.call("POST", "/racks/s-1/links/books", Some(links)).await;
+    assert_eq!(h.calls(), 2, "link, then link again after the unlink");
 }

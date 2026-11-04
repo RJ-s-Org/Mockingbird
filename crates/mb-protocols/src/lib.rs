@@ -410,6 +410,8 @@ pub struct MockRuntime {
     _value_feed: Option<call::ValueFeed>,
     /// Which types each session was last seen writing (see [`call::WrittenTypes`]).
     written_types: call::WrittenTypes,
+    /// Each session's latest write, for its retry (see [`call::LastWrites`]).
+    last_writes: call::LastWrites,
     /// Which stored resources are a plain read's own answer (see
     /// [`call::OwnReads`]).
     own_reads: call::OwnReads,
@@ -537,6 +539,7 @@ impl MockRuntime {
             value_index,
             _value_feed: value_feed,
             written_types: call::WrittenTypes::default(),
+            last_writes: call::LastWrites::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
             #[cfg(feature = "graphql")]
@@ -596,6 +599,11 @@ impl MockRuntime {
     /// Which types each session was last seen writing.
     pub(crate) fn written_types(&self) -> &call::WrittenTypes {
         &self.written_types
+    }
+
+    /// Each session's latest write (see [`call::LastWrites`]).
+    pub(crate) fn last_writes(&self) -> &call::LastWrites {
+        &self.last_writes
     }
 
     /// Which stored resources are a plain read's own answer.

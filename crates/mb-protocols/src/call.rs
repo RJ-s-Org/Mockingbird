@@ -41,6 +41,7 @@ mod world;
 
 pub(crate) use value_index::{ValueFeed, ValueIndex};
 mod write_memory;
+pub(crate) use write_memory::LastWrites;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
@@ -708,8 +709,16 @@ pub(crate) async fn generate_pending(
             held,
             advancing: &pending.tokens.advancing,
         });
+    // A retried write answering no body is shown nothing beyond its target, so it is
+    // asked for no effects a second time (see [`write_memory::repeats_last_write`]).
+    let repeat = write_memory::repeats_last_write(rt, plan, call);
+    let (related, created_since): (&[StoredResource], &[StoredResource]) = if repeat {
+        (&[], &[])
+    } else {
+        (&pending.related, &pending.created_since)
+    };
     let ctx = GenerationContext {
-        related: &pending.related,
+        related,
         target: pending.target.as_ref(),
         forced_status: plan.forced_status,
         scenario: plan.scenario.map(|s| &s.spec),
@@ -720,7 +729,7 @@ pub(crate) async fn generate_pending(
         earlier_writes: &pending.earlier_writes,
         earlier_origins: &pending.earlier_origins,
         served_cursors: &pending.served_cursors,
-        created_since: &pending.created_since,
+        created_since,
         alongside: &pending.alongside,
         same_values: &pending.same_values,
         changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
@@ -3299,19 +3308,22 @@ struct WrittenList {
 }
 
 /// A list read one level under the parent of a command's path: the path through the
-/// command's last parameter, then only literal segments (`/lists/{id}/profiles` of
-/// `POST /lists/{id}/relationships/profiles`, or of `PUT /lists/{id}`). A deeper
-/// parameter is another record, and an ancestor's lists are not this parent's.
+/// command's last parameter, then one literal segment, that the command's route ends in
+/// (`/lists/{id}/profiles` of `POST /lists/{id}/relationships/profiles`), or of a command
+/// on the parent itself (`PUT /lists/{id}`). A deeper parameter is another record, a
+/// longer tail another list (`/lists/{id}/archived/profiles`), and an ancestor's lists
+/// are not this parent's.
 #[derive(Debug, Clone)]
 struct SiblingList {
     /// The list read's path template.
     path: String,
     /// How many segments of the command's path are the parent's.
     prefix: usize,
-    /// The list read's segments after the parent's.
+    /// The list read's one segment after the parent's.
     rest: Vec<String>,
-    /// The command's route ends in the same segment as the list's
-    /// (`relationships/profiles` and `profiles`): it writes that list.
+    /// The command's route ends in the list's segment (`relationships/profiles` and
+    /// `profiles`): it writes that list. Otherwise the command is on the parent itself,
+    /// and the list is told only what a body member named for it says.
     by_route: bool,
     list: WrittenList,
 }
@@ -3648,8 +3660,9 @@ fn routes_of(
     (single_reads, written_lists, unscoped_lists, sibling_lists)
 }
 
-/// The list reads of `lists` one level under the parent of a command's `path` (see
-/// [`SiblingList`]), sorted by path. None when the path has no parameter.
+/// The list reads of `lists` one level under the parent of a command's `path` that it
+/// can be told to (see [`SiblingList`]), sorted by path. None when the path has no
+/// parameter.
 fn siblings_of(path: &str, lists: &HashMap<&str, WrittenList>) -> Vec<SiblingList> {
     let segments = path_segments(path);
     let Some(last) = segments.iter().rposition(|s| segment_param(s).is_some()) else {
@@ -3657,13 +3670,16 @@ fn siblings_of(path: &str, lists: &HashMap<&str, WrittenList>) -> Vec<SiblingLis
     };
     let prefix = last + 1;
     let own_end = segments.last().filter(|_| segments.len() > prefix);
+    let on_parent = segments.len() == prefix;
     // Its own route's list is told by its path (see [`BundleIndex::written_lists`]).
     let mut out: Vec<SiblingList> = lists
         .iter()
         .filter_map(|(list, read)| {
             let below = path_segments(list);
-            let rest = below.get(prefix..).filter(|rest| !rest.is_empty())?;
-            if write_memory::same_route(&segments, &below)
+            let rest = below.get(prefix..).filter(|rest| rest.len() == 1)?;
+            let by_route = own_end.is_some_and(|end| rest.last() == Some(end));
+            if !(by_route || on_parent)
+                || write_memory::same_route(&segments, &below)
                 || !write_memory::same_route(&segments[..prefix], &below[..prefix])
                 || rest.iter().any(|s| segment_param(s).is_some())
             {
@@ -3673,7 +3689,7 @@ fn siblings_of(path: &str, lists: &HashMap<&str, WrittenList>) -> Vec<SiblingLis
                 path: (*list).to_string(),
                 prefix,
                 rest: rest.iter().map(|s| (*s).to_string()).collect(),
-                by_route: own_end.is_some_and(|end| rest.last() == Some(end)),
+                by_route,
                 list: read.clone(),
             })
         })
@@ -6734,6 +6750,8 @@ mod tests {
         let lists: HashMap<&str, WrittenList> = HashMap::from([
             ("/lists/{list_id}/members", read("members")),
             ("/lists/{list_id}/links/members", read("members")),
+            ("/lists/{list_id}/archived/members", read("members")),
+            ("/lists/{list_id}/owners", read("owners")),
             ("/lists/{list_id}/members/{member_id}/notes", read("notes")),
             ("/lists", read("lists")),
             ("/teams/{team_id}/members", read("members")),
@@ -6744,17 +6762,18 @@ mod tests {
                 .map(|s| (s.path, s.by_route))
                 .collect()
         };
-        // Its route names the members: it writes that list; the other is a sibling.
+        // Its route names the members: it writes that list. Two segments down, or
+        // another segment, is another list.
         assert_eq!(
             of("/lists/{id}/links/members"),
             vec![("/lists/{list_id}/members".to_string(), true)]
         );
-        // On the parent itself: both lists under it, by member only.
+        // On the parent itself: the lists one segment under it, by member only.
         assert_eq!(
             of("/lists/{list_id}"),
             vec![
-                ("/lists/{list_id}/links/members".to_string(), false),
                 ("/lists/{list_id}/members".to_string(), false),
+                ("/lists/{list_id}/owners".to_string(), false),
             ]
         );
         // A child's own route: its parent is the member, whose list is one level down.

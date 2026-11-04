@@ -1202,6 +1202,15 @@ async fn remember(
     own: Option<Value>,
 ) {
     let mut memory = read_memory(state, session, key).await;
+    // A repeat of the newest request (a client's retry) is one request, kept as the
+    // later, so that repeats push no other out.
+    if memory
+        .requests
+        .last()
+        .is_some_and(|newest| same_request(newest, entry))
+    {
+        memory.requests.pop();
+    }
     memory.requests.push(entry.clone());
     let excess = memory.requests.len().saturating_sub(MAX_REMEMBERED);
     memory.requests.drain(..excess);
@@ -1216,6 +1225,18 @@ async fn remember(
         memory.requests.remove(0);
     }
     write_memory(state, session, key, &memory).await;
+}
+
+/// Whether two kept requests are the same but for when they were made.
+fn same_request(one: &Value, other: &Value) -> bool {
+    let timeless = |v: &Value| {
+        let mut v = v.clone();
+        if let Value::Object(members) = &mut v {
+            members.remove("at");
+        }
+        v
+    };
+    timeless(one) == timeless(other)
 }
 
 /// Ends what an older own body may overlay: a later write has the last word.
@@ -1434,7 +1455,10 @@ pub(super) async fn after_write(
             _ => clear_own(state, session, key).await,
         }
     }
-    let tells_parent = matches!(effect, Effect::Create | Effect::Delete)
+    // A delete of what the session never held has nothing to name, and its parent's
+    // stored copy stands.
+    let tells_parent = effect == Effect::Create
+        || (effect == Effect::Delete && w.held.is_some())
         || (effect == Effect::Other && generated.body.is_none());
     let parent = if tells_parent {
         let own = match effect {
@@ -1728,6 +1752,7 @@ pub(super) async fn after_route_write(
     {
         return;
     }
+    note_last_write(rt, plan, call);
     if op.kind == OperationKind::Command(Effect::Delete) {
         forget_deleted_route(state, plan, call).await;
     }
@@ -1751,6 +1776,70 @@ pub(super) async fn after_route_write(
     remember(state, &plan.session, &key, &entry, None).await;
 }
 
+/// Sessions [`LastWrites`] holds at most; it is emptied when full.
+const MAX_LAST_WRITE_SESSIONS: usize = 1024;
+
+/// Each session's latest 2xx write through this runtime, by a hash of its operation,
+/// the path it was made to and its body (a hash, as those may hold a secret), for
+/// [`repeats_last_write`]. Per process: a retry reaching another node, or coming after a
+/// reset of the session, is asked again.
+#[derive(Debug, Default)]
+pub(crate) struct LastWrites(std::sync::Mutex<HashMap<SessionKey, String>>);
+
+impl LastWrites {
+    fn note(&self, session: &SessionKey, hash: String) {
+        let Ok(mut last) = self.0.lock() else {
+            return;
+        };
+        if last.len() >= MAX_LAST_WRITE_SESSIONS && !last.contains_key(session) {
+            last.clear();
+        }
+        last.insert(session.clone(), hash);
+    }
+
+    fn is(&self, session: &SessionKey, hash: &str) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .is_some_and(|last| last.get(session).map(String::as_str) == Some(hash))
+    }
+}
+
+/// What makes a write the same write: its operation, the path it was made to and its
+/// body, hashed.
+fn last_write(op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { path, .. } = &op.binding else {
+        return None;
+    };
+    let filled = fill_path(call, &path_segments(path))?;
+    let body = call.body.as_ref().map(Value::to_string).unwrap_or_default();
+    let digest = Sha256::digest(format!("{}\n{}\n{body}", op.id, filled.path).as_bytes());
+    Some(digest[..16].iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Keeps the session's latest 2xx write, for [`repeats_last_write`].
+fn note_last_write(rt: &MockRuntime, plan: &CallPlan<'_>, call: &OperationCall) {
+    if let Some(hash) = last_write(plan.op, call) {
+        rt.last_writes().note(&plan.session, hash);
+    }
+}
+
+/// Whether a write answering no body repeats the session's latest 2xx write, the same
+/// operation, path and body (a client's retry): it is then asked for no effects, which
+/// were asked for already and could apply twice. A write with an answer to generate is
+/// never one.
+pub(super) fn repeats_last_write(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+) -> bool {
+    let op = plan.op;
+    applies(rt, plan)
+        && matches!(op.kind, OperationKind::Command(_))
+        && op.success_output().is_some_and(|o| o.schema.is_none())
+        && last_write(op, call).is_some_and(|hash| rt.last_writes().is(&plan.session, &hash))
+}
+
 /// How deep a write's body is looked into for a member naming a sibling list: the
 /// body's own members and theirs (`{"ticket": {"comment": ...}}`).
 const SIBLING_MEMBER_DEPTH: usize = 2;
@@ -1762,9 +1851,11 @@ const SIBLING_MEMBER_DEPTH: usize = 2;
 /// - whose path ends in the segment the write's route ends in
 ///   (`POST /lists/{id}/relationships/profiles` to `/lists/{id}/profiles`): with what
 ///   the request says, as a write to the list's own route;
-/// - else, whose last segment or item type a member of the body names by its stem
-///   (`PUT /tickets/{id}` with `ticket.comment`, to `/tickets/{id}/comments`): that
-///   member's value alone, by the schema the request declares it with.
+/// - else, for a write on the parent itself, whose last segment a member of the body
+///   holding an object or a list names by its stem (`PUT /tickets/{id}` with
+///   `ticket.comment`, to `/tickets/{id}/comments`): that member's value alone, by the
+///   schema the request declares it with. A member on a sibling route
+///   (`PUT /racks/{id}/featured` with `book`) is no membership of the parent's list.
 ///
 /// Not when it stored a record of the list's type, which the read shows. Only told,
 /// past the checks a write to the list's own route has: nothing is forced or changed.
@@ -1793,11 +1884,13 @@ async fn tell_siblings(
                 .as_ref()
                 .and_then(|body| told_to_list(rt, plan, &sibling.list, body, request))
         } else {
-            let names = [
-                sibling.rest.last().map(String::as_str),
-                Some(sibling.list.resource_type.as_str()),
-            ];
-            let stems: Vec<String> = names.into_iter().flatten().map(type_stem).collect();
+            // Only a write on the parent itself (see [`SiblingList`]), by the list's segment.
+            let stems: Vec<String> = sibling
+                .rest
+                .last()
+                .map(|s| type_stem(s))
+                .into_iter()
+                .collect();
             let Some((member, schema)) = call
                 .body
                 .as_ref()
@@ -1826,8 +1919,8 @@ async fn tell_siblings(
     }
 }
 
-/// The first member of `body`, at most [`SIBLING_MEMBER_DEPTH`] deep, whose name has
-/// one of `stems` (see [`type_stem`]), with the schema `schema` declares it by. In the
+/// The first member of `body`, at most [`SIBLING_MEMBER_DEPTH`] deep, holding an object
+/// or a list, whose name has one of `stems` (see [`type_stem`]), with the schema `schema` declares it by. In the
 /// order the body holds its members, the shallower first.
 fn member_named<'a>(
     rt: &MockRuntime,
@@ -1846,10 +1939,9 @@ fn member_named<'a>(
             .iter()
             .find_map(|p| p.get("properties")?.get(key).cloned())
     };
-    if let Some((key, member)) = members
-        .iter()
-        .find(|(key, member)| !member.is_null() && stems.contains(&type_stem(key)))
-    {
+    if let Some((key, member)) = members.iter().find(|(key, member)| {
+        (member.is_object() || member.is_array()) && stems.contains(&type_stem(key))
+    }) {
         return Some((member, declared(key)));
     }
     if depth + 1 >= SIBLING_MEMBER_DEPTH {

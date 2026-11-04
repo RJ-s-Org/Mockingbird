@@ -487,6 +487,11 @@ pub const NON_JSON_MEDIA_REASON: &str =
 /// Counter of faker answers that matched no schema-valid draw.
 pub const FAKER_INVALID_METRIC: &str = "mb_faker_invalid_total";
 
+/// Counter of the effects-only calls of writes answering no body (see
+/// [`Engine::generate`]), labelled by `outcome`: `answered` (its effects, if any, go to
+/// the runtime) or `failed` (it changes nothing).
+pub const BODYLESS_EFFECTS_METRIC: &str = "mb_bodyless_effects_calls_total";
+
 /// Counter of scenario `set` patches dropped at request time, labelled by
 /// `reason`: `invalid` (the patched body would not validate) or
 /// `not_an_object` (the body is not a JSON object).
@@ -1940,6 +1945,18 @@ impl Engine {
             }
             Err(reason) => Err(reason),
         };
+        let answered = matches!(
+            reply,
+            Ok(Reply {
+                truncated: None,
+                ..
+            })
+        );
+        metrics::counter!(
+            BODYLESS_EFFECTS_METRIC,
+            "outcome" => if answered { "answered" } else { "failed" }
+        )
+        .increment(1);
         let effects = match reply {
             Ok(Reply {
                 text,

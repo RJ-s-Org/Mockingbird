@@ -34,8 +34,9 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 No migration or configuration.
 
-- **One more LLM call for some writes**: a 2xx write whose declared answer has no body (a `204`) now makes one LLM call, for its effects only, when its prompt shows records besides its target. Before, it made none. A delete, and such a write shown nothing else, still make none. A failed call answers the write as before, changing nothing.
-- **Parent reads catch up after a child's delete**: deleting a record under a parent the session holds (`DELETE /posts/{id}/comments/{comment_id}`) now tells that parent, so its next read generates (one LLM call) instead of answering from state.
+- **One more LLM call for most nested 204 writes**: a 2xx write whose declared answer has no body (a `204`) now makes one LLM call, for its effects only, when its prompt shows records besides its target. That is nearly every nested `204` write under a parent the session holds, as the parent is shown. Before, it made none. A delete, such a write shown nothing else, and a retry repeating the session's latest write (same operation, path and body, on the same process) still make none. A failed call answers the write as before, changing nothing. Count them with `mb_bodyless_effects_calls_total{outcome}` (`answered`, `failed`).
+- **Parent reads catch up after a child's delete**: deleting a record the session holds under a parent it holds (`DELETE /posts/{id}/comments/{comment_id}`) now tells that parent, so its next read generates (one LLM call) instead of answering from state. A delete of a record the session never held tells nothing.
+- **Repeated requests are remembered once**: a request identical to the newest one a resource or route remembers replaces it, so retries push no other request out.
 - **Longer list prompts**: a list read one level under a write's parent may now be told that write in `<earlier_writes>`, so a recording of such a read may not replay.
 
 ### Next pages given as URLs, and served page cursors in prompts
