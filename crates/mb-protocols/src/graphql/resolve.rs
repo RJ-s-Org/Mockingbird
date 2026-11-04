@@ -473,6 +473,7 @@ async fn generate_in(
                         Ok(mut generated) => {
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
+                            write_by_id(rt, &plan, op, &call, &generated).await;
                             Ok(generated)
                         }
                         Err(e) => Err(e),
@@ -586,6 +587,59 @@ async fn store_answer(
     if !objects.is_empty() {
         call::store_resources(rt, &plan.session, objects, !seeding).await;
     }
+}
+
+/// The write a 2xx update or delete makes on the stored record its `id`
+/// argument names (see [`super::state::by_id`]), whether or not its
+/// payload selects it: an update merges its input's members of the record
+/// over it, after what the answer held, and a delete removes it. Answers
+/// from state or the cache wrote already.
+async fn write_by_id(
+    rt: &MockRuntime,
+    plan: &call::CallPlan<'_>,
+    op: &mb_mcm::Operation,
+    call: &OperationCall,
+    generated: &mb_engine::GeneratedResponse,
+) {
+    if !writes_by_id(generated.status, generated.source) {
+        return;
+    }
+    let Some(Value::Object(args)) = &call.body else {
+        return;
+    };
+    let Some(target) = super::state::by_id(&rt.bundle, op, args) else {
+        return;
+    };
+    let Some(held) = call::stored(rt, &plan.session, &target.resource_type, &target.id).await
+    else {
+        return;
+    };
+    if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
+        call::delete_resource(rt, &plan.session, held).await;
+        return;
+    }
+    let update = super::state::update_of(&rt.bundle, &held, args);
+    if !update.is_empty() {
+        let resource = mb_state::StoredResource {
+            resource_type: held.resource_type,
+            id: held.id,
+            data: Value::Object(update),
+        };
+        call::store_resources(rt, &plan.session, vec![resource], true).await;
+    }
+}
+
+/// Whether an answer of `status` from `source` makes [`write_by_id`]'s
+/// write: a 2xx one generated now, not one from state or the cache, which
+/// wrote when it was first answered.
+///
+/// No update or delete reaches here otherwise today: state and the response
+/// cache answer only queries (`call::prepare`), and a forced non-2xx status
+/// fails before generation. The guard stays as defence in depth, like
+/// [`store_answer`]'s, so a later path that serves a write from either
+/// cannot apply it twice.
+fn writes_by_id(status: u16, source: Source) -> bool {
+    (200..300).contains(&status) && !matches!(source, Source::State | Source::Cache)
 }
 
 /// The one request-log record of an HTTP request's root fields: a single
@@ -705,5 +759,19 @@ pub(crate) fn project(value: Value, ty: &Type, shapes: &Shapes) -> Option<FieldV
                 Some(FieldValue::owned_any(value).with_type(typename))
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_generated_2xx_answer_writes_by_id() {
+        assert!(writes_by_id(200, Source::Llm));
+        assert!(writes_by_id(201, Source::Fallback));
+        assert!(!writes_by_id(200, Source::State));
+        assert!(!writes_by_id(200, Source::Cache));
+        assert!(!writes_by_id(404, Source::Llm));
     }
 }

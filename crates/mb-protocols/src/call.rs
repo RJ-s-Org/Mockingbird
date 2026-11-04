@@ -5565,6 +5565,35 @@ pub(crate) async fn store_resources(
     .await;
 }
 
+/// The resource of type `t` the session holds under `id`.
+#[cfg(feature = "graphql")]
+pub(crate) async fn stored(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    t: &str,
+    id: &str,
+) -> Option<StoredResource> {
+    let mut state = StateAccess::new(rt);
+    async { state.get(session, t, id).await }
+        .instrument(state_span())
+        .await
+}
+
+/// Removes `gone`, a resource the session holds, from it. Keeps the
+/// session alive.
+#[cfg(feature = "graphql")]
+pub(crate) async fn delete_resource(rt: &MockRuntime, session: &SessionKey, gone: StoredResource) {
+    let mut state = StateAccess::new(rt);
+    async {
+        if state.delete(session, &gone.resource_type, &gone.id).await {
+            rt.collections().forget(session, &gone);
+        }
+        state.touch(session).await;
+    }
+    .instrument(state_span())
+    .await;
+}
+
 /// Resources the response should stay consistent with, nearest first: what
 /// the request names, then recent items for a list query. [`follow_hops`]
 /// adds what those refer to. With consistency off, only the `<x>Id` members
