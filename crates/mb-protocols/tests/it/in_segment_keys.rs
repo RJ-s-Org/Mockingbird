@@ -437,3 +437,83 @@ async fn a_record_named_with_a_format_suffix_round_trips() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
     assert_eq!(h.calls(), 1);
 }
+
+/// Order lines keyed by a document and a sequence together.
+const LINES: &str = r##"
+openapi: 3.0.3
+info: {title: Lines, version: "1"}
+paths:
+  /salesOrderLines:
+    post:
+      operationId: createLine
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}
+      responses: {"201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+  /salesOrderLines(documentId={documentId},sequence={sequence}):
+    parameters:
+      - {name: documentId, in: path, required: true, schema: {type: string}}
+      - {name: sequence, in: path, required: true, schema: {type: integer}}
+    get:
+      operationId: getLine
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+    patch:
+      operationId: updateLine
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Line"}}}}}
+    delete:
+      operationId: deleteLine
+      responses: {"204": {description: gone}}
+components:
+  schemas:
+    Line:
+      type: object
+      properties:
+        documentId: {type: string}
+        sequence: {type: integer}
+        amount: {type: number}
+"##;
+
+/// No one part of a composite key identifies a record: two lines sharing a
+/// sequence stay apart, and neither answers or is written for the other.
+#[tokio::test]
+async fn records_sharing_a_part_of_a_composite_key_do_not_collide() {
+    let line =
+        |doc: &str, amount: f64| json!({"documentId": doc, "sequence": 10000, "amount": amount});
+    let h = harness(
+        LINES,
+        vec![
+            line("A", 1.0),
+            line("B", 2.0),
+            line("B", 2.0),
+            line("A", 5.0),
+            line("B", 2.0),
+        ],
+    );
+    for (doc, amount) in [("A", 1.0), ("B", 2.0)] {
+        let (status, _, made) = h
+            .call("POST", "/salesOrderLines", Some(line(doc, amount)))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{made}");
+        assert_eq!(made["documentId"], doc, "{made}");
+    }
+    let stored = h.exported().await;
+    assert_ne!(stored.len(), 1, "two lines stored as one: {stored:?}");
+
+    let a = "/salesOrderLines(documentId=A,sequence=10000)";
+    let b = "/salesOrderLines(documentId=B,sequence=10000)";
+    let (status, _, read) = h.call("GET", b, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["documentId"], "B", "{read}");
+    let (status, _, patched) = h.call("PATCH", a, Some(json!({"amount": 5.0}))).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    assert_eq!(patched["documentId"], "A", "{patched}");
+    let (status, _, _) = h.call("DELETE", a, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, read) = h.call("GET", b, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["documentId"], "B", "{read}");
+    assert_eq!(
+        h.exported().await,
+        stored,
+        "nothing written by a part of a key"
+    );
+}

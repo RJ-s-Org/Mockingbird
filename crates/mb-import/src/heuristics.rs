@@ -38,7 +38,8 @@ struct KeySegment<'a> {
     /// `customers({customer_id})`. `None` for `key={key}`, a key of the
     /// collection before it.
     stem: Option<&'a str>,
-    /// Each parameter as its whole-segment text: `{customer_id}`.
+    /// Each parameter that keys it, as its whole-segment text:
+    /// `{customer_id}`. None for a composite key or a call.
     params: Vec<&'a str>,
 }
 
@@ -69,9 +70,15 @@ fn template(seg: &str) -> Option<(&str, Vec<&str>, &str)> {
 
 /// The resource a segment's literal text keys by the parameters inside it:
 ///
-/// - an OData key, `customers({customer_id})`, `customers('{id}')` or
-///   `entity(k1={a},k2={b})`: the type before the `(`, keyed by the
-///   parameters as `/entity/{a}/{b}` would be;
+/// - an OData key, `customers({customer_id})` or `customers('{id}')`: the type
+///   before the `(`, keyed by the one parameter inside as
+///   `/customers/{customer_id}` would be;
+/// - a composite OData key or a function call, `lines(doc={d},seq={s})` or
+///   `NS.getBalance(asOf={date})`: the name before the `(` alone, as if it had
+///   no parameters. A [`mb_mcm::Identity`] names one parameter, and no one part
+///   of a composite key, nor an argument of a call, identifies a record, so it
+///   gives none; a call after a keyed record (`/customers({id})/NS.post(x={x})`)
+///   reads as the action `/customers/{id}/NS.post`;
 /// - a named key, `key={key}`: the parameter alone, an alternate key of the
 ///   collection the segment before names, as `/carts/{key}` would be.
 ///
@@ -85,15 +92,25 @@ fn key_segment(seg: &str) -> Option<KeySegment<'_>> {
             .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
     };
     let formatted = |s: &str| s.is_empty() || FORMAT_SUFFIXES.contains(&s);
-    if let Some((stem, _)) = prefix.split_once('(') {
+    if let Some((stem, args)) = prefix.split_once('(') {
         let closed = suffix
             .trim_start_matches(['\'', '"'])
             .strip_prefix(')')
             .is_some_and(formatted);
-        return (name_like(stem) && closed).then(|| KeySegment {
-            stem: Some(stem).filter(|s| !s.is_empty()),
-            params,
-        });
+        if !name_like(stem) || !closed {
+            return None;
+        }
+        // One parameter, unnamed: a key. Named or several: no key.
+        let keyed = params.len() == 1 && args.trim_matches(['\'', '"']).is_empty();
+        let stem = Some(stem).filter(|s| !s.is_empty());
+        return match (keyed, stem) {
+            (true, _) => Some(KeySegment { stem, params }),
+            (false, Some(_)) => Some(KeySegment {
+                stem,
+                params: Vec::new(),
+            }),
+            (false, None) => None,
+        };
     }
     let name = prefix.strip_suffix('=')?;
     let named = !name.is_empty() && name_like(name);
@@ -2258,7 +2275,18 @@ mod tests {
                 &["companies", "{company_id}", "customers", "{customer_id}"][..],
             ),
             ("/customers('{id}')", &["customers", "{id}"]),
-            ("/entity(k1={a},k2={b})/x", &["entity", "{a}", "{b}", "x"]),
+            ("/entity(k1={a},k2={b})/x", &["entity", "x"]),
+            ("/lines({doc},{seq})", &["lines"]),
+            ("/customers(id={id})", &["customers"]),
+            (
+                "/customers({id})/NS.getBalance(asOf={date})",
+                &["customers", "{id}", "NS.getBalance"],
+            ),
+            (
+                "/me/calendarView(startDateTime={s},endDateTime={e})",
+                &["me", "calendarView"],
+            ),
+            ("/(a={a})", &["(a={a})"]),
             ("/carts/key={key}", &["carts", "{key}"]),
             ("/carts/key={key}.json", &["carts", "{key}"]),
             ("/({id})", &["{id}"]),
@@ -2379,15 +2407,10 @@ mod tests {
                 "/carts/{id}": {"parameters": path_param("id"), "get": answering("getCart", &json!({"$ref": "#/components/schemas/Cart"}))},
                 "/carts/key={key}": {"parameters": path_param("key"), "get": answering("getCartByKey", &json!({"$ref": "#/components/schemas/Cart"}))},
                 "/files/{name}.json": {"parameters": path_param("name"), "get": answering("getFile", &json!({"$ref": "#/components/schemas/File"}))},
-                "/pairs(left={left},right={right})": {
-                    "parameters": [path_param("left")[0], path_param("right")[0]],
-                    "get": answering("getPair", &json!({"$ref": "#/components/schemas/Pair"})),
-                },
             }),
             &json!({
                 "Cart": {"type": "object", "properties": {"id": {"type": "string"}, "key": {"type": "string"}}},
                 "File": {"type": "object", "properties": {"name": {"type": "string"}}},
-                "Pair": {"type": "object", "properties": {"left": {"type": "string"}, "right": {"type": "string"}}},
             }),
         );
         let op = |id: &str| bundle.operations.iter().find(|op| op.id == id).unwrap();
@@ -2407,12 +2430,79 @@ mod tests {
             op("getFile").identity.clone().and_then(|i| i.path_param),
             Some("name".into())
         );
-        // Two keys in one segment key it as `/pairs/{left}/{right}` would.
-        assert_eq!(op("getPair").resource_type.as_deref(), Some("pairs"));
-        assert_eq!(
-            op("getPair").identity.as_ref().map(|i| i.field.as_str()),
-            Some("right")
+    }
+
+    #[test]
+    fn a_composite_key_or_a_call_names_no_identity() {
+        let line = json!({"$ref": "#/components/schemas/Line"});
+        let customer = json!({"$ref": "#/components/schemas/Customer"});
+        let both = json!([path_param("documentId")[0], path_param("sequence")[0]]);
+        let bundle = compiled(
+            &json!({
+                "/lines": {"post": answering("createLine", &line)},
+                "/lines(documentId={documentId},sequence={sequence})": {
+                    "parameters": both,
+                    "get": answering("getLine", &line),
+                    "patch": answering("updateLine", &line),
+                    "delete": {"operationId": "deleteLine", "responses": {"204": {"description": "gone"}}},
+                },
+                "/customers({id})": {"parameters": path_param("id"), "get": answering("getCustomer", &customer)},
+                "/customers({id})/NS.getBalance(asOf={date})": {
+                    "parameters": [path_param("id")[0], path_param("date")[0]],
+                    "get": answering("getBalance", &json!({"type": "object", "properties": {"balance": {"type": "number"}}})),
+                },
+                "/customers({id})/NS.post(on={date})": {
+                    "parameters": [path_param("id")[0], path_param("date")[0]],
+                    "post": {"operationId": "postCustomer", "responses": {"204": {"description": "done"}}},
+                },
+                "/me/calendarView(startDateTime={s},endDateTime={e})": {
+                    "parameters": [path_param("s")[0], path_param("e")[0]],
+                    "get": answering("calendarView", &json!({"type": "object", "properties": {"id": {"type": "string"}, "e": {"type": "string"}}})),
+                },
+            }),
+            &json!({
+                "Line": {"type": "object", "properties": {"documentId": {"type": "string"}, "sequence": {"type": "integer"}, "amount": {"type": "number"}}},
+                "Customer": {"type": "object", "properties": {"id": {"type": "string"}}},
+            }),
         );
+        let op = |id: &str| bundle.operations.iter().find(|op| op.id == id).unwrap();
+        for id in ["createLine", "getLine", "updateLine", "deleteLine"] {
+            assert_eq!(op(id).resource_type.as_deref(), Some("lines"), "{id}");
+            assert!(
+                op(id)
+                    .identity
+                    .as_ref()
+                    .is_none_or(|i| i.path_param.is_none()
+                        && i.field != "sequence"
+                        && i.field != "documentId"),
+                "{id}: {:?}",
+                op(id).identity
+            );
+        }
+        // A call keys nothing by its arguments.
+        for id in ["getBalance", "calendarView"] {
+            assert!(
+                op(id)
+                    .identity
+                    .as_ref()
+                    .is_none_or(|i| i.path_param.is_none()),
+                "{id}: {:?}",
+                op(id).identity
+            );
+        }
+        assert_eq!(
+            op("calendarView").resource_type.as_deref(),
+            Some("calendarView")
+        );
+        // A call after a keyed record acts on it, as one with no arguments does.
+        let post = op("postCustomer");
+        assert_eq!(post.resource_type.as_deref(), Some("customers"));
+        assert_eq!(post.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(
+            post.identity.as_ref().and_then(|i| i.path_param.as_deref()),
+            Some("id")
+        );
+        assert!(post.is_action());
     }
 
     #[test]
