@@ -8,7 +8,7 @@
 //! [`Validation::refused`], with a JSON pointer into the description naming
 //! it; the rest applies. [`check_size`] bounds a document before it is parsed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -407,18 +407,16 @@ impl<'a> Ctx<'a> {
         };
         let record = match desc {
             Some(d) if at(&d.record).is_some() => at(&d.record),
-            Some(d) if at(&d.records).is_some() => at(&d.records).and_then(|s| items(b, s, 0)),
+            Some(d) if at(&d.records).is_some() => at(&d.records).and_then(|s| items(b, s)),
             _ => match op.identity.as_ref().and_then(|i| i.record.as_ref()) {
                 None => Some(answer),
-                Some(RecordAt::Member(m)) => property(b, answer, m, 0),
-                Some(RecordAt::Item) => items(b, answer, 0),
-                Some(RecordAt::MemberItem(m)) => {
-                    property(b, answer, m, 0).and_then(|s| items(b, s, 0))
-                }
+                Some(RecordAt::Member(m)) => property(b, answer, m),
+                Some(RecordAt::Item) => items(b, answer),
+                Some(RecordAt::MemberItem(m)) => property(b, answer, m).and_then(|s| items(b, s)),
             },
         }?;
-        if is_array(b, record, 0) {
-            items(b, record, 0)
+        if is_array(b, record) {
+            items(b, record)
         } else {
             Some(record)
         }
@@ -544,6 +542,17 @@ impl<'a> Ctx<'a> {
     }
 
     fn check_status(&mut self, op: &Operation, code: u16, path: &Path) -> bool {
+        if !is_http(op) {
+            self.refuse(
+                path,
+                RefusalCode::NotApplicable,
+                format!(
+                    "operation `{}` is not an HTTP operation and has no statuses",
+                    op.id
+                ),
+            );
+            return false;
+        }
         if declares_status(op, code) {
             return true;
         }
@@ -585,7 +594,7 @@ impl<'a> Ctx<'a> {
             );
             return false;
         };
-        if array && !is_array(self.bundle, target, 0) {
+        if array && !is_array(self.bundle, target) {
             self.refuse(
                 path,
                 RefusalCode::Invalid,
@@ -645,7 +654,19 @@ impl<'a> Ctx<'a> {
     }
 
     fn check_type_status(&mut self, t: &str, code: u16, path: &Path) -> bool {
-        if self.writes_of(t).iter().any(|o| declares_status(o, code)) {
+        if !self.ops_of(t).iter().any(|o| is_http(o)) {
+            self.refuse(
+                path,
+                RefusalCode::NotApplicable,
+                format!("type `{t}` has no HTTP operation and so no statuses"),
+            );
+            return false;
+        }
+        if self
+            .writes_of(t)
+            .iter()
+            .any(|o| is_http(o) && declares_status(o, code))
+        {
             return true;
         }
         self.refuse(
@@ -748,6 +769,11 @@ impl<'a> Ctx<'a> {
             for (j, m) in u.members.iter().enumerate() {
                 ok &= self.check_member(record, ty, m, &p.join("members").join(j));
             }
+            // A scope that no longer resolves refuses the whole set: kept
+            // without it, the members would be unique across every record.
+            if let Some(scope) = &u.scope {
+                ok &= self.check_member(record, ty, scope, &p.join("scope"));
+            }
             if ok {
                 out.unique.push(UniqueDesc {
                     members: u.members.clone(),
@@ -763,20 +789,23 @@ impl<'a> Ctx<'a> {
         if let Some(c) = &t.concurrency {
             let p = path.join("concurrency");
             self.unknown(&p, &c.extra);
-            out.concurrency = Some(ConcurrencyDesc {
-                member: c
-                    .member
-                    .clone()
-                    .filter(|m| self.check_member(record, ty, m, &p.join("member"))),
-                header: c
-                    .header
-                    .clone()
-                    .filter(|h| self.check_type_header(name, h, &p.join("header"))),
-                conflict: c
-                    .conflict
-                    .filter(|s| self.check_type_status(name, *s, &p.join("conflict"))),
-                extra: Extra::new(),
-            });
+            out.concurrency = unless_emptied(
+                c,
+                ConcurrencyDesc {
+                    member: c
+                        .member
+                        .clone()
+                        .filter(|m| self.check_member(record, ty, m, &p.join("member"))),
+                    header: c
+                        .header
+                        .clone()
+                        .filter(|h| self.check_type_header(name, h, &p.join("header"))),
+                    conflict: c
+                        .conflict
+                        .filter(|s| self.check_type_status(name, *s, &p.join("conflict"))),
+                    extra: Extra::new(),
+                },
+            );
         }
         out
     }
@@ -928,43 +957,49 @@ impl<'a> Ctx<'a> {
         if let Some(target) = &d.target {
             let p = path.join("target");
             self.unknown(&p, &target.extra);
-            out.target = Some(TargetDesc {
-                path_param: target
-                    .path_param
-                    .clone()
-                    .filter(|q| self.check_path_param(op, q, &p.join("path_param"))),
-                member: target.member.clone().filter(|m| {
-                    let found = body
-                        .and_then(|b| dotted_member(self.bundle, b, m))
-                        .is_some();
-                    if !found {
-                        self.refuse(
-                            &p.join("member"),
-                            RefusalCode::Unresolved,
-                            format!(
-                                "`{m}` is not a member of operation `{}`'s request body",
-                                op.id
-                            ),
-                        );
-                    }
-                    found
-                }),
-                extra: Extra::new(),
-            });
+            out.target = unless_emptied(
+                target,
+                TargetDesc {
+                    path_param: target
+                        .path_param
+                        .clone()
+                        .filter(|q| self.check_path_param(op, q, &p.join("path_param"))),
+                    member: target.member.clone().filter(|m| {
+                        let found = body
+                            .and_then(|b| dotted_member(self.bundle, b, m))
+                            .is_some();
+                        if !found {
+                            self.refuse(
+                                &p.join("member"),
+                                RefusalCode::Unresolved,
+                                format!(
+                                    "`{m}` is not a member of operation `{}`'s request body",
+                                    op.id
+                                ),
+                            );
+                        }
+                        found
+                    }),
+                    extra: Extra::new(),
+                },
+            );
         }
 
         if let Some(r) = &d.request {
             let p = path.join("request");
             self.unknown(&p, &r.extra);
-            out.request = Some(RecordsAt {
-                record: r.record.clone().filter(|ptr| {
-                    self.check_pointer(body, ptr, false, "request body", &p.join("record"))
-                }),
-                records: r.records.clone().filter(|ptr| {
-                    self.check_pointer(body, ptr, true, "request body", &p.join("records"))
-                }),
-                extra: Extra::new(),
-            });
+            out.request = unless_emptied(
+                r,
+                RecordsAt {
+                    record: r.record.clone().filter(|ptr| {
+                        self.check_pointer(body, ptr, false, "request body", &p.join("record"))
+                    }),
+                    records: r.records.clone().filter(|ptr| {
+                        self.check_pointer(body, ptr, true, "request body", &p.join("records"))
+                    }),
+                    extra: Extra::new(),
+                },
+            );
         }
 
         if let Some(a) = &d.answer {
@@ -996,16 +1031,19 @@ impl<'a> Ctx<'a> {
                     extra: Extra::new(),
                 })
             });
-            out.answer = Some(AnswerDesc {
-                record: a.record.clone().filter(|ptr| {
-                    self.check_pointer(answer, ptr, false, "answer", &p.join("record"))
-                }),
-                records: a.records.clone().filter(|ptr| {
-                    self.check_pointer(answer, ptr, true, "answer", &p.join("records"))
-                }),
-                long_running,
-                extra: Extra::new(),
-            });
+            out.answer = unless_emptied(
+                a,
+                AnswerDesc {
+                    record: a.record.clone().filter(|ptr| {
+                        self.check_pointer(answer, ptr, false, "answer", &p.join("record"))
+                    }),
+                    records: a.records.clone().filter(|ptr| {
+                        self.check_pointer(answer, ptr, true, "answer", &p.join("records"))
+                    }),
+                    long_running,
+                    extra: Extra::new(),
+                },
+            );
         }
 
         if let Some(transition) = &d.transition {
@@ -1041,7 +1079,22 @@ impl<'a> Ctx<'a> {
                             false
                         }
                     },
-                    None => self.check_member(record, ty, member, &mp),
+                    None => {
+                        self.refuse(
+                            &mp,
+                            RefusalCode::Unresolved,
+                            match ty {
+                                Some(t) => format!(
+                                    "type `{t}` has no lifecycle, so `{member}` has no states to set"
+                                ),
+                                None => format!(
+                                    "operation `{}` has no resource type with a lifecycle",
+                                    op.id
+                                ),
+                            },
+                        );
+                        false
+                    }
                 };
                 if ok {
                     kept.insert(member.clone(), value.clone());
@@ -1162,6 +1215,36 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// `applied`, unless filtering left it empty although `authored` was not: a
+/// sub-object whose every entry was refused is dropped (as `transition`
+/// is), so it cannot stand over a lower tier's value in an overlay.
+fn unless_emptied<T: Clone + Default + PartialEq + HasExtra>(
+    authored: &T,
+    applied: T,
+) -> Option<T> {
+    let mut bare = authored.clone();
+    bare.clear_extra();
+    let empty = T::default();
+    (applied != empty || bare == empty).then_some(applied)
+}
+
+/// The sub-objects [`unless_emptied`] compares, without their unknown keys.
+trait HasExtra {
+    fn clear_extra(&mut self);
+}
+
+macro_rules! has_extra {
+    ($($t:ty),*) => {$(
+        impl HasExtra for $t {
+            fn clear_extra(&mut self) {
+                self.extra = Extra::new();
+            }
+        }
+    )*};
+}
+
+has_extra!(ConcurrencyDesc, TargetDesc, RecordsAt, AnswerDesc);
+
 // ---- schema lookups ----
 
 fn success_schema(op: &Operation) -> Option<&Value> {
@@ -1180,61 +1263,91 @@ fn branches(schema: &Value) -> impl Iterator<Item = &Value> {
         .flatten()
 }
 
-/// The schema of property `name` of `schema`, through `$ref`s and branches.
-fn property<'a>(b: &'a Bundle, schema: &'a Value, name: &str, depth: usize) -> Option<&'a Value> {
+/// Schemas a lookup has already searched, by address: a composition that
+/// refers back to itself (`A = {anyOf: [{$ref: A}, ...]}`) is searched once,
+/// so a lookup costs at most one visit per schema of the bundle.
+type Seen = HashSet<*const Value>;
+
+/// Resolve `schema`'s `$ref`s and mark it searched; `None` when it was already
+/// searched or the walk is too deep.
+fn visit<'a>(b: &'a Bundle, schema: &'a Value, seen: &mut Seen, depth: usize) -> Option<&'a Value> {
     if depth > MAX_HOPS {
         return None;
     }
     let schema = b.resolve(schema);
-    if let Some(p) = schema.get("properties").and_then(|p| p.get(name)) {
-        return Some(p);
+    seen.insert(std::ptr::from_ref(schema)).then_some(schema)
+}
+
+/// The schema of property `name` of `schema`, through `$ref`s and branches.
+fn property<'a>(b: &'a Bundle, schema: &'a Value, name: &str) -> Option<&'a Value> {
+    fn walk<'a>(
+        b: &'a Bundle,
+        schema: &'a Value,
+        name: &str,
+        seen: &mut Seen,
+        depth: usize,
+    ) -> Option<&'a Value> {
+        let schema = visit(b, schema, seen, depth)?;
+        if let Some(p) = schema.get("properties").and_then(|p| p.get(name)) {
+            return Some(p);
+        }
+        branches(schema).find_map(|s| walk(b, s, name, seen, depth + 1))
     }
-    branches(schema).find_map(|s| property(b, s, name, depth + 1))
+    walk(b, schema, name, &mut Seen::new(), 0)
 }
 
 /// The item schema of an array `schema`, through `$ref`s and branches.
-fn items<'a>(b: &'a Bundle, schema: &'a Value, depth: usize) -> Option<&'a Value> {
-    if depth > MAX_HOPS {
-        return None;
+fn items<'a>(b: &'a Bundle, schema: &'a Value) -> Option<&'a Value> {
+    fn walk<'a>(
+        b: &'a Bundle,
+        schema: &'a Value,
+        seen: &mut Seen,
+        depth: usize,
+    ) -> Option<&'a Value> {
+        let schema = visit(b, schema, seen, depth)?;
+        if let Some(i) = schema
+            .get("items")
+            .filter(|i| i.is_object() || i.is_boolean())
+        {
+            return Some(i);
+        }
+        branches(schema).find_map(|s| walk(b, s, seen, depth + 1))
     }
-    let schema = b.resolve(schema);
-    if let Some(i) = schema
-        .get("items")
-        .filter(|i| i.is_object() || i.is_boolean())
-    {
-        return Some(i);
-    }
-    branches(schema).find_map(|s| items(b, s, depth + 1))
+    walk(b, schema, &mut Seen::new(), 0)
 }
 
 /// Whether `schema` describes an array, through `$ref`s and branches.
-fn is_array(b: &Bundle, schema: &Value, depth: usize) -> bool {
-    if depth > MAX_HOPS {
-        return false;
+fn is_array(b: &Bundle, schema: &Value) -> bool {
+    fn walk(b: &Bundle, schema: &Value, seen: &mut Seen, depth: usize) -> bool {
+        let Some(schema) = visit(b, schema, seen, depth) else {
+            return false;
+        };
+        let typed = match schema.get("type") {
+            Some(Value::String(t)) => t == "array",
+            Some(Value::Array(ts)) => ts.iter().any(|t| t == "array"),
+            _ => false,
+        };
+        typed
+            || schema.get("items").is_some()
+            || branches(schema).any(|s| walk(b, s, seen, depth + 1))
     }
-    let schema = b.resolve(schema);
-    let typed = match schema.get("type") {
-        Some(Value::String(t)) => t == "array",
-        Some(Value::Array(ts)) => ts.iter().any(|t| t == "array"),
-        _ => false,
-    };
-    typed || schema.get("items").is_some() || branches(schema).any(|s| is_array(b, s, depth + 1))
+    walk(b, schema, &mut Seen::new(), 0)
 }
 
 /// The schema of a dotted member path such as `meta.id`.
 fn dotted_member<'a>(b: &'a Bundle, schema: &'a Value, member: &str) -> Option<&'a Value> {
     member
         .split('.')
-        .try_fold(schema, |s, name| property(b, s, name, 0))
+        .try_fold(schema, |s, name| property(b, s, name))
 }
 
 /// The schema at a JSON pointer's tokens: a property, or an array's items for
 /// an index (or `-`).
 fn at_pointer<'a>(b: &'a Bundle, schema: &'a Value, tokens: &[String]) -> Option<&'a Value> {
     tokens.iter().try_fold(schema, |s, token| {
-        property(b, s, token, 0).or_else(|| {
+        property(b, s, token).or_else(|| {
             (token == "-" || token.parse::<usize>().is_ok())
-                .then(|| items(b, s, 0))
+                .then(|| items(b, s))
                 .flatten()
         })
     })
@@ -1262,7 +1375,7 @@ fn declares_param(b: &Bundle, op: &Operation, name: &str) -> bool {
             .input
             .body
             .as_ref()
-            .is_some_and(|body| property(b, body, name, 0).is_some())
+            .is_some_and(|body| property(b, body, name).is_some())
 }
 
 /// A declared request header or a header of any declared response, ignoring
@@ -1593,14 +1706,8 @@ mod tests {
                 ),
             ]
         );
-        assert!(
-            v.applied.operations["ListFolders"]
-                .answer
-                .as_ref()
-                .unwrap()
-                .records
-                .is_none()
-        );
+        // Its only entry refused, the answer is dropped whole.
+        assert!(v.applied.operations["ListFolders"].answer.is_none());
 
         // An item of an array resolves through `items`.
         let w = world(json!({"operations": {"ListFolders": {"answer": {"record": "/folders/0"}}}}));
@@ -1794,6 +1901,141 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(transition.keys().collect::<Vec<_>>(), vec!["state"]);
+    }
+
+    #[test]
+    fn validate_cyclic_composition_returns_quickly() {
+        for n in [3, 4, 6] {
+            let mut b = folders();
+            let branches: Vec<Value> = (0..n).map(|_| json!({"$ref": "#/$defs/A"})).collect();
+            b.defs.insert("A".into(), json!({ "anyOf": branches }));
+            op(&mut b, "GetFolder").outputs[0].schema = Some(json!({"$ref": "#/$defs/A"}));
+            op(&mut b, "ListFolders").resource_type = None;
+            op(&mut b, "CreateFolder").resource_type = None;
+            let w = world(json!({
+                "types": {"folder": {"identity": {"member": "x"}}},
+                "operations": {"GetFolder": {"answer": {"records": "/a/0"}}}
+            }));
+            let start = std::time::Instant::now();
+            let v = validate(&w, &b);
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(1),
+                "{n} branches took {:?}",
+                start.elapsed()
+            );
+            assert_eq!(
+                paths(&v),
+                vec![
+                    ("/types/folder/identity/member", RefusalCode::Unresolved),
+                    (
+                        "/operations/GetFolder/answer/records",
+                        RefusalCode::Unresolved
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn validate_refuses_unique_scope_not_in_schema() {
+        let w = world(json!({
+            "types": {"folder": {"unique": [
+                {"members": ["displayName"], "scope": "gone"},
+                {"members": ["displayName"], "scope": "parent"}
+            ]}}
+        }));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![("/types/folder/unique/0/scope", RefusalCode::Unresolved)]
+        );
+        let unique = &v.applied.types["folder"].unique;
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique[0].scope.as_deref(), Some("parent"));
+    }
+
+    #[test]
+    fn validate_drops_sub_objects_left_empty() {
+        let w = world(json!({
+            "types": {"folder": {"concurrency": {"member": "nope"}}},
+            "operations": {
+                "GetFolder": {
+                    "target": {"path_param": "nope"},
+                    "answer": {"record": "/nope"}
+                },
+                "CreateFolder": {"request": {"records": "/nope"}},
+                "ListFolders": {"target": {}}
+            }
+        }));
+        let v = validate(&w, &folders());
+        assert_eq!(v.refused.len(), 4, "{:?}", paths(&v));
+        assert!(v.applied.types["folder"].concurrency.is_none());
+        let get = &v.applied.operations["GetFolder"];
+        assert!(get.target.is_none());
+        assert!(get.answer.is_none());
+        assert!(v.applied.operations["CreateFolder"].request.is_none());
+        // An object authored empty stays: it is what the author wrote.
+        assert_eq!(
+            v.applied.operations["ListFolders"].target,
+            Some(TargetDesc::default())
+        );
+    }
+
+    #[test]
+    fn validate_refuses_transition_without_lifecycle() {
+        let w = world(json!({
+            "operations": {"CreateFolder": {"transition": {"state": "ACTIVE"}}}
+        }));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![(
+                "/operations/CreateFolder/transition/state",
+                RefusalCode::Unresolved
+            )]
+        );
+        assert!(v.applied.operations["CreateFolder"].transition.is_none());
+    }
+
+    #[test]
+    fn validate_statuses_on_graphql_are_not_applicable() {
+        let mut b = bundle(&[(
+            "createIssue",
+            "POST",
+            "/graphql",
+            json!({"type": "object", "properties": {"id": {"type": "string"}, "title": {"type": "string"}}}),
+        )]);
+        {
+            let o = op(&mut b, "createIssue");
+            o.protocol = Protocol::Graphql;
+            o.binding = Binding::Graphql {
+                operation_type: GraphqlOperationType::Mutation,
+                field: "createIssue".into(),
+            };
+            o.resource_type = Some("issue".into());
+        }
+        let w = world(json!({
+            "types": {"issue": {
+                "unique": [{"members": ["title"], "conflict": 409}],
+                "concurrency": {"member": "id", "conflict": 412}
+            }},
+            "operations": {"createIssue": {"not_found": 404}}
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(
+            paths(&v),
+            vec![
+                ("/types/issue/unique/0/conflict", RefusalCode::NotApplicable),
+                (
+                    "/types/issue/concurrency/conflict",
+                    RefusalCode::NotApplicable
+                ),
+                (
+                    "/operations/createIssue/not_found",
+                    RefusalCode::NotApplicable
+                ),
+            ]
+        );
     }
 
     #[test]

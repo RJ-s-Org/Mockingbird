@@ -134,16 +134,19 @@
 Rules (each failing entry is dropped from `applied` and listed once):
 - **`operations` keys:** an operation id in the bundle, else `unresolved`.
 - **`types` keys:** a `resource_type` some operation has, or a key of `defs`, else `unresolved`.
-- **Members** (`identity.member`, `lifecycle.member`, `unique.members`, `concurrency.member`, `scope.member`, `filters.member`, `order.member`, `derived.*.member`, `changes` keys) must be a property of the type's record schema. The record schema is the success output of the type's read operation, or the first operation of that type, resolved through `answer.record` when set and `$ref` into `defs`. A member is a dotted path through nested properties.
+- **Members** (`identity.member`, `lifecycle.member`, `unique.members`, `unique.scope`, `concurrency.member`, `scope.member`, `filters.member`, `order.member`, `derived.*.member`, `changes` keys) must be a property of the type's record schema. The record schema is the success output of the type's read operation, or the first operation of that type, resolved through `answer.record` when set and `$ref` into `defs`. A member is a dotted path through nested properties.
 - **Parameters** (`target.path_param`, `scope.param`, `filters.param`, `paging.request`, `paging.size`, `listed_with.param`) must be declared on that operation, or on some list operation of the type for `listed_with`.
 - **Headers** (`concurrency.header`, `idempotency.header`, `paging.response_header`): declared request or response headers of the operation, or of the type's write operations for `concurrency`. On a non-HTTP operation they are `not_applicable`.
-- **Statuses** (`conflict`, `not_found`) must be declared responses on the operation, or on the type's writes.
+- **Statuses** (`conflict`, `not_found`) must be declared responses on the operation, or on the type's writes. On a non-HTTP operation (or a type with no HTTP operation) they are `not_applicable`.
 - **Pointers** (`request`, `answer`) must resolve inside the operation's request or success schema. `records` must point to an array.
 - **Other rules:**
   - `identity.pattern` holds exactly one `{id}`;
   - `lifecycle.initial` and `soft_delete.state` are in `states`, when `states` is non-empty;
   - `derived.of` names a type whose `parent.type` is this type;
-  - `transition` keys are the lifecycle member of the op's type;
+  - `transition` keys are the lifecycle member of the op's type; with no applied lifecycle for that type, every key is `unresolved`;
+  - a `unique` set whose `scope` does not resolve is refused whole, so it never widens to global uniqueness;
+  - a sub-object (`target`, `request`, `answer`, `concurrency`) whose every entry is refused is dropped, as `transition` is, so it cannot mask a lower tier; one authored empty stays;
+  - schema lookups through `$ref`s and `allOf`/`anyOf`/`oneOf` visit each schema at most once, so a self-referencing composition cannot blow up;
   - each unknown key in any `extra` is `unknown_key`.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -287,6 +290,7 @@ Rules (each failing entry is dropped from `applied` and listed once):
   - `POST .../world/revisions/{r}/restore`: adds a new revision whose document is `r`'s, validated again. The answer is `WorldWriteResult`.
   - `GET .../world/diff?from=a&to=b` → `{ added: [pointer], removed: [pointer], changed: [pointer] }`, at the leaf level of the overlay documents.
   - A conflict gives `412` problem `revision_conflict`.
+  - Some malformed entries fail deserialization of the whole `World` rather than reaching the validator: unknown keys inside externally tagged or enum-valued entries (`changes.a = {from_request: "/a", bogus: 1}`, `derived` kind `avg`, an unknown `OpKind` or `FilterKind`). Map that serde error to a 422 problem that names the JSON pointer (e.g. with `serde_path_to_error`), or make those enums tolerant. Check this in the Task 7 review.
   - MCP tools: `put_world {mock, version?, world, author?, expect_revision?}`, `patch_world {mock, version?, patch, author?, expect_revision?}`, `list_world_revisions`, `restore_world_revision`, `diff_world`.
   - CLI: `mockingbird world put|patch|revisions|restore|diff`.
 
