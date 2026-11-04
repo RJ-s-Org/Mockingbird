@@ -54,6 +54,20 @@ All results go to `--out`, which defaults to `docs/benchmarks/2026-10-29`. Relat
 
 The model slug is the model id with `/` replaced by `__`. Proxy labels have the form `<slug>~<workload>`. The workload is `engine` for the full run, `pilot` for the pilot, and the suite name for the server suites.
 
+## Running the server suites fast
+
+By default `server_suites.py` runs every suite, rep and journey in order, so a model has about one LLM call in flight. Two flags change that without changing the rows (case names, rep numbers and `ok` are the same; only row order and latencies differ):
+
+- `--jobs N` runs the independent units of each suite on N threads against the suite's one server: every (rep, journey) pair of the journeys suites, and every rep of `consistency` and `sse`. Each unit has its own `x-mockingbird-session`. A consistency rep's three checks share their session, so they stay in order inside the rep. `import` always runs in order, because the server queues import jobs on two workers and the wait would count toward `--import-timeout` and the measured time.
+- `--suites-parallel` runs the suites given with `--suite` at the same time, each on its own server. Running one process per (model, suite) does the same thing, and so does `run.py full --parallel`. Each server gets its own temp directory, its own log (`server-logs/<slug>~<suite>.log`) and its own proxy label. Its three ports are picked under a lock file (`$TMPDIR/mb-bench-ports.lock`) that is held until the server answers `/readyz`, so two servers starting at the same moment never get the same port. All of them can share one `--out`, since `server.jsonl` is appended under `flock`.
+
+```sh
+python3 scripts/llm-bench/server_suites.py --model <id> --proxy-base http://127.0.0.1:<port> --out <dir> \
+  --repeat 3 --suite journeys_blind6 --suite journeys_blind7 --suites-parallel --jobs 4
+```
+
+`run.py full --server-jobs N` passes `--jobs N` on. The number of calls in flight per model is about (number of suites running) × `--jobs`, and the proxy reserves a budget estimate for each call in flight, so leave `--budget-usd` some headroom. A journeys suite of 5 journeys × 3 reps has 15 units, so `--jobs 4` makes it about 3–4× faster, and `--jobs 15` makes it as fast as its slowest journey. The server allows 64 LLM generations at once (`limits.max_concurrent_generations`); a call that waits past its LLM timeout is answered by the faker, so keep the total well under that.
+
 ## Budget
 
 The proxy stops spending. Before each call it reserves an estimate of the call's cost: prompt characters / 3 × input price, plus `max_tokens` (default 4096) × output price. It refuses the call with 402 when the following would reach `--budget-usd` (default 9.0):

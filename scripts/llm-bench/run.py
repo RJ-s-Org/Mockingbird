@@ -447,6 +447,9 @@ def run_server_suites(
         "--out", outdir,
         "--repeat", str(repeat),
     ]
+    jobs = getattr(args, "server_jobs", 1) or 1
+    if jobs > 1:
+        cmd += ["--jobs", str(jobs)]
     rcs = []
     suites = [s.strip() for s in (args.suites or "").split(",") if s.strip()] or [None]
     for suite in suites:
@@ -887,6 +890,8 @@ def main() -> int:
     runner(p)
     p.add_argument("--parallel", type=int, default=3, help="models run concurrently (Inkling models: one at a time, last)")
     p.add_argument("--suites", help="comma-separated server suites (default: all)")
+    p.add_argument("--server-jobs", type=int, default=1,
+                   help="server_suites.py --jobs: journey/consistency/SSE units in flight per model (default 1)")
     p.add_argument("--skip-server", action="store_true", help="engine workload only")
 
     args = ap.parse_args()
