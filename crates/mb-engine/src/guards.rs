@@ -841,6 +841,14 @@ pub(crate) fn refusals(
     offered_codes(op)
 }
 
+/// The statuses a refusal of `op` may name, whatever a prompt was shown: the codes
+/// among 400, 409, 412 and 422 it declares, in that order (a create's `400` only when
+/// it declares none of the others), and none when it declares none.
+#[must_use]
+pub fn refusal_codes(op: &mb_mcm::Operation) -> Vec<u16> {
+    offered_codes(op)
+}
+
 /// The statuses of [`REFUSAL_STATUSES`] `op` declares by code that a refusal may name,
 /// in order: a create's `400` only when it declares none of the others.
 fn offered_codes(op: &mb_mcm::Operation) -> Vec<u16> {
@@ -870,7 +878,9 @@ fn offered_codes(op: &mb_mcm::Operation) -> Vec<u16> {
 /// its path names, among the related resources; or a record of the type it creates
 /// that creates put in its own collection ([`crate::GenerationContext::alongside`]),
 /// or that holds a value of the request under the same member
-/// ([`crate::GenerationContext::same_values`]). A record only the request names by
+/// ([`crate::GenerationContext::same_values`]); the record whose id the request asks
+/// for under the type's identity field (a client-chosen `id`, see [`asked_identity`])
+/// is one of those, under that member. Any other record only the request names by
 /// value is none of these, whatever its type, and a create shown nothing has nothing
 /// to conflict with.
 fn shows_a_conflict(
@@ -909,6 +919,49 @@ fn shows_a_conflict(
         .any(|r| alongside(r) || named(&r.id))
 }
 
+/// The id a create's request asks for its record: what its top-level body sets under
+/// the identity field of `op` (`id` when it declares none), a string or a number, when
+/// the request's body schema declares that member and not as `readOnly` (at its top
+/// level or in an `allOf` part): a client-chosen id. `None` for an operation that is
+/// no create, a body that sets none, or a member the request does not declare, which
+/// the API mints whatever the body says.
+#[must_use]
+pub fn asked_identity(
+    bundle: &mb_mcm::Bundle,
+    op: &mb_mcm::Operation,
+    call: &crate::OperationCall,
+) -> Option<String> {
+    if op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create) {
+        return None;
+    }
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let asked = match call.body.as_ref()?.get(field)? {
+        Value::String(s) if !s.is_empty() => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    let schema = crate::consistency::deref(bundle, op.input.body.as_ref()?);
+    let parts = schema
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|part| crate::consistency::deref(bundle, part));
+    let writable = std::iter::once(schema).chain(parts).any(|part| {
+        part.get("properties")
+            .and_then(|p| p.get(field))
+            .map(|member| crate::consistency::deref(bundle, member))
+            .is_some_and(|member| member.get("readOnly") != Some(&Value::Bool(true)))
+    });
+    writable.then_some(asked)
+}
+
+/// What a create's refusal note adds when a resource it is shown already has the id
+/// its request asks for (see [`refusal_note`]).
+const TAKEN_ID_NOTE: &str = " A resource listed under the member that is its type's identity \
+already has the id this request asks for: a second record cannot take it, so that is a duplicate \
+the API refuses, with the declared status above that fits best.";
+
 /// What the prompt adds to the effects envelope's instruction when `op` may be
 /// refused with one of `refusals`: each status with the contract's description of it,
 /// in a block framed as the contract's data, and that a refusal stands only on what
@@ -935,8 +988,11 @@ pub(crate) fn refusal_note(
             }
         }
     }
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let mut same = String::new();
+    let mut taken_id = false;
     for (t, id, member) in ctx.same_values {
+        taken_id |= member == field && op.resource_type.as_deref() == Some(t.as_str());
         let _ = writeln!(
             same,
             "{{\"type\": {}, \"id\": {}, \"member\": {}}}",
@@ -953,7 +1009,8 @@ pub(crate) fn refusal_note(
 that are of the type this call creates and already hold the value this request gives the member \
 named. Holding the same value contradicts this create only when the description of a declared \
 refusal status above says that such a duplicate is refused; otherwise answer the create as \
-usual.\n<same_values>\n{same}</same_values>"
+usual.{taken}\n<same_values>\n{same}</same_values>",
+            taken = if taken_id { TAKEN_ID_NOTE } else { "" },
         )
     };
     format!(
