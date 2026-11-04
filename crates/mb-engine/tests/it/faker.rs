@@ -677,6 +677,33 @@ fn strings_match_their_pattern() {
 }
 
 #[test]
+fn broad_classes_in_patterns_draw_readable_ascii() {
+    // `.` and a negated class can match bytes that are not UTF-8, so these
+    // used to be drawn from all of Unicode.
+    for pattern in [
+        r"^id:.{22}$",
+        r"^[^/]{8}\.[a-z]{3}$",
+        r"^\S+@\S+$",
+        r"^\p{L}{6}$",
+    ] {
+        let re = regex::Regex::new(pattern).unwrap();
+        for v in draws(json!({"type": "string", "pattern": pattern}), 100) {
+            let s = v.as_str().unwrap();
+            assert!(re.is_match(s), "{pattern}: {s:?}");
+            assert!(s.chars().all(|c| c.is_ascii_graphic()), "{pattern}: {s:?}");
+        }
+    }
+    let re = regex::Regex::new(r"^id:.{22}$").unwrap();
+    for v in draws(json!({"type": "string", "pattern": r"^id:.{22}$"}), 50) {
+        let s = v.as_str().unwrap();
+        assert!(
+            re.is_match(s) && s[3..].chars().all(|c| c.is_ascii_alphanumeric()),
+            "{s}"
+        );
+    }
+}
+
+#[test]
 fn unsupported_or_too_long_patterns_fall_back() {
     for v in draws(json!({"type": "string", "pattern": r"^(a)\1$"}), 20) {
         assert!(v.is_string());

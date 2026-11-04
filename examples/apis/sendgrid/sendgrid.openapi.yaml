@@ -249,7 +249,7 @@ components:
             type: object
             required: [type, value]
             properties:
-              type: { type: string, description: MIME type, e.g. text/plain or text/html. }
+              type: { type: string, description: "MIME type, e.g. text/plain or text/html." }
               value: { type: string }
         template_id: { type: string }
         categories: { type: array, maxItems: 10, items: { type: string } }

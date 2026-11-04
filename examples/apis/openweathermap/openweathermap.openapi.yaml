@@ -281,7 +281,7 @@ components:
           type: object
           properties:
             1h: { type: number, minimum: 0, maximum: 20 }
-        dt: { type: integer, minimum: 1761000000, maximum: 1800000000, description: Unix seconds, UTC. }
+        dt: { type: integer, minimum: 1761000000, maximum: 1800000000, description: "Unix seconds, UTC." }
         sys:
           type: object
           required: [country, sunrise, sunset]

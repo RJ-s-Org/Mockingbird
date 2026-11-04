@@ -259,7 +259,7 @@ components:
       type: object
       required: [code, message, more_info, status]
       properties:
-        code: { type: integer, description: Twilio error code, e.g. 21211. }
+        code: { type: integer, description: "Twilio error code, e.g. 21211." }
         message: { type: string }
         more_info: { type: string, format: uri, pattern: "^https://www\\.twilio\\.com/docs/errors/[0-9]{5}$" }
         status: { type: integer }
@@ -294,7 +294,7 @@ components:
         messaging_service_sid: { type: [string, "null"], pattern: "^MG[0-9a-f]{32}$" }
         num_media: { type: string, pattern: "^[0-9]$" }
         num_segments: { type: string, pattern: "^[1-9]$" }
-        price: { type: [string, "null"], pattern: "^-0\\.0[0-9]{4}$", description: Negative decimal string, e.g. "-0.00790"; null while queued. }
+        price: { type: [string, "null"], pattern: "^-0\\.0[0-9]{4}$", description: 'Negative decimal string, e.g. "-0.00790"; null while queued.' }
         price_unit: { type: string, const: USD }
         status: { $ref: "#/components/schemas/message_enum_status" }
         uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Messages/SM[0-9a-f]{32}\\.json$" }
@@ -327,7 +327,7 @@ components:
         price: { type: [string, "null"], pattern: "^-0\\.0[0-9]{4}$" }
         price_unit: { type: string, const: USD }
         answered_by: { type: [string, "null"], enum: [human, machine_start, fax, unknown, null] }
-        caller_name: { type: [string, "null"], description: CNAM of the caller, e.g. "HARBOR LANE DENT". }
+        caller_name: { type: [string, "null"], description: 'CNAM of the caller, e.g. "HARBOR LANE DENT".' }
         queue_time: { type: string, pattern: "^[0-9]{1,4}$", description: Milliseconds. }
         uri: { type: string, pattern: "^/2010-04-01/Accounts/AC[0-9a-f]{32}/Calls/CA[0-9a-f]{32}\\.json$" }
     message_status_callback:

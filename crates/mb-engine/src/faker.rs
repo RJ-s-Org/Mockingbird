@@ -1400,11 +1400,62 @@ fn compile_pattern(pattern: &str, max_repeat: u32) -> Option<Pattern> {
         .parse(body)
         .ok()
         .and_then(|hir| rand_regex::Regex::with_hir(hir, max_repeat).ok());
+    // A pattern the ASCII parse refuses (`.` or `[^/]` can match bytes that
+    // are not UTF-8, `\p{L}` needs Unicode) is parsed with Unicode and each
+    // class narrowed to readable ASCII, so draws stay printable.
     let generator = match ascii {
         Some(g) => g,
-        None => rand_regex::Regex::compile(body, max_repeat).ok()?,
+        None => {
+            let hir = regex_syntax::ParserBuilder::new()
+                .build()
+                .parse(body)
+                .ok()?;
+            rand_regex::Regex::with_hir(readable(hir), max_repeat).ok()?
+        }
     };
     Some(Pattern { generator, check })
+}
+
+/// `hir` with every class narrowed to readable ASCII where it has some: a
+/// broad class (`.`, `[^/]`, `\S`) that holds every ASCII letter and digit
+/// draws only those, any other keeps its printable ASCII part, and a class
+/// with none keeps its members. Each draw is still a match of `hir`.
+fn readable(hir: regex_syntax::hir::Hir) -> regex_syntax::hir::Hir {
+    use regex_syntax::hir::{Class, ClassUnicode, ClassUnicodeRange, Hir, HirKind};
+    let set = |ranges: &[(char, char)]| {
+        ClassUnicode::new(ranges.iter().map(|&(a, b)| ClassUnicodeRange::new(a, b)))
+    };
+    match hir.into_kind() {
+        HirKind::Class(Class::Unicode(class)) => {
+            let alnum = set(&[('0', '9'), ('A', 'Z'), ('a', 'z')]);
+            let mut printable = class.clone();
+            printable.intersect(&set(&[(' ', '~')]));
+            let mut narrowed = printable.clone();
+            narrowed.intersect(&alnum);
+            let pick = if narrowed == alnum {
+                narrowed
+            } else if printable.ranges().is_empty() {
+                class
+            } else {
+                printable
+            };
+            Hir::class(Class::Unicode(pick))
+        }
+        HirKind::Repetition(mut rep) => {
+            rep.sub = Box::new(readable(*rep.sub));
+            Hir::repetition(rep)
+        }
+        HirKind::Capture(mut cap) => {
+            cap.sub = Box::new(readable(*cap.sub));
+            Hir::capture(cap)
+        }
+        HirKind::Concat(subs) => Hir::concat(subs.into_iter().map(readable).collect()),
+        HirKind::Alternation(subs) => Hir::alternation(subs.into_iter().map(readable).collect()),
+        HirKind::Class(class) => Hir::class(class),
+        HirKind::Empty => Hir::empty(),
+        HirKind::Literal(lit) => Hir::literal(lit.0),
+        HirKind::Look(look) => Hir::look(look),
+    }
 }
 
 /// A pattern that is just a literal (optionally anchored) can be satisfied

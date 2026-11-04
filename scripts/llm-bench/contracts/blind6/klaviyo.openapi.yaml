@@ -380,7 +380,7 @@ components:
             properties:
               id: {type: string, format: uuid}
               status: {type: integer}
-              code: {type: string, description: Such as invalid, not_found or duplicate_profile.}
+              code: {type: string, description: "Such as invalid, not_found or duplicate_profile."}
               title: {type: string}
               detail: {type: string}
               source:
@@ -424,7 +424,7 @@ components:
       type: object
       properties:
         email: {type: string, format: email, nullable: true}
-        phone_number: {type: string, nullable: true, description: E.164, such as +351912345678.}
+        phone_number: {type: string, nullable: true, description: "E.164, such as +351912345678."}
         external_id: {type: string, nullable: true}
         first_name: {type: string, nullable: true}
         last_name: {type: string, nullable: true}
