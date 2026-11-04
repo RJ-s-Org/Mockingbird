@@ -54,6 +54,7 @@ mod repro234;
 mod routing;
 mod runtime;
 mod sibling_writes;
+mod skeletal_answers;
 mod soap;
 mod sse;
 mod state_reads;
