@@ -2478,3 +2478,71 @@ async fn an_acknowledgement_is_not_stored_as_a_record_requiring_nothing() {
     assert_eq!(status, StatusCode::OK, "{read}");
     assert!(read.get("taskUid").is_none(), "{read}");
 }
+
+/// Widgets read by `sku` declare none of `{id, size}`; an order's `widget` member is
+/// `WIDGET_AT` (an inline object, or a `$ref` to another definition).
+const WIDGET_IN_ORDER: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /widgets/{sku}:
+    get:
+      operationId: getWidget
+      parameters: [{name: sku, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  widget: WIDGET_AT
+components:
+  schemas:
+    Widget:
+      type: object
+      properties: {sku: {type: string}, color: {type: string}}
+    Gadget:
+      type: object
+      properties: {id: {type: string}, size: {type: integer}}
+"##;
+
+/// Whether reading an order whose `widget` is at `widget_at` stores that widget.
+async fn stores_the_widget(widget_at: &str) -> bool {
+    let contract = WIDGET_IN_ORDER.replace("WIDGET_AT", widget_at);
+    let h = harness_with(
+        contract.as_bytes(),
+        vec![json!({"id": "o1", "widget": {"id": "w1", "size": 3}})],
+        |rt| rt.consistency = true,
+    );
+    let (status, _, body) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    h.store
+        .export(&session())
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.resource_type == "widgets" && r.id == "w1")
+}
+
+/// An object found in an answer shows its type by what its own inline place declares,
+/// though the type's schema declares none of it; a `$ref` place is its definition's,
+/// which says nothing of the type the member names.
+#[tokio::test]
+async fn a_found_object_shows_its_type_by_its_inline_place_only() {
+    assert!(
+        stores_the_widget(
+            "{type: object, properties: {id: {type: string}, size: {type: integer}}}"
+        )
+        .await
+    );
+    assert!(!stores_the_widget(r##"{$ref: "#/components/schemas/Gadget"}"##).await);
+}

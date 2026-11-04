@@ -41,13 +41,20 @@ fn meant(key: &str) -> Option<&str> {
 /// Whether `rest`, what followed a member name, is only JSON written after it:
 /// ASCII whitespace, the punctuation `"`, `:`, `,`, `{`, `}`, `[` and `]`, the
 /// literals `null`, `true` and `false`, numbers and quoted strings. A `"` it
-/// starts with closes the name.
+/// starts with closes the name; without one, only whitespace and punctuation are
+/// debris (`id:2`, `a,1` and `name:true` are names of their own).
 fn is_debris(rest: &str) -> bool {
-    let mut chars = rest.strip_prefix('"').unwrap_or(rest).chars().peekable();
+    // Values follow only a name the model closed: `user:1` and `v:2.0` are names.
+    let (named, after) = match rest.strip_prefix('"') {
+        Some(after) => (true, after),
+        None => (false, rest),
+    };
+    let mut chars = after.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             c if c.is_ascii_whitespace() => {}
             ':' | ',' | '{' | '}' | '[' | ']' => {}
+            _ if !named => return false,
             '"' => {
                 // A quoted string, to its closing quote.
                 let mut closed = false;
@@ -320,7 +327,8 @@ mod tests {
         let schema = json!({
             "type": "object",
             "properties": {"name": {"type": "string"}, "id": {"type": "string"},
-                           "xmlns": {"type": "string"}, "a": {"type": "string"}},
+                           "xmlns": {"type": "string"}, "a": {"type": "string"},
+                           "user": {"type": "string"}, "v": {"type": "string"}},
             "additionalProperties": {"type": "string"}
         });
         for value in [
@@ -334,6 +342,11 @@ mod tests {
             json!({"\u{a0}name": "x"}),
             json!({"name\u{3000}": "x"}),
             json!({"\u{a0}id:": "x"}),
+            json!({"id": "1", "id:2": "x"}),
+            json!({"user:1": "x"}),
+            json!({"a,1": "x"}),
+            json!({"v:2.0": "x"}),
+            json!({"name:true": "x"}),
         ] {
             assert_eq!(
                 mended(&schema, value.clone()),
