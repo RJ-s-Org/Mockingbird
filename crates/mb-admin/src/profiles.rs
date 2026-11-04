@@ -89,6 +89,9 @@ pub struct LlmProfileView {
     /// JSON merged into every provider request body.
     #[schema(value_type = Object)]
     pub extra_body: serde_json::Map<String, serde_json::Value>,
+    /// Whether a looping reply is stopped early and retried (with the
+    /// server's `limits.repetition_guard` on).
+    pub repetition_guard: bool,
     pub source: Source,
 }
 
@@ -108,6 +111,7 @@ impl From<LlmProfile> for LlmProfileView {
             fallback_profile: p.fallback_profile,
             headers: p.headers,
             extra_body: p.extra_body,
+            repetition_guard: p.repetition_guard,
         }
     }
 }
@@ -159,6 +163,16 @@ pub struct PutProfile {
     #[serde(default)]
     #[schema(value_type = Object)]
     pub extra_body: serde_json::Map<String, serde_json::Value>,
+    /// Stop a reply that falls into a loop (the same few short pieces
+    /// repeated) early and retry it once; default on. The server's
+    /// `limits.repetition_guard` must be on too.
+    #[serde(default = "default_repetition_guard")]
+    #[schema(default = true)]
+    pub repetition_guard: bool,
+}
+
+fn default_repetition_guard() -> bool {
+    true
 }
 
 fn default_temperature() -> f32 {
@@ -455,6 +469,7 @@ pub async fn put(
         headers: body.headers,
         extra_body: body.extra_body,
         source: ResourceSource::Api,
+        repetition_guard: body.repetition_guard,
     };
     st.store.put_profile(&profile).await?;
     let warnings = mocks_using(&st, &access.ws, &profile.name)

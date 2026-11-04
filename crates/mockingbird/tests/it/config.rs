@@ -759,6 +759,7 @@ fn api_profile(name: &str) -> LlmProfile {
         headers: Default::default(),
         extra_body: Default::default(),
         source: ResourceSource::Api,
+        repetition_guard: true,
     }
 }
 
@@ -873,6 +874,32 @@ async fn reconcile_rejects_prefix_clash_with_api_mock() {
             .unwrap()
             .is_none()
     );
+}
+
+/// A file profile's `repetition_guard` reaches the stored profile; it is
+/// on unless the profile turns it off.
+#[tokio::test]
+async fn a_file_profile_can_turn_the_repetition_guard_off() {
+    let ws = Workspace::new();
+    let store = store().await;
+    let cfg = ws.load(
+        "llm:\n  profiles:\n    plain: {base_url: http://x, model: m, repetition_guard: false}\n    guarded: {base_url: http://x, model: m}\n",
+    );
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let get = |name: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .get_profile(DEFAULT_WORKSPACE, name)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    assert!(!get("plain").await.repetition_guard);
+    assert!(get("guarded").await.repetition_guard);
 }
 
 /// gRPC services are unique across workspaces: two file mocks, or a file
@@ -2982,6 +3009,14 @@ fn limits_ranges_named() {
         (
             "limits:\n  max_response_bytes: 16777217\n",
             "limits.max_response_bytes",
+        ),
+        (
+            "limits:\n  repetition_guard_span: 4096\n",
+            "limits.repetition_guard_span",
+        ),
+        (
+            "limits:\n  repetition_guard_span: 1048577\n",
+            "limits.repetition_guard_span",
         ),
         (
             "mocks:\n  orders:\n    contract: orders.yaml\n    limits: {rate_limit: {requests_per_second: 0, burst: 1}}\n",

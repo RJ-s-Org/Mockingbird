@@ -165,7 +165,7 @@ fn a_looping_answer_is_stopped_and_the_retry_serves() {
     // The stopped attempt is charged (estimated: it never reached its usage
     // chunk), far below the 16,384 tokens it was heading for.
     assert!(
-        out.usage.completion_tokens > 2000 && out.usage.completion_tokens < 3000,
+        out.usage.completion_tokens > 8000 && out.usage.completion_tokens < 9500,
         "{:?}",
         out.usage
     );
@@ -185,7 +185,7 @@ fn an_answer_that_keeps_looping_falls_back_with_the_reason() {
         "{reason}"
     );
     assert!(
-        out.usage.completion_tokens > 4000 && out.usage.completion_tokens < 6000,
+        out.usage.completion_tokens > 16_000 && out.usage.completion_tokens < 19_000,
         "{:?}",
         out.usage
     );

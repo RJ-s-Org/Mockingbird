@@ -40,7 +40,7 @@ const WORKSPACE_COLUMNS: &str = "name, display_name, created_at";
 const VERSION_COLUMNS: &str = "id, mock_id, version, source_digest, source, bundle, status, created_by, created_at, \
      draft_meta, warnings";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers, extra_body, output_mode";
+     max_tokens, fallback_profile, source, headers, extra_body, output_mode, repetition_guard";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 const PENDING_LOGIN_COLUMNS: &str = "state_hash, data, created_at, expires_at";
@@ -401,6 +401,7 @@ fn profile_from_row(row: &SqliteRow) -> Result<LlmProfile, StoreError> {
         fallback_profile: row.try_get("fallback_profile")?,
         headers: serde_json::from_str(&headers)?,
         extra_body: serde_json::from_str(&extra_body)?,
+        repetition_guard: row.try_get("repetition_guard")?,
         source: ResourceSource::parse(&source)?,
     })
 }
@@ -1216,13 +1217,13 @@ impl ControlStore for SqliteControlStore {
 
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
-            "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
              source = excluded.source, headers = excluded.headers, extra_body = excluded.extra_body, \
-             output_mode = excluded.output_mode"
+             output_mode = excluded.output_mode, repetition_guard = excluded.repetition_guard"
         );
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         require_workspace(&mut tx, &p.workspace).await?;
@@ -1242,6 +1243,7 @@ impl ControlStore for SqliteControlStore {
             .bind(serde_json::to_string(&p.headers)?)
             .bind(serde_json::to_string(&p.extra_body)?)
             .bind(p.output_mode.as_str())
+            .bind(p.repetition_guard)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

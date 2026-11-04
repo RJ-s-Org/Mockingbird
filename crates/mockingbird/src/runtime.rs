@@ -842,9 +842,23 @@ async fn openai_provider(
         output_mode: llm_output_mode(profile.output_mode),
         http: deps.http.clone(),
     })
-    .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?
-    .with_repetition_guard(deps.limits.repetition_guard);
-    Ok(Arc::new(provider))
+    .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?;
+    let (guard, span) = repetition_settings(&deps.limits, profile);
+    Ok(Arc::new(
+        provider
+            .with_repetition_guard(guard)
+            .with_repetition_span(span),
+    ))
+}
+
+/// Whether `profile`'s calls are guarded against loops, and the span the
+/// guard waits for: on when both `limits.repetition_guard` and the
+/// profile's own `repetition_guard` are.
+fn repetition_settings(limits: &LimitsConfig, profile: &LlmProfile) -> (bool, usize) {
+    (
+        limits.repetition_guard && profile.repetition_guard,
+        limits.repetition_guard_span,
+    )
 }
 
 /// The client's output mode for a stored profile's.
@@ -899,4 +913,45 @@ fn scenario_runtime(s: Scenario) -> ScenarioRuntime {
         per_operation: HashMap::new(),
     }
     .with_operation_instructions(s.rules.operation_instructions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(repetition_guard: bool) -> LlmProfile {
+        LlmProfile {
+            workspace: "default".into(),
+            name: "p".into(),
+            base_url: "http://x".into(),
+            model: "m".into(),
+            secret_ref: None,
+            output_mode: mb_store::OutputMode::JsonSchema,
+            temperature: 0.7,
+            timeout_ms: 1000,
+            max_tokens: 100,
+            fallback_profile: None,
+            headers: Default::default(),
+            extra_body: Default::default(),
+            repetition_guard,
+            source: mb_store::ResourceSource::Api,
+        }
+    }
+
+    /// The guard is on only when both the server and the profile want it.
+    #[test]
+    fn the_guard_needs_both_the_server_and_the_profile() {
+        let on = LimitsConfig::default();
+        let off = LimitsConfig {
+            repetition_guard: false,
+            repetition_guard_span: 65_536,
+            ..LimitsConfig::default()
+        };
+        assert_eq!(
+            repetition_settings(&on, &profile(true)),
+            (true, mb_llm::repetition::DEFAULT_SPAN)
+        );
+        assert!(!repetition_settings(&on, &profile(false)).0);
+        assert_eq!(repetition_settings(&off, &profile(true)), (false, 65_536));
+    }
 }

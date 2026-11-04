@@ -805,7 +805,16 @@ pub struct LlmProfile {
     /// Not for secrets, which belong in `headers` as references.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra_body: serde_json::Map<String, Value>,
+    /// Whether a reply of this profile's provider that falls into a loop is
+    /// stopped early and retried (`mb_llm::repetition`); the server-wide
+    /// `limits.repetition_guard` must be on too. On by default.
+    #[serde(default = "repetition_guard_default")]
+    pub repetition_guard: bool,
     pub source: ResourceSource,
+}
+
+fn repetition_guard_default() -> bool {
+    true
 }
 
 /// What kind of call a request-log entry records.

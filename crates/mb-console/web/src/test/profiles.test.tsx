@@ -89,8 +89,33 @@ describe("llm profiles", () => {
       max_tokens: 512,
       fallback_profile: "boot",
       headers: {},
+      repetition_guard: true,
     });
     expect("api_key" in body).toBe(false);
+  });
+
+  it("the repetition guard can be turned off and stays off", async () => {
+    const user = userEvent.setup();
+    const plain = { ...fast, repetition_guard: false };
+    const calls = serve({
+      ...shell(localMe),
+      [`GET ${BASE}/llm-profiles`]: [fast, { ...plain, name: "plain" }],
+      [`PUT ${BASE}/llm-profiles/fast`]: () => json({ ...plain, warnings: [] }),
+      [`PUT ${BASE}/llm-profiles/plain`]: () => json({ ...plain, name: "plain", warnings: [] }),
+    });
+    renderAt("/w/default/llm-profiles");
+    await user.click(await screen.findByRole("button", { name: "Edit fast" }));
+    let dialog = await screen.findByRole("dialog");
+    const guard = within(dialog).getByLabelText("Stop looping replies") as HTMLInputElement;
+    expect(guard.checked).toBe(true);
+    await user.click(guard);
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    expect(JSON.parse(calls.find((c) => c.method === "PUT")?.body ?? "").repetition_guard).toBe(false);
+
+    await user.click(await screen.findByRole("button", { name: "Edit plain" }));
+    dialog = await screen.findByRole("dialog");
+    expect((within(dialog).getByLabelText("Stop looping replies") as HTMLInputElement).checked).toBe(false);
   });
 
   it("editing a profile keeps its provider headers", async () => {

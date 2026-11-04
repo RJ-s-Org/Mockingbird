@@ -776,6 +776,7 @@ fn to_profile(name: &str, p: &FileProfile) -> anyhow::Result<LlmProfile> {
         headers: p.headers.clone(),
         extra_body: p.extra_body.clone(),
         source: ResourceSource::File,
+        repetition_guard: p.repetition_guard,
     })
 }
 

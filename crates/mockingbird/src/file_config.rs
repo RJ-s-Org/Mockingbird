@@ -289,8 +289,12 @@ pub struct LimitsConfig {
     /// response is generated shorter and completed by the faker (0: off).
     pub output_budget_tokens: u32,
     /// Stop an LLM reply whose text has fallen into a loop, and retry it
-    /// once (see [`mb_llm::repetition`]).
+    /// once (see [`mb_llm::repetition`]). A profile can turn it off for its
+    /// own calls.
     pub repetition_guard: bool,
+    /// How long, in bytes, a reply must have been of low variety before the
+    /// guard stops it.
+    pub repetition_guard_span: usize,
 }
 
 impl Default for LimitsConfig {
@@ -301,6 +305,7 @@ impl Default for LimitsConfig {
             max_response_bytes: 1_048_576,
             output_budget_tokens: mb_engine::budget::DEFAULT_OUTPUT_BUDGET,
             repetition_guard: true,
+            repetition_guard_span: mb_llm::repetition::DEFAULT_SPAN,
         }
     }
 }
@@ -404,6 +409,9 @@ pub const IMPORT_WORKERS: std::ops::RangeInclusive<usize> = 1..=16;
 
 /// Accepted `limits.output_budget_tokens` other than 0 (off).
 const MIN_OUTPUT_BUDGET: u32 = 100;
+
+/// Largest accepted `limits.repetition_guard_span` (1 MiB).
+const MAX_REPETITION_GUARD_SPAN: usize = 1024 * 1024;
 const MAX_OUTPUT_BUDGET: u32 = 100_000;
 
 /// Smallest accepted `import.max_tokens`.
@@ -780,9 +788,17 @@ pub struct FileProfile {
     /// routing, `reasoning` settings). Not for secrets.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra_body: serde_json::Map<String, serde_json::Value>,
+    /// Whether this profile's looping replies are stopped early and retried
+    /// (with `limits.repetition_guard` on); default on.
+    #[serde(default = "FileProfile::default_repetition_guard")]
+    pub repetition_guard: bool,
 }
 
 impl FileProfile {
+    fn default_repetition_guard() -> bool {
+        true
+    }
+
     fn default_timeout() -> Duration {
         Duration::from_secs(60)
     }
@@ -818,6 +834,7 @@ impl FileProfile {
             fallback: None,
             headers: BTreeMap::new(),
             extra_body: serde_json::Map::new(),
+            repetition_guard: true,
         }
     }
 }
@@ -1669,6 +1686,11 @@ impl FileConfig {
                 MIN_OUTPUT_BUDGET..=MAX_OUTPUT_BUDGET,
             )?;
         }
+        in_range(
+            "limits.repetition_guard_span",
+            l.repetition_guard_span,
+            mb_llm::repetition::WINDOW..=MAX_REPETITION_GUARD_SPAN,
+        )?;
         Ok(())
     }
 
