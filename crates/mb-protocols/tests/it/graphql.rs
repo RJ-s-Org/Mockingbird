@@ -2188,7 +2188,7 @@ type ProductPayload { product: Product }
 type ProductVariantDeletePayload { deletedId: ID product: Product }
 type OrderPayload { order: Order }
 type NotificationPayload { notification: Notification }
-type DeletePayload { success: Boolean! entityId: String }
+type DeletePayload { success: Boolean! entityId: String deletedId: ID }
 input IssueCreateInput { title: String! priority: Int }
 input IssueUpdateInput { title: String priority: Int stateId: String }
 input CommentCreateInput { body: String! }
@@ -2501,7 +2501,7 @@ async fn a_delete_whose_payload_contradicts_it_leaves_no_marker() {
     let (provider, rt) = noun_first(scripted(vec![
         json!({"__typename": "CommentPayload", "success": true,
                "comment": {"__typename": "Comment", "id": "c-1", "body": "Hi"}}),
-        json!({"__typename": "DeletePayload", "success": true, "entityId": "c-9"}),
+        json!({"__typename": "DeletePayload", "success": true, "deletedId": "c-9"}),
         json!({"__typename": "Comment", "id": "c-1", "body": "Still here"}),
     ]));
     let base = serve(rt).await;
@@ -2514,7 +2514,7 @@ async fn a_delete_whose_payload_contradicts_it_leaves_no_marker() {
     .await;
     post(
         &base,
-        json!({"query": "mutation { commentDelete(id: \"c-1\") { success entityId } }"}),
+        json!({"query": "mutation { commentDelete(id: \"c-1\") { success deletedId } }"}),
         &session,
     )
     .await;

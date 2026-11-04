@@ -625,7 +625,7 @@ async fn write_by_id(
         return;
     };
     if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
-        let marks = !payload_contradicts(generated.body.as_ref(), &held.id);
+        let marks = !contradicts(generated.body.as_ref(), Some(&held.resource_type), &held.id);
         call::delete_resource(rt, plan, call, held, marks).await;
         return;
     }
@@ -640,19 +640,33 @@ async fn write_by_id(
     }
 }
 
-/// Whether a delete's payload says the record `id` was not deleted: it holds a
-/// non-empty `userErrors` or `errors` list, or an id member (`id`, `deletedId`,
-/// `entityId`) that is `null` or another id. A delete so answered is no evidence
-/// the record is gone, and leaves no marker.
+/// Whether a delete's payload says the record `id` was not deleted (see
+/// [`contradicts`]), the record's type untold.
+#[cfg(test)]
 fn payload_contradicts(payload: Option<&Value>, id: &str) -> bool {
+    contradicts(payload, None, id)
+}
+
+/// Whether a delete's payload says record `id`, of type `t`, was not deleted: it
+/// holds a non-empty `userErrors` or `errors` list, or a member naming the deleted
+/// record that is `null` or another id. Only `id`, a `deleted…Id` (`deletedId`,
+/// `deletedCommentId`, `deleted_comment_id`) and `<type>Id` / `<type>_id` for `t`
+/// name it: a Relay `clientMutationId`, or the parent's `issueId`, says nothing of
+/// the record. A delete so answered is no evidence the record is gone, and leaves
+/// no marker.
+fn contradicts(payload: Option<&Value>, t: Option<&str>, id: &str) -> bool {
     let Some(Value::Object(members)) = payload else {
         return false;
     };
+    let own = t.map(|t| format!("{}id", t.to_lowercase().replace(['_', '-'], "")));
     members.iter().any(|(name, value)| {
         let errors = matches!(name.as_str(), "userErrors" | "errors")
             && value.as_array().is_some_and(|list| !list.is_empty());
-        let names_id = mb_mcm::is_generic_id(name) || name.ends_with("Id") || name.ends_with("_id");
-        let other_id = names_id
+        let flat = name.to_lowercase().replace('_', "");
+        let names_record = flat == "id"
+            || (flat.starts_with("deleted") && flat.ends_with("id"))
+            || own.as_deref() == Some(flat.as_str());
+        let other_id = names_record
             && match value {
                 Value::Null => true,
                 Value::String(text) => text != id,
@@ -812,6 +826,31 @@ mod tests {
             json!({"deletedId": "c-1", "userErrors": [{"message": "no"}]})
         ));
         assert!(!marks(json!({"errors": [{"message": "no"}]})));
+        // The record's own type names it too.
+        assert!(contradicts(
+            Some(&json!({"commentId": "c-2"})),
+            Some("comment"),
+            "c-1"
+        ));
+        assert!(!contradicts(
+            Some(&json!({"commentId": "c-1"})),
+            Some("comment"),
+            "c-1"
+        ));
+    }
+
+    // A Relay payload: the deleted id plus the standard clientMutationId echo.
+    #[test]
+    fn g1_relay_client_mutation_id_does_not_contradict_the_delete() {
+        let payload = serde_json::json!({"deletedId": "c-1", "clientMutationId": "abc"});
+        assert!(!payload_contradicts(Some(&payload), "c-1"));
+    }
+
+    // A delete payload naming the parent the record belonged to.
+    #[test]
+    fn g1_a_parent_id_does_not_contradict_the_delete() {
+        let payload = serde_json::json!({"deletedCommentId": "c-1", "issueId": "i-9"});
+        assert!(!payload_contradicts(Some(&payload), "c-1"));
     }
 
     #[test]
