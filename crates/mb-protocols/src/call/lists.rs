@@ -723,18 +723,17 @@ pub(super) async fn stored_rest(
     };
     // No place for a token, and no first page of a list paged by number or offset: no
     // next page to serve, and the store is not read.
-    let slot = pages::slot(bundle, (op, call), body, size_param);
+    let slot = pages::slot(
+        bundle,
+        (op, call, plan.page_url.as_deref()),
+        body,
+        size_param,
+    );
     if slot.is_none() && !runs::starts(bundle, (op, call), size_param) {
         return cut;
     }
     // A token the model gave goes on to its own next page.
-    let given = slot.is_some_and(|slot| {
-        slot.path
-            .iter()
-            .try_fold(body, |at, name| at.get(name))
-            .and_then(Value::as_str)
-            .is_some_and(|token| !token.trim().is_empty())
-    });
+    let given = slot.is_some_and(|slot| slot.given(body).is_some());
     if cut.is_none() && given {
         return cut;
     }
