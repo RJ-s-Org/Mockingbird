@@ -1,11 +1,13 @@
 """Tests for the W1 harness fixes: echo-aware grading, fallback causes and
 header-safe session ids. Run: python3 -m unittest scripts/llm-bench/test_w1.py"""
 
+import argparse
 import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -454,6 +456,261 @@ class EmptyAnswersTest(unittest.TestCase):
             self.assertEqual(sorted(rows), sorted(f"{name}.{c}" for c in server_suites.JOURNEY_CHECKS[name]), name)
             self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [], name)
             self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
+
+
+class FakeServer(BaseHTTPRequestHandler):
+    """One fake `mockingbird serve` for the consistency, SSE and journeys suites:
+    thread safe, state kept per `x-mockingbird-session`, and ids counted per
+    session, so its answers do not depend on the order the sessions run in.
+    Every call waits a little, so parallel units overlap; `peak` counts the
+    calls in flight at once. Paths it does not know answer `{}`."""
+
+    lock = threading.Lock()
+    stores, streamed = {}, set()
+    inflight = peak = 0
+
+    def log_message(self, *a):
+        pass
+
+    def reply(self, obj, code=200):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("x-mockingbird-source", "llm")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def body(self):
+        raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+        if "x-www-form-urlencoded" in (self.headers.get("content-type") or ""):
+            return {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode()).items()}
+        try:
+            return json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+
+    def handle_one(self, method):
+        cls = FakeServer
+        with cls.lock:
+            cls.inflight += 1
+            cls.peak = max(cls.peak, cls.inflight)
+        try:
+            time.sleep(0.02)
+            url = urllib.parse.urlsplit(self.path)
+            body = self.body() if method != "GET" else {}
+            if url.path == "/events/ticks":
+                return self.stream()
+            with cls.lock:
+                obj, code = self.route(method, url, body, cls.stores.setdefault(self.session(), {}))
+            self.reply(obj, code)
+        finally:
+            with cls.lock:
+                cls.inflight -= 1
+
+    def session(self):
+        return self.headers.get("x-mockingbird-session") or ""
+
+    def stream(self):
+        want = int(self.headers.get("x-mockingbird-stream-items") or 1)
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        for i in range(want):
+            self.wfile.write(f"event: tick\ndata: {json.dumps({'id': f't{i}', 'seq': i, 'price': 1.5})}\n\n".encode())
+        self.wfile.flush()
+        with FakeServer.lock:
+            FakeServer.streamed.add(self.session())
+        self.close_connection = True
+
+    def route(self, method, url, body, st):
+        path, n = url.path, len(st)
+        if path.startswith("/api/v1/workspaces/default/mocks/events/requests"):
+            session = urllib.parse.parse_qs(url.query).get("session", [""])[0]
+            seen = session in FakeServer.streamed
+            return ([{"source": "llm", "prompt_tokens": 10, "completion_tokens": 5}] if seen else []), 200
+        if method == "POST" and path == "/stripe/v1/customers":
+            c = {"id": f"cus_{n}", "name": body.get("name"), "email": body.get("email")}
+            st[c["id"]] = c
+            return c, 200
+        if method == "POST" and path == "/stripe/v1/payment_intents":
+            pid = f"pi_{n}"
+            pi = {"id": pid, "amount": int(body["amount"]), "currency": body["currency"], "object": "payment_intent",
+                  "customer": body.get("customer"), "status": "requires_confirmation",
+                  "client_secret": f"{pid}_secret_abc"}
+            st[pid] = pi
+            return pi, 200
+        if method == "POST" and path.endswith("/confirm"):
+            pi = st[path.split("/")[-2]]
+            pi.update(status="succeeded", amount_received=pi["amount"])
+            return pi, 200
+        if method == "POST" and path == "/stripe/v1/refunds":
+            pi = st[body["payment_intent"]]
+            return {"id": f"re_{n}", "payment_intent": pi["id"], "amount": int(body["amount"]),
+                    "currency": pi["currency"]}, 200
+        if path.startswith("/stripe/v1/"):
+            item = st.get(path.split("/")[-1])
+            return (item, 200) if item else ({}, 404)
+        if path == "/tmdb/3/movie/popular":
+            page = int(urllib.parse.parse_qs(url.query).get("page", ["1"])[0])
+            return {"results": [{"id": 100 + page, "title": f"Film {page}"}]}, 200
+        if path.startswith("/tmdb/3/movie/"):
+            mid = int(path.split("/")[-1])
+            return {"id": mid, "title": f"Film {mid - 100}"}, 200
+        if method == "POST" and path == "/square/v2/payments":
+            pay = {"id": f"pay{n}", "amount_money": body.get("amount_money"), "status": "COMPLETED"}
+            st[pay["id"]] = pay
+            return {"payment": pay}, 200
+        if path.startswith("/square/v2/payments/"):
+            pay = st.get(path.split("/")[-1])
+            return ({"payment": pay}, 200) if pay else ({}, 404)
+        return {}, 200
+
+    def do_GET(self):
+        self.handle_one("GET")
+
+    def do_POST(self):
+        self.handle_one("POST")
+
+    def do_PUT(self):
+        self.handle_one("PUT")
+
+    def do_PATCH(self):
+        self.handle_one("PATCH")
+
+    def do_DELETE(self):
+        self.handle_one("DELETE")
+
+
+class JobsTest(unittest.TestCase):
+    """--jobs N gives the rows of --jobs 1, up to their order and latencies."""
+
+    def setUp(self):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeServer)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Srv:
+            data, api = base, f"{base}/api/v1/workspaces/default"
+
+        self.srv = Srv
+
+    def run_suite(self, suite, jobs, **extra):
+        FakeServer.stores, FakeServer.streamed, FakeServer.peak = {}, set(), 0
+        args = argparse.Namespace(**dict(dict(model="m/x", timeout=10, repeat=3, journey=None, stream_items=3),
+                                         jobs=jobs, **extra))
+        _, runner = server_suites.RUNNERS[suite]
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", suite)
+            runner(self.srv, sink, args)
+            with open(os.path.join(out, "server.jsonl")) as f:
+                written = [json.loads(line) for line in f]
+        self.assertEqual(written, json.loads(json.dumps(sink.rows)))  # every row written whole, once
+        rows = sorted(json.dumps({k: v for k, v in r.items() if k not in ("latency_ms", "ttfe_ms")}, sort_keys=True)
+                      for r in sink.rows)
+        return rows, FakeServer.peak
+
+    def assert_same_rows(self, suite, **extra):
+        seq, seq_peak = self.run_suite(suite, 1, **extra)
+        par, par_peak = self.run_suite(suite, 4, **extra)
+        self.assertEqual(seq_peak, 1, suite)
+        self.assertGreater(par_peak, 1, suite)
+        self.assertEqual(par, seq, suite)
+        return [json.loads(r) for r in seq]
+
+    def test_consistency(self):
+        rows = self.assert_same_rows("consistency")
+        self.assertEqual(len(rows), 18)
+        self.assertTrue(all(r["ok"] for r in rows), [r for r in rows if not r["ok"]])
+
+    def test_sse(self):
+        rows = self.assert_same_rows("sse")
+        self.assertEqual([(r["rep"], r["ok"], r["source"]) for r in sorted(rows, key=lambda r: r["rep"])],
+                         [(0, True, "llm"), (1, True, "llm"), (2, True, "llm")])
+
+    def test_journeys(self):
+        rows = self.assert_same_rows("journeys", journey=["stripe", "travel", "github"])
+        stripe = [r for r in rows if r["case"].startswith("stripe.")]
+        self.assertTrue(stripe and all(r["ok"] for r in stripe))
+        self.assertEqual(sorted({r["rep"] for r in rows}), [0, 1, 2])
+
+    def test_journeys_blind7(self):
+        rows = self.assert_same_rows("journeys_blind7")
+        self.assertEqual(len(rows), 3 * sum(len(server_suites.JOURNEY_CHECKS[n]) for n in server_suites.BLIND7_JOURNEYS))
+
+    def test_a_unit_error_is_raised_and_stops_units_not_started(self):
+        ran = []
+
+        def unit(i):
+            def go():
+                time.sleep(0.01)
+                ran.append(i)
+                if i == 1:
+                    raise ValueError("unit 1")
+            return go
+
+        with self.assertRaisesRegex(ValueError, "unit 1"):
+            server_suites.run_units([unit(i) for i in range(50)], argparse.Namespace(jobs=2))
+        self.assertLess(len(ran), 50)
+        ran.clear()
+        with self.assertRaisesRegex(ValueError, "unit 1"):
+            server_suites.run_units([unit(i) for i in range(5)], argparse.Namespace(jobs=1))
+        self.assertEqual(ran, [0, 1])
+
+
+FAKE_BINARY = """#!/usr/bin/env python3
+import re, sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+config = open(sys.argv[sys.argv.index("-c") + 1]).read()
+port = int(re.search(r"admin_port: (\\d+)", config).group(1))
+
+class Ready(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+time.sleep(0.2)  # a server that takes a while to bind its ports
+HTTPServer(("127.0.0.1", port), Ready).serve_forever()
+"""
+
+
+class ServerPortsTest(unittest.TestCase):
+    def test_free_ports_are_distinct(self):
+        self.assertEqual(len(set(server_suites.free_ports(8))), 8)
+
+    def test_servers_started_at_once_get_their_own_ports_and_dirs(self):
+        with tempfile.TemporaryDirectory() as out:
+            binary = os.path.join(out, "fake-mockingbird")
+            with open(binary, "w") as f:
+                f.write(FAKE_BINARY.replace("/usr/bin/env python3", sys.executable, 1))
+            os.chmod(binary, 0o755)
+            args = argparse.Namespace(model="m/x", proxy_base="http://127.0.0.1:1", out=out, binary=binary,
+                                      ready_timeout=20, keep=False)
+            seen, errors = [], []
+
+            def start(suite):
+                try:
+                    with server_suites.Server(args, suite, {}) as srv:
+                        seen.append((srv.ports, srv.dir, srv.log_path))
+                        time.sleep(0.3)  # all up at the same time
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+
+            threads = [threading.Thread(target=start, args=(s,)) for s in ("journeys", "sse", "consistency", "journeys")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(errors, [])
+        ports = [p for ps, _, _ in seen for p in ps]
+        self.assertEqual(len(ports), 12)
+        self.assertEqual(len(set(ports)), 12)
+        self.assertEqual(len({d for _, d, _ in seen}), 4)
 
 
 if __name__ == "__main__":

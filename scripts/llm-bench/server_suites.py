@@ -3,7 +3,8 @@
 
     python3 scripts/llm-bench/server_suites.py --model deepseek/deepseek-v4.1-flash \\
         --proxy-base http://127.0.0.1:18080 --out docs/benchmarks/2026-10-29 --repeat 3 \\
-        [--suite consistency --suite sse --suite import] [--binary target/release/mockingbird]
+        [--suite consistency --suite sse --suite import] [--binary target/release/mockingbird] \\
+        [--jobs 4] [--suites-parallel]
 
 For each suite it starts `mockingbird serve` with a generated config (fresh
 SQLite in a temp directory, free ports, waits for `/readyz` on the admin
@@ -67,12 +68,23 @@ Suites (contracts are in-repo, so the bench is reproducible):
   the expected lists. Imports run `--import-repeat` times (default 1:
   extraction is at temperature 0, so repeats mostly add spend).
 
+Concurrency: `--jobs N` runs independent units on N threads against each suite's
+server: every (rep, journey) of a journeys suite, and every rep of consistency and
+SSE (each has its own session). Rows are the same as with the default `--jobs 1`
+except for their order and latencies. Import always runs in order.
+`--suites-parallel` runs the suites at once, each on its own server, temp
+directory and free ports; so does one process per (model, suite), which is safe
+too: ports are picked under a lock file in the temp directory and held until the
+server is ready.
+
 Standard library only. Makes no LLM calls itself.
 """
 
 import argparse
 import base64
+import contextlib
 import fcntl
+import functools
 import glob
 import hashlib
 import http.client
@@ -85,11 +97,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -188,9 +202,62 @@ SQUARE_FIELDS = ("id", "amount_money", "status", "source_type", "location_id", "
 # ---------------------------------------------------------------- plumbing
 
 def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    return free_ports(1)[0]
+
+
+def free_ports(n):
+    """`n` distinct free ports. Every socket stays bound until all are picked,
+    so one call never hands out the same port twice."""
+    socks = []
+    try:
+        for _ in range(n):
+            s = socket.socket()
+            socks.append(s)
+            s.bind(("127.0.0.1", 0))
+        return tuple(s.getsockname()[1] for s in socks)
+    finally:
+        for s in socks:
+            s.close()
+
+
+# Held from picking a server's ports until it answers /readyz, so another bench
+# process or thread (`run.py full --parallel`, one process per suite,
+# --suites-parallel) cannot pick a port that is free only because our server has
+# not bound it yet: once it is bound, the OS no longer hands it out.
+PORT_LOCK_PATH = os.path.join(tempfile.gettempdir(), "mb-bench-ports.lock")
+_PORT_THREAD_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def port_reservation():
+    with _PORT_THREAD_LOCK, open(PORT_LOCK_PATH, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def run_units(units, args):
+    """Runs independent zero-argument callables: in order when --jobs is 1 (the
+    default), else on a pool of --jobs threads against the same server. Each
+    unit owns its session and writes its own rows, so the rows are the same in
+    either mode up to order and latency. After a unit raises, units not started
+    yet are dropped and the first error (in unit order) is raised once the
+    running ones finish, as sequential mode stops at it."""
+    jobs = max(1, int(getattr(args, "jobs", 1) or 1))
+    if jobs == 1 or len(units) <= 1:
+        for unit in units:
+            unit()
+        return
+    with ThreadPoolExecutor(max_workers=min(jobs, len(units)), thread_name_prefix="bench-unit") as pool:
+        futures = [pool.submit(unit) for unit in units]
+        _, pending = wait(futures, return_when=FIRST_EXCEPTION)
+        for f in pending:
+            f.cancel()
+    for f in futures:
+        if not f.cancelled() and f.exception() is not None:
+            raise f.exception()
 
 
 def slug_of(model):
@@ -204,12 +271,14 @@ def session_slug(model):
 
 
 class Sink:
-    """Appends rows to <out>/server.jsonl; safe across concurrent processes."""
+    """Appends rows to <out>/server.jsonl; safe across concurrent processes
+    (flock) and across the threads of --jobs (a lock per sink)."""
 
     def __init__(self, out, model, suite):
         self.path = os.path.join(out, "server.jsonl")
         self.model, self.suite = model, suite
         self.rows = []
+        self.lock = threading.Lock()
 
     def add(self, case, rep, ok, latency_ms, source, detail, ttfe_ms=None):
         row = {"model": self.model, "suite": self.suite, "case": case, "rep": rep, "ok": bool(ok),
@@ -219,17 +288,18 @@ class Sink:
         row["source"] = source
         row["detail"] = detail
         line = (json.dumps(row, ensure_ascii=False) + "\n").encode()
-        with open(self.path, "ab") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.write(line)
-                f.flush()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-        self.rows.append(row)
         mark = "ok " if ok else "BAD"
         lat = "-" if latency_ms is None else f"{latency_ms / 1000:.1f}s"
-        print(f"  [{mark}] {self.suite}/{case} #{rep}: {lat} {source}", file=sys.stderr)
+        with self.lock:
+            with open(self.path, "ab") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.write(line)
+                    f.flush()
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            self.rows.append(row)
+            print(f"  [{mark}] {self.suite}/{case} #{rep}: {lat} {source}", file=sys.stderr)
 
 
 def write_config(directory, model, base_url, ports, mocks, suite):
@@ -258,12 +328,16 @@ def write_config(directory, model, base_url, ports, mocks, suite):
     return path
 
 
+class ServerExited(RuntimeError):
+    """The server process ended before it answered /readyz."""
+
+
 def wait_ready(admin, proc, timeout):
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"server exited with {proc.returncode}")
+            raise ServerExited(f"server exited with {proc.returncode}")
         try:
             with urllib.request.urlopen(f"{admin}/readyz", timeout=2) as r:
                 if r.status == 200:
@@ -332,19 +406,26 @@ def agreement(a, b, fields):
 
 
 class Server:
+    # Starts tried when the server exits before it is ready (such as a port taken
+    # by a process outside the bench between picking and binding it).
+    START_ATTEMPTS = 3
+
     def __init__(self, args, suite, mocks):
-        self.args, self.suite = args, suite
+        self.args, self.suite, self.mocks = args, suite, mocks
         self.dir = tempfile.mkdtemp(prefix=f"mb-bench-{suite}-")
-        self.ports = (free_port(), free_port(), free_port())
         self.base_url = f"{args.proxy_base.rstrip('/')}/r/{slug_of(args.model)}~{suite}/api/v1"
-        self.config = write_config(self.dir, args.model, self.base_url, self.ports, mocks, suite)
-        self.data = f"http://127.0.0.1:{self.ports[0]}"
-        self.admin = f"http://127.0.0.1:{self.ports[1]}"
-        self.api = f"{self.admin}/api/v1/workspaces/default"
         logs = os.path.join(args.out, "server-logs")
         os.makedirs(logs, exist_ok=True)
         self.log_path = os.path.join(logs, f"{slug_of(args.model)}~{suite}.log")
         self.proc = None
+        self.log = None
+
+    def use_ports(self, ports):
+        self.ports = ports
+        self.config = write_config(self.dir, self.args.model, self.base_url, ports, self.mocks, self.suite)
+        self.data = f"http://127.0.0.1:{ports[0]}"
+        self.admin = f"http://127.0.0.1:{ports[1]}"
+        self.api = f"{self.admin}/api/v1/workspaces/default"
 
     def __enter__(self):
         # No real key and no MB_* overrides of the generated config: MB_LLM_*
@@ -357,13 +438,23 @@ class Server:
         env["OPENROUTER_API_KEY"] = PLACEHOLDER_KEY
         env.setdefault("RUST_LOG", "info")
         self.log = open(self.log_path, "w")
-        self.proc = subprocess.Popen([self.args.binary, "serve", "-c", self.config], cwd=self.dir,
-                                     stdout=self.log, stderr=self.log, env=env)
-        try:
-            wait_ready(self.admin, self.proc, self.args.ready_timeout)
-        except Exception:
-            self.__exit__(None, None, None)
-            raise
+        for attempt in range(self.START_ATTEMPTS):
+            try:
+                with port_reservation():
+                    self.use_ports(free_ports(3))
+                    self.proc = subprocess.Popen([self.args.binary, "serve", "-c", self.config], cwd=self.dir,
+                                                 stdout=self.log, stderr=self.log, env=env)
+                    wait_ready(self.admin, self.proc, self.args.ready_timeout)
+                return self
+            except ServerExited:
+                if attempt + 1 == self.START_ATTEMPTS:
+                    self.__exit__(None, None, None)
+                    raise
+                self.log.write("\n--- bench: the server exited before it was ready; retrying on new ports\n")
+                self.log.flush()
+            except Exception:
+                self.__exit__(None, None, None)
+                raise
         return self
 
     def __exit__(self, *exc):
@@ -373,7 +464,8 @@ class Server:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-        self.log.close()
+        if self.log:
+            self.log.close()
         if self.args.keep:
             print(f"kept {self.dir}", file=sys.stderr)
         else:
@@ -384,12 +476,16 @@ class Server:
 
 def run_consistency(srv, sink, args):
     stamp = int(time.time())
-    for rep in range(args.repeat):
-        session = f"bench-{session_slug(args.model)}-{stamp}-{rep}"
-        h = {"x-mockingbird-session": session}
-        consistency_stripe(srv, sink, args, rep, h)
-        consistency_tmdb(srv, sink, args, rep, h)
-        consistency_square(srv, sink, args, rep, h)
+    run_units([functools.partial(consistency_rep, srv, sink, args, stamp, rep) for rep in range(args.repeat)], args)
+
+
+def consistency_rep(srv, sink, args, stamp, rep):
+    """One rep: its own session; its three checks share it, so they run in order."""
+    session = f"bench-{session_slug(args.model)}-{stamp}-{rep}"
+    h = {"x-mockingbird-session": session}
+    consistency_stripe(srv, sink, args, rep, h)
+    consistency_tmdb(srv, sink, args, rep, h)
+    consistency_square(srv, sink, args, rep, h)
 
 
 def consistency_stripe(srv, sink, args, rep, h):
@@ -591,29 +687,33 @@ def logged_source(srv, mock, session, waits=10):
 def run_sse(srv, sink, args):
     stamp = int(time.time())
     want = args.stream_items
-    for rep in range(args.repeat):
-        session = f"bench-{session_slug(args.model)}-{stamp}-sse-{rep}"
-        headers = {"x-mockingbird-session": session, "accept": "text/event-stream",
-                   "x-mockingbird-stream-items": str(want)}
-        status, ttfe, total, events, error = read_sse(f"{srv.data}/events/ticks", headers, want, args.timeout)
-        valid, bad, names = 0, [], {}
-        for i, ev in enumerate(events):
-            names[ev["event"]] = names.get(ev["event"], 0) + 1
-            try:
-                value = json.loads(ev["data"])
-            except ValueError:
-                bad.append({"index": i, "violations": ["json"]})
-                continue
-            v = basic_violations(value, TICK_SCHEMA) if ev["event"] == "tick" else [f"event:{ev['event']}"]
-            if v:
-                bad.append({"index": i, "violations": v})
-            else:
-                valid += 1
-        source, extra = logged_source(srv, "events", session)
-        detail = {"status": status, "events": len(events), "wanted": want, "valid": valid,
-                  "invalid": bad[:10], "event_names": names, "error": error, **extra}
-        ok = status == 200 and len(events) == want and valid == want
-        sink.add("ticks", rep, ok, total, source, detail, ttfe_ms=ttfe)
+    # Each rep has its own session, and its source is looked up by that session.
+    run_units([functools.partial(sse_rep, srv, sink, args, stamp, want, rep) for rep in range(args.repeat)], args)
+
+
+def sse_rep(srv, sink, args, stamp, want, rep):
+    session = f"bench-{session_slug(args.model)}-{stamp}-sse-{rep}"
+    headers = {"x-mockingbird-session": session, "accept": "text/event-stream",
+               "x-mockingbird-stream-items": str(want)}
+    status, ttfe, total, events, error = read_sse(f"{srv.data}/events/ticks", headers, want, args.timeout)
+    valid, bad, names = 0, [], {}
+    for i, ev in enumerate(events):
+        names[ev["event"]] = names.get(ev["event"], 0) + 1
+        try:
+            value = json.loads(ev["data"])
+        except ValueError:
+            bad.append({"index": i, "violations": ["json"]})
+            continue
+        v = basic_violations(value, TICK_SCHEMA) if ev["event"] == "tick" else [f"event:{ev['event']}"]
+        if v:
+            bad.append({"index": i, "violations": v})
+        else:
+            valid += 1
+    source, extra = logged_source(srv, "events", session)
+    detail = {"status": status, "events": len(events), "wanted": want, "valid": valid,
+              "invalid": bad[:10], "event_names": names, "error": error, **extra}
+    ok = status == 200 and len(events) == want and valid == want
+    sink.add("ticks", rep, ok, total, source, detail, ttfe_ms=ttfe)
 
 
 # ---------------------------------------------------------------- import
@@ -698,6 +798,9 @@ def import_body(name, path):
 
 
 def run_import(srv, sink, args):
+    # Sequential whatever --jobs says: the server runs import jobs on a small
+    # worker pool, so concurrent jobs would queue there, and the queue wait would
+    # count toward --import-timeout and the measured job time.
     inputs = import_inputs()
     if args.only_input:
         inputs = [i for i in inputs if re.search(args.only_input, i[0])]
@@ -1057,9 +1160,17 @@ DEFAULT_JOURNEYS = ("stripe", "travel", "github")
 
 
 def run_journeys(srv, sink, args):
-    for rep in range(args.repeat):
-        for name in args.journey or DEFAULT_JOURNEYS:
-            JOURNEYS[name](srv, sink, args, rep)
+    run_units([functools.partial(JOURNEYS[name], srv, sink, args, rep)
+               for rep in range(args.repeat) for name in args.journey or DEFAULT_JOURNEYS], args)
+
+
+def run_journey_table(table, srv, sink, args):
+    """Every (rep, journey) of `table` as its own unit. Each `Journey` has its
+    own session (`<model>-<stamp>-<journey>-<rep>`, unique within the suite's
+    server), its own seeded rng and its own record of checks; the step
+    functions keep no module state."""
+    run_units([functools.partial(run_one_journey, name, steps, srv, sink, args, rep)
+               for rep in range(args.repeat) for name, steps in table.items()], args)
 
 
 # ---------------------------------------------------------------- held-out journeys
@@ -1424,9 +1535,7 @@ HELDOUT_JOURNEYS = {"paypal": paypal_steps, "jira": jira_steps, "zendesk": zende
 
 
 def run_journeys_heldout(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in HELDOUT_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(HELDOUT_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- blind journeys
@@ -1847,9 +1956,7 @@ BLIND_JOURNEYS = {"spotify": spotify_steps, "discord": discord_steps, "auth0": a
 
 
 def run_journeys_blind(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- second blind journeys
@@ -2223,9 +2330,7 @@ BLIND2_JOURNEYS = {"twilio": twilio_steps, "sendgrid": sendgrid_steps, "plaid": 
 
 
 def run_journeys_blind2(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND2_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND2_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- third blind journeys
@@ -2617,9 +2722,7 @@ BLIND3_JOURNEYS = {"trello": trello_steps, "asana": asana_steps, "gitlab": gitla
 
 
 def run_journeys_blind3(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND3_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND3_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- fourth blind journeys
@@ -3029,9 +3132,7 @@ BLIND4_JOURNEYS = {"pipedrive": pipedrive_steps, "zoom": zoom_steps, "sentry": s
 
 
 def run_journeys_blind4(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND4_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND4_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- fifth blind journeys
@@ -3473,9 +3574,7 @@ BLIND5_JOURNEYS = {"airtable": airtable_steps, "okta": okta_steps, "box": box_st
 
 
 def run_journeys_blind5(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND5_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND5_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- sixth blind journeys
@@ -3980,9 +4079,7 @@ BLIND6_JOURNEYS = {"dropbox": dropbox_steps, "klaviyo": klaviyo_steps, "woocomme
 
 
 def run_journeys_blind6(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND6_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND6_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- seventh blind journeys
@@ -4503,9 +4600,7 @@ BLIND7_JOURNEYS = {"linear": linear_steps, "mollie": mollie_steps, "chargebee": 
 
 
 def run_journeys_blind7(srv, sink, args):
-    for rep in range(args.repeat):
-        for name, steps in BLIND7_JOURNEYS.items():
-            run_one_journey(name, steps, srv, sink, args, rep)
+    run_journey_table(BLIND7_JOURNEYS, srv, sink, args)
 
 
 # ---------------------------------------------------------------- main
@@ -4544,31 +4639,50 @@ def main():
     p.add_argument("--only-input", help="regex over import input names")
     p.add_argument("--ready-timeout", type=float, default=120)
     p.add_argument("--keep", action="store_true", help="keep each suite's temp directory")
+    p.add_argument("--jobs", type=int, default=1,
+                   help="independent units (a journey's rep, a consistency or SSE rep) run at once "
+                        "against each suite's server; 1 (default) runs them in order. Import stays sequential")
+    p.add_argument("--suites-parallel", action="store_true",
+                   help="run the suites at once, each on its own server (in flight: suites x --jobs)")
     args = p.parse_args()
+    if args.jobs < 1:
+        p.error("--jobs must be at least 1")
     if not os.path.exists(args.binary) and not os.path.isabs(args.binary):
         args.binary = os.path.join(REPO, args.binary)
     args.binary = os.path.abspath(args.binary)
     if not os.path.exists(args.binary):
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
-    failed = False
     if args.journey:
         # --journey alone means the journeys suite; each journey runs once.
         args.journey = list(dict.fromkeys(args.journey))
         args.suite = args.suite or ["journeys"]
-    for suite in args.suite or DEFAULT_SUITES:
-        mocks, runner = RUNNERS[suite]
-        sink = Sink(args.out, args.model, suite)
-        print(f"{args.model} / {suite}", file=sys.stderr)
-        try:
-            with Server(args, suite, mocks) as srv:
-                runner(srv, sink, args)
-        except Exception as e:  # one broken suite must not stop the others
-            failed = True
-            sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
-        n_ok = sum(1 for r in sink.rows if r["ok"])
-        print(f"  {suite}: {n_ok}/{len(sink.rows)} ok", file=sys.stderr)
+    suites = list(args.suite or DEFAULT_SUITES)
+    if args.suites_parallel:
+        # A suite's server log is named by model and suite, so each runs once.
+        suites = list(dict.fromkeys(suites))
+        with ThreadPoolExecutor(max_workers=len(suites), thread_name_prefix="bench-suite") as pool:
+            failed = any(list(pool.map(lambda suite: run_suite(suite, args), suites)))
+    else:
+        failed = any([run_suite(suite, args) for suite in suites])
     sys.exit(1 if failed else 0)
+
+
+def run_suite(suite, args):
+    """Runs one suite on its own server; True when it broke."""
+    mocks, runner = RUNNERS[suite]
+    sink = Sink(args.out, args.model, suite)
+    print(f"{args.model} / {suite}", file=sys.stderr)
+    failed = False
+    try:
+        with Server(args, suite, mocks) as srv:
+            runner(srv, sink, args)
+    except Exception as e:  # one broken suite must not stop the others
+        failed = True
+        sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
+    n_ok = sum(1 for r in sink.rows if r["ok"])
+    print(f"  {suite}: {n_ok}/{len(sink.rows)} ok", file=sys.stderr)
+    return failed
 
 
 if __name__ == "__main__":
