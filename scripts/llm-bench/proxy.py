@@ -154,9 +154,22 @@ def load_prices(path: Optional[str]) -> Dict[str, Tuple[float, float]]:
 # Provider pins
 
 DEFAULT_PROVIDER_PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "providers.json")
-# What OpenRouter answers (400/404) when no allowed provider can serve the call.
+# OpenRouter's own words when no provider the routing allows can serve the call. Only
+# these phrases count: other 4xx bodies that mention a provider or an endpoint ("Provider
+# returned error", "This endpoint's maximum context length ...", "No endpoints found that
+# can handle the requested parameters") are the request's own errors, and mb-llm steps
+# down from them (schema, reasoning), so they must stay 4xx. OpenRouter documents the
+# routing failure as a 503, which passes through as a 5xx anyway; the 404 text is the
+# one it sends when allowed providers rule out every endpoint.
 PIN_UNAVAILABLE_STATUSES = (400, 404)
-PIN_UNAVAILABLE_MARKERS = ("endpoint", "provider")
+PIN_UNAVAILABLE_MARKERS = (
+    "no allowed providers are available",
+    "no available model provider that meets your routing requirements",
+)
+
+
+class PinRefused(Exception):
+    """The first streamed chunk came from a provider the pin does not allow."""
 
 
 def load_provider_pins(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
@@ -234,7 +247,7 @@ class Ledger:
                 os.path.join(os.path.dirname(os.path.abspath(p)), "BUDGET_TRIPPED")
             )
         for rec in self._read(path):
-            self._tally(rec)
+            self._tally(rec, live=False)
         self.tripped = prior_tripped or os.path.exists(self.trip_file) or self.total_spent() >= self.budget
         if self.tripped and not os.path.exists(self.trip_file):
             self._write_trip("spend loaded at start already reaches the budget")
@@ -257,7 +270,10 @@ class Ledger:
                 if isinstance(rec, dict):
                     yield rec
 
-    def _tally(self, rec: Dict[str, Any]) -> None:
+    def _tally(self, rec: Dict[str, Any], live: bool = True) -> None:
+        """Counts a record. `providers` counts only calls made since this proxy
+        started (`live`), so a resumed ledger's earlier rows stay out of this
+        run's provider mix; spend and call counts include them."""
         cost = as_float(rec.get("cost_usd")) or 0.0
         self.spent += cost
         self.calls += 1
@@ -268,7 +284,7 @@ class Ledger:
         )
         s["calls"] += 1
         prov = rec.get("provider")
-        if prov:
+        if prov and live:
             s["providers"][prov] = s["providers"].get(prov, 0) + 1
         s["cost_usd"] += cost
         if rec.get("error_kind"):
@@ -579,6 +595,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "mb-llm-bench-proxy"
     proxy: Proxy  # set on the class at start
+    stream_started = False
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet by default
         if os.environ.get("MB_BENCH_PROXY_VERBOSE"):
@@ -702,6 +719,7 @@ class Handler(BaseHTTPRequestHandler):
         rec: Dict[str, Any],
         received: float,
     ) -> None:
+        self.stream_started = False  # set once a client stream's 200 head has gone out
         up = copy.deepcopy(body)
         if model.endswith(VARIANT_NOJSON):
             up["model"] = base_model(model)
@@ -808,13 +826,15 @@ class Handler(BaseHTTPRequestHandler):
         assert resp is not None
         try:
             if client_stream:
-                self.pass_through(resp, out)
+                self.pass_through(resp, out, pinned)
             elif upgraded:
-                self.collect_stream(resp, out)
+                self.collect_stream(resp, out, pinned)
             else:
                 doc = json.loads(resp.read() or b"{}")
                 out.ttft_ms = out.since()
                 out.take_message(doc if isinstance(doc, dict) else {})
+        except PinRefused:
+            pass  # refused below, before anything reached the client
         except (socket.timeout, TimeoutError) as e:
             out.error_kind = out.error_kind or "timeout"
             out.error_excerpt = out.error_excerpt or excerpt(f"upstream timeout mid-response: {e}")
@@ -824,19 +844,29 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             resp.close()
         if pinned and not out.error_kind and not pin_allows(pinned, out.provider):
-            # allow_fallbacks false should make this impossible; never pass on an
-            # answer from a provider the pin does not allow.
+            # allow_fallbacks false should make this impossible. The provider is checked
+            # on the first chunk, before anything is relayed, so the answer is refused
+            # there. Only a stream whose first chunk named no provider has already gone
+            # out by the time a later chunk names one: that call is flagged, not refused.
             rec["provider_pin_mismatch"] = True
-            msg = f"served by {out.provider}, not the pinned {','.join(map(str, pinned['order']))}"
-            out.error_kind = "provider_unavailable"
-            out.error_excerpt = excerpt(msg)
-            out.error_body = json.dumps({"error": {"message": msg, "code": 503}}).encode()
+            if not self.stream_started:
+                msg = f"served by {out.provider}, not the pinned {','.join(map(str, pinned['order']))}"
+                out.error_kind = "provider_unavailable"
+                out.error_excerpt = excerpt(msg)
+                out.error_body = json.dumps({"error": {"message": msg, "code": 503}}).encode()
         p_in, _ = px.price(model)
         prompt_est = len(json.dumps(body.get("messages", []), ensure_ascii=False)) / 3.0 * p_in
         self.complete(px, model, rec, out, client_stream, received, prompt_est)
         px.dump(rec, body, out)
 
-    def collect_stream(self, resp: Any, out: Outcome) -> None:
+    @staticmethod
+    def check_first_chunk(out: Outcome, pinned: Optional[Dict[str, Any]]) -> None:
+        """Raises PinRefused when the first chunk names a provider the pin does not allow."""
+        if pinned and not pin_allows(pinned, out.provider):
+            raise PinRefused(out.provider)
+
+    def collect_stream(self, resp: Any, out: Outcome, pinned: Optional[Dict[str, Any]] = None) -> None:
+        first = True
         for data in sse_events(resp, deadline=out.started + UPSTREAM_TIMEOUT_S):
             if data.strip() == "[DONE]":
                 break
@@ -846,17 +876,17 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if isinstance(chunk, dict):
                 out.take_chunk(chunk)
+                if first:
+                    first = False
+                    self.check_first_chunk(out, pinned)  # stop reading a refused answer
 
-    def pass_through(self, resp: Any, out: Outcome) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.close_connection = True
+    def pass_through(self, resp: Any, out: Outcome, pinned: Optional[Dict[str, Any]] = None) -> None:
+        """Relays the stream. Nothing (not even the 200 head) goes out before the
+        first chunk has been checked against the pin; keep-alives before it wait."""
+        held: List[bytes] = []
         client_gone = [False]
 
-        def relay(raw: bytes) -> None:
+        def write(raw: bytes) -> None:
             if client_gone[0]:
                 return
             try:
@@ -866,8 +896,28 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 client_gone[0] = True
 
+        def start() -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            self.stream_started = True
+            for raw in held:
+                write(raw)
+            held.clear()
+
+        def relay(raw: bytes) -> None:
+            if self.stream_started:
+                write(raw)
+            else:
+                held.append(raw)
+
         for data in sse_events(resp, on_line=relay, deadline=out.started + UPSTREAM_TIMEOUT_S):
             if data.strip() == "[DONE]":
+                if not self.stream_started:
+                    start()
                 continue
             try:
                 chunk = json.loads(data)
@@ -875,6 +925,11 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if isinstance(chunk, dict):
                 out.take_chunk(chunk)
+                if not self.stream_started:
+                    self.check_first_chunk(out, pinned)
+                    start()
+        if not self.stream_started:
+            start()
         try:
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -935,10 +990,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             rec["status"] = 200
         rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
-        if client_stream:
+        if client_stream and self.stream_started:
             if out.error_kind:
                 rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
             return
+        # A client stream that failed before its first chunk (refused, timed out) gets
+        # the error as a plain answer, as a non-streamed call would.
         if out.error_kind:
             self.send_bytes(err_status, redact_bytes(out.error_body or b"") or json.dumps({"error": {"message": out.error_excerpt}}).encode(),
                             "application/json")

@@ -1,17 +1,17 @@
 {
-  "about": "Per-model OpenRouter provider pins. proxy.py adds `provider` = the pin's `provider` object to a call for that model, unless the client sent its own `provider`. Keys are model ids without a bench variant suffix (`@nojson`). Each pin is the provider that served most of the model's calls in full6 (2026-11-04, scratchpad full6/server/calls.jsonl); `basis` records that share. Change a pin here, not in code.",
+  "about": "Per-model OpenRouter provider pins. proxy.py adds `provider` = the pin's `provider` object to a call for that model, unless the client sent its own `provider`. Keys are model ids without a bench variant suffix (`@nojson`). Each pin is the provider that served most of the model's calls in full6 (2026-11-04, scratchpad full6/server/calls.jsonl); `basis` records that share. full6 recorded only the provider's display name, not the endpoint variant (quantization, region, service tier), so a pin names the variant chosen from the model's endpoint list (GET /api/v1/models/<id>/endpoints, `tag`). A full tag (`wafer/us`) matches only that endpoint; a base slug (`fireworks`) matches all of that provider's endpoints except service-tier ones (`openai/fast`, `openai/flex`). `only` repeats `order` so no other endpoint is eligible. Change a pin here, not in code.",
   "pins": {
     "nvidia/nemotron-3.5-lightning": {
-      "provider": {"order": ["fireworks"], "allow_fallbacks": false},
-      "basis": "full6: Fireworks served 2089 of 2114 calls (98.8%)"
+      "provider": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": false},
+      "basis": "full6: Fireworks served 2089 of 2114 calls (98.8%). Fireworks lists one endpoint for this model (`fireworks`). full6 did not record endpoint variants."
     },
     "openai/gpt-6-luna": {
-      "provider": {"order": ["openai"], "allow_fallbacks": false},
-      "basis": "full6: OpenAI served 1913 of 2108 calls (90.7%)"
+      "provider": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": false},
+      "basis": "full6: OpenAI served 1913 of 2108 calls (90.7%). `openai` is the standard endpoint; the base slug does not select the `openai/flex` or `openai/fast` service tiers. full6 did not record which OpenAI endpoint served each call."
     },
     "deepseek/deepseek-v4.1-flash-1017": {
-      "provider": {"order": ["wafer"], "allow_fallbacks": false},
-      "basis": "full6: Wafer served 378 of 2090 calls (18.1%); about 25 providers served the rest"
+      "provider": {"order": ["wafer/us"], "only": ["wafer/us"], "allow_fallbacks": false},
+      "basis": "full6: Wafer served 378 of 2090 calls (18.1%); about 25 providers served the rest. Pinned to `wafer/us`, not `wafer/mxfp4` (a lower-precision quantization). full6 did not record which Wafer endpoint served each call."
     }
   }
 }

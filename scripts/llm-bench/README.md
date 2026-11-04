@@ -103,23 +103,27 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 
 OpenRouter can send one model to different upstream providers from one run to the next. Between full6 and full7, Nemotron went from Fireworks (2089 of 2114 calls) to a mix of CoreWeave, DeepInfra, Fireworks, Io Net and Darkbloom. Its timeouts and truncations went up with the change, and about 80 Nemotron checks moved with them. To stop this, the proxy pins each model to one provider.
 
-- **Where pins live.** [`providers.json`](providers.json) maps a model id to an OpenRouter `provider` object: `{"order": [...], "allow_fallbacks": false}`. Each pin's `basis` field records why it was picked. Change a pin there, not in code. `proxy.py --provider-pins <file>` and `run.py --provider-pins <file>` read another file, and `''` turns pins off. `run.py preflight` copies each model's pin into `roster.json` as `provider_pin`.
+- **Where pins live.** [`providers.json`](providers.json) maps a model id to an OpenRouter `provider` object: `{"order": [...], "only": [...], "allow_fallbacks": false}`. Each pin's `basis` field records why it was picked. Change a pin there, not in code. `proxy.py --provider-pins <file>` and `run.py --provider-pins <file>` read another file, and `''` turns pins off. `run.py preflight` copies each model's pin into `roster.json` as `provider_pin`, and it honours `--provider-pins` too.
 - **Current pins.** Each model is pinned to the provider that served most of its full6 calls:
 
   | model | pin | full6 share |
   |---|---|---|
-  | `nvidia/nemotron-3.5-lightning` | `fireworks` | 2089 of 2114 calls (98.8%) |
+  | `nvidia/nemotron-3.5-lightning` | `fireworks` | 2089 of 2114 calls (98.8%). Fireworks lists one endpoint for this model. |
   | `openai/gpt-6-luna` | `openai` | 1913 of 2108 calls (90.7%) |
-  | `deepseek/deepseek-v4.1-flash-1017` | `wafer` | 378 of 2090 calls (18.1%). About 25 providers served the rest, so this pin changes DeepSeek's conditions the most. |
+  | `deepseek/deepseek-v4.1-flash-1017` | `wafer/us` | 378 of 2090 calls (18.1%). About 25 providers served the rest, so this pin changes DeepSeek's conditions the most. |
+
+- **Endpoint variants.** A pin names the endpoint variant (a `tag` from `GET /api/v1/models/<id>/endpoints`). In OpenRouter's routing, a full tag such as `wafer/us` matches only that endpoint, so DeepSeek does not run on `wafer/mxfp4`, a lower-precision quantization. A base slug matches every endpoint of that provider except the service tiers, so `openai` leaves out `openai/flex` and `openai/fast`. full6 recorded only the provider's display name, not which variant served a call, so the variants were chosen from the endpoint list. The answer still carries only that display name (`Wafer`, not `wafer/us`). The ledger cannot record the variant either: the pin in `provider_pin` is the record.
 
 - **How a pin is added.** The proxy adds the pin as the call's `provider` field. If the client already sent a `provider` field, the proxy passes it on as sent and does not enforce it. A model with no pin is forwarded unchanged. A bench variant (`<id>@nojson`) uses its base model's pin.
-- **When the pinned provider is unavailable.** OpenRouter answers 400 or 404 about endpoints or providers when the pinned provider cannot take the call. The proxy turns that into a 503 with `error_kind: provider_unavailable`. Mockingbird then reports `LLM returned HTTP 503: pinned provider ... unavailable`, which the journeys label as `detail.infra` (see the blind7 notes below). The call is not sent to another provider. If an answer still comes back from a provider the pin does not allow, the proxy refuses it the same way and sets `provider_pin_mismatch: true` in the ledger. It can only refuse when the client did not stream.
+- **When the pinned provider is unavailable.** OpenRouter documents this failure as a 503 ("no available model provider that meets your routing requirements"). A 503 passes through as `http_5xx`, which the journeys label as `detail.infra` (see the blind7 notes below). When OpenRouter answers a 400 or 404 with its no-allowed-provider message instead ("No allowed providers are available ..."), the proxy turns it into a 503 with `error_kind: provider_unavailable`. Mockingbird reports that as `LLM returned HTTP 503: pinned provider ... unavailable`, which is labelled infra too. Only those exact phrases count. A 4xx that merely mentions a provider or an endpoint passes through as `http_4xx`, because mb-llm steps down from those itself (schema, reasoning). Examples: `Provider returned error`, `This endpoint's maximum context length ...`, `No endpoints found that can handle the requested parameters`. The call is never sent to another provider.
+- **An answer from a provider the pin does not allow.** The proxy refuses it the same way (503 `provider_unavailable`) and sets `provider_pin_mismatch: true` in the ledger. It checks the provider on the first streamed chunk. Nothing is relayed to a streaming client before that check, not even the 200 head; keep-alives wait. If the first chunk names no provider and a later chunk names a provider the pin does not allow, the stream has already gone out, so the call is only flagged.
+- **One unavailable call can show as two rows.** mb-llm retries a 503 once, so one mock call that the pinned provider could not serve usually appears as two `provider_unavailable` ledger rows. Those rows count in `aggregate.py`'s errors and error rate.
 - **What the ledger records.** Every ledger line has `provider` (who served the call), `provider_pin` (the `provider.order` it was sent with) and `provider_pin_by` (`proxy`, `client` or null).
 - **Where the provider mix is reported.**
-  - `/stats` counts providers per label.
+  - `/stats` counts providers per label, for calls made since that proxy started. Rows already in a resumed ledger count toward spend but not toward the mix, so the mix covers the current run.
   - `server_suites.py` prints each suite's provider mix under its ok count.
   - `run.py full` logs each model's mix when the model finishes and stores it as `providers` in `run.json`.
-  - `aggregate.py` shows the pin and the pin-unavailable count next to the served-provider shares in section 6 of `tables.md`.
+  - `aggregate.py` shows the pin and the pin-unavailable count next to the served-provider shares in section 6 of `tables.md`. It reads the whole ledger it is given.
 
   Read a score together with its model's provider mix.
 

@@ -1439,8 +1439,10 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
     lines.append("")
     lines.append("n = ledger rows for the model, budget-refused rows excluded. Provider shares are over "
                  "calls with a served provider. Provider pin = the `provider.order` the calls were sent "
-                 "with (scripts/llm-bench/providers.json); pin unavailable = calls failed because no pinned "
-                 "provider could serve them.")
+                 "with (scripts/llm-bench/providers.json); pin unavailable = ledger rows the proxy failed "
+                 "with `provider_unavailable` (no pinned provider could serve the call, or another provider "
+                 "answered). Those rows count in errors and error rate. mb-llm retries a 503 once, so one "
+                 "mock call the pinned provider could not serve usually shows as two rows here.")
     lines.append("")
     rows = []
     for m, b in models.items():

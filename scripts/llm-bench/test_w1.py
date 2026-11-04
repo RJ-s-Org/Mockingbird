@@ -1372,12 +1372,12 @@ class InfraFailureTest(unittest.TestCase):
 
 class FakeRouter(BaseHTTPRequestHandler):
     """A fake OpenRouter chat endpoint: keeps each request body (never headers) and
-    answers as `FakeRouter.mode` says: "ok" (served by `served`), or "no_endpoint"
-    (OpenRouter's 404 when no allowed provider can serve the call)."""
+    answers with `error` (status, message) when set, else served by `served`, as SSE
+    when the request asks for a stream."""
 
     protocol_version = "HTTP/1.1"
     bodies = []
-    mode = "ok"
+    error = None
     served = "Fireworks"
 
     def log_message(self, *a):
@@ -1386,8 +1386,22 @@ class FakeRouter(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
         FakeRouter.bodies.append(body)
-        if FakeRouter.mode == "no_endpoint":
-            status, doc = 404, {"error": {"code": 404, "message": "No endpoints found matching your provider routing"}}
+        if FakeRouter.error:
+            status, msg = FakeRouter.error
+            doc = {"error": {"code": status, "message": msg}}
+        elif body.get("stream"):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(b": OPENROUTER PROCESSING\n\n")
+            for piece, finish in (("{", None), ("}", "stop")):
+                chunk = {"id": "gen-fake", "object": "chat.completion.chunk", "provider": FakeRouter.served,
+                         "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": finish}]}
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.close_connection = True
+            return
         else:
             status, doc = 200, {
                 "id": "gen-fake", "object": "chat.completion", "model": body.get("model"),
@@ -1428,10 +1442,31 @@ class ProviderPinTest(unittest.TestCase):
     def test_the_bench_pins_its_three_models_without_fallbacks(self):
         pins = proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS)
         self.assertEqual(pins, {
-            "nvidia/nemotron-3.5-lightning": {"order": ["fireworks"], "allow_fallbacks": False},
-            "openai/gpt-6-luna": {"order": ["openai"], "allow_fallbacks": False},
-            "deepseek/deepseek-v4.1-flash-1017": {"order": ["wafer"], "allow_fallbacks": False},
+            "nvidia/nemotron-3.5-lightning": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": False},
+            "openai/gpt-6-luna": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False},
+            "deepseek/deepseek-v4.1-flash-1017": {"order": ["wafer/us"], "only": ["wafer/us"],
+                                                  "allow_fallbacks": False},
         })
+
+    def test_preflight_records_the_pins_it_is_given(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        pins = os.path.join(d, "pins.json")
+        with open(pins, "w") as f:
+            json.dump({"pins": {"nvidia/x": {"provider": self.PIN}}}, f)
+        args = argparse.Namespace(out=d, models="nvidia/x@nojson,other/y", openrouter_api="http://unused",
+                                  no_key=True, strict=False, provider_pins=pins)
+        doc = {"data": [{"id": "nvidia/x", "pricing": {}}, {"id": "other/y", "pricing": {}}]}
+        with mock.patch.object(run, "get_json", return_value=doc), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.preflight(args), 0)
+        with open(os.path.join(d, "roster.json")) as f:
+            roster = {m["id"]: m["provider_pin"] for m in json.load(f)["models"]}
+        self.assertEqual(roster, {"nvidia/x@nojson": self.PIN, "other/y": None})
+        args.provider_pins = ""
+        with mock.patch.object(run, "get_json", return_value=doc), contextlib.redirect_stdout(io.StringIO()):
+            run.preflight(args)
+        with open(os.path.join(d, "roster.json")) as f:
+            self.assertFalse(any(m["provider_pin"] for m in json.load(f)["models"]))
 
     def test_pin_allows_matches_display_names_and_slugs(self):
         self.assertTrue(proxy.pin_allows({"order": ["io-net"]}, "Io Net"))
@@ -1446,7 +1481,7 @@ class ProviderPinProxyTest(unittest.TestCase):
     PIN = ProviderPinTest.PIN
 
     def setUp(self):
-        FakeRouter.bodies, FakeRouter.mode, FakeRouter.served = [], "ok", "Fireworks"
+        FakeRouter.bodies, FakeRouter.error, FakeRouter.served = [], None, "Fireworks"
         up = serve(FakeRouter, self)
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -1454,6 +1489,8 @@ class ProviderPinProxyTest(unittest.TestCase):
         with open(pins, "w") as f:
             json.dump({"pins": {"nvidia/x": {"provider": self.PIN, "basis": "test"}}}, f)
         self.ledger = os.path.join(self.dir, "calls.jsonl")
+        with open(self.ledger, "w") as f:  # an earlier run's row: not this run's provider mix
+            f.write(json.dumps({"label": "nvidia__x~test", "provider": "CoreWeave", "cost_usd": 0.0}) + "\n")
         args = argparse.Namespace(
             upstream=f"{up.data}/api/v1/chat/completions",
             no_stream_upgrade=True, dump=None, ledger=self.ledger, budget_usd=5.0, prior_ledger=[],
@@ -1474,7 +1511,8 @@ class ProviderPinProxyTest(unittest.TestCase):
                                      data=json.dumps(body).encode(), headers={"content-type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                status, doc = r.status, json.load(r)
+                raw = r.read()
+                status, doc = r.status, (raw.decode() if extra.get("stream") else json.loads(raw))
         except urllib.error.HTTPError as e:
             with e:
                 status, doc = e.code, json.loads(e.read() or b"{}")
@@ -1508,7 +1546,7 @@ class ProviderPinProxyTest(unittest.TestCase):
         self.assertEqual((rec["provider_pin"], rec["provider_pin_by"]), (None, None))
 
     def test_an_unavailable_pinned_provider_is_a_provider_failure(self):
-        FakeRouter.mode = "no_endpoint"
+        FakeRouter.error = (404, "No allowed providers are available for the selected model.")
         status, doc, rec = self.call("nvidia/x")
         self.assertEqual(status, 503)
         self.assertEqual(len(FakeRouter.bodies), 1)  # not retried elsewhere
@@ -1520,6 +1558,36 @@ class ProviderPinProxyTest(unittest.TestCase):
         # Without a pin the same 404 stays the request's own error.
         _, _, rec = self.call("other/y")
         self.assertEqual((rec["status"], rec["error_kind"]), (404, "http_4xx"))
+        # OpenRouter's documented routing failure is a 503: a provider error as it is.
+        FakeRouter.error = (503, "There is no available model provider that meets your routing requirements")
+        status, _, rec = self.call("nvidia/x")
+        self.assertEqual((status, rec["error_kind"]), (503, "http_5xx"))
+
+    def test_ordinary_request_errors_on_a_pinned_model_stay_4xx(self):
+        # mb-llm steps down (schema, reasoning) on these, so they must reach it unchanged.
+        for status, msg in (
+            (400, "Provider returned error"),
+            (400, "This endpoint's maximum context length is 8192 tokens. However, you requested about 9000."),
+            (404, "No endpoints found that can handle the requested parameters."),
+            (404, "No endpoints found that support the provided 'response_format' parameter."),
+        ):
+            FakeRouter.error = (status, msg)
+            got, doc, rec = self.call("nvidia/x")
+            self.assertEqual((got, rec["status"], rec["error_kind"]), (status, status, "http_4xx"), msg)
+            self.assertEqual(doc["error"]["message"], msg)
+
+    def test_a_stream_from_another_provider_is_refused_before_anything_is_relayed(self):
+        FakeRouter.served = "CoreWeave"
+        status, doc, rec = self.call("nvidia/x", stream=True)
+        self.assertEqual(status, 503)  # a plain error answer: no 200 head, no chunk went out
+        self.assertIn("served by CoreWeave", doc["error"]["message"])
+        self.assertEqual((rec["status"], rec["error_kind"], rec.get("provider_pin_mismatch")),
+                         (503, "provider_unavailable", True))
+        FakeRouter.served = "Fireworks"
+        status, raw, rec = self.call("nvidia/x", stream=True)
+        self.assertEqual((status, rec["error_kind"], rec["provider"]), (200, None, "Fireworks"))
+        self.assertIn(": OPENROUTER PROCESSING", raw)  # held keep-alives are relayed once checked
+        self.assertIn("data: [DONE]", raw)
 
     def test_an_answer_from_another_provider_is_refused(self):
         FakeRouter.served = "CoreWeave"

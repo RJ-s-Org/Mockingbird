@@ -38,6 +38,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import proxy as bench_proxy  # noqa: E402  (load_provider_pins; proxy.py runs nothing on import)
 OPENROUTER_API = "https://openrouter.ai/api/v1"
 DEFAULT_OUT = os.path.join("docs", "benchmarks", "2026-10-29")
 DEFAULT_MANIFEST = os.path.join("docs", "benchmarks", "workloads.json")
@@ -204,10 +207,10 @@ def preflight(args: argparse.Namespace) -> int:
             }
         )
     # Record the provider pin the proxy will send with each model (providers.json).
-    pins = (read_json(abspath(DEFAULT_PROVIDER_PINS), {}) or {}).get("pins") or {}
+    pins_path = getattr(args, "provider_pins", DEFAULT_PROVIDER_PINS)
+    pins = bench_proxy.load_provider_pins(abspath(pins_path) if pins_path else None)
     for r in roster:
-        pin = pins.get(r["id"]) or pins.get(r["id"].split("@", 1)[0])
-        r["provider_pin"] = pin.get("provider") if isinstance(pin, dict) else None
+        r["provider_pin"] = pins.get(r["id"]) or pins.get(r["id"].split("@", 1)[0])
     path = os.path.join(out, "roster.json")
     write_json(path, {"fetched_at": utc_now(), "source": args.openrouter_api + "/models", "models": roster,
                       "missing": missing})
@@ -910,6 +913,8 @@ def main() -> int:
     p = sub.add_parser("preflight", help="write roster.json and key-before.json")
     common(p)
     p.add_argument("--strict", action="store_true", help="exit 1 when a roster model is missing")
+    p.add_argument("--provider-pins", default=DEFAULT_PROVIDER_PINS,
+                   help="pins to record in roster.json as provider_pin (default %(default)s; '' for none)")
 
     p = sub.add_parser("pilot", help="small engine slice per model; project the full run's cost")
     common(p)
