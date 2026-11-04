@@ -879,7 +879,15 @@ impl Engine {
                         user.content.push_str(guards::ITEMS_ENVELOPE_NOTE);
                     }
                 }
-                let prompt_schema = compact::response_prompt_schema(bundle, written);
+                // Some models write only what a schema requires: the members a 2xx
+                // answer is sure to need are required in the prompt's copy.
+                let prompt_schema = compact::with_echoes_required(
+                    bundle,
+                    op,
+                    status,
+                    call,
+                    compact::response_prompt_schema(bundle, written),
+                );
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
                     schema: if effects_envelope {
@@ -1701,7 +1709,8 @@ impl Engine {
 
     /// [`Engine::fresh_identity`] for an answer of `status`, drawn anew for
     /// each `attempt`: a fixed seed and the same body otherwise draw the same
-    /// identity, however taken it is.
+    /// identity, however taken it is. A record that holds no identity (or a
+    /// `null` one) is given one, drawn as the schema declares the member.
     pub fn fresh_identity_at(
         &self,
         bundle: &Bundle,
@@ -1718,7 +1727,12 @@ impl Engine {
             Some(identity) => identity.record_in(body)?,
             None => body,
         };
-        let current = record.get(field)?;
+        // A record with no identity at all (a model that wrote only what the schema
+        // requires) is given one the same way.
+        if !record.is_object() {
+            return None;
+        }
+        let current = record.get(field).filter(|v| !v.is_null());
         let record_schema = match identity {
             Some(identity) if identity.record.is_some() => record_schema(bundle, identity, schema)?,
             _ => schema.clone(),
@@ -1736,7 +1750,7 @@ impl Engine {
         );
         (0..IDENTITY_DRAWS).find_map(|_| {
             let fresh = self.fake_field(bundle, field, &id_schema, &mut draws);
-            if fresh.is_null() || &fresh == current {
+            if fresh.is_null() || Some(&fresh) == current {
                 return None;
             }
             let mut candidate = body.clone();

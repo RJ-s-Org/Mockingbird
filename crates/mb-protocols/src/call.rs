@@ -1306,6 +1306,12 @@ pub(crate) async fn complete(
             // The model's own next page, after a rest the mock served: not those again,
             // and its token as the model gave it.
             let followed = pages::followed(&mut state, (plan, call), body).await;
+            // A list answer that left its list member out (a model writing only what
+            // the schema requires) holds an empty one, which the store may fill.
+            let absent = match followed {
+                None => lists::absent_list(rt, plan, body),
+                Some(_) => None,
+            };
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
             if let Some(followed) = &followed {
@@ -1314,9 +1320,15 @@ pub(crate) async fn complete(
             let cut = lists::narrow(rt, plan, call, body);
             // A full page whose rest the model left out, but the store holds.
             let cut = match (fallback, followed.is_some()) {
-                (false, false) => {
-                    lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await
-                }
+                (false, false) => match absent.as_deref() {
+                    Some(member) => {
+                        lists::stored_page(&mut state, (plan, call), resource_type, body, member)
+                            .await
+                    }
+                    None => {
+                        lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await
+                    }
+                },
                 _ => None,
             };
             let kept = match cut {
@@ -1358,6 +1370,16 @@ pub(crate) async fn complete(
                     true => None,
                     false => generated.body.clone(),
                 };
+                // A record answered with no identity (a model writing only what the
+                // schema requires) would not be stored: it is given one.
+                mint_create_id(
+                    rt,
+                    &mut state,
+                    (session, op, t, state_call),
+                    &mut generated,
+                    answered.as_ref(),
+                )
+                .await;
                 unique_create_id(
                     rt,
                     &mut state,
@@ -3153,6 +3175,52 @@ async fn unique_create_id(
             && state.get(session, resource_type, &fresh_id).await.is_none()
         {
             generated.body = Some(fresh);
+            return;
+        }
+    }
+}
+
+/// Gives a create's 2xx answer an identity when its record holds none (or `null`) and
+/// the request asked for none: no client-chosen id (see [`mb_engine::guards::asked_identity`])
+/// and no path value naming the record. The faker draws it as the record's schema declares
+/// the member (its `format`, `pattern`), each retry anew, until it is one the session
+/// holds no record of the type under and the request does not carry; with none to be
+/// had, or a member the schema does not declare, the answer stays as it is.
+async fn mint_create_id(
+    rt: &MockRuntime,
+    state: &mut StateAccess<'_>,
+    (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
+    generated: &mut GeneratedResponse,
+    answer: Option<&Value>,
+) {
+    let identity = op.identity.as_ref();
+    let field = identity.map_or("id", |i| i.field.as_str());
+    let Some(body) = generated.body.as_ref().filter(|b| b.is_object()) else {
+        return;
+    };
+    if body.get(field).is_some_and(|v| !v.is_null()) {
+        return;
+    }
+    let named_by_path = identity
+        .and_then(|i| i.path_param.as_deref())
+        .is_some_and(|param| call.path_params.contains_key(param));
+    if named_by_path || mb_engine::guards::asked_identity(rt.bundle(), op, call).is_some() {
+        return;
+    }
+    let carried = request_values(op, call);
+    for attempt in 0..3 {
+        let draw = fresh_record(rt, op, generated.status, (body, answer), attempt);
+        let Some(drawn) = draw.as_ref().and_then(|d| d.get(field)).and_then(id_string) else {
+            return;
+        };
+        if !carried.contains(&drawn) && state.get(session, resource_type, &drawn).await.is_none() {
+            tracing::debug!(
+                mock = %rt.name,
+                operation = %op.id,
+                id = %log_capped(&drawn),
+                "create answered with no identity: one was drawn"
+            );
+            generated.body = draw;
             return;
         }
     }
