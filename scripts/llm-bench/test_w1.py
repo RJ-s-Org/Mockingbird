@@ -958,5 +958,283 @@ class SinkConcurrencyTest(unittest.TestCase):
         self.assertGreater(bad, 0)
 
 
+class FakeFlakySquare(FakeSquare):
+    """FakeSquare whose provider fails: the first call of the first session
+    (`fail = "once"`) or of every session (`"always"`) is answered with the
+    fallback Mockingbird sends when the LLM answered 503."""
+
+    fail = "once"
+    reason = "LLM returned HTTP 503: no capacity"
+    sessions = []
+
+    def failing(self):
+        session = self.headers.get("x-mockingbird-session")
+        if session in FakeFlakySquare.sessions:
+            return False
+        FakeFlakySquare.sessions.append(session)
+        return FakeFlakySquare.fail == "always" or len(FakeFlakySquare.sessions) == 1
+
+    def fallback(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        raw = b"{}"
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("x-mockingbird-source", "fallback")
+        self.send_header("x-mockingbird-fallback-reason", FakeFlakySquare.reason)
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        return self.fallback() if self.failing() else super().do_POST()
+
+    def do_GET(self):
+        return self.fallback() if self.failing() else super().do_GET()
+
+
+class FakeDiscord(FakeStripe):
+    """A Discord whose guild has only voice and category channels."""
+
+    posted = []
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        gid = path.split("/")[3] if path.startswith("/discord/guilds/") else None
+        if path == "/discord/users/@me":
+            return self.reply({"id": "42"})
+        if path.endswith("/channels"):
+            return self.reply([{"id": "7", "type": 2, "guild_id": gid}, {"id": "8", "type": 4, "guild_id": gid}])
+        if gid:
+            return self.reply({"id": gid, "approximate_member_count": 3})
+        self.reply({}, 404)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        FakeDiscord.posted.append(self.path)
+        self.reply(dict(body, id=str(900 + len(FakeDiscord.posted)), channel_id=self.path.split("/")[3]))
+
+
+def serve(handler, test):
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    test.addCleanup(httpd.server_close)
+    test.addCleanup(httpd.shutdown)
+
+    class Srv:
+        data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    return Srv
+
+
+class FakeScripted(FakeStripe):
+    """Answers `/scripted/<kind>`: `model` is an LLM answer of {}, `infra` the fallback
+    sent when the provider answered 503, `timeout` the one sent when the LLM timed out.
+    Records each call's session."""
+
+    calls = []
+    REASONS = {"infra": "LLM returned HTTP 503: no capacity", "timeout": "LLM request timed out"}
+
+    def do_GET(self):
+        kind = self.path.split("?")[0].split("/")[-1]
+        FakeScripted.calls.append((self.headers.get("x-mockingbird-session"), kind))
+        if kind not in self.REASONS:
+            return self.reply({})
+        raw = b"{}"
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("x-mockingbird-source", "fallback")
+        self.send_header("x-mockingbird-fallback-reason", self.REASONS[kind])
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+def scripted_steps(*kinds):
+    """A journey that judges one failing check on each call in `kinds`, the last of
+    them a gate, then would go on to `rest`."""
+    def steps(j):
+        for i, kind in enumerate(kinds):
+            j.call("GET", f"/{kind}")
+            if i == len(kinds) - 1:
+                server_suites.need(j, f"check {i}", False)
+            else:
+                j.check(f"check {i}", False)
+    return steps
+
+
+class DiscordChannelTest(unittest.TestCase):
+    def test_no_check_asks_for_a_text_channel(self):
+        checks = server_suites.JOURNEY_CHECKS["discord"]
+        self.assertNotIn("guild has a text channel", checks)
+        self.assertEqual(len(checks), 13)
+        self.assertEqual(len(set(checks)), 13)
+
+    def test_a_guild_without_a_text_channel_still_gets_its_messages(self):
+        FakeDiscord.posted = []
+        srv = serve(FakeDiscord, self)
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys_blind")
+            server_suites.run_one_journey("discord", server_suites.discord_steps, srv, sink, Args, 0)
+        rows = {r["case"]: r for r in sink.rows}
+        self.assertEqual(sorted(rows), sorted(f"discord.{c}" for c in server_suites.JOURNEY_CHECKS["discord"]))
+        self.assertTrue(rows["discord.message has an id"]["ok"])
+        self.assertTrue(rows["discord.message keeps what was sent"]["ok"])
+        self.assertTrue(FakeDiscord.posted)
+        # Neither listed channel takes messages, so it posts to a DM channel id it makes up.
+        self.assertFalse(any(p.split("/")[3] in ("7", "8") for p in FakeDiscord.posted), FakeDiscord.posted)
+        self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [])
+
+
+class InfraFailureTest(unittest.TestCase):
+    """The provider/model split is a label on rows; it never drops, replaces or re-runs one."""
+
+    def run_square(self, fail, out, reason="LLM returned HTTP 503: no capacity"):
+        FakeSquare.store, FakeSquare.stale_read = {}, False
+        FakeFlakySquare.fail, FakeFlakySquare.reason, FakeFlakySquare.sessions = fail, reason, []
+        srv = serve(FakeFlakySquare, self)
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        sink = server_suites.Sink(out, "m/x", "journeys_heldout")
+        server_suites.run_one_journey("square", server_suites.square_steps, srv, sink, Args, 0)
+        with open(os.path.join(out, "server.jsonl")) as f:
+            written = [json.loads(line) for line in f]
+        self.assertEqual(written, json.loads(json.dumps(sink.rows)))
+        return written
+
+    def square(self, fail, reason="LLM returned HTTP 503: no capacity"):
+        with tempfile.TemporaryDirectory() as out:
+            return self.run_square(fail, out, reason)
+
+    def test_infra_reason(self):
+        def last(reason, source="fallback"):
+            return {"source": source, "fallback_reason": reason}
+
+        for reason in ("LLM returned HTTP 503: no capacity", "LLM returned HTTP 502: x",
+                       "LLM returned HTTP 429: slow down", "LLM transport error: connection reset"):
+            self.assertEqual(server_suites.infra_reason(last(reason)), reason)
+        for reason in (
+            # A timeout is often the model being slow: it stays the model's.
+            "LLM request timed out",
+            # The model's answer was cut short, then the repair call failed: the model's.
+            "LLM output truncated: stopped at max_tokens; not salvaged: LLM returned HTTP 503: no capacity",
+            # The bench proxy after repeated upstream 4xx: the request's failure (424 now, 502 before).
+            'LLM returned HTTP 424: {"error":{"message":"upstream kept rejecting the request"}}',
+            'LLM returned HTTP 502: {"error":{"message":"upstream kept rejecting the request"}}',
+            "LLM returned HTTP 400: bad", "repaired output still invalid", "stopped at max_tokens",
+            "timed out waiting for a generation slot", None,
+        ):
+            self.assertIsNone(server_suites.infra_reason(last(reason)), reason)
+        self.assertIsNone(server_suites.infra_reason(last("LLM returned HTTP 503: x", source="llm")))
+        # Known limit: a repair call that gets a 503 after an invalid first answer is reported
+        # as a bare `LLM returned HTTP 503`, the same as a first call's 503, so it is labelled
+        # infra. That is why the label is only a label: it never changes a row or re-runs one.
+        self.assertIsNotNone(server_suites.infra_reason(last("LLM returned HTTP 503: repair call")))
+
+    def test_a_provider_failure_at_the_gate_is_labelled_and_never_rerun(self):
+        rows = self.square("once")
+        checks = server_suites.JOURNEY_CHECKS["square"]
+        self.assertEqual(len(FakeFlakySquare.sessions), 1)  # one run, no re-run
+        self.assertEqual(sorted(r["case"] for r in rows), sorted(f"square.{c}" for c in checks))
+        self.assertFalse(any(r["ok"] for r in rows))
+        self.assertTrue(all(r["detail"].get("infra") is True for r in rows), rows)
+        self.assertFalse(any("retried_after" in r["detail"] for r in rows))
+        gate = next(r for r in rows if r["case"] == "square.payment has an id")
+        self.assertEqual(gate["source"], "fallback")
+        self.assertEqual(sum(1 for r in rows if r["source"] == "skipped"), len(checks) - 1)
+        block = aggregate.journeys_block(rows + [{"suite": "consistency", "case": "stripe", "ok": False}])
+        self.assertEqual(list(block), ["journeys_heldout"])
+        self.assertEqual(block["journeys_heldout"], {"n": len(checks), "ok": 0, "ok_rate": 0.0, "failed_model": 0,
+                                                     "failed_timeout": 0, "failed_infra": len(checks)})
+
+    def test_rows_are_those_of_a_run_without_infra_but_for_the_label(self):
+        labelled = self.square("once")
+        plain = self.square("once", reason="repaired output still invalid")  # the model's failure
+
+        def unlabelled(rows):
+            out = []
+            for r in rows:
+                detail = {k: v for k, v in r["detail"].items() if k not in ("infra", "fallback_reason")}
+                out.append(dict({k: v for k, v in r.items() if k != "latency_ms"}, detail=detail))
+            return out
+
+        self.assertFalse(any(r["detail"].get("infra") for r in plain))
+        self.assertEqual(unlabelled(labelled), unlabelled(plain))
+        a = aggregate.journeys_block(labelled)["journeys_heldout"]
+        b = aggregate.journeys_block(plain)["journeys_heldout"]
+        self.assertEqual((a["n"], a["ok"], a["ok_rate"]), (b["n"], b["ok"], b["ok_rate"]))  # the label changes no rate
+        self.assertEqual((a["failed_model"], a["failed_infra"]), (0, a["n"]))
+        self.assertEqual((b["failed_model"], b["failed_infra"]), (b["n"], 0))
+
+    def test_a_timeout_at_the_gate_is_a_model_failure(self):
+        rows = self.square("once", reason="LLM request timed out")
+        checks = server_suites.JOURNEY_CHECKS["square"]
+        self.assertEqual(len(FakeFlakySquare.sessions), 1)
+        self.assertFalse(any(r["ok"] or r["detail"].get("infra") for r in rows))
+        block = aggregate.journeys_block(rows)["journeys_heldout"]
+        self.assertEqual((block["failed_model"], block["failed_timeout"], block["failed_infra"]), (len(checks), 1, 0))
+
+    def test_a_model_failure_at_the_gate_is_not_infra(self):
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys_heldout")
+            srv = serve(FakeEmpty, self)
+
+            class Args:
+                model, timeout, repeat = "m/x", 10, 1
+
+            server_suites.run_one_journey("square", server_suites.square_steps, srv, sink, Args, 0)
+        self.assertFalse(any(r["ok"] or r["detail"].get("infra") for r in sink.rows))
+        block = aggregate.journeys_block(sink.rows)["journeys_heldout"]
+        self.assertEqual((block["failed_model"], block["failed_infra"]), (len(sink.rows), 0))
+
+    def run_scripted(self, steps, checks):
+        FakeScripted.calls = []
+        srv = serve(FakeScripted, self)
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with mock.patch.dict(server_suites.JOURNEY_CHECKS, {"scripted": checks}):
+            with tempfile.TemporaryDirectory() as out:
+                sink = server_suites.Sink(out, "m/x", "journeys_heldout")
+                server_suites.run_one_journey("scripted", steps, srv, sink, Args, 0)
+        rows = {r["case"].split(".", 1)[1]: r for r in sink.rows}
+        self.assertEqual(sorted(rows), sorted(checks))
+        self.assertEqual(len({session for session, _ in FakeScripted.calls}), 1)  # never re-run
+        return rows
+
+    def test_each_row_is_labelled_by_its_own_call(self):
+        def gated(*kinds):
+            return self.run_scripted(scripted_steps(*kinds), [f"check {i}" for i in range(len(kinds))] + ["rest"])
+
+        rows = gated("model", "infra")
+        self.assertFalse(rows["check 0"]["detail"].get("infra"))
+        self.assertTrue(rows["check 1"]["detail"].get("infra") and rows["rest"]["detail"].get("infra"))
+        rows = gated("infra", "model")
+        self.assertTrue(rows["check 0"]["detail"].get("infra"))
+        self.assertFalse(rows["check 1"]["detail"].get("infra") or rows["rest"]["detail"].get("infra"))
+        rows = gated("infra", "timeout")
+        self.assertTrue(rows["check 0"]["detail"].get("infra"))
+        self.assertFalse(rows["check 1"]["detail"].get("infra") or rows["rest"]["detail"].get("infra"))
+
+    def test_an_exception_after_an_infra_call_is_the_models(self):
+        # `call()` never raises, so an exception comes from reading an answer, which may be
+        # an earlier one: the checks it skips are not labelled infra.
+        def steps(j):
+            first = j.call("GET", "/model")
+            j.call("GET", "/infra")
+            first["missing"]  # noqa: B018 - reading the earlier answer raises KeyError
+
+        rows = self.run_scripted(steps, ["check 0", "rest"])
+        self.assertTrue(all(r["source"] == "skipped" and not r["ok"] for r in rows.values()))
+        self.assertFalse(any(r["detail"].get("infra") for r in rows.values()), rows)
+        self.assertIn("KeyError", rows["rest"]["detail"]["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

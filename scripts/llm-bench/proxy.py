@@ -714,10 +714,11 @@ class Handler(BaseHTTPRequestHandler):
                             "application/json")
             return
         else:
-            # Three rejections in a row: answer with the last one.
-            rec.update(status=502, error_kind="http_4xx", error_excerpt="upstream kept rejecting the request")
+            # Three rejections in a row: the request's failure, not the provider's, so a
+            # 4xx (424) rather than a 502 that the bench would read as a provider error.
+            rec.update(status=424, error_kind="http_4xx", error_excerpt="upstream kept rejecting the request")
             rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
-            self.send_json(502, {"error": {"message": "upstream kept rejecting the request"}})
+            self.send_json(424, {"error": {"message": "upstream kept rejecting the request"}})
             return
 
         assert resp is not None

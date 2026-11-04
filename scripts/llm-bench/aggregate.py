@@ -727,6 +727,26 @@ def drop_harness_rejected(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
     return kept, len(rows) - len(kept)
 
 
+def journeys_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per journeys suite: checks, passes, and the failures split into those labelled
+    as the provider's (`detail.infra`: a 5xx, 429 or transport-error fallback, and the
+    checks a journey skipped after one) and the rest, which are the model's.
+    `failed_timeout` counts the model failures judged on an LLM-timeout fallback: they
+    stay the model's (a slow model times out) and are only shown apart. The split is a
+    label: every row counts in `ok_rate` exactly as it was recorded."""
+    out: Dict[str, Any] = {}
+    for name in sorted({str(r.get("suite")) for r in rows if str(r.get("suite")).startswith("journeys")}):
+        suite = [r for r in rows if r.get("suite") == name and r.get("case") != "suite_error"]
+        details = [r.get("detail") if isinstance(r.get("detail"), dict) else {} for r in suite]
+        failed = [d for r, d in zip(suite, details) if not r.get("ok")]
+        infra = sum(1 for d in failed if d.get("infra"))
+        timeouts = sum(1 for d in failed if not d.get("infra")
+                       and "LLM request timed out" in str(d.get("fallback_reason") or ""))
+        out[name] = {"n": len(suite), "ok": len(suite) - len(failed), "ok_rate": rate(len(suite) - len(failed), len(suite)),
+                     "failed_model": len(failed) - infra, "failed_timeout": timeouts, "failed_infra": infra}
+    return out
+
+
 def server_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     n_all = len(rows)
     rows, rejected = drop_harness_rejected(rows)
@@ -737,6 +757,7 @@ def server_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"consistency": consistency_block(suite("consistency")),
             "sse": sse_block(suite("sse")),
             "import": import_block(suite("import")),
+            "journeys": journeys_block(rows),
             "n": len(rows),
             "n_all": n_all,
             "harness_rejected_n": rejected}
@@ -1482,6 +1503,24 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
             rows.append([m, case, fmt(c["n"], "int"), fmt(c["ok_rate"], "pct")])
     lines += md_table(["Model", "case", "n", "ok rate"], rows or [["—", "—", "0", "—"]])
     lines.append("")
+
+    rows = []
+    for m, b in models.items():
+        for name, jb in b["server"].get("journeys", {}).items():
+            rows.append([m, name, fmt(jb["n"], "int"), fmt(jb["ok"], "int"), fmt(jb["failed_model"], "int"),
+                         fmt(jb["failed_timeout"], "int"), fmt(jb["failed_infra"], "int")])
+    if rows:
+        lines.append("Journey suites (failed checks split into the model's and the provider's):")
+        lines.append("")
+        lines += md_table(["Model", "suite", "checks", "ok", "failed (model)", "of which timeouts",
+                           "failed (provider)"], rows)
+        lines.append("")
+        lines.append("failed (provider) = checks judged on a fallback the provider forced (HTTP 5xx or 429, "
+                     "a transport error) and the checks a journey skipped after one. It is a label only: no row "
+                     "is dropped, replaced or re-run, and the ok counts and rates are the same with or without "
+                     "it. An LLM timeout stays a model failure (of which timeouts). A repair call's 503 after "
+                     "an invalid first answer cannot be told apart today and is labelled provider.")
+        lines.append("")
 
     lines.append("## 9. Value sensitivity")
     lines.append("")

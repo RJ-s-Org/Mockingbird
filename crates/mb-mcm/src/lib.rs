@@ -429,6 +429,53 @@ pub enum Effect {
     Other,
 }
 
+/// The writes a name says it makes and the nouns it makes them on: `create`,
+/// `update` or `delete` starting it before an uppercase letter or `_`
+/// (`deleteComment`), then ending it after a noun, at an uppercase letter
+/// or after `_` (`issueUpdate`, `product_variant_delete`). Each noun is
+/// lowercased, with `_` removed and one trailing `s` (not `ss`) dropped
+/// (`issue`, `productvariant`); empty ones are left out. Whether a noun
+/// names a record is the caller's to tell.
+#[must_use]
+pub fn write_nouns(name: &str) -> Vec<(Effect, String)> {
+    const VERBS: [(&str, Effect); 3] = [
+        ("create", Effect::Create),
+        ("update", Effect::Update),
+        ("delete", Effect::Delete),
+    ];
+    let noun = |raw: &str| {
+        let mut n: String = raw.chars().filter(|c| *c != '_').collect();
+        n.make_ascii_lowercase();
+        if n.ends_with('s') && !n.ends_with("ss") {
+            n.pop();
+        }
+        (!n.is_empty()).then_some(n)
+    };
+    let mut out = Vec::new();
+    for (verb, effect) in VERBS {
+        if let Some((head, rest)) = name.split_at_checked(verb.len())
+            && head.eq_ignore_ascii_case(verb)
+            && rest.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+            && let Some(n) = noun(rest)
+        {
+            out.push((effect, n));
+        }
+    }
+    for (verb, effect) in VERBS {
+        if let Some((head, tail)) = name
+            .len()
+            .checked_sub(verb.len())
+            .and_then(|at| name.split_at_checked(at))
+            && tail.eq_ignore_ascii_case(verb)
+            && (tail.starts_with(|c: char| c.is_ascii_uppercase()) || head.ends_with('_'))
+            && let Some(n) = noun(head)
+        {
+            out.push((effect, n));
+        }
+    }
+    out
+}
+
 /// A request/response operation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]

@@ -25,7 +25,9 @@ Suites (contracts are in-repo, so the bench is reproducible):
   rep: Stripe (customer, payment intent, confirm, refund), travel (search, offer,
   booking, cancel) and GitHub (search, repo, issue). One row per check, `case` =
   `<journey>.<check>`; `source` is the `x-mockingbird-source` of the call the check
-  judged. A journey that breaks fails its remaining checks. Not in the default
+  judged. A journey that breaks fails its remaining checks. A failure the provider
+  caused (a 5xx, 429 or transport-error fallback; never a timeout) carries the
+  label `detail.infra`, which changes no row. Not in the default
   suites (it is asked for with `--suite journeys`). Measures remembering entities
   and the effects of writes.
 - journeys_heldout: the same kind of journey over five contracts the engine was not
@@ -432,6 +434,28 @@ def source_of(hdrs):
 
 def fallback_reason(hdrs):
     return hdrs.get("x-mockingbird-fallback-reason") if hdrs else None
+
+
+# A fallback answer the provider caused, not the model: the provider answered 5xx or
+# 429 ("no capacity", rate limited), or the connection to it failed. Anchored, so a
+# reason that starts with the model's own failure (`LLM output truncated: ...; not
+# salvaged: LLM returned HTTP 503`) is not one. An LLM timeout is not one either: it is
+# often the model being slow (aggregate.py counts timeouts on their own). The bench
+# proxy's 424 after repeated upstream 4xx rejections is the request's failure, not the
+# provider's (older runs sent it as a 502, hence the text check).
+# Known limit: a repair call that gets a 503 after an invalid first answer is reported
+# as a bare `LLM returned HTTP 503` and cannot be told apart, so it is labelled infra.
+# That is why the label never changes a row and never causes a re-run.
+INFRA_REASON = re.compile(r"^LLM returned HTTP (5\d\d|429)\b|^LLM transport error")
+
+
+def infra_reason(last):
+    """The fallback reason of `last` (a `Journey.last`) when the mock's answer was a
+    fallback forced by a clear provider error, else None."""
+    reason = str(last.get("fallback_reason") or "")
+    if last.get("source") == "fallback" and INFRA_REASON.search(reason) and "kept rejecting" not in reason:
+        return reason
+    return None
 
 
 def excerpt(raw, n=200):
@@ -1004,7 +1028,12 @@ def same_items(got, want):
 
 class Journey:
     """One journey run: a fresh session, calls through `request()`, and checks
-    recorded as rows against the latest call."""
+    recorded as rows against the latest call.
+
+    A failed check judged on a call the provider failed (`infra_reason`) carries
+    `detail.infra` true. That is a label only: the row, its `ok` and every other row
+    are what they would be without it, and no run is repeated or dropped. The label
+    goes by the latest call, which is the call a check judges in all but a few steps."""
 
     def __init__(self, name, srv, sink, args, rep):
         self.name, self.srv, self.sink, self.args, self.rep = name, srv, sink, args, rep
@@ -1013,6 +1042,7 @@ class Journey:
         self.rng = random.Random(f"{args.model}|{name}|{rep}")
         self.done = set()
         self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
+        self.last_infra = None  # the infra reason the latest check failed on, if any
 
     def call(self, method, path, query=None, body=None, form=None):
         """The JSON body of the response, or {} when it is not a JSON object."""
@@ -1027,9 +1057,15 @@ class Journey:
             self.last["error"] = excerpt(raw)
         return parsed if isinstance(parsed, (dict, list)) else {}
 
-    def check(self, name, ok, **detail):
+    def check(self, name, ok, infra=None, **detail):
+        """`infra`: None labels the row by the latest call; a reason or False sets it."""
         self.done.add(name)
         detail = dict(detail, **{k: v for k, v in self.last.items() if k not in ("source", "ms") and v is not None})
+        if infra is None:
+            infra = infra_reason(self.last)
+        self.last_infra = infra if infra and not ok else None
+        if self.last_infra:
+            detail["infra"] = True
         journey_check(self.sink, self.name, self.rep, name, bool(ok), detail,
                       self.last["source"], self.last["ms"])
 
@@ -1039,18 +1075,24 @@ class Journey:
 
 
 def run_one_journey(name, steps, srv, sink, args, rep):
+    """Runs a journey once and records every one of its checks. When a gate fails on a
+    provider error (`Journey.check` labels it `detail.infra`), the checks it skips carry
+    the label too. A journey that breaks on an exception is the model's: `call()` never
+    raises, so the exception comes from reading an answer, which may be an earlier one."""
     j = Journey(name, srv, sink, args, rep)
+    ended_on_infra = None
     try:
         steps(j)
         reason = None
     except JourneyStop as e:
         reason = f"stopped at {e}"
+        ended_on_infra = j.last_infra
     except Exception as e:  # noqa: BLE001 - a journey that breaks is recorded, not raised
         reason = f"{type(e).__name__}: {e}"[:300]
     for check in JOURNEY_CHECKS[name]:
         if check not in j.done:
             j.last = {"status": None, "source": "skipped", "ms": None, "fallback_reason": None}
-            j.check(check, False, reason=reason or "journey ended early")
+            j.check(check, False, infra=ended_on_infra or False, reason=reason or "journey ended early")
 
 
 def stripe_steps(j):
@@ -1608,8 +1650,8 @@ BLIND_CHECKS = {
         "read shows the latest snapshot and count", "read keeps the playlist's details",
     ],
     "discord": [
-        "guild read names the guild asked for", "channels name their guild", "guild has a text channel",
-        "message has an id", "message keeps what was sent", "author is the bot", "read matches the created message",
+        "guild read names the guild asked for", "channels name their guild", "message has an id",
+        "message keeps what was sent", "author is the bot", "read matches the created message",
         "reply names the message it answers", "read keeps the reference", "list holds both, newest first",
         "after filter holds only the later message", "before filter holds only the earlier message",
         "deleted message is gone", "list drops the deleted message",
@@ -1723,9 +1765,11 @@ def discord_steps(j):
             eq(guild.get("id"), gid) and isinstance(guild.get("approximate_member_count"), int))
     channels = dicts(j.call("GET", f"/guilds/{gid}/channels"))
     j.check("channels name their guild", bool(channels) and all(eq(c.get("guild_id"), gid) for c in channels))
+    # The contract does not promise the guild a text channel (types are an enum and it has
+    # no route to make one), so a listed text channel is used when there is one, and else a
+    # DM channel id the bench makes up, as it does the guild's: `create_message` posts to either.
     channel = next((c for c in channels if c.get("type") == 0), {})
-    cid = channel.get("id")
-    need(j, "guild has a text channel", cid)
+    cid = channel.get("id") or str(1100000000000000000 + j.rng.randrange(10 ** 17))
     messages = f"/channels/{cid}/messages"
     content, title = f"Doors open at {j.rng.randint(17, 20)}:30 tonight.", "Meetup reminder"
     nonce = f"bench-{j.rng.randint(100000, 999999)}"
@@ -4734,7 +4778,9 @@ def run_suite(suite, args):
         failed = True
         sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
     n_ok = sum(1 for r in sink.rows if r["ok"])
-    print(f"  {suite}: {n_ok}/{len(sink.rows)} ok", file=sys.stderr)
+    n_infra = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra"))
+    infra = f", {n_infra} failed on provider errors" if n_infra else ""
+    print(f"  {suite}: {n_ok}/{len(sink.rows)} ok{infra}", file=sys.stderr)
     return failed
 
 

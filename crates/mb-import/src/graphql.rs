@@ -602,24 +602,67 @@ fn def_schema(
 // Operations
 // ---------------------------------------------------------------------------
 
+/// The write a mutation's name says it makes, and on what: a write verb
+/// at its start (`deleteComment`) or end (`issueUpdate`,
+/// `productVariantDelete`; see [`mb_mcm::write_nouns`]), with the rest of
+/// the name naming exactly, once singular, an object type of the schema
+/// with an `id` (`ProductVariant`). That type, lowercased, is the record.
+/// `None` when the rest names no such type (`undoDelete`, `bulkDelete`,
+/// `itemsToDelete`).
+fn write_verb(schema: &Schema, name: &str) -> Option<(Effect, String)> {
+    mb_mcm::write_nouns(name)
+        .into_iter()
+        .find_map(|(effect, noun)| Some((effect, record_type(schema, &noun)?)))
+}
+
+/// The object type with an `id` that `noun` (lowercase, singular, no `_`)
+/// names exactly, ignoring case and `_`, lowercased.
+fn record_type(schema: &Schema, noun: &str) -> Option<String> {
+    schema.types.keys().find_map(|t| {
+        let lower = t.to_lowercase();
+        let identified = schema
+            .object_fields(t)
+            .is_some_and(|fields| fields.iter().any(|x| x.name == "id"));
+        (identified && lower.replace('_', "") == noun).then_some(lower)
+    })
+}
+
 fn operation(
     schema: &Schema,
     operation_type: GraphqlOperationType,
     label: &str,
     f: &Field,
 ) -> Operation {
+    let write = (operation_type == GraphqlOperationType::Mutation)
+        .then(|| write_verb(schema, &f.name))
+        .flatten();
     let kind = match operation_type {
         GraphqlOperationType::Query => OperationKind::Query,
+        // A verb prefix as on any protocol (`deleteIssue`), else a write
+        // verb ending a name that names a record (`issueUpdate`).
         GraphqlOperationType::Mutation => {
-            kind_from_name(&f.name, OperationKind::Command(Effect::Other))
+            match kind_from_name(&f.name, OperationKind::Command(Effect::Other)) {
+                OperationKind::Command(Effect::Other) => write
+                    .as_ref()
+                    .map_or(OperationKind::Command(Effect::Other), |(effect, _)| {
+                        OperationKind::Command(*effect)
+                    }),
+                kind => kind,
+            }
         }
         GraphqlOperationType::Subscription => OperationKind::StreamServer,
     };
     let named = named_type(&f.ty);
     let object_fields = schema.object_fields(named);
+    let record = write.map(|(_, record)| record);
     let resource_type = match object_fields {
+        // A write's payload with no `id` of its own (`IssuePayload`,
+        // `DeletePayload`) stands for the record its name names.
+        Some(fields) if !fields.iter().any(|x| x.name == "id") => {
+            Some(record.unwrap_or_else(|| named.to_lowercase()))
+        }
         Some(_) => Some(named.to_lowercase()),
-        None => resource_from_name(&f.name),
+        None => record.or_else(|| resource_from_name(&f.name)),
     };
     let returns_one = matches!(f.ty.base, BaseType::Named(_));
     let identity = object_fields
