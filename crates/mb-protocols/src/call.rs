@@ -1496,24 +1496,8 @@ pub(crate) async fn complete(
                     .and_then(|b| b.get(field))
                     .and_then(id_string);
                 let effects = std::mem::take(&mut generated.effects);
-                // What the siblings the effects reach hold now, for what they store.
-                let mut held: HashMap<String, Value> = HashMap::new();
-                for e in effects
-                    .iter()
-                    .filter(|e| e.resource_type == t && created.as_deref() != Some(e.id.as_str()))
-                {
-                    if !held.contains_key(&e.id)
-                        && let Some(record) = state.get(session, t, &e.id).await
-                    {
-                        held.insert(e.id.clone(), record.data);
-                    }
-                }
-                let (kept, dropped) = sibling_effects(
-                    t,
-                    created.as_deref(),
-                    (state_call.body.as_ref(), &held),
-                    effects,
-                );
+                let (kept, dropped) =
+                    sibling_effects(t, created.as_deref(), state_call.body.as_ref(), effects);
                 generated.effects = kept;
                 generated.dropped_effects += dropped.len();
                 generated
@@ -2665,17 +2649,16 @@ fn copies_value(set: &Value, asked: &Value, depth: usize) -> bool {
 /// `created`, into what may apply and what is rejected: on another record of its own
 /// type, every member whose value copies what the request gives that member (see
 /// [`copies_value`]) is taken out, as the request copied onto a sibling (Mollie's second
-/// payment setting the first one's amount). One is left in only when the sibling, as
-/// `held` has it, does not store that member yet and its value is the sibling's own id
-/// (`in_reply_to: 1234567` on a parent lacking it). The rest of the effect applies (a
-/// reply's count on its thread, clearing `is_default` on the old default); an effect
-/// with nothing left is rejected whole. Effects on the created record and on other
+/// payment setting the first one's amount, a request's `parent_id` making its parent its
+/// own parent), whatever the value: the sibling's own id is copied as much as any. The
+/// rest of the effect applies (a reply's count on its thread, clearing `is_default` on
+/// the old default); an effect with nothing left is rejected whole. Effects on the created record and on other
 /// types are left as they are. Each rejected part is returned as an effect of the
 /// members taken out.
 fn sibling_effects(
     resource_type: &str,
     created: Option<&str>,
-    (body, held): (Option<&Value>, &HashMap<String, Value>),
+    body: Option<&Value>,
     effects: Vec<ResourceEffect>,
 ) -> (Vec<ResourceEffect>, Vec<ResourceEffect>) {
     let empty = Map::new();
@@ -2690,16 +2673,9 @@ fn sibling_effects(
             kept.push(e);
             continue;
         }
-        let stored = held.get(&e.id);
-        let (copied, rest): (Map<String, Value>, Map<String, Value>) =
-            std::mem::take(&mut e.set).into_iter().partition(|(k, v)| {
-                let Some(asked) = body.get(k) else {
-                    return false;
-                };
-                let names_it = id_string(v).is_some_and(|v| v == e.id);
-                let unstored = stored.is_none_or(|r| r.get(k).is_none());
-                copies_value(v, asked, 0) && !(names_it && unstored)
-            });
+        let (copied, rest): (Map<String, Value>, Map<String, Value>) = std::mem::take(&mut e.set)
+            .into_iter()
+            .partition(|(k, v)| body.get(k).is_some_and(|asked| copies_value(v, asked, 0)));
         if !copied.is_empty() {
             dropped.push(ResourceEffect {
                 set: copied,
@@ -6365,23 +6341,11 @@ mod tests {
                 .map(|e| format!("{}:{}", e.id, Value::Object(e.set.clone())))
                 .collect::<Vec<_>>()
         };
-        let held: HashMap<String, Value> = HashMap::from([
-            (
-                "1".to_string(),
-                json!({"id": "1", "amount": 25, "is_default": true}),
-            ),
-            (
-                "tr_1".to_string(),
-                json!({"id": "tr_1", "fields": {"parent": {"id": "tr_0"}}}),
-            ),
-            ("1234567".to_string(), json!({"id": "1234567", "amount": 3})),
-        ]);
         let split = |body: Value, effects: Vec<ResourceEffect>| {
-            let (kept, dropped) =
-                sibling_effects("payments", Some("new"), (Some(&body), &held), effects);
+            let (kept, dropped) = sibling_effects("payments", Some("new"), Some(&body), effects);
             (sets(&kept), sets(&dropped))
         };
-        // The amount alone, though `1` is the sibling's id: it stores an amount.
+        // The amount alone, though `1` is the sibling's id.
         assert_eq!(
             split(
                 json!({"amount": 1, "description": "Order X-2"}),
@@ -6435,20 +6399,36 @@ mod tests {
             .0,
             Vec::<String>::new()
         );
-        // The sibling's own id, under a member it does not store, may be set.
+        // The sibling's own id is copied as much as any value: a reply's `in_reply_to`
+        // on its parent, a `parent_id` making a record its own parent, a `quantity` that
+        // happens to equal an id. What the request does not give still applies.
         assert_eq!(
             split(
                 json!({"amount": 3, "in_reply_to": 1_234_567}),
                 vec![effect(
                     "payments",
                     "1234567",
-                    json!({"in_reply_to": 1_234_567, "amount": 3})
+                    json!({"in_reply_to": 1_234_567, "replies": 1})
                 )],
             ),
             (
-                vec!["1234567:{\"in_reply_to\":1234567}".to_string()],
-                vec!["1234567:{\"amount\":3}".to_string()]
+                vec!["1234567:{\"replies\":1}".to_string()],
+                vec!["1234567:{\"in_reply_to\":1234567}".to_string()]
             )
+        );
+        assert_eq!(
+            split(
+                json!({"parent_id": "tr_1"}),
+                vec![effect("payments", "tr_1", json!({"parent_id": "tr_1"}))],
+            ),
+            (vec![], vec!["tr_1:{\"parent_id\":\"tr_1\"}".to_string()])
+        );
+        assert_eq!(
+            split(
+                json!({"amount": 2, "quantity": 1}),
+                vec![effect("payments", "1", json!({"quantity": 1}))],
+            ),
+            (vec![], vec!["1:{\"quantity\":1}".to_string()])
         );
         // The created record and other types are left as they are.
         assert_eq!(

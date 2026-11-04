@@ -67,7 +67,7 @@ paths:
       parameters: [{name: ledger_id, in: path, required: true, schema: {type: string}}]
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, properties: {amount: {type: number}, description: {type: string}, is_default: {type: boolean}, in_reply_to: {type: integer}, fields: {type: object, properties: {parent: {type: object, properties: {id: {type: string}}}}}}}}}
+        content: {application/json: {schema: {type: object, properties: {amount: {type: number}, description: {type: string}, quantity: {type: integer}, parent_id: {type: string}, is_default: {type: boolean}, in_reply_to: {type: integer}, fields: {type: object, properties: {parent: {type: object, properties: {id: {type: string}}}}}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
   /profiles:
@@ -114,6 +114,8 @@ components:
         description: {type: string}
         reply_to: {type: string}
         replies: {type: integer}
+        quantity: {type: integer}
+        parent_id: {type: string}
         is_default: {type: boolean}
         in_reply_to: {type: integer}
         fields: {type: object, properties: {parent: {type: object, properties: {id: {type: string}}}}}
@@ -885,4 +887,53 @@ async fn a_copied_nested_object_lands_none_of_its_members() {
     let first = h.held("payments", "tr_000001").await;
     assert_eq!(first["replies"], 2, "{first} {}", h.prompt(1));
     assert!(first.get("fields").is_none(), "{first}");
+}
+
+/// A request value that happens to equal a sibling's id, or names it, is copied onto it
+/// as much as any: a `quantity` of `1` does not land on payment `1`, and a `parent_id`
+/// does not make the payment it names its own parent, though neither stores that member
+/// yet.
+#[tokio::test]
+async fn a_value_naming_a_sibling_is_still_a_copy() {
+    let first = json!({"id": "1", "amount": 25.0, "description": "Order X-1"});
+    let parent = json!({"id": "tr_000001", "amount": 9.0, "description": "Parent"});
+    let h = harness(
+        CONTRACT,
+        vec![
+            first.clone(),
+            parent.clone(),
+            json!({
+                "effects": [{"type": "payments", "id": "1", "set": {"quantity": 1}}],
+                "response": payment("2", 2.0, "Order X-2"),
+            }),
+            json!({
+                "effects": [{"type": "payments", "id": "tr_000001", "set": {"parent_id": "tr_000001"}}],
+                "response": payment("3", 3.0, "Child"),
+            }),
+        ],
+    );
+    let uri = "/ledgers/lg_000001/payments";
+    h.post(uri, json!({"amount": 25.0, "description": "Order X-1"}))
+        .await;
+    h.post(uri, json!({"amount": 9.0, "description": "Parent"}))
+        .await;
+    let (status, body) = h
+        .post(
+            uri,
+            json!({"amount": 2, "quantity": 1, "description": "Order X-2"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body} {}", h.prompt(2));
+    assert!(h.prompt(2).contains("\"effects\""), "{}", h.prompt(2));
+    let held = h.held("payments", "1").await;
+    assert!(held.get("quantity").is_none(), "{held}");
+    let (status, body) = h
+        .post(
+            uri,
+            json!({"amount": 3, "parent_id": "tr_000001", "description": "Child"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body} {}", h.prompt(3));
+    let held = h.held("payments", "tr_000001").await;
+    assert!(held.get("parent_id").is_none(), "{held}");
 }
