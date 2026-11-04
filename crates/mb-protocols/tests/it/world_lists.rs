@@ -3796,7 +3796,7 @@ async fn review_free_text_matches_only_declared_text() {
 }
 
 /// The model's page reached by its own token, carried on the last stored page, does
-/// not serve again a record the stored pages served, and keeps the model's token.
+/// not serve again a record the stored pages served.
 #[tokio::test]
 async fn review2_model_page_after_stored_rest_does_not_repeat_it() {
     let mut script = created("open");
@@ -3827,7 +3827,6 @@ async fn review2_model_page_after_stored_rest_does_not_repeat_it() {
     dedup.sort();
     dedup.dedup();
     assert_eq!(all.len(), dedup.len(), "duplicate across pages: {all:?}");
-    assert_eq!(third["next_cursor"], "def", "{third}");
 }
 
 const PATCH_BLOCK: &str = r##"  /tasks/{id}:
@@ -3868,4 +3867,55 @@ async fn review2_an_update_does_not_reopen_the_scope_leak() {
     let first = api.get("/tasks?org=other&limit=1").await;
     let second = next_of(&api, &first, "org=other&limit=1").await;
     assert_eq!(ids_in(&second, "data"), ["t3"], "{second}");
+    assert_eq!(second["next_cursor"], Value::Null, "{second}");
+}
+
+/// The model's page for its own token, carried on after a stored rest, that holds only
+/// what the rest served ends the list: no token, rather than an empty page with one.
+#[tokio::test]
+async fn a_model_page_holding_only_served_records_ends_the_list() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc"});
+    script.push(Ok(page.to_string()));
+    let model2 = json!({"data": [stored_task("t2", "B", "open")], "next_cursor": "def"});
+    script.push(Ok(model2.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let second = api.get(&format!("/tasks?limit=1&cursor={cursor}")).await;
+    assert_eq!(second["next_cursor"], "abc", "{second}");
+    let third = api.get("/tasks?limit=1&cursor=abc").await;
+    assert_eq!(third["data"], json!([]), "{third}");
+    assert!(
+        third.get("next_cursor").is_none_or(Value::is_null),
+        "{third}"
+    );
+}
+
+/// A token the model gives again (`abc`) on a later first page of the route that keeps
+/// it ends the earlier walk's note: the model's page for it drops nothing.
+#[tokio::test]
+async fn a_reused_model_token_finds_no_earlier_walk() {
+    let mut script = created("open");
+    let page = json!({"data": [stored_task("t1", "A", "open")], "next_cursor": "abc"});
+    script.push(Ok(page.to_string()));
+    // A full page showing both tasks: no stored rest, so the model's `abc` stays.
+    let later = json!({
+        "data": [stored_task("t1", "A", "open"), stored_task("t2", "B", "open")],
+        "next_cursor": "abc",
+    });
+    script.push(Ok(later.to_string()));
+    let model2 = json!({"data": [stored_task("t2", "B", "open")], "next_cursor": null});
+    script.push(Ok(model2.to_string()));
+    let api = api_of(&stored_pages(BY_CURSOR), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?limit=1").await;
+    assert_ne!(first["next_cursor"], "abc", "{first}");
+    assert_eq!(api.get("/tasks?limit=2").await, later);
+    let third = api.get("/tasks?limit=1&cursor=abc").await;
+    assert_eq!(ids_in(&third, "data"), ["t2"], "{third}");
 }

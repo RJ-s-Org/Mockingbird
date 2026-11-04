@@ -1274,11 +1274,11 @@ pub(crate) async fn complete(
         {
             // The model's own next page, after a rest the mock served: not those again,
             // and its token as the model gave it.
-            let followed = pages::followed(&mut state, (plan, call)).await;
+            let followed = pages::followed(&mut state, (plan, call), body).await;
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
-            if let Some(ids) = &followed {
-                pages::drop_served(plan, rt, body, ids);
+            if let Some(followed) = &followed {
+                pages::drop_served(plan, rt, body, followed);
             }
             let cut = lists::narrow(rt, plan, call, body);
             // A full page whose rest the model left out, but the store holds.
@@ -1294,9 +1294,15 @@ pub(crate) async fn complete(
                 }
                 None => false,
             };
-            // A first page kept nothing: no run of an earlier one serves its next pages.
+            // A first page kept nothing: no run of an earlier one serves its next pages,
+            // and a token of the model's it keeps leads on to nothing the mock served.
             if !kept {
                 runs::forget(&mut state, (plan, call)).await;
+                if followed.is_none()
+                    && let Some(body) = generated.body.as_ref()
+                {
+                    pages::forget_followed(&mut state, (plan, call), body).await;
+                }
             }
         }
         if (200..300).contains(&generated.status)
@@ -5363,17 +5369,31 @@ struct CollectionRecord {
 
 impl Collections {
     fn remember(&self, session: &SessionKey, r: &StoredResource, collection: Collection) {
-        self.record(session, r, collection, false);
+        self.place(session, r, collection, false, false);
     }
 
-    /// Records where `r` is, keeping the scope noted for it (see [`Scope`]), as of
-    /// `r` now.
+    /// Records where this runtime's write of `r` put it, keeping the scope noted for it
+    /// (see [`Scope`]), as of `r` now.
     fn record(
         &self,
         session: &SessionKey,
         r: &StoredResource,
         collection: Collection,
         created: bool,
+    ) {
+        self.place(session, r, collection, created, true);
+    }
+
+    /// Records where `r` is, keeping the scope noted for it: as of `r` now when
+    /// `written`, this runtime's own write; as it was otherwise (a list showing `r`),
+    /// so a scope no longer known ([`ScopeOf::Noted`]) does not come back.
+    fn place(
+        &self,
+        session: &SessionKey,
+        r: &StoredResource,
+        collection: Collection,
+        created: bool,
+        written: bool,
     ) {
         let Ok(mut held) = self.0.lock() else {
             return;
@@ -5387,7 +5407,10 @@ impl Collections {
             .remove(&key)
             .and_then(|top| top.scope)
             .or_else(|| held.records.get(&key).and_then(|was| was.scope.clone()))
-            .map(|scope| Scope { digest, ..scope });
+            .map(|scope| match written {
+                true => Scope { digest, ..scope },
+                false => scope,
+            });
         // A later write or list there leaves what a create put there.
         let created = created
             || held
@@ -6884,10 +6907,20 @@ mod tests {
             template: "/orgs/{org}/invoices".into(),
             path: "/orgs/o/invoices".into(),
         };
-        collections.record(&at, &r, collection, false);
+        collections.record(&at, &r, collection.clone(), false);
         assert_eq!(
             collections.carried(&at, &r, "organization_id"),
             ScopeOf::Carried(vec!["42".to_string()])
+        );
+        // A list showing it changed behind the runtime's back leaves it noted only.
+        let moved = StoredResource {
+            data: json!({"id": "1", "x": 3}),
+            ..r.clone()
+        };
+        collections.remember(&at, &moved, collection);
+        assert_eq!(
+            collections.carried(&at, &moved, "organization_id"),
+            ScopeOf::Noted
         );
         // A delete ends it.
         collections.forget_id(&at, "invoices", "1");

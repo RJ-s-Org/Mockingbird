@@ -14,7 +14,8 @@
 //! answer validates so, leading on to the model's own pages. The model's page for that
 //! token is generated as any, but the items the rest served are taken out of it (where
 //! it still validates), its token stays as the model gave it, and the store is not read
-//! for a rest of its own ([`Followed`]). The count stays, raised
+//! for a rest of its own ([`Followed`]); a page left with no item ends the list
+//! instead (no token, its more flag `false` where it has one). The count stays, raised
 //! only as below. A cut the page size made of the model's own items alone writes its
 //! token over the model's, which the last page does not carry; a page that is no cut
 //! keeps the model's token as it is. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
@@ -722,31 +723,49 @@ fn parents_of(slot: &[String]) -> &[String] {
     slot.split_last().map_or(&[], |(_, parents)| parents)
 }
 
-/// The one place answer `body` to `call` has for a token (see the module's doc).
-pub(super) fn slot(
-    bundle: &mb_mcm::Bundle,
-    (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
-    body: &Value,
+/// The text query parameters of `op` a token may come back under: declared free text
+/// ([`is_free_text`]), no page size `size_param`, no bare `id`, naming no member of the
+/// items `item_parts` describe; and, with `call`, none it carries.
+fn token_candidates<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    op: &'a Operation,
+    item_parts: &[&'a Value],
     size_param: &str,
-) -> Option<Slot> {
-    let list = list_member(body)?;
-    let schema = op.success_output()?.schema.as_ref()?;
-    let mut held = None;
-    let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
-    let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
-    let candidates: Vec<(&str, &Value)> = declared
+    call: Option<&OperationCall>,
+) -> Vec<(&'a str, &'a Value)> {
+    let Some(declared) = op
+        .input
+        .query
+        .as_ref()
+        .and_then(|q| q.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    declared
         .iter()
         .filter(|(name, schema)| {
             name.as_str() != size_param
                 && !mb_mcm::is_generic_id(name)
-                && !carries(call, name)
-                && lists::named_member(bundle, &item_parts, name).is_none()
+                && call.is_none_or(|call| !carries(call, name))
+                && lists::named_member(bundle, item_parts, name).is_none()
                 && is_free_text(bundle, schema)
         })
         .map(|(name, schema)| (name.as_str(), schema))
-        .collect();
-    let params: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
-    let echoed = request_values(call);
+        .collect()
+}
+
+/// The places for a token in answers of schema `schema` beside the list `list`: each
+/// free-text member, at the top level or in an object member, whose name is, or ends
+/// with the words of, exactly one of `params`, and whose value in `body` echoes none of
+/// `echoed` (a search's `query`).
+fn token_slots(
+    bundle: &mb_mcm::Bundle,
+    (schema, list): (&Value, &str),
+    body: &Value,
+    params: &[&str],
+    echoed: &[String],
+) -> Vec<Slot> {
     let param_of = |name: &str, generated: Option<&Value>| -> Option<String> {
         if generated
             .and_then(id_string)
@@ -794,6 +813,24 @@ pub(super) fn slot(
             }
         }
     }
+    found
+}
+
+/// The one place answer `body` to `call` has for a token (see the module's doc).
+pub(super) fn slot(
+    bundle: &mb_mcm::Bundle,
+    (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
+    body: &Value,
+    size_param: &str,
+) -> Option<Slot> {
+    let list = list_member(body)?;
+    let schema = op.success_output()?.schema.as_ref()?;
+    let mut held = None;
+    let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
+    let candidates = token_candidates(bundle, op, &item_parts, size_param, Some(call));
+    let params: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+    let echoed = request_values(call);
+    let mut found = token_slots(bundle, (schema, list), body, &params, &echoed);
     match found.pop() {
         Some(first) => found.is_empty().then_some(first),
         // No place for the token itself: a place for the next page's URL, if any, unless
@@ -807,6 +844,54 @@ pub(super) fn slot(
             (&candidates, size_param),
         ),
     }
+}
+
+/// The one parameter, and its value, under which `call` may carry a token a first
+/// page of `op` gave: of those [`slot`] could pair with a member of the answer `body`
+/// (a token's member, else, with one next-page URL member, a cursor no `format` or
+/// `pattern` shapes), the one `call` carries a non-empty text value under. `None` when
+/// it carries none or several.
+fn carried_token(
+    bundle: &mb_mcm::Bundle,
+    (op, call): (&Operation, &OperationCall),
+    body: &Value,
+    size_param: &str,
+) -> Option<(String, String)> {
+    let list = list_member(body)?;
+    let schema = op.success_output()?.schema.as_ref()?;
+    let mut held = None;
+    let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
+    let candidates = token_candidates(bundle, op, &item_parts, size_param, None);
+    let params: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+    let slots = token_slots(bundle, (schema, list), body, &params, &[]);
+    let paired: Vec<String> = match slots.as_slice() {
+        [one] => vec![one.param.clone()],
+        [] if !runs::starts(bundle, (op, call), size_param) => {
+            let mut urls = Vec::new();
+            next_urls(bundle, schema, list, &mut Vec::new(), &mut urls);
+            if urls.len() == 1 {
+                candidates
+                    .iter()
+                    .filter(|(_, schema)| {
+                        let (parts, _) = schema_parts(bundle, Some(schema));
+                        !parts
+                            .iter()
+                            .any(|p| p.get("format").is_some() || p.get("pattern").is_some())
+                    })
+                    .map(|(name, _)| (*name).to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    };
+    let mut carried = paired.into_iter().filter_map(|param| {
+        let token = call.query.get(&param)?.as_str()?.trim().to_string();
+        (!token.is_empty()).then_some((param, token))
+    });
+    let first = carried.next()?;
+    carried.next().is_none().then_some(first)
 }
 
 /// `body` with `value` at `path`, an object made for it where its parent is missing or
@@ -883,21 +968,23 @@ fn place_key(place: u64) -> String {
 
 /// The prefix of a [`Followed`] document.
 const FOLLOWED_PREFIX: &str = "#then/";
-/// Query values of a request looked up as a model's token carried on, at most.
-const MAX_FOLLOWED_LOOKUPS: usize = 4;
 
-/// What a cut's last page led on to: a token the model gave on the first page (see
-/// the module's doc), and the ids of the items the cut served before it. A request
-/// carrying the token under its parameter, with the first page's other query values,
-/// is the model's, but those items are not served again on it. Kept under the store's
-/// reserved type, one document per token, ended by the session's TTL like cuts.
-struct Followed {
+/// What a cut's last page led on to: the token the model gave on the first page (see
+/// the module's doc), where it sat, and the ids of the items the cut served before it.
+/// A request carrying the token under its parameter, with the first page's other query
+/// values, is the model's, but those items are not served again on it. One document
+/// per route, path values and parameter, under the store's reserved type: every first
+/// page there that keeps a cut over a token the model gave writes it anew, or ends it
+/// when nothing leads on, and so does one that keeps the model's token, so a token the
+/// model gives again (`abc`) never finds an earlier walk's. The session's TTL ends it.
+pub(super) struct Followed {
     op: String,
     path: Value,
     query: Value,
-    param: String,
+    token: String,
+    slot: Slot,
     size_param: String,
-    ids: Vec<String>,
+    pub(super) ids: Vec<String>,
 }
 
 impl Followed {
@@ -906,7 +993,10 @@ impl Followed {
             "op": self.op,
             "path": self.path,
             "query": self.query,
-            "param": self.param,
+            "token": self.token,
+            "slot": self.slot.path,
+            "param": self.slot.param,
+            "url": self.slot.url,
             "size_param": self.size_param,
             "ids": self.ids,
         })
@@ -918,7 +1008,17 @@ impl Followed {
             op: text("op")?,
             path: value.get("path")?.clone(),
             query: value.get("query")?.clone(),
-            param: text("param")?,
+            token: text("token")?,
+            slot: Slot {
+                path: value
+                    .get("slot")?
+                    .as_array()?
+                    .iter()
+                    .map(|s| s.as_str().map(str::to_string))
+                    .collect::<Option<_>>()?,
+                param: text("param")?,
+                url: text("url"),
+            },
             size_param: text("size_param")?,
             ids: value
                 .get("ids")?
@@ -930,11 +1030,11 @@ impl Followed {
     }
 }
 
-/// The key of the [`Followed`] document of `token`, a model's token on `op`'s route
-/// and `call`'s path.
-fn followed_key(op: &Operation, call: &OperationCall, token: &str) -> String {
+/// The key of the [`Followed`] document of `op`'s route, `call`'s path values and the
+/// token parameter `param`.
+fn followed_key(op: &Operation, call: &OperationCall, param: &str) -> String {
     let mut hasher = Sha256::new();
-    for part in [op.id.as_str(), &path_of(call).to_string(), token] {
+    for part in [op.id.as_str(), &path_of(call).to_string(), param] {
         hasher.update(part.as_bytes());
         hasher.update([0]);
     }
@@ -943,52 +1043,84 @@ fn followed_key(op: &Operation, call: &OperationCall, token: &str) -> String {
     format!("{FOLLOWED_PREFIX}{hex}")
 }
 
-/// The ids a cut served before the model's token `call` carries, which the model's
-/// page for it is not to serve again; `None` when it carries no such token. Only text
-/// values of declared text parameters with no `enum` or `format` are looked up, at
-/// most [`MAX_FOLLOWED_LOOKUPS`].
+/// The page size parameter of a list read `call` of `op`, as the cut's are found.
+fn size_param_of(bundle: &mb_mcm::Bundle, op: &Operation, call: &OperationCall) -> Option<String> {
+    let schema = op.success_output()?.schema.as_ref()?;
+    let doc = std::cell::OnceCell::new();
+    mb_engine::budget::requested_page(
+        op.input.query.as_ref(),
+        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
+        call,
+    )
+    .map(|(name, _)| name.to_string())
+}
+
+/// The [`Followed`] note of the model's token `call` carries, whose page the model
+/// answers with `body`; `None` when it carries none. At most one read: of the one
+/// parameter [`carried_token`] finds, and none when the request carries no value there
+/// (a first page). For a next-page URL as for a token, the request matches only when
+/// its other query values are exactly the first page's (page size aside): a URL the
+/// model wrote with another value, or one more, is no follow of the note, and its page
+/// is the model's as it answers it.
 pub(super) async fn followed(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
-) -> Option<Vec<String>> {
+    body: &Value,
+) -> Option<Followed> {
     let rt = state.rt;
     let op = plan.op;
-    let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
-    let candidates: Vec<(&String, String)> = call
-        .query
-        .iter()
-        .filter(|(name, _)| {
-            declared
-                .get(name.as_str())
-                .is_some_and(|schema| is_free_text(rt.bundle(), schema))
-        })
-        .filter_map(|(name, value)| {
-            let token = value.as_str()?.trim();
-            (!token.is_empty()).then(|| (name, token.to_string()))
-        })
-        .take(MAX_FOLLOWED_LOOKUPS)
-        .collect();
-    for (param, token) in candidates {
-        let key = followed_key(op, call, &token);
-        let Some(doc) = state.get(&plan.session, INTERNAL_TYPE, &key).await else {
-            continue;
-        };
-        if let Some(followed) = Followed::of(&doc.data)
-            && followed.op == op.id
-            && followed.param == *param
-            && followed.path == path_of(call)
-            && followed.query == bound_query(call, param, &followed.size_param)
-        {
-            return Some(followed.ids);
-        }
-    }
-    None
+    let size_param = size_param_of(rt.bundle(), op, call)?;
+    let (param, token) = carried_token(rt.bundle(), (op, call), body, &size_param)?;
+    let key = followed_key(op, call, &param);
+    let doc = state.get(&plan.session, INTERNAL_TYPE, &key).await?;
+    let followed = Followed::of(&doc.data)?;
+    (followed.op == op.id
+        && followed.slot.param == param
+        && followed.token == token
+        && followed.path == path_of(call)
+        && followed.query == bound_query(call, &param, &followed.size_param))
+    .then_some(followed)
 }
 
-/// `body` without the items whose identity is one of `ids`, where the answer still
-/// validates so.
-pub(super) fn drop_served(plan: &CallPlan<'_>, rt: &MockRuntime, body: &mut Value, ids: &[String]) {
-    let field = item_identity(rt.bundle(), plan.op, body);
+/// Ends the [`Followed`] note of the token answer `body` to the first page `call`
+/// holds where the model gave it: a page that keeps the model's token leads on to
+/// nothing the mock served.
+pub(super) async fn forget_followed(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    body: &Value,
+) {
+    let rt = state.rt;
+    let op = plan.op;
+    let Some(size_param) = size_param_of(rt.bundle(), op, call) else {
+        return;
+    };
+    let Some(slot) = slot(
+        rt.bundle(),
+        (op, call, plan.page_url.as_deref()),
+        body,
+        &size_param,
+    ) else {
+        return;
+    };
+    if slot.given(body).is_some() {
+        let key = followed_key(op, call, &slot.param);
+        state.delete(&plan.session, INTERNAL_TYPE, &key).await;
+    }
+}
+
+/// `body`, the model's page for `followed`'s token, without the items whose identity
+/// is one of the ids the cut served, where the answer still validates so. A page left
+/// with no item ends the list instead: no token where the token sat (`null`, left out
+/// or empty, whichever validates), and its more flag `false` where it has one.
+pub(super) fn drop_served(
+    plan: &CallPlan<'_>,
+    rt: &MockRuntime,
+    body: &mut Value,
+    followed: &Followed,
+) {
+    let op = plan.op;
+    let field = item_identity(rt.bundle(), op, body);
     let mut kept = body.clone();
     let Some(items) = list_items_mut(&mut kept) else {
         return;
@@ -997,15 +1129,35 @@ pub(super) fn drop_served(plan: &CallPlan<'_>, rt: &MockRuntime, body: &mut Valu
     items.retain(|item| {
         item.get(&field)
             .and_then(id_string)
-            .is_none_or(|id| !ids.contains(&id))
+            .is_none_or(|id| !followed.ids.contains(&id))
     });
-    if items.len() < was
-        && plan
-            .engine
-            .serve_stored(rt.bundle(), plan.op, &kept, None)
+    if items.len() == was {
+        return;
+    }
+    let empty = items.is_empty();
+    let valid = |candidate: &Value| {
+        plan.engine
+            .serve_stored(rt.bundle(), op, candidate, None)
             .is_some()
-    {
-        *body = kept;
+    };
+    if !empty {
+        if valid(&kept) {
+            *body = kept;
+        }
+        return;
+    }
+    let flag = more_flag(rt.bundle(), op, &followed.slot.path);
+    let parents = parents_of(&followed.slot.path);
+    let end = ended(&kept, &followed.slot)
+        .into_iter()
+        .find_map(|candidate| {
+            flag.as_deref()
+                .and_then(|flag| flag_set(&candidate, parents, flag, false))
+                .filter(|done| valid(done))
+                .or_else(|| valid(&candidate).then_some(candidate))
+        });
+    if let Some(end) = end {
+        *body = end;
     }
 }
 
@@ -1154,18 +1306,23 @@ pub(super) async fn mint(
     if rest.is_empty() {
         return false;
     }
-    // The model's token the last page carries on, with what the rest serves before it.
-    let followed_by = slot
-        .as_ref()
-        .filter(|_| cut.stored > 0)
-        .and_then(|slot| Some((slot.param.clone(), slot.given(body)?)))
-        .map(|(param, token)| {
+    // The model's token the last page carries on, with what the rest serves before it;
+    // any other first page here ends an earlier note (see [`Followed`]).
+    let note = slot.as_ref().map(|slot| {
+        let then = slot.given(body).filter(|_| cut.stored > 0).map(|token| {
             let ids: Vec<String> = rest
                 .iter()
                 .filter_map(|item| item.get(&field).and_then(id_string))
                 .collect();
-            (param, token, ids)
+            (token, ids)
         });
+        let at = Slot {
+            path: slot.path.clone(),
+            param: slot.param.clone(),
+            url: slot.url.clone(),
+        };
+        (at, then)
+    });
     let size_param = cut.size_param.clone();
     let kept = match slot {
         Some(slot) => tokened(
@@ -1215,21 +1372,30 @@ pub(super) async fn mint(
     }
     // A cut not kept serves no token: the answer keeps the model's.
     let kept = state.upsert(session, document).await;
-    if kept && let Some((param, token, ids)) = followed_by {
-        let followed = Followed {
-            op: op.id.clone(),
-            path: path_of(call),
-            query: bound_query(call, &param, &size_param),
-            param,
-            size_param,
-            ids,
-        };
-        let document = StoredResource {
-            resource_type: INTERNAL_TYPE.to_string(),
-            id: followed_key(op, call, &token),
-            data: followed.to_value(),
-        };
-        state.upsert(session, document).await;
+    if kept && let Some((at, then)) = note {
+        let key = followed_key(op, call, &at.param);
+        match then {
+            Some((token, ids)) => {
+                let followed = Followed {
+                    op: op.id.clone(),
+                    path: path_of(call),
+                    query: bound_query(call, &at.param, &size_param),
+                    token,
+                    slot: at,
+                    size_param,
+                    ids,
+                };
+                let document = StoredResource {
+                    resource_type: INTERNAL_TYPE.to_string(),
+                    id: key,
+                    data: followed.to_value(),
+                };
+                state.upsert(session, document).await;
+            }
+            None => {
+                state.delete(session, INTERNAL_TYPE, &key).await;
+            }
+        }
     }
     if kept {
         generated.body = Some(page);
