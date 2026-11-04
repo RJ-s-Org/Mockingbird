@@ -5860,7 +5860,8 @@ def moderntreasury_steps(j):
     j.check("posting sets posted_at",
             patched == 200 and eq(posted.get("id"), t1) and eq(posted.get("status"), "posted")
             and instant(posted.get("posted_at")) is not None
-            and eq(read.get("status"), "posted") and eq(read.get("posted_at"), posted.get("posted_at")),
+            and eq(read.get("status"), "posted")
+            and eq(instant(read.get("posted_at")), instant(posted.get("posted_at"))),
             patch_status=patched, transaction_status=posted.get("status"), posted_at=posted.get("posted_at"),
             read_status=read.get("status"), read_posted_at=read.get("posted_at"))
     balances = account(cash)

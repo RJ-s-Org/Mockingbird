@@ -27,7 +27,9 @@ info:
     `GET /resources/image/upload/{public_id}` answers an asset's details, with its
     `tags` and `context`. `GET /resources/image/tags/{tag}` lists the assets that carry
     a tag, sorted by `created_at`, newest first by default (`direction=asc` for oldest
-    first), and by `public_id` between assets created at the same moment; `tags=true` and `context=true` include those fields. Lists answer at most
+    first); assets created at the same moment are ordered by `public_id` in the same
+    direction (descending when newest first). `tags=true` and `context=true` include
+    those fields. Lists answer at most
     `max_results` assets (default 10, at most 500) and, when more follow, a
     `next_cursor` that the next request sends as `next_cursor`; the last page answers
     none. `POST /resources/image/upload/{public_id}` updates an asset: `tags` replaces
@@ -258,7 +260,7 @@ paths:
       tags: [Admin]
       operationId: listResourcesByTag
       summary: List the assets with a tag
-      description: "Sorted by `created_at`, newest first unless `direction=asc`, then by `public_id`."
+      description: "Sorted by `created_at`, newest first unless `direction=asc`, and ties by `public_id` in the same direction (descending when newest first)."
       parameters:
         - $ref: "#/components/parameters/maxResults"
         - $ref: "#/components/parameters/nextCursor"
