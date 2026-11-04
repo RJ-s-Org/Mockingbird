@@ -473,6 +473,7 @@ async fn generate_in(
                         Ok(mut generated) => {
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
+                            write_by_id(rt, &plan, op, &call, &generated).await;
                             Ok(generated)
                         }
                         Err(e) => Err(e),
@@ -585,6 +586,47 @@ async fn store_answer(
     let objects = super::state::objects(&rt.bundle, op, selection, body, args);
     if !objects.is_empty() {
         call::store_resources(rt, &plan.session, objects, !seeding).await;
+    }
+}
+
+/// The write a 2xx update or delete makes on the stored record its `id`
+/// argument names (see [`super::state::by_id`]), whether or not its
+/// payload selects it: an update merges its input's members of the record
+/// over it, after what the answer held, and a delete removes it. Answers
+/// from state or the cache wrote already.
+async fn write_by_id(
+    rt: &MockRuntime,
+    plan: &call::CallPlan<'_>,
+    op: &mb_mcm::Operation,
+    call: &OperationCall,
+    generated: &mb_engine::GeneratedResponse,
+) {
+    if !(200..300).contains(&generated.status)
+        || matches!(generated.source, Source::State | Source::Cache)
+    {
+        return;
+    }
+    let Some(Value::Object(args)) = &call.body else {
+        return;
+    };
+    let Some(target) = super::state::by_id(&rt.bundle, op, args) else {
+        return;
+    };
+    let Some(held) = call::stored_in(rt, &plan.session, &target.types, &target.id).await else {
+        return;
+    };
+    if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
+        call::delete_resource(rt, &plan.session, held).await;
+        return;
+    }
+    let update = super::state::update_of(&rt.bundle, &held, args);
+    if !update.is_empty() {
+        let resource = mb_state::StoredResource {
+            resource_type: held.resource_type,
+            id: held.id,
+            data: Value::Object(update),
+        };
+        call::store_resources(rt, &plan.session, vec![resource], true).await;
     }
 }
 

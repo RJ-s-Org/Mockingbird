@@ -602,6 +602,19 @@ fn def_schema(
 // Operations
 // ---------------------------------------------------------------------------
 
+/// The object type with an `id` that the operation `name` names, without
+/// its verb (`issueUpdate` -> `issue`), lowercased.
+fn named_record(schema: &Schema, name: &str) -> Option<String> {
+    let noun = resource_from_name(name)?;
+    schema.types.keys().find_map(|t| {
+        let lower = t.to_lowercase();
+        let identified = schema
+            .object_fields(t)
+            .is_some_and(|fields| fields.iter().any(|x| x.name == "id"));
+        (identified && lower == noun).then_some(lower)
+    })
+}
+
 fn operation(
     schema: &Schema,
     operation_type: GraphqlOperationType,
@@ -618,6 +631,15 @@ fn operation(
     let named = named_type(&f.ty);
     let object_fields = schema.object_fields(named);
     let resource_type = match object_fields {
+        // A mutation's payload with no `id` of its own (`IssuePayload`,
+        // `DeletePayload`) stands for the record its name names
+        // (`issueUpdate`, `deleteComment`) when the schema has that type.
+        Some(fields)
+            if operation_type == GraphqlOperationType::Mutation
+                && !fields.iter().any(|x| x.name == "id") =>
+        {
+            Some(named_record(schema, &f.name).unwrap_or_else(|| named.to_lowercase()))
+        }
         Some(_) => Some(named.to_lowercase()),
         None => resource_from_name(&f.name),
     };

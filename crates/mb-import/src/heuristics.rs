@@ -2069,7 +2069,7 @@ fn set_identity(
     }
 }
 
-/// Verb prefixes of operation names, with the kind each implies.
+/// Verbs of operation names, with the kind each implies.
 const VERBS: [(&[&str], OperationKind); 4] = [
     (
         &["get", "list", "find", "search", "query", "fetch", "read"],
@@ -2105,16 +2105,42 @@ fn verb_prefix(name: &str) -> Option<(&str, &OperationKind)> {
     })
 }
 
-/// The operation kind implied by a verb-prefixed name (`getUser`,
-/// `create_order`), else `default`.
-pub(crate) fn kind_from_name(name: &str, default: OperationKind) -> OperationKind {
-    verb_prefix(name).map_or(default, |(_, kind)| *kind)
+/// The verb suffix of `name` (a noun-first name: `issueUpdate`,
+/// `comment_delete`) and the kind it implies, with the noun before it. The
+/// suffix matches case-insensitively, must start with an uppercase letter
+/// or follow a `_`, and must follow a non-empty noun.
+fn verb_suffix(name: &str) -> Option<(&str, &OperationKind)> {
+    VERBS.iter().find_map(|(verbs, kind)| {
+        verbs.iter().find_map(|verb| {
+            let at = name.len().checked_sub(verb.len())?;
+            let (noun, tail) = name.split_at_checked(at)?;
+            let boundary =
+                tail.starts_with(|c: char| c.is_ascii_uppercase()) || noun.ends_with('_');
+            let noun = noun.trim_end_matches('_');
+            (!noun.is_empty() && boundary && tail.eq_ignore_ascii_case(verb))
+                .then_some((noun, kind))
+        })
+    })
 }
 
-/// The resource a name refers to: the name without its verb prefix,
-/// lowercased, with one trailing `s` (not `ss`) dropped; `None` if empty.
+/// The verb of `name`, a prefix (`getUser`) or else a suffix
+/// (`userCreate`), and the kind it implies, with the rest of the name.
+fn verb(name: &str) -> Option<(&str, &OperationKind)> {
+    verb_prefix(name).or_else(|| verb_suffix(name))
+}
+
+/// The operation kind implied by a verb-prefixed name (`getUser`,
+/// `create_order`) or a verb-suffixed one (`commentDelete`), else
+/// `default`.
+pub(crate) fn kind_from_name(name: &str, default: OperationKind) -> OperationKind {
+    verb(name).map_or(default, |(_, kind)| *kind)
+}
+
+/// The resource a name refers to: the name without its verb prefix or
+/// suffix, lowercased, with one trailing `s` (not `ss`) dropped; `None` if
+/// empty.
 pub(crate) fn resource_from_name(name: &str) -> Option<String> {
-    let rest = verb_prefix(name).map_or(name, |(rest, _)| rest);
+    let rest = verb(name).map_or(name, |(rest, _)| rest);
     let mut resource = rest.trim_start_matches('_').to_lowercase();
     if resource.ends_with('s') && !resource.ends_with("ss") {
         resource.pop();
@@ -2308,6 +2334,60 @@ mod tests {
         assert_eq!(resource_from_name("addAddress").as_deref(), Some("address"));
         assert_eq!(resource_from_name("search"), None);
         assert_eq!(kind_from_name("ébauche", other()), other());
+    }
+
+    #[test]
+    fn heuristics_kind_and_resource_from_a_verb_suffix() {
+        let other = || OperationKind::Command(Effect::Other);
+        for (name, kind, resource) in [
+            (
+                "issueCreate",
+                OperationKind::Command(Effect::Create),
+                "issue",
+            ),
+            (
+                "issueUpdate",
+                OperationKind::Command(Effect::Update),
+                "issue",
+            ),
+            (
+                "commentDelete",
+                OperationKind::Command(Effect::Delete),
+                "comment",
+            ),
+            (
+                "comment_delete",
+                OperationKind::Command(Effect::Delete),
+                "comment",
+            ),
+            ("ProductsList", OperationKind::Query, "product"),
+        ] {
+            assert_eq!(kind_from_name(name, other()), kind, "{name}");
+            assert_eq!(
+                resource_from_name(name).as_deref(),
+                Some(resource),
+                "{name}"
+            );
+        }
+        // A prefix wins; a suffix needs a word boundary and a noun; archive
+        // is no verb.
+        assert_eq!(
+            kind_from_name("deleteIssue", other()),
+            OperationKind::Command(Effect::Delete)
+        );
+        assert_eq!(resource_from_name("deleteIssue").as_deref(), Some("issue"));
+        assert_eq!(
+            kind_from_name("updateIssueDelete", other()),
+            OperationKind::Command(Effect::Update)
+        );
+        assert_eq!(kind_from_name("upset", other()), other());
+        assert_eq!(kind_from_name("issuedelete", other()), other());
+        assert_eq!(kind_from_name("_Delete", other()), other());
+        assert_eq!(kind_from_name("issueArchive", other()), other());
+        assert_eq!(
+            resource_from_name("issueArchive").as_deref(),
+            Some("issuearchive")
+        );
     }
 
     /// A contract of `paths` over `schemas`, compiled.

@@ -71,6 +71,93 @@ pub(crate) fn objects(
     walk.found.into_iter().map(|(r, _)| r).collect()
 }
 
+/// What an update or a delete mutation names by its `id` argument: the
+/// types the record may be stored under and its id.
+#[derive(Debug, PartialEq)]
+pub(crate) struct ById {
+    /// Lowercased, the operation's own resource type first.
+    pub types: Vec<String>,
+    pub id: String,
+}
+
+/// The record `op`, an update or a delete, acts on by its `id` argument
+/// (`issueUpdate(id:, input:)`, `commentDelete(id:)`), whatever its
+/// payload selects: an `id` of a type with an `id` key that is the
+/// operation's resource type or an object its payload holds
+/// (`IssuePayload.issue`). `None` for any other mutation, or with no `id`.
+pub(crate) fn by_id(bundle: &Bundle, op: &Operation, args: &Map<String, Value>) -> Option<ById> {
+    if !matches!(
+        op.kind,
+        OperationKind::Command(Effect::Update | Effect::Delete)
+    ) {
+        return None;
+    }
+    let id = match args.get("id")? {
+        Value::String(s) if !s.is_empty() => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    let keyed = |name: &str| {
+        bundle
+            .defs
+            .iter()
+            .find(|(n, _)| n.to_lowercase() == name)
+            .and_then(|(_, def)| def.get("properties")?.as_object())
+            .is_some_and(|p| p.contains_key("id"))
+    };
+    let mut types: Vec<String> = op
+        .resource_type
+        .iter()
+        .filter(|t| keyed(t))
+        .cloned()
+        .collect();
+    let payload = op
+        .success_output()
+        .and_then(|o| o.schema.as_ref())
+        .and_then(|s| ref_name(s))
+        .and_then(|name| bundle.defs.get(name)?.get("properties")?.as_object());
+    for member in payload.into_iter().flat_map(|p| p.values()) {
+        if let Some(name) = ref_name(member).map(str::to_lowercase)
+            && keyed(&name)
+            && !types.contains(&name)
+        {
+            types.push(name);
+        }
+    }
+    (!types.is_empty()).then_some(ById { types, id })
+}
+
+/// The input objects' members of an update (`input: {priority, title}`)
+/// that `held`, a stored record, has or its type declares: what the
+/// update sets on it. Its `id` is left alone.
+pub(crate) fn update_of(
+    bundle: &Bundle,
+    held: &StoredResource,
+    args: &Map<String, Value>,
+) -> Map<String, Value> {
+    let declared = bundle
+        .defs
+        .iter()
+        .find(|(name, _)| name.to_lowercase() == held.resource_type)
+        .and_then(|(_, def)| def.get("properties"))
+        .and_then(Value::as_object);
+    let has = |name: &str| {
+        held.data.get(name).is_some() || declared.is_some_and(|d| d.contains_key(name))
+    };
+    let mut out = Map::new();
+    for (name, value) in args.values().filter_map(Value::as_object).flatten() {
+        if name != "id" && has(name) {
+            out.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    out
+}
+
+/// The type a schema refers to, through a nullable `anyOf`.
+fn ref_name(schema: &Value) -> Option<&str> {
+    def_name(schema).or_else(|| schema.get("anyOf")?.as_array()?.iter().find_map(def_name))
+}
+
 struct Walk<'a> {
     bundle: &'a Bundle,
     /// With the depth each was found at.

@@ -2166,3 +2166,270 @@ async fn chaos_applies_to_each_batched_operation() {
     assert_eq!(recs.len(), 3, "{recs:?}");
     assert!(recs.iter().all(|r| r.status == 503), "{recs:?}");
 }
+
+/// A Linear-like schema: noun-first mutations (`issueUpdate`) whose payloads
+/// need not select the record, beside verb-first ones.
+const NOUN_FIRST: &str = r#"
+type Issue { id: ID! title: String! priority: Int! }
+type Comment { id: ID! body: String! }
+type IssuePayload { success: Boolean! issue: Issue }
+type CommentPayload { success: Boolean! comment: Comment }
+type DeletePayload { success: Boolean! entityId: String }
+input IssueCreateInput { title: String! priority: Int }
+input IssueUpdateInput { title: String priority: Int stateId: String }
+input CommentCreateInput { body: String! }
+type Query {
+  issue(id: ID!): Issue
+  comment(id: ID!): Comment
+}
+type Mutation {
+  issueCreate(input: IssueCreateInput!): IssuePayload!
+  issueUpdate(id: String!, input: IssueUpdateInput!): IssuePayload!
+  issueBulkUpdate(input: IssueUpdateInput!): IssuePayload!
+  issueArchive(id: String!): IssuePayload!
+  updateIssue(id: String!, input: IssueUpdateInput!): IssuePayload!
+  commentCreate(input: CommentCreateInput!): CommentPayload!
+  commentDelete(id: String!): DeletePayload!
+}
+"#;
+
+fn noun_first(provider: Arc<ScriptedProvider>) -> (Arc<ScriptedProvider>, MockRuntime) {
+    (provider.clone(), sdl_runtime(NOUN_FIRST, Some(provider)))
+}
+
+const ISSUE_READ: &str = "query($id: ID!) { issue(id: $id) { id title priority } }";
+
+/// Creates issue `i-1` ("Crash", priority 3) with `issueCreate`; the first
+/// scripted answer is its payload.
+async fn create_issue(base: &str, session: &[(&str, &str)]) {
+    let created = post(
+        base,
+        json!({"query": "mutation { issueCreate(input: {title: \"Crash\", priority: 3}) { success issue { id title priority } } }"}),
+        session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    assert_eq!(created.body["data"]["issueCreate"]["issue"]["id"], "i-1");
+}
+
+fn issue_payload() -> Value {
+    json!({"__typename": "IssuePayload", "success": true,
+           "issue": {"__typename": "Issue", "id": "i-1", "title": "Crash", "priority": 3}})
+}
+
+async fn read_issue(base: &str, session: &[(&str, &str)]) -> Answer {
+    post(
+        base,
+        json!({"query": ISSUE_READ, "variables": {"id": "i-1"}}),
+        session,
+    )
+    .await
+}
+
+#[test]
+fn noun_first_mutations_take_their_kind_from_a_verb_suffix() {
+    use mb_mcm::{Effect, OperationKind};
+    let bundle = compile(NOUN_FIRST.as_bytes()).unwrap();
+    let op = |id: &str| {
+        bundle
+            .operations
+            .iter()
+            .find(|o| o.id == format!("Mutation.{id}"))
+            .unwrap()
+    };
+    for (name, kind, resource) in [
+        (
+            "issueCreate",
+            OperationKind::Command(Effect::Create),
+            "issue",
+        ),
+        (
+            "issueUpdate",
+            OperationKind::Command(Effect::Update),
+            "issue",
+        ),
+        (
+            "commentDelete",
+            OperationKind::Command(Effect::Delete),
+            "comment",
+        ),
+        (
+            "updateIssue",
+            OperationKind::Command(Effect::Update),
+            "issue",
+        ),
+        (
+            "issueArchive",
+            OperationKind::Command(Effect::Other),
+            "issuepayload",
+        ),
+    ] {
+        assert_eq!(op(name).kind, kind, "{name}");
+        assert_eq!(op(name).resource_type.as_deref(), Some(resource), "{name}");
+    }
+}
+
+/// `issueUpdate(id:, input:) { success }` selects no issue, yet the stored
+/// issue takes the input's members: a later read from state sees them.
+#[tokio::test]
+async fn a_noun_first_update_selecting_no_record_changes_the_stored_one() {
+    let (provider, rt) = noun_first(scripted(vec![
+        issue_payload(),
+        json!({"__typename": "IssuePayload", "success": true}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    create_issue(&base, &session).await;
+
+    let updated = post(
+        &base,
+        json!({"query": "mutation { issueUpdate(id: \"i-1\", input: {priority: 1, stateId: \"st-9\"}) { success } }"}),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    assert_eq!(updated.body["data"]["issueUpdate"]["success"], true);
+
+    let read = read_issue(&base, &session).await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["issue"],
+        json!({"id": "i-1", "title": "Crash", "priority": 1})
+    );
+    assert_eq!(provider.requests().len(), 2);
+}
+
+/// When the payload does select the issue, the input still wins over what
+/// the answer made up.
+#[tokio::test]
+async fn an_update_by_id_keeps_its_input_over_the_answer() {
+    let (_, rt) = noun_first(scripted(vec![
+        issue_payload(),
+        json!({"__typename": "IssuePayload", "success": true,
+               "issue": {"__typename": "Issue", "id": "i-1", "title": "Crash", "priority": 4}}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    create_issue(&base, &session).await;
+    let updated = post(
+        &base,
+        json!({"query": "mutation { issueUpdate(id: \"i-1\", input: {priority: 1}) { success issue { id priority } } }"}),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    let read = read_issue(&base, &session).await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(read.body["data"]["issue"]["priority"], 1);
+}
+
+/// `commentDelete(id:) { success }` removes the stored comment: a later
+/// read is no longer served from state.
+#[tokio::test]
+async fn a_noun_first_delete_removes_the_stored_record() {
+    let (provider, rt) = noun_first(scripted(vec![
+        json!({"__typename": "CommentPayload", "success": true,
+               "comment": {"__typename": "Comment", "id": "c-1", "body": "Hi"}}),
+        json!({"__typename": "DeletePayload", "success": true, "entityId": "c-1"}),
+        Value::Null,
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let read_comment = json!({"query": "query($id: ID!) { comment(id: $id) { id body } }", "variables": {"id": "c-1"}});
+    let created = post(
+        &base,
+        json!({"query": "mutation { commentCreate(input: {body: \"Hi\"}) { success comment { id body } } }"}),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let before = post(&base, read_comment.clone(), &session).await;
+    assert_eq!(
+        before.headers["x-mockingbird-source"], "state",
+        "{}",
+        before.body
+    );
+
+    let deleted = post(
+        &base,
+        json!({"query": "mutation { commentDelete(id: \"c-1\") { success } }"}),
+        &session,
+    )
+    .await;
+    assert!(deleted.body.get("errors").is_none(), "{}", deleted.body);
+    let after = post(&base, read_comment, &session).await;
+    assert_ne!(
+        after.headers["x-mockingbird-source"], "state",
+        "{}",
+        after.body
+    );
+    assert_eq!(provider.requests().len(), 3);
+}
+
+/// A mutation naming no record by `id` (`issueBulkUpdate(input:)`), and an
+/// action (`issueArchive`), leave the stored issue as it was.
+#[tokio::test]
+async fn a_mutation_with_no_id_argument_changes_nothing() {
+    let (_, rt) = noun_first(scripted(vec![
+        issue_payload(),
+        json!({"__typename": "IssuePayload", "success": true}),
+        json!({"__typename": "IssuePayload", "success": true}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    create_issue(&base, &session).await;
+    for q in [
+        "mutation { issueBulkUpdate(input: {priority: 1, title: \"Other\"}) { success } }",
+        "mutation { issueArchive(id: \"i-1\") { success } }",
+    ] {
+        let answer = post(&base, json!({"query": q}), &session).await;
+        assert!(answer.body.get("errors").is_none(), "{}", answer.body);
+    }
+    let read = read_issue(&base, &session).await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["issue"],
+        json!({"id": "i-1", "title": "Crash", "priority": 3})
+    );
+}
+
+/// A verb-first update (`updateIssue`) acts by its `id` the same way.
+#[tokio::test]
+async fn a_verb_first_update_by_id_changes_the_stored_record() {
+    let (_, rt) = noun_first(scripted(vec![
+        issue_payload(),
+        json!({"__typename": "IssuePayload", "success": true}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    create_issue(&base, &session).await;
+    let updated = post(
+        &base,
+        json!({"query": "mutation { updateIssue(id: \"i-1\", input: {title: \"Renamed\"}) { success } }"}),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    let read = read_issue(&base, &session).await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(
+        read.body["data"]["issue"],
+        json!({"id": "i-1", "title": "Renamed", "priority": 3})
+    );
+}
