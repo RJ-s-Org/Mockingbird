@@ -941,7 +941,9 @@ fn body_members(
             }
         }
     }
-    (!members.is_empty()).then_some(members)
+    // An object that declares no members (a free-form `PATCH`, a merge patch) is
+    // read as setting none: it says nothing either way. A single value is not read.
+    (!members.is_empty() || matches!(held(schema, defs), Held::Object(_))).then_some(members)
 }
 
 /// What a type's writes say of the object an envelope holds.
@@ -970,7 +972,10 @@ fn sent_to(
     member: &str,
     record: &Map<String, Value>,
 ) -> Sent {
-    if bodies.is_empty() {
+    if bodies
+        .iter()
+        .all(|b| b.as_ref().is_some_and(HashSet::is_empty))
+    {
         return Sent::Nothing;
     }
     let own: Vec<&String> = envelope
@@ -982,6 +987,9 @@ fn sent_to(
         let Some(body) = body else {
             return Sent::Unreadable;
         };
+        if body.is_empty() {
+            continue;
+        }
         if own.iter().any(|m| body.contains(*m)) {
             return Sent::Envelope;
         }
@@ -1005,7 +1013,9 @@ fn sent_to(
 ///
 /// - The writes' bodies set mostly the object's members ([`Sent::Object`]), and two
 ///   or more of the type's routes, one a `GET` by path, answer the same schema under
-///   the same member.
+///   the same member, and another type's routes answer an envelope of the same
+///   single values beside its object: the contract's convention, not one type's
+///   record holding a related one.
 /// - The member is named for the route's type (`invoice` on `invoices`) and the object
 ///   carries a key: on a route by path or a write, its `id` or one named for the type
 ///   ([`owned_key`]); on a query with no path parameter, only the latter, since a
@@ -1022,6 +1032,19 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
         param: Option<String>,
         record: Map<String, Value>,
         envelope: Vec<String>,
+    }
+    impl Found {
+        /// The envelope's members beside the object, sorted.
+        fn beside(&self) -> Vec<String> {
+            let mut beside: Vec<String> = self
+                .envelope
+                .iter()
+                .filter(|m| **m != self.key.1)
+                .cloned()
+                .collect();
+            beside.sort();
+            beside
+        }
     }
     let wrapped = |op: &Operation| -> Option<Found> {
         if is_stream(op) {
@@ -1071,6 +1094,24 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
         seen.0 += 1;
         seen.1 |= read_by_path;
     }
+    // The types whose routes answer each envelope shape: the names of the single
+    // values beside its object. `{success, data}` or `{code, message, X}` is the
+    // contract's convention when several types answer it; `{order_number, status,
+    // customer}`, one type's alone, is that type's record holding a related one.
+    let mut conventions: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
+    for op in operations.iter() {
+        if let Some(found) = wrapped(op) {
+            conventions
+                .entry(found.beside())
+                .or_default()
+                .insert(found.key.0.clone());
+        }
+    }
+    let shared = |found: &Found| {
+        conventions
+            .get(&found.beside())
+            .is_some_and(|types| types.iter().any(|t| *t != found.key.0))
+    };
     let corroborated = |op: &Operation, found: &Found| {
         let (t, member, _) = &found.key;
         let bodies = sent.get(t).map(Vec::as_slice).unwrap_or_default();
@@ -1079,6 +1120,7 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
             return false;
         }
         let routes = told == Sent::Object
+            && shared(found)
             && answered
                 .get(&found.key)
                 .is_some_and(|&(count, read)| count >= 2 && read);
@@ -2350,10 +2392,13 @@ mod tests {
             "data": {"$ref": "#/components/schemas/Gadget"},
         }});
         let bundle = compiled(
-            &json!({
-                "/gadgets": {"post": sending("create", &json!({"type": "object", "properties": {"name": {"type": "string"}}}), &envelope)},
-                "/gadgets/{id}": {"parameters": path_param("id"), "get": answering("read", &envelope)},
-            }),
+            &with_peer(
+                json!({
+                    "/gadgets": {"post": sending("create", &json!({"type": "object", "properties": {"name": {"type": "string"}}}), &envelope)},
+                    "/gadgets/{id}": {"parameters": path_param("id"), "get": answering("read", &envelope)},
+                }),
+                &envelope,
+            ),
             &json!({"Gadget": {"type": "object", "properties": {
                 "id": {"type": "integer"},
                 "name": {"type": "string"},
@@ -2397,15 +2442,41 @@ mod tests {
     /// whatever member structure picks.
     fn corroborated(collection: &str, param: &str, envelope: &Value) -> mb_mcm::Bundle {
         compiled(
-            &json!({
-                format!("/{collection}"): {"post": sending("create", &obj(json!({"name": {"type": "string"}})), envelope)},
-                format!("/{collection}/{{{param}}}"): {
-                    "parameters": path_param(param),
-                    "get": answering("read", envelope),
-                },
-            }),
+            &with_peer(
+                json!({
+                    format!("/{collection}"): {"post": sending("create", &obj(json!({"name": {"type": "string"}})), envelope)},
+                    format!("/{collection}/{{{param}}}"): {
+                        "parameters": path_param(param),
+                        "get": answering("read", envelope),
+                    },
+                }),
+                envelope,
+            ),
             &json!({"Gadget": obj(json!({"id": {"type": "string"}, "name": {"type": "string"}}))}),
         )
+    }
+
+    /// `paths` with `GET /peers/{peer_id}` answering `envelope`'s single values beside
+    /// another type's object, so the envelope is a convention of the contract's.
+    fn with_peer(mut paths: Value, envelope: &Value) -> Value {
+        let mut peer = envelope.clone();
+        if let Some(props) = peer.get_mut("properties").and_then(Value::as_object_mut) {
+            for schema in props.values_mut() {
+                if schema.get("properties").is_some()
+                    || schema.get("$ref").is_some()
+                    || schema.get("anyOf").is_some()
+                {
+                    *schema = obj(json!({"peer_id": {"type": "string"}}));
+                }
+            }
+        }
+        if let Some(paths) = paths.as_object_mut() {
+            paths.insert(
+                "/peers/{peer_id}".into(),
+                json!({"parameters": path_param("peer_id"), "get": answering("peer", &peer)}),
+            );
+        }
+        paths
     }
 
     fn unknown(bundle: &mb_mcm::Bundle, ids: &[&str]) {
@@ -2666,14 +2737,17 @@ mod tests {
         }));
         let body = obj(json!({"name": {"type": "string"}, "owner_id": {"type": "integer"}}));
         let bundle = compiled(
-            &json!({
-                "/accounts": {"post": sending("create", &body, &envelope)},
-                "/accounts/{id}": {
-                    "parameters": path_param("id"),
-                    "get": answering("read", &envelope),
-                    "patch": sending("update", &body, &envelope),
-                },
-            }),
+            &with_peer(
+                json!({
+                    "/accounts": {"post": sending("create", &body, &envelope)},
+                    "/accounts/{id}": {
+                        "parameters": path_param("id"),
+                        "get": answering("read", &envelope),
+                        "patch": sending("update", &body, &envelope),
+                    },
+                }),
+                &envelope,
+            ),
             &json!({}),
         );
         assert_eq!(identity_of(&bundle, "create"), wrapped(None, "id", "data"));
@@ -2800,10 +2874,13 @@ mod tests {
         }));
         let body = obj(json!({"name": {"type": "string"}, "status": {"type": "string"}}));
         let bundle = compiled(
-            &json!({
-                "/accounts": {"post": sending("create", &body, &envelope)},
-                "/accounts/{id}": {"parameters": path_param("id"), "get": answering("read", &envelope)},
-            }),
+            &with_peer(
+                json!({
+                    "/accounts": {"post": sending("create", &body, &envelope)},
+                    "/accounts/{id}": {"parameters": path_param("id"), "get": answering("read", &envelope)},
+                }),
+                &envelope,
+            ),
             &json!({}),
         );
         assert_eq!(identity_of(&bundle, "create"), wrapped(None, "id", "data"));
@@ -2854,5 +2931,52 @@ mod tests {
             &json!({}),
         );
         unknown(&bundle, &["list"]);
+    }
+
+    #[test]
+    fn an_envelope_only_one_type_answers_is_that_types_record() {
+        // A guest checkout sends the customer's members, and two routes answer the
+        // same envelope; but no other type answers `{order_number, status, X}`, so
+        // it is the order, holding a related customer.
+        let order = obj(json!({
+            "order_number": {"type": "string"},
+            "status": {"type": "string"},
+            "customer": obj(json!({"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}})),
+        }));
+        let guest = obj(json!({"name": {"type": "string"}, "email": {"type": "string"}}));
+        let bundle = compiled(
+            &json!({
+                "/orders": {"post": sending("create", &guest, &order)},
+                "/orders/{id}": {"parameters": path_param("id"), "get": answering("read", &order)},
+            }),
+            &json!({}),
+        );
+        unknown(&bundle, &["create", "read"]);
+    }
+
+    #[test]
+    fn a_free_form_body_says_nothing_either_way() {
+        let widget = obj(json!({
+            "ok": {"type": "boolean"},
+            "widget": obj(json!({"id": {"type": "string"}, "name": {"type": "string"}})),
+        }));
+        let patch = json!({"type": "object", "additionalProperties": true});
+        let bundle = compiled(
+            &json!({
+                "/widgets/{id}": {
+                    "parameters": path_param("id"),
+                    "get": answering("read", &widget),
+                    "patch": sending("update", &patch, &widget),
+                },
+            }),
+            &json!({}),
+        );
+        for id in ["read", "update"] {
+            assert_eq!(
+                identity_of(&bundle, id),
+                wrapped(Some("id"), "id", "widget"),
+                "{id}"
+            );
+        }
     }
 }
