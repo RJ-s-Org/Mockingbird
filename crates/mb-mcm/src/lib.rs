@@ -881,6 +881,29 @@ impl Bundle {
             .collect()
     }
 
+    /// `schema` with its `$ref`s to `#/$defs/<name>` followed into
+    /// [`Bundle::defs`] (at most 16 hops, so a cycle ends); `schema` itself
+    /// when it is not such a reference or its definition is missing.
+    #[must_use]
+    pub fn resolve<'a>(&'a self, mut schema: &'a Value) -> &'a Value {
+        for _ in 0..16 {
+            let Some(target) = schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.strip_prefix("#/$defs/"))
+                .and_then(|name| {
+                    self.defs
+                        .get(name)
+                        .or_else(|| self.defs.get(&name.replace("~1", "/").replace("~0", "~")))
+                })
+            else {
+                break;
+            };
+            schema = target;
+        }
+        schema
+    }
+
     /// Clone `schema` with this bundle's definitions attached as `$defs`, so
     /// it can be validated or faked standalone.
     #[must_use]

@@ -26,8 +26,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod validate;
+
+pub use validate::{Refusal, RefusalCode, Validation, check_size, validate};
+
 /// The published JSON Schema (draft 2020-12) of a world description.
-pub const SCHEMA: &str = include_str!("../schemas/world.v1.json");
+pub const SCHEMA: &str = include_str!("../../schemas/world.v1.json");
 
 /// The largest world description document accepted, in bytes (256 KiB).
 pub const MAX_BYTES: usize = 262_144;
@@ -675,7 +679,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const SPEC_EXCERPT: &str = include_str!("../tests/fixtures/world-spec-excerpt.json");
+    const SPEC_EXCERPT: &str = include_str!("../../tests/fixtures/world-spec-excerpt.json");
 
     #[test]
     fn world_roundtrips_the_spec_excerpt() {
