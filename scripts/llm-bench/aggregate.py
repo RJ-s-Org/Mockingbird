@@ -729,11 +729,17 @@ def drop_harness_rejected(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
 
 def journeys_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Per journeys suite: checks, passes, and the failures split into those labelled
-    as the provider's (`detail.infra`: a 5xx, 429 or transport-error fallback, and the
-    checks a journey skipped after one) and the rest, which are the model's.
+    as the provider's (`detail.infra`: a fallback on an HTTP 5xx or 429, on another
+    status whose body carries `"code":429` or OpenRouter's "temporarily rate-limited
+    upstream", or on a transport error, and the checks a journey skipped after one) and
+    the rest, which are the model's.
     `failed_timeout` counts the model failures judged on an LLM-timeout fallback: they
-    stay the model's (a slow model times out) and are only shown apart. The split is a
-    label: every row counts in `ok_rate` exactly as it was recorded."""
+    stay the model's (a slow model times out) and are only shown apart.
+    `failed_infra_cascade` counts the model failures labelled `detail.infra_cascade`, a
+    coarse label: any earlier call of the same journey run fell back on a provider
+    failure, whatever the check's own call returned. It overlaps `failed_timeout` and
+    is not a discount: those rows stay the model's and are only shown apart. The split
+    is a label: every row counts in `ok_rate` exactly as it was recorded."""
     out: Dict[str, Any] = {}
     for name in sorted({str(r.get("suite")) for r in rows if str(r.get("suite")).startswith("journeys")}):
         suite = [r for r in rows if r.get("suite") == name and r.get("case") != "suite_error"]
@@ -742,8 +748,10 @@ def journeys_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         infra = sum(1 for d in failed if d.get("infra"))
         timeouts = sum(1 for d in failed if not d.get("infra")
                        and "LLM request timed out" in str(d.get("fallback_reason") or ""))
+        cascade = sum(1 for d in failed if not d.get("infra") and d.get("infra_cascade"))
         out[name] = {"n": len(suite), "ok": len(suite) - len(failed), "ok_rate": rate(len(suite) - len(failed), len(suite)),
-                     "failed_model": len(failed) - infra, "failed_timeout": timeouts, "failed_infra": infra}
+                     "failed_model": len(failed) - infra, "failed_timeout": timeouts, "failed_infra": infra,
+                     "failed_infra_cascade": cascade}
     return out
 
 
@@ -806,6 +814,9 @@ def ledger_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     error_n = sum(1 for r in rows if r.get("error_kind") in ERROR_KINDS)
     timeout_n = sum(1 for r in rows if r.get("error_kind") == "timeout")
     refusal_n = sum(1 for r in rows if r.get("error_kind") == "refusal")
+    # A client hang-up mid-generation (proxy.py: 499, `client_closed`): neither an
+    # error (not in ERROR_KINDS) nor a success (`is_success` needs status 200).
+    client_closed_n = sum(1 for r in rows if r.get("error_kind") == "client_closed")
     retry_n = sum(1 for r in rows if (num(r.get("attempts")) or 1) > 1)
     success = [r for r in rows if is_success(r)]
     engine_success = [r for r in success if r.get("workload") == "engine"]
@@ -816,6 +827,7 @@ def ledger_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "errors": error_n, "error_rate": rate(error_n, n),
         "timeouts": timeout_n, "timeout_rate": rate(timeout_n, n),
         "refusals": refusal_n, "refusal_rate": rate(refusal_n, n),
+        "client_closed": client_closed_n,
         "retries": retry_n, "retry_rate": rate(retry_n, n),
         "error_kinds": {str(k): v for k, v in Counter(r.get("error_kind") for r in rows
                                                        if r.get("error_kind")).items()},
@@ -1517,18 +1529,26 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
     for m, b in models.items():
         for name, jb in b["server"].get("journeys", {}).items():
             rows.append([m, name, fmt(jb["n"], "int"), fmt(jb["ok"], "int"), fmt(jb["failed_model"], "int"),
-                         fmt(jb["failed_timeout"], "int"), fmt(jb["failed_infra"], "int")])
+                         fmt(jb["failed_timeout"], "int"), fmt(jb.get("failed_infra_cascade", 0), "int"),
+                         fmt(jb["failed_infra"], "int")])
     if rows:
         lines.append("Journey suites (failed checks split into the model's and the provider's):")
         lines.append("")
         lines += md_table(["Model", "suite", "checks", "ok", "failed (model)", "of which timeouts",
-                           "failed (provider)"], rows)
+                           "of which after a provider failure", "failed (provider)"], rows)
         lines.append("")
-        lines.append("failed (provider) = checks judged on a fallback the provider forced (HTTP 5xx or 429, "
-                     "a transport error) and the checks a journey skipped after one. It is a label only: no row "
-                     "is dropped, replaced or re-run, and the ok counts and rates are the same with or without "
-                     "it. An LLM timeout stays a model failure (of which timeouts). A repair call's 503 after "
-                     "an invalid first answer cannot be told apart today and is labelled provider.")
+        lines.append("failed (provider) = checks judged on a fallback the provider forced (HTTP 5xx or 429; "
+                     "another status whose body carries `\"code\":429` or OpenRouter's \"temporarily "
+                     "rate-limited upstream\"; a transport error) and the checks a journey skipped after one. "
+                     "It is a label only: no row is dropped, replaced or re-run, and the ok counts and rates "
+                     "are the same with or without it. An LLM timeout stays a model failure (of which "
+                     "timeouts). A repair call's 503 after an invalid first answer cannot be told apart today "
+                     "and is labelled provider. "
+                     "Of which after a provider failure = model failures in a journey run where any earlier "
+                     "call fell back on a provider failure (`detail.infra_cascade`), whatever the check's own "
+                     "call returned. It is coarse: it does not show the earlier fallback caused the failure, "
+                     "and it overlaps of which timeouts. It is not a discount: those checks stay in failed "
+                     "(model) and in every score; read it next to the raw ok count.")
         lines.append("")
 
     lines.append("## 9. Value sensitivity")

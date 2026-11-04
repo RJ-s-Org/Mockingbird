@@ -1270,6 +1270,53 @@ class InfraFailureTest(unittest.TestCase):
         # infra. That is why the label is only a label: it never changes a row or re-runs one.
         self.assertIsNotNone(server_suites.infra_reason(last("LLM returned HTTP 503: repair call")))
 
+    # The reason full8 recorded for DeepSeek's 429s (cut where Mockingbird's header cuts it).
+    FULL8_429 = ('LLM returned HTTP 429: {"error":{"message":"Provider returned error","code":429,'
+                 '"metadata":{"raw":"deepseek/deepseek-v4.1-flash-1017 is temporarily rate-limited upstream. '
+                 'Please retry shortly, or add your own provider key to use your own limits: '
+                 'https://openrouter.ai/workspaces/default/byok","provid')
+
+    def test_a_rate_limit_is_the_providers_on_a_structured_signal_only(self):
+        def last(reason, source="fallback"):
+            return {"source": source, "fallback_reason": reason}
+
+        for reason in (
+            self.FULL8_429,
+            "LLM returned HTTP 429",
+            # Under another status: an error code 429 in the body, or OpenRouter's exact phrase.
+            'LLM returned HTTP 400: {"error":{"message":"Provider returned error","code":429}}',
+            'LLM returned HTTP 400: {"error":{"code": 429}}',
+            'LLM returned HTTP 400: {"error":{"metadata":{"raw":"x is temporarily rate-limited upstream"}}}',
+        ):
+            self.assertEqual(server_suites.infra_reason(last(reason)), reason)
+        for reason in (
+            # A 400 whose body only mentions a rate-limit field is the request's.
+            'LLM returned HTTP 400: {"error":{"message":"invalid field","param":"rate_limit"}}',
+            'LLM returned HTTP 400: {"error":{"message":"Rate limit exceeded: free-models-per-min"}}',
+            'LLM returned HTTP 403: {"error":{"code":"rate_limit_exceeded","message":"slow down"}}',
+            "LLM returned HTTP 408: Too Many Requests",
+            'LLM returned HTTP 400: {"error":{"code":4290}}',
+            # The model's own failure that only ends in a rate limit stays the model's.
+            "LLM output truncated: stopped at max_tokens; not salvaged: LLM returned HTTP 429: x",
+            'repaired output still invalid: {"code":429}',
+            "LLM request timed out; temporarily rate-limited upstream",
+            # A 4xx without a signal stays the request's, and so does the proxy's 424.
+            'LLM returned HTTP 400: {"error":{"message":"Provider returned error"}}',
+            'LLM returned HTTP 424: {"error":{"message":"upstream kept rejecting the request","code":429}}',
+        ):
+            self.assertIsNone(server_suites.infra_reason(last(reason)), reason)
+        # A mock answer from the LLM is no fallback: nothing to label.
+        self.assertIsNone(server_suites.infra_reason(last(self.FULL8_429, source="llm")))
+
+    def test_a_429_at_the_gate_is_labelled_like_a_503(self):
+        rows = self.square("once", reason=self.FULL8_429)
+        checks = server_suites.JOURNEY_CHECKS["square"]
+        self.assertFalse(any(r["ok"] for r in rows))
+        self.assertTrue(all(r["detail"].get("infra") is True for r in rows), rows)
+        block = aggregate.journeys_block(rows)["journeys_heldout"]
+        self.assertEqual((block["failed_model"], block["failed_timeout"], block["failed_infra"]),
+                         (0, 0, len(checks)))
+
     def test_a_provider_failure_at_the_gate_is_labelled_and_never_rerun(self):
         rows = self.square("once")
         checks = server_suites.JOURNEY_CHECKS["square"]
@@ -1284,7 +1331,8 @@ class InfraFailureTest(unittest.TestCase):
         block = aggregate.journeys_block(rows + [{"suite": "consistency", "case": "stripe", "ok": False}])
         self.assertEqual(list(block), ["journeys_heldout"])
         self.assertEqual(block["journeys_heldout"], {"n": len(checks), "ok": 0, "ok_rate": 0.0, "failed_model": 0,
-                                                     "failed_timeout": 0, "failed_infra": len(checks)})
+                                                     "failed_timeout": 0, "failed_infra": len(checks),
+                                                     "failed_infra_cascade": 0})
 
     def test_rows_are_those_of_a_run_without_infra_but_for_the_label(self):
         labelled = self.square("once")
@@ -1293,7 +1341,7 @@ class InfraFailureTest(unittest.TestCase):
         def unlabelled(rows):
             out = []
             for r in rows:
-                detail = {k: v for k, v in r["detail"].items() if k not in ("infra", "fallback_reason")}
+                detail = {k: v for k, v in r["detail"].items() if k not in ("infra", "infra_cascade", "fallback_reason")}
                 out.append(dict({k: v for k, v in r.items() if k != "latency_ms"}, detail=detail))
             return out
 
@@ -1368,6 +1416,67 @@ class InfraFailureTest(unittest.TestCase):
         self.assertTrue(all(r["source"] == "skipped" and not r["ok"] for r in rows.values()))
         self.assertFalse(any(r["detail"].get("infra") for r in rows.values()), rows)
         self.assertIn("KeyError", rows["rest"]["detail"]["reason"])
+        # The infra call came before the skip, so the skipped checks are a cascade.
+        self.assertTrue(all(r["detail"].get("infra_cascade") for r in rows.values()), rows)
+
+    def test_a_failure_after_an_earlier_provider_failure_is_a_cascade(self):
+        def steps(j):
+            j.call("GET", "/model")
+            j.check("before", False)  # no provider failure yet: the model's, unlabelled
+            j.call("GET", "/infra")
+            j.check("own call", False)  # its own call failed: infra, not a cascade
+            j.call("GET", "/model")
+            j.check("after, passes", True)  # a pass is never labelled
+            j.check("after, fails", False)
+            j.call("GET", "/timeout")
+            j.check("after, times out", False)
+            server_suites.need(j, "gate", False)
+
+        names = ["before", "own call", "after, passes", "after, fails", "after, times out", "gate", "rest"]
+        rows = self.run_scripted(steps, names)
+        label = {n: (rows[n]["ok"], bool(rows[n]["detail"].get("infra")),
+                     bool(rows[n]["detail"].get("infra_cascade"))) for n in names}
+        self.assertEqual(label, {
+            "before": (False, False, False),
+            "own call": (False, True, False),
+            "after, passes": (True, False, False),
+            "after, fails": (False, False, True),
+            "after, times out": (False, False, True),
+            "gate": (False, False, True),
+            "rest": (False, False, True),  # skipped after a model gate, in a run that had one
+        })
+        block = aggregate.journeys_block(list(rows.values()))["journeys_heldout"]
+        # Raw passes unchanged; cascades stay the model's and are only shown apart. The gate
+        # judges the timeout call too, so two timeouts.
+        self.assertEqual((block["n"], block["ok"], block["failed_model"], block["failed_timeout"],
+                          block["failed_infra"], block["failed_infra_cascade"]), (7, 1, 5, 2, 1, 4))
+
+    def test_no_provider_failure_means_no_cascade(self):
+        rows = self.run_scripted(scripted_steps("model", "timeout", "model"),
+                                 ["check 0", "check 1", "check 2", "rest"])
+        self.assertFalse(any(r["detail"].get("infra_cascade") or r["detail"].get("infra")
+                             for r in rows.values()), rows)
+
+    def test_tables_report_the_cascade_next_to_the_raw_passes(self):
+        def row(case, ok, **detail):
+            return {"model": "m/x", "suite": "journeys_heldout", "case": case, "rep": 0, "ok": ok,
+                    "latency_ms": 1.0, "source": "llm", "detail": detail}
+
+        rows = [row("a", True), row("b", False, infra=True), row("c", False, infra_cascade=True),
+                row("d", False, infra_cascade=True), row("e", False)]
+        with tempfile.TemporaryDirectory() as out:
+            with open(os.path.join(out, "server.jsonl"), "w") as f:
+                f.writelines(json.dumps(r) + "\n" for r in rows)
+            with contextlib.redirect_stderr(io.StringIO()):
+                aggregate.main(["--out", out])
+            with open(os.path.join(out, "results.json")) as f:
+                block = json.load(f)["models"]["m/x"]["server"]["journeys"]["journeys_heldout"]
+            with open(os.path.join(out, "tables.md")) as f:
+                tables = f.read()
+        self.assertEqual((block["ok"], block["failed_model"], block["failed_infra"], block["failed_infra_cascade"]),
+                         (1, 3, 1, 2))
+        self.assertIn("of which after a provider failure", tables)
+        self.assertIn("| m/x | journeys_heldout | 5 | 1 | 3 | 0 | 2 | 1 |", tables)
 
 
 class FakeRouter(BaseHTTPRequestHandler):
@@ -1444,9 +1553,35 @@ class ProviderPinTest(unittest.TestCase):
         self.assertEqual(pins, {
             "nvidia/nemotron-3.5-lightning": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": False},
             "openai/gpt-6-luna": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False},
-            "deepseek/deepseek-v4.1-flash-1017": {"order": ["wafer/us"], "only": ["wafer/us"],
-                                                  "allow_fallbacks": False},
+            "deepseek/deepseek-v4.1-flash-1017": {
+                "order": ["wafer/us"], "only": ["wafer/us"], "allow_fallbacks": False,
+                "quantizations": ["mxfp4"]},
         })
+
+    # The `quantizations` values OpenRouter documents. It defines no precision order
+    # between them, so none is asserted here. `fp4` covers mxfp4 and nvfp4, and `fp8`
+    # covers mxfp8, so a filter naming one of those admits more than it names.
+    QUANTIZATIONS = {"int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32",
+                     "unknown"}
+    UMBRELLA = {"fp4", "fp8"}
+
+    def test_every_pin_is_built_the_comparable_way(self):
+        # `only` is `order`, no fallbacks, a short list, and a `quantizations` filter (when
+        # given) that names documented, known values exactly: no `unknown`, no umbrella value.
+        for model, pin in proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS).items():
+            self.assertEqual(pin["only"], pin["order"], model)
+            self.assertIs(pin["allow_fallbacks"], False, model)
+            self.assertLessEqual(len(pin["order"]), 3, model)
+            self.assertEqual(len(set(pin["order"])), len(pin["order"]), model)
+            q = pin.get("quantizations")
+            if q is None:
+                self.assertEqual(len(pin["order"]), 1, f"{model}: an ordered list needs a quantizations filter")
+                continue
+            self.assertIsInstance(q, list, model)
+            self.assertTrue(q, model)
+            self.assertTrue(set(q) <= self.QUANTIZATIONS, model)
+            self.assertNotIn("unknown", q, model)
+            self.assertFalse(set(q) & self.UMBRELLA, model)
 
     def test_preflight_records_the_pins_it_is_given(self):
         d = tempfile.mkdtemp()
@@ -1563,6 +1698,38 @@ class ProviderPinProxyTest(unittest.TestCase):
         status, _, rec = self.call("nvidia/x")
         self.assertEqual((status, rec["error_kind"]), (503, "http_5xx"))
 
+    def test_an_ordered_pin_is_sent_whole_and_takes_any_endpoint_it_lists(self):
+        pin = {"order": ["wafer/us", "stepfun/fp8"], "only": ["wafer/us", "stepfun/fp8"],
+               "allow_fallbacks": False, "quantizations": ["mxfp4", "mxfp8"]}
+        self.px.pins["deepseek/x"] = pin
+        for served in ("Wafer", "StepFun"):
+            FakeRouter.served = served
+            status, _, rec = self.call("deepseek/x")
+            self.assertEqual(status, 200, served)
+            self.assertEqual(FakeRouter.bodies[-1]["provider"], pin)  # quantizations included
+            self.assertEqual((rec["provider"], rec["provider_pin"]), (served, ["wafer/us", "stepfun/fp8"]))
+        FakeRouter.served = "Together"
+        status, doc, rec = self.call("deepseek/x")
+        self.assertEqual((status, rec["error_kind"]), (503, "provider_unavailable"))
+        self.assertTrue(rec["provider_pin_mismatch"])
+
+    def test_the_proxy_checks_the_provider_not_the_endpoint(self):
+        # An answer names only the provider (`Wafer`), so the proxy matches by base slug:
+        # it cannot tell `wafer/us` from `wafer/mxfp4`. Keeping to the endpoint is
+        # OpenRouter's routing (`only` with the full tag); the proxy cannot verify it.
+        self.assertTrue(proxy.pin_allows({"order": ["wafer/us"]}, "Wafer"))
+        self.assertEqual(proxy.provider_key("wafer/us"), proxy.provider_key("wafer/mxfp4"))
+
+    def test_an_upstream_429_reaches_mockingbird_as_a_429(self):
+        # As in full8: every pinned endpoint is rate-limited. The proxy passes the 429 on,
+        # Mockingbird falls back with `LLM returned HTTP 429: ...`, and that is infra.
+        FakeRouter.error = (429, "deepseek/x is temporarily rate-limited upstream. Please retry shortly")
+        status, doc, rec = self.call("nvidia/x")
+        self.assertEqual((status, rec["status"], rec["error_kind"]), (429, 429, "http_4xx"))
+        self.assertEqual(len(FakeRouter.bodies), 1)  # not retried elsewhere
+        last = {"source": "fallback", "fallback_reason": f"LLM returned HTTP 429: {json.dumps(doc)}"}
+        self.assertIsNotNone(server_suites.infra_reason(last))
+
     def test_ordinary_request_errors_on_a_pinned_model_stay_4xx(self):
         # mb-llm steps down (schema, reasoning) on these, so they must reach it unchanged.
         for status, msg in (
@@ -1608,6 +1775,171 @@ class ProviderPinProxyTest(unittest.TestCase):
         args = argparse.Namespace(model="nvidia/x", proxy_base=self.base)
         self.assertEqual(server_suites.provider_mix(args, "test"), "Fireworks 1 (100.0%)")
 
+
+class ClientDisconnectTest(unittest.TestCase):
+    """A client that hangs up mid-generation (Mockingbird aborting a looping answer)
+    stops the proxy reading from the provider; one that hangs up after the answer ended
+    does not. Offline: fake_llm streams slowly, no key."""
+
+    CHUNKS, DELAY = 200, 0.02  # the whole stream would take 4 s
+
+    def wait_for(self, what, timeout=10.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            got = what()
+            if got:
+                return got
+            time.sleep(0.02)
+        self.fail("timed out waiting")
+
+    def start(self, *fake_args):
+        """Starts fake_llm with `fake_args` and an in-process proxy in front of it."""
+        import socket
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.fake_log = os.path.join(self.dir, "fake.jsonl")
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
+        fake = subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_llm.py"),
+             "--port", str(port), "--log", self.fake_log, *fake_args], env=env)
+        self.addCleanup(fake.wait, 5)
+        self.addCleanup(fake.terminate)
+
+        def up():
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    return True
+            except OSError:
+                return False
+
+        self.wait_for(up)
+        self.ledger = os.path.join(self.dir, "calls.jsonl")
+        args = argparse.Namespace(
+            upstream=f"http://127.0.0.1:{port}/api/v1/chat/completions",
+            no_stream_upgrade=True, dump=None, ledger=self.ledger, budget_usd=5.0, prior_ledger=[],
+            prices=None, provider_pins="", no_format_fallback=True)
+        patch = mock.patch.dict(os.environ, {}, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("OPENROUTER_API_KEY", None)  # the fake upstream never sees a key
+        self.px = proxy.Proxy(args)
+        self.addCleanup(self.px.ledger.fh.close)
+        handler = type("DisconnectHandler", (proxy.Handler,), {"proxy": self.px})
+        self.port = int(serve(handler, self).data.rsplit(":", 1)[1])
+
+    def rows(self):
+        if not os.path.exists(self.ledger):
+            return []
+        with open(self.ledger) as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def fake_ends(self):
+        if not os.path.exists(self.fake_log):
+            return []
+        with open(self.fake_log) as f:
+            return [r for r in map(json.loads, f) if r.get("stream_end")]
+
+    BODY = json.dumps({"model": "m/x", "stream": True, "max_tokens": 1000,
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    def hang_up_after(self, marker, count=1):
+        """Streams through the proxy, reads until `marker` has been seen `count` times,
+        then resets the connection (as a client dropping an aborted stream does)."""
+        import socket
+        import struct
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        sock.sendall(b"POST /r/m__x~test/api/v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                     b"Content-Type: application/json\r\nContent-Length: " + str(len(self.BODY)).encode()
+                     + b"\r\n\r\n" + self.BODY)
+        seen = b""
+        while seen.count(marker) < count:
+            part = sock.recv(4096)
+            self.assertTrue(part, seen)
+            seen += part
+        self.assertTrue(seen.startswith(b"HTTP/1.1 200"), seen[:80])
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+        return seen
+
+    def assert_budget_settled(self, rec):
+        st = self.px.ledger.stats()
+        self.assertEqual((st["reserved_usd"], st["in_flight"], st["calls"]), (0.0, 0, 1))
+        self.assertAlmostEqual(st["ledger_spent_usd"], round(rec["cost_usd"], 6), places=6)
+
+    def test_a_hang_up_mid_generation_stops_the_upstream_read(self):
+        self.start("--chunk-delay", str(self.DELAY), "--stream-chunks", str(self.CHUNKS))
+        started = time.monotonic()
+        self.hang_up_after(b"data: ", 3)
+        rec = self.wait_for(self.rows)[-1]
+        end = self.wait_for(self.fake_ends)[-1]
+        self.assertLess(time.monotonic() - started, self.CHUNKS * self.DELAY / 2)  # well before its end
+        # The proxy closed the upstream connection: the provider stopped mid-stream.
+        self.assertTrue(end["caller_closed"], end)
+        self.assertLess(end["chunks_sent"], self.CHUNKS // 4, end)
+        self.assertEqual((rec["status"], rec["error_kind"], rec["client_closed"]), (499, "client_closed", True))
+        self.assertGreater(rec["received_chars"], 0)
+        self.assertEqual(rec["generation_id"], "fake")  # kept, to look the generation up
+        self.assertIsNone(rec["finish_reason"])
+        self.assertIsNotNone(rec["ttft_ms"])
+        # No usage arrived (it comes last), so the cost is the prompt plus the output seen,
+        # far below the reservation for 1000 tokens; the reservation is released.
+        self.assertEqual(rec["cost_source"], "estimate")
+        self.assertGreater(rec["cost_usd"], 0.0)
+        self.assertLess(rec["cost_usd"], self.px.estimate("m/x", json.loads(self.BODY)) / 10)
+        self.assert_budget_settled(rec)
+        # Neither an error nor a success, wherever calls are counted.
+        self.assertFalse(aggregate.is_success(rec))
+        self.assertNotIn(rec["error_kind"], aggregate.ERROR_KINDS)
+        self.assertFalse(proxy.is_error(rec))
+        label = self.px.ledger.stats()["per_label"]["m__x~test"]
+        self.assertEqual((label["errors"], label["client_closed"]), (0, 1))
+        summary = run.summarize([rec])
+        self.assertEqual((summary["errors"], summary["error_kinds"], summary["client_closed"]), (0, [], 1))
+        rel = aggregate.ledger_block([rec])["reliability"]
+        self.assertEqual((rel["errors"], rel["client_closed"]), (0, 1))
+
+    def assert_recorded_as_usual_after(self, finish, marker):
+        # Mockingbird drops the stream right after the chunk that ends the answer. The
+        # proxy keeps reading, unrelayed, so the usage that comes after still arrives.
+        self.start("--stream-chunks", "3", "--finish", finish, "--tail-delay", "0.2")
+        self.hang_up_after(marker)
+        rec = self.wait_for(self.rows)[-1]
+        end = self.wait_for(self.fake_ends)[-1]
+        self.assertFalse(end["caller_closed"], end)  # the proxy read the stream to its end
+        self.assertNotIn("client_closed", rec)
+        self.assertNotEqual(rec["status"], 499)
+        self.assertTrue(rec.get("client_gone_after_end"), rec)
+        self.assertEqual(rec["finish_reason"], finish)
+        self.assertEqual(rec["cost_source"], "estimate")  # from the usage's tokens (fake sends no cost)
+        self.assertIsNotNone(rec["completion_tokens"])  # the usage arrived after the hang-up
+        self.assert_budget_settled(rec)
+        return rec
+
+    def test_a_hang_up_after_a_length_chunk_is_recorded_as_usual(self):
+        rec = self.assert_recorded_as_usual_after("length", b'"finish_reason": "length"')
+        self.assertEqual((rec["status"], rec["error_kind"]), (200, None))
+
+    def test_a_hang_up_after_an_in_band_error_is_recorded_as_usual(self):
+        rec = self.assert_recorded_as_usual_after("error", b'"finish_reason": "error"')
+        # As before this change: the 200 head had gone out, the error went in-stream.
+        self.assertEqual((rec["status"], rec["error_kind"]), (200, "stream_error"))
+
+    def test_a_client_that_reads_to_the_end_is_not_marked(self):
+        self.start("--stream-chunks", "3")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/r/m__x~test/api/v1/chat/completions",
+            data=self.BODY, headers={"content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+        self.assertIn(b"[DONE]", raw)
+        rec = self.wait_for(self.rows)[-1]
+        self.assertEqual((rec["status"], rec["error_kind"]), (200, None))
+        self.assertNotIn("client_closed", rec)
+        self.assertNotIn("client_gone_after_end", rec)
+        self.assertFalse(self.wait_for(self.fake_ends)[-1]["caller_closed"])
 
 if __name__ == "__main__":
     unittest.main()

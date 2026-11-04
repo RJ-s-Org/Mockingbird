@@ -493,8 +493,10 @@ def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     cost = sum(float(r.get("cost_usd") or 0.0) for r in records)
     return {
         "calls": n,
-        "errors": sum(1 for r in records if r.get("error_kind")),
-        "error_kinds": sorted({r["error_kind"] for r in records if r.get("error_kind")}),
+        # A client hang-up (499, `client_closed`) is neither an error nor a success.
+        "errors": sum(1 for r in records if bench_proxy.is_error(r)),
+        "error_kinds": sorted({r["error_kind"] for r in records if bench_proxy.is_error(r)}),
+        "client_closed": sum(1 for r in records if r.get("error_kind") == bench_proxy.CLIENT_CLOSED),
         "cost_usd": round(cost, 6),
         "cost_per_call": (cost / n) if n else None,
         "prompt_tokens_per_call": mean("prompt_tokens"),

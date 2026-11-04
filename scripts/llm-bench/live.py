@@ -119,7 +119,8 @@ def frame(out: str, pilot: bool, budget: float, stop: float) -> (str, bool):
         engine = [r for r in recs if not r.get("error_kind")]
         ttft = p50([float(r["ttft_ms"]) for r in engine if r.get("ttft_ms") is not None])
         e2e = p50([float(r["total_ms"]) for r in engine if r.get("total_ms") is not None])
-        errs = sum(1 for r in recs if r.get("error_kind"))
+        # A client hang-up (499, `client_closed`; proxy.CLIENT_CLOSED) is not an error.
+        errs = sum(1 for r in recs if r.get("error_kind") and r.get("error_kind") != "client_closed")
         cost = sum(float(r.get("cost_usd") or 0) for r in recs)
         frac = (n / expected) if expected else 0.0
         if status in ("done", "partial") and not pilot:

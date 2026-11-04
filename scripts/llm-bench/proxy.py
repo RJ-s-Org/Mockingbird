@@ -172,6 +172,20 @@ class PinRefused(Exception):
     """The first streamed chunk came from a provider the pin does not allow."""
 
 
+class ClientClosed(Exception):
+    """The client hung up on a stream mid-generation: stop reading from the provider."""
+
+
+# The error_kind of a call the client hung up on mid-generation (status 499). It is
+# neither a success nor an error: every count of errors leaves it out.
+CLIENT_CLOSED = "client_closed"
+
+
+def is_error(rec: Dict[str, Any]) -> bool:
+    """Whether a ledger record is an error: any error_kind except a client hang-up."""
+    return bool(rec.get("error_kind")) and rec.get("error_kind") != CLIENT_CLOSED
+
+
 def load_provider_pins(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
     """OpenRouter `provider` objects by model id, from `providers.json`.
 
@@ -279,16 +293,18 @@ class Ledger:
         self.calls += 1
         label = rec.get("label") or "?"
         s = self.per_label.setdefault(
-            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
-                    "providers": {}}
+            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "client_closed": 0, "prompt_tokens": 0,
+                    "completion_tokens": 0, "providers": {}}
         )
         s["calls"] += 1
         prov = rec.get("provider")
         if prov and live:
             s["providers"][prov] = s["providers"].get(prov, 0) + 1
         s["cost_usd"] += cost
-        if rec.get("error_kind"):
+        if is_error(rec):
             s["errors"] += 1
+        if rec.get("error_kind") == CLIENT_CLOSED:
+            s["client_closed"] += 1
         s["prompt_tokens"] += as_int(rec.get("prompt_tokens")) or 0
         s["completion_tokens"] += as_int(rec.get("completion_tokens")) or 0
 
@@ -376,6 +392,7 @@ class Outcome:
         self.reasoning: List[str] = []
         self.refusal: Optional[str] = None
         self.finish_reason: Optional[str] = None
+        self.client_gone_after_end = False  # the client hung up after the answer ended
         self.usage: Optional[Dict[str, Any]] = None
         self.provider: Optional[str] = None
         self.model: Optional[str] = None
@@ -585,7 +602,9 @@ class Proxy:
             conn.connect()
             out.started = time.monotonic()
             conn.request("POST", self.up_path, body=data, headers=headers)
-            return conn.getresponse()
+            resp = conn.getresponse()
+            resp.bench_conn = conn  # closed with the response, so a cut stream drops the socket at once
+            return resp
         except BaseException:
             conn.close()
             raise
@@ -824,6 +843,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         assert resp is not None
+        client_closed = False
         try:
             if client_stream:
                 self.pass_through(resp, out, pinned)
@@ -835,6 +855,11 @@ class Handler(BaseHTTPRequestHandler):
                 out.take_message(doc if isinstance(doc, dict) else {})
         except PinRefused:
             pass  # refused below, before anything reached the client
+        except ClientClosed:
+            # The client hung up mid-stream (Mockingbird aborts a looping answer). Stop
+            # reading: closing the upstream connection below stops the generation, so
+            # the provider bills no more tokens than it had sent.
+            client_closed = True
         except (socket.timeout, TimeoutError) as e:
             out.error_kind = out.error_kind or "timeout"
             out.error_excerpt = out.error_excerpt or excerpt(f"upstream timeout mid-response: {e}")
@@ -843,6 +868,9 @@ class Handler(BaseHTTPRequestHandler):
             out.error_excerpt = out.error_excerpt or excerpt(f"bad upstream response: {e}")
         finally:
             resp.close()
+            conn = getattr(resp, "bench_conn", None)
+            if conn is not None:
+                conn.close()
         if pinned and not out.error_kind and not pin_allows(pinned, out.provider):
             # allow_fallbacks false should make this impossible. The provider is checked
             # on the first chunk, before anything is relayed, so the answer is refused
@@ -856,7 +884,11 @@ class Handler(BaseHTTPRequestHandler):
                 out.error_body = json.dumps({"error": {"message": msg, "code": 503}}).encode()
         p_in, _ = px.price(model)
         prompt_est = len(json.dumps(body.get("messages", []), ensure_ascii=False)) / 3.0 * p_in
-        self.complete(px, model, rec, out, client_stream, received, prompt_est)
+        if client_closed:
+            self.close_connection = True
+            self.client_closed(px, model, rec, out, received, prompt_est)
+        else:
+            self.complete(px, model, rec, out, client_stream, received, prompt_est)
         px.dump(rec, body, out)
 
     @staticmethod
@@ -885,25 +917,32 @@ class Handler(BaseHTTPRequestHandler):
         first chunk has been checked against the pin; keep-alives before it wait."""
         held: List[bytes] = []
         client_gone = [False]
+        done = [False]
 
         def write(raw: bytes) -> None:
+            # This touches only the client socket, so any OSError (broken pipe, reset,
+            # macOS EPROTOTYPE) means the client is gone. Relaying stops there; whether
+            # reading stops too is decided once the event being relayed has been read.
             if client_gone[0]:
                 return
             try:
                 self.wfile.write(raw)
                 if raw in (b"\n", b"\r\n"):
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:
                 client_gone[0] = True
 
         def start() -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
             self.close_connection = True
             self.stream_started = True
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            except OSError:
+                client_gone[0] = True
             for raw in held:
                 write(raw)
             held.clear()
@@ -914,26 +953,40 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 held.append(raw)
 
+        def check_gone() -> None:
+            # A client gone mid-generation: stop reading (ClientClosed), so the provider
+            # generates and bills no more. A client gone after the answer ended (a
+            # finish_reason, an in-band error, [DONE]; Mockingbird drops a stream right
+            # after a `length` chunk) costs nothing more: keep reading, unrelayed, so the
+            # usage that comes last still arrives, and record the call as usual.
+            if client_gone[0] and not (done[0] or out.finish_reason or out.error_kind):
+                raise ClientClosed("client closed the stream mid-generation")
+
         for data in sse_events(resp, on_line=relay, deadline=out.started + UPSTREAM_TIMEOUT_S):
             if data.strip() == "[DONE]":
+                done[0] = True
                 if not self.stream_started:
                     start()
                 continue
             try:
                 chunk = json.loads(data)
             except ValueError:
+                check_gone()
                 continue
             if isinstance(chunk, dict):
                 out.take_chunk(chunk)
                 if not self.stream_started:
                     self.check_first_chunk(out, pinned)
                     start()
+            check_gone()
         if not self.stream_started:
             start()
-        try:
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        if not client_gone[0]:
+            try:
+                self.wfile.flush()
+            except OSError:
+                client_gone[0] = True
+        out.client_gone_after_end = client_gone[0]
 
     def fail(self, rec: Dict[str, Any], out: Outcome, kind: str, status: int, msg: str, received: float) -> None:
         rec.update(status=status, error_kind=kind, error_excerpt=excerpt(msg))
@@ -950,6 +1003,75 @@ class Handler(BaseHTTPRequestHandler):
         received: float,
         prompt_est: float,
     ) -> None:
+        usage = self.fill_record(px, model, rec, out, prompt_est)
+        err_status = 503 if out.error_kind == "provider_unavailable" else 502
+        if out.error_kind:
+            rec.update(status=err_status, error_kind=out.error_kind, error_excerpt=out.error_excerpt)
+        elif out.finish_reason == "content_filter" or out.refusal:
+            rec.update(status=200, error_kind="refusal", error_excerpt=excerpt(out.refusal or "content_filter"))
+        elif not out.text().strip() and not out.reasoning_text().strip():
+            rec.update(status=200, error_kind="empty")
+        else:
+            rec["status"] = 200
+        rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
+        if out.client_gone_after_end:
+            rec["client_gone_after_end"] = True  # recorded as usual: the answer had ended
+        if client_stream and self.stream_started:
+            if out.error_kind:
+                rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
+            return
+        # A client stream that failed before its first chunk (refused, timed out) gets
+        # the error as a plain answer, as a non-streamed call would.
+        if out.error_kind:
+            self.send_bytes(err_status, redact_bytes(out.error_body or b"") or json.dumps({"error": {"message": out.error_excerpt}}).encode(),
+                            "application/json")
+            return
+        message: Dict[str, Any] = {"role": "assistant", "content": out.text()}
+        if out.reasoning:
+            message["reasoning"] = out.reasoning_text()
+        if out.refusal:
+            message["refusal"] = out.refusal
+        doc = {
+            "id": out.gen_id or "gen-bench",
+            "object": "chat.completion",
+            "created": out.created or int(time.time()),
+            "model": out.model or model,
+            "provider": out.provider,
+            "choices": [{"index": 0, "message": message, "finish_reason": out.finish_reason}],
+            "usage": usage or None,
+        }
+        self.send_json(200, doc)
+
+    def client_closed(
+        self,
+        px: Proxy,
+        model: str,
+        rec: Dict[str, Any],
+        out: Outcome,
+        received: float,
+        prompt_est: float,
+    ) -> None:
+        """Records a stream the client hung up on mid-generation: what was received so
+        far (generation_id included), charged as usage when the provider had sent it,
+        else as the prompt plus the output seen. That cost is a lower bound: a provider
+        that does not support cancellation keeps generating, and billing. Status 499
+        (client closed request), `error_kind: client_closed`: neither a success nor an
+        error. Nothing is sent: the client is gone."""
+        self.fill_record(px, model, rec, out, prompt_est)
+        rec.update(status=499, error_kind=CLIENT_CLOSED, client_closed=True,
+                   error_excerpt="client closed the stream; upstream read stopped",
+                   received_chars=len(out.text()) + len(out.reasoning_text()))
+        rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
+
+    def fill_record(
+        self,
+        px: Proxy,
+        model: str,
+        rec: Dict[str, Any],
+        out: Outcome,
+        prompt_est: float,
+    ) -> Dict[str, Any]:
+        """Fills `rec` with the answer's provider, timings, tokens and cost; returns its usage."""
         usage = out.usage or {}
         pt = as_int(usage.get("prompt_tokens"))
         ct = as_int(usage.get("completion_tokens"))
@@ -980,41 +1102,7 @@ class Handler(BaseHTTPRequestHandler):
             cached_tokens=as_int(pdetails.get("cached_tokens")),
             finish_reason=out.finish_reason,
         )
-        err_status = 503 if out.error_kind == "provider_unavailable" else 502
-        if out.error_kind:
-            rec.update(status=err_status, error_kind=out.error_kind, error_excerpt=out.error_excerpt)
-        elif out.finish_reason == "content_filter" or out.refusal:
-            rec.update(status=200, error_kind="refusal", error_excerpt=excerpt(out.refusal or "content_filter"))
-        elif not out.text().strip() and not out.reasoning_text().strip():
-            rec.update(status=200, error_kind="empty")
-        else:
-            rec["status"] = 200
-        rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
-        if client_stream and self.stream_started:
-            if out.error_kind:
-                rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
-            return
-        # A client stream that failed before its first chunk (refused, timed out) gets
-        # the error as a plain answer, as a non-streamed call would.
-        if out.error_kind:
-            self.send_bytes(err_status, redact_bytes(out.error_body or b"") or json.dumps({"error": {"message": out.error_excerpt}}).encode(),
-                            "application/json")
-            return
-        message: Dict[str, Any] = {"role": "assistant", "content": out.text()}
-        if out.reasoning:
-            message["reasoning"] = out.reasoning_text()
-        if out.refusal:
-            message["refusal"] = out.refusal
-        doc = {
-            "id": out.gen_id or "gen-bench",
-            "object": "chat.completion",
-            "created": out.created or int(time.time()),
-            "model": out.model or model,
-            "provider": out.provider,
-            "choices": [{"index": 0, "message": message, "finish_reason": out.finish_reason}],
-            "usage": usage or None,
-        }
-        self.send_json(200, doc)
+        return usage
 
 
 def main() -> int:
