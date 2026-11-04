@@ -40,6 +40,7 @@ mod grpc;
 mod http_media;
 mod http_rest;
 mod identity_by_contract;
+mod in_segment_keys;
 mod provider_policy;
 mod references_by_value;
 mod related_writes;
