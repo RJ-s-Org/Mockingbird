@@ -1552,10 +1552,7 @@ pub(crate) async fn complete(
                 body: Some(answer.clone()),
                 ..generated.clone()
             });
-            let own = held_in.and_then(|i| match &i.record {
-                Some(mb_mcm::RecordAt::Member(member)) => Some(member.as_str()),
-                _ => None,
-            });
+            let own = held_in.and_then(mb_mcm::Identity::envelope_member);
             store_wrapped(
                 &mut state,
                 session,
@@ -3328,6 +3325,11 @@ fn record_schema_of(
             let (parts, _) = schema_parts(bundle, Some(schema));
             parts.iter().find_map(|p| p.get("items")).cloned()
         }
+        mb_mcm::RecordAt::MemberItem(member) => {
+            let list = property_schema(bundle, schema, member)?;
+            let (parts, _) = schema_parts(bundle, Some(&list));
+            parts.iter().find_map(|p| p.get("items")).cloned()
+        }
     }
 }
 
@@ -4551,13 +4553,15 @@ async fn seed_entities(
         found: Vec::new(),
     };
     walk.visit(body, schema, "", 0);
-    for resource in walk.found {
-        let stored = resource.clone();
-        if state.insert_seeded(session, resource).await
-            && let Some((_, collection)) = created.filter(|(t, _)| *t == stored.resource_type)
+    // One answer's records read back in its order.
+    let found = walk.found;
+    let stored = state.insert_seeded_all(session, found.clone()).await;
+    for (resource, stored) in found.iter().zip(stored) {
+        if stored
+            && let Some((_, collection)) = created.filter(|(t, _)| *t == resource.resource_type)
         {
             rt.collections()
-                .remember(session, &stored, collection.clone());
+                .remember(session, resource, collection.clone());
         }
     }
 }
@@ -6435,6 +6439,32 @@ impl<'a> StateAccess<'a> {
         }
         stored
     }
+
+    /// [`StateAccess::insert_seeded`] of each of `resources` as one write, so they
+    /// list in their order (as [`mb_state::StateStore::insert_seeded_all`] does): the
+    /// last is inserted first, each settled on its own, so what a store failing midway
+    /// took is still known. The first of two of one id is the one stored. Whether each
+    /// was stored, in their order.
+    pub(crate) async fn insert_seeded_all(
+        &mut self,
+        s: &SessionKey,
+        resources: Vec<StoredResource>,
+    ) -> Vec<bool> {
+        let mut stored = vec![false; resources.len()];
+        let mut firsts: Vec<(usize, StoredResource)> = Vec::with_capacity(resources.len());
+        for (at, r) in resources.into_iter().enumerate() {
+            let again = |(_, k): &(usize, StoredResource)| {
+                k.resource_type == r.resource_type && k.id == r.id
+            };
+            if !firsts.iter().any(again) {
+                firsts.push((at, r));
+            }
+        }
+        for (at, r) in firsts.into_iter().rev() {
+            stored[at] = self.insert_seeded(s, r).await;
+        }
+        stored
+    }
 }
 
 /// Stores `resources` in the session: merged over what it holds
@@ -7087,6 +7117,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             op,
             generated.body.as_ref().unwrap_or(&Value::Null),
         );
+        let mut seeded = Vec::new();
         for item in items {
             let Some(id) = item.get(&field).and_then(id_string) else {
                 continue;
@@ -7102,17 +7133,20 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     continue;
                 }
             }
-            let resource = StoredResource {
+            seeded.push(StoredResource {
                 resource_type: resource_type.into(),
-                id: id.clone(),
+                id,
                 data: item.clone(),
-            };
-            let stored = resource.clone();
+            });
+        }
+        // The list's items read back in its order.
+        let stored = state.insert_seeded_all(session, seeded.clone()).await;
+        for (stored, inserted) in seeded.into_iter().zip(stored) {
             let Some(collection) = collection.clone() else {
-                state.insert_seeded(session, resource).await;
                 continue;
             };
-            if state.insert_seeded(session, resource).await {
+            let id = stored.id.clone();
+            if inserted {
                 rt.collections().remember(session, &stored, collection);
             } else if let Some(held) = state.get(session, resource_type, &id).await
                 && rt.collections().get(session, &held).is_none()
@@ -7129,10 +7163,39 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
             let Some(data) = data else { return };
-            let Some(id) = data.get(field).and_then(id_string) else {
-                return;
-            };
-            (id, Some(data))
+            match data.get(field).and_then(id_string) {
+                Some(id) => (id, Some(data)),
+                // An envelope the contract does not say holds the record: the one
+                // member of the answer that is a record of the type and holds what
+                // the request sent is, when nothing is held under its id.
+                // It is inserted as a mention is: never over a held record, nor one the
+                // session deleted, and as no record this create made.
+                None => {
+                    let (Some(answer), Some(sent)) = (generated.body.as_ref(), request_body) else {
+                        return;
+                    };
+                    let want = Holding::Sent(sent);
+                    let on = (op, generated.status);
+                    let Some(data) = fitting_member(rt, on, resource_type, answer, want) else {
+                        return;
+                    };
+                    let Some(id) = data.get(field).and_then(id_string) else {
+                        return;
+                    };
+                    let resource = StoredResource {
+                        resource_type: resource_type.into(),
+                        id,
+                        data,
+                    };
+                    let stored = resource.clone();
+                    if state.insert_seeded(session, resource).await
+                        && let Some(collection) = collection
+                    {
+                        rt.collections().remember(session, &stored, collection);
+                    }
+                    return;
+                }
+            }
         }
         OperationKind::Command(Effect::Update) => {
             let (Some(id), Some(data)) = (target_id, data) else {
@@ -7146,8 +7209,17 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     write_memory::onto_record(rt, op, on, data, generated.status)
                 }
                 // With nothing held, an answer that does not suit the type (a task
-                // acknowledging the update) is no record of it: nothing is stored.
-                Some(_) if !entity_fits(rt, resource_type, &data) => return,
+                // acknowledging the update) is no record of it: nothing is stored,
+                // unless it is an envelope holding the record, the one member of it
+                // that suits the type and carries the target's id.
+                Some(_) if !entity_fits(rt, resource_type, &data) => {
+                    let want = Holding::Target(id.as_str());
+                    let on = (op, generated.status);
+                    match fitting_member(rt, on, resource_type, &data, want) {
+                        Some(record) => record,
+                        None => return,
+                    }
+                }
                 _ => data,
             };
             (id, Some(data))
@@ -7201,6 +7273,105 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 rt.collections().forget(session, &gone);
             }
         }
+    }
+}
+
+/// The members type `t`'s schema declares at its top level, as [`entity_fits`] reads
+/// that schema; none for a type with nothing to check against.
+fn type_members(rt: &MockRuntime, t: &str) -> Vec<String> {
+    let index = rt.index();
+    let bundle = rt.bundle();
+    let (read, shape) = match index.detail_reads.get(t) {
+        Some(i) => (Some(*i), index.record_schemas.get(t)),
+        None => match index.other_shapes.get(t) {
+            Some((i, schema)) => (Some(*i), Some(schema)),
+            None => (None, None),
+        },
+    };
+    let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
+        return Vec::new();
+    };
+    let schema = shape.or_else(|| op.success_output()?.schema.as_ref());
+    Place::of(rt, schema)
+        .parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flat_map(|p| p.keys().cloned())
+        .collect()
+}
+
+/// What the record [`fitting_member`] finds must hold.
+#[derive(Clone, Copy)]
+enum Holding<'a> {
+    /// An update's target id: as its identity's key or the member the path names, or,
+    /// with no identity, as any of its single values.
+    Target(&'a str),
+    /// A create's request: a single value it sent, under the same member name.
+    Sent(&'a Value),
+}
+
+/// The one member of an object `answer` (`op`'s, of `status`), one level down, that is
+/// a record of type `t` ([`entity_fits`]) and holds what `want` says: the record an
+/// envelope the contract does not describe holds (`{result: {...}, success}`). A member
+/// the answer's schema declares as another type's definition is not one. `None` when no
+/// member or several are such records.
+fn fitting_member(
+    rt: &MockRuntime,
+    (op, status): (&Operation, u16),
+    t: &str,
+    answer: &Value,
+    want: Holding<'_>,
+) -> Option<Value> {
+    let Value::Object(members) = answer else {
+        return None;
+    };
+    let holds = |record: &Value| match want {
+        Holding::Target(id) => {
+            let is_id = |v: &Value| id_string(v).is_some_and(|v| v == id);
+            match &op.identity {
+                Some(identity) => [identity.field.as_str(), identity.path_member()]
+                    .iter()
+                    .any(|f| record.get(*f).is_some_and(is_id)),
+                None => record.as_object().is_some_and(|r| r.values().any(is_id)),
+            }
+        }
+        Holding::Sent(sent) => {
+            let (Some(record), Some(sent)) = (record.as_object(), sent.as_object()) else {
+                return false;
+            };
+            let declared = type_members(rt, t);
+            let mut named = sent.iter().filter(|(name, value)| {
+                !value.is_null()
+                    && !value.is_object()
+                    && !value.is_array()
+                    && declared.contains(*name)
+            });
+            let first = named.next();
+            first.is_some()
+                && first
+                    .into_iter()
+                    .chain(named)
+                    .all(|(name, value)| record.get(name) == Some(value))
+        }
+    };
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let schema = op.output_for_status(status).and_then(|o| o.schema.as_ref());
+    let another_type = |member: &str| {
+        let Some(declared) = schema.and_then(|s| property_schema(bundle, s, member)) else {
+            return false;
+        };
+        let (_, defs) = schema_parts(bundle, Some(&declared));
+        defs.iter()
+            .filter_map(|d| index.types_by_def.get(*d))
+            .any(|of| of != t)
+    };
+    let mut fitting = members.iter().filter(|(member, v)| {
+        v.is_object() && holds(v) && !another_type(member) && entity_fits(rt, t, v)
+    });
+    match (fitting.next(), fitting.next()) {
+        (Some((_, record)), None) => Some(record.clone()),
+        _ => None,
     }
 }
 

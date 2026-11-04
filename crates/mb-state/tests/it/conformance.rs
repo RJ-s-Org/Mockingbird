@@ -35,6 +35,7 @@ pub async fn run_all_in(store: Arc<dyn StateStore>, workspace: &str) {
     export_then_seed_round_trips(&store, ws).await;
     session_count_default_matches_sessions(&store, ws).await;
     insert_seeded_keeps_an_existing_resource(&store, ws).await;
+    one_write_lists_in_its_order(&store, ws).await;
     the_internal_type_is_no_resource(&store, ws).await;
     an_unlisted_session_is_left_out(&store, ws).await;
 }
@@ -166,6 +167,39 @@ async fn insert_seeded_keeps_an_existing_resource(st: &Arc<dyn StateStore>, ws: 
         "seeding publishes nothing"
     );
     assert_eq!(st.sessions(ws, "seeding").await.expect("sessions").len(), 1);
+}
+
+/// The records of one write list in their order, after every later write's and
+/// before every earlier one's; one held already keeps its place.
+async fn one_write_lists_in_its_order(st: &Arc<dyn StateStore>, ws: &str) {
+    let s = key(ws, "one-write", "a");
+    let ids = |list: Vec<StoredResource>| list.into_iter().map(|r| r.id).collect::<Vec<_>>();
+    st.upsert(&s, res("block", "held", json!({"v": 0})))
+        .await
+        .expect("upsert");
+    let batch = ["b1", "b2", "held", "b3"]
+        .into_iter()
+        .map(|id| res("block", id, json!({"v": id})))
+        .collect();
+    let stored = st.insert_seeded_all(&s, batch).await.expect("seed all");
+    assert_eq!(stored, [true, true, false, true]);
+    assert_eq!(
+        ids(st.list(&s, "block", 10).await.expect("list")),
+        ["b1", "b2", "b3", "held"]
+    );
+    assert_eq!(
+        st.get(&s, "block", "held")
+            .await
+            .expect("get")
+            .map(|r| r.data),
+        Some(json!({"v": 0}))
+    );
+    let later = vec![res("block", "c1", json!({})), res("block", "c2", json!({}))];
+    st.insert_seeded_all(&s, later).await.expect("seed all");
+    assert_eq!(
+        ids(st.list(&s, "block", 3).await.expect("list")),
+        ["c1", "c2", "b1"]
+    );
 }
 
 /// `session_count` counts exactly the live sessions `sessions` lists, per

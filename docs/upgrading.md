@@ -30,6 +30,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Records in envelopes and one write's order
+
+No migration or configuration.
+
+- **What changes in a compiled bundle:** an identity can hold its record as the one item of an envelope's array, `record: {member_item: "Contacts"}`, and routes answering an `allOf` extension of an envelope whose base declares a placeholder member (`result: {}`) now get `record: {member: "result"}`. Recompile a stored bundle to pick either up.
+- **Listing order:** the records one write stores (a list answer's items, the records an answer mentions) list in the answer's order, newest write first; `export` gives them in reverse within the write, so `seed` restores the same order.
+- **Rust API**: `mb_mcm::RecordAt` gains the variant `MemberItem`, which breaks an exhaustive `match` on it; `Identity::envelope_member` and `StateStore::insert_seeded_all` (with a default) are new.
+
 ### Sibling-route writes reach a parent's lists, and bodyless writes get effects
 
 No migration or configuration.

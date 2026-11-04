@@ -338,7 +338,18 @@ async fn a_create_with_another_email_shows_nothing() {
         vec![contact("ct-000102", "John Doe", "john.doe@example.com")],
     );
     fresh.post("/contacts", second).await;
-    assert_eq!(prompt, fresh.prompt(0), "the prompt is unchanged");
+    // The clock line says when each was sent, which may be another second.
+    let timeless = |p: &str| {
+        p.lines()
+            .filter(|l| !l.starts_with("<now>"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        timeless(&prompt),
+        timeless(&fresh.prompt(0)),
+        "the prompt is unchanged"
+    );
 }
 
 /// A common value two contacts share (a status word) is no identifier, and is held by

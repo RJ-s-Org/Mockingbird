@@ -68,9 +68,7 @@ fn shape(rt: &MockRuntime, op: &Operation) -> Option<Shape> {
         return None;
     }
     let t = op.resource_type.as_deref()?;
-    let Some(mb_mcm::RecordAt::Member(member)) = op.identity.as_ref()?.record.as_ref() else {
-        return None;
-    };
+    let member = op.identity.as_ref()?.envelope_member()?;
     let schema = op.success_output()?.schema.as_ref()?;
     let mut siblings: Vec<String> = mb_engine::consistency::required_members(rt.bundle(), schema)
         .into_iter()
@@ -82,7 +80,7 @@ fn shape(rt: &MockRuntime, op: &Operation) -> Option<Shape> {
     siblings.sort();
     Some(Shape {
         key: format!("{t} {member} {}", siblings.join(",")),
-        member: member.clone(),
+        member: member.to_owned(),
         siblings,
     })
 }

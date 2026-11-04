@@ -29,7 +29,6 @@ smart = [
     "dep:futures",
     "dep:jsonschema",
     "dep:chrono",
-    "dep:tracing",
     "dep:pdf-extract",
     "dep:scraper",
     "dep:pulldown-cmark",
@@ -48,7 +47,7 @@ async-trait = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 jsonschema = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
+tracing = { workspace = true }
 pdf-extract = { workspace = true, optional = true }
 scraper = { workspace = true, optional = true }
 pulldown-cmark = { workspace = true, optional = true }
