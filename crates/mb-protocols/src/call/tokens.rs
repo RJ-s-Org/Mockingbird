@@ -16,11 +16,12 @@
 //!   the server manages: a *candidate* pairing. It pairs only once the client was seen to
 //!   track the member as it moves: a later write whose header holds the member's moved
 //!   value. A header that stays the same while the member moves drops the candidate.
-//! - **By the body or the query**: the write declares and requires the member, it is the
-//!   only member of the record the write's input declares (the `{version, actions}`
-//!   shape), or the read marks it `readOnly`; no create of the type sets it, and the
-//!   request echoes its held value. An integer one is stale only when lower than the
-//!   current value.
+//! - **By the body or the query**: the write declares the member, no create of the
+//!   type sets it, and the request echoes its held value; and either the write requires
+//!   it as the only member of the record its input declares (the `{version, actions}`
+//!   shape), or the client was seen to track it: a later write sent back the value it
+//!   moved to. A `readOnly` member alone ties nothing (a computed total a full PUT echoes
+//!   is none). An integer one is stale only when lower than the current value.
 //!
 //! No member's date, time or wording is read beyond that.
 //!
@@ -84,6 +85,10 @@ pub(super) struct Tokens {
     headers_after: Map<String, Value>,
     /// `seen` after this write.
     seen_after: Map<String, Value>,
+    /// Body tokens the client was seen to track (it sent a moved value back), as read.
+    tracked: Vec<String>,
+    /// `tracked` after this write.
+    tracked_after: Vec<String>,
     /// Whether the record has a document of its tokens.
     kept: bool,
 }
@@ -316,8 +321,11 @@ fn header_member(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> boo
 }
 
 /// Whether `op` may carry member `member` of a stored `t` as a token in its body or its
-/// query (see the module's documentation).
-fn body_token(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
+/// query (see the module's documentation): it declares a `409` or a `412` and the
+/// member, which no create sets, and that the read marks `readOnly` or that has the
+/// token's shape ([`body_shaped`]). A `readOnly` member alone ties nothing: it is a
+/// token once [`body_shaped`] or once the client was seen to track it.
+fn body_candidate(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
     if !declares_conflict(op) {
         return false;
     }
@@ -335,9 +343,17 @@ fn body_token(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
     if settable_by(rt, t, member, false) {
         return false;
     }
-    if read_only(bundle, &read, 0) {
-        return true;
-    }
+    read_only(bundle, &read, 0) || body_shaped(rt, op, t, member)
+}
+
+/// Whether `op`'s input requires member `member` of a stored `t` as the only member of
+/// the record it declares (the `{version, actions}` shape).
+fn body_shaped(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
+    let bundle = rt.bundle();
+    let declares =
+        |s: &&Value| mb_engine::consistency::property_schema(bundle, s, member).is_some();
+    let body = op.input.body.as_ref().filter(declares);
+    let query = op.input.query.as_ref().filter(declares);
     let required = [body, query]
         .into_iter()
         .flatten()
@@ -482,6 +498,9 @@ pub(super) async fn check(
             .unwrap_or_default()
     };
     let (pairs, seen) = (object("headers"), object("seen"));
+    let tracked_body: Vec<String> = part("tracked")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
     let body = match call.body.as_ref() {
         Some(Value::Object(members)) => Some(members),
         _ => None,
@@ -506,7 +525,9 @@ pub(super) async fn check(
             continue;
         }
         let by_words = in_body && tied(rt, op, t, member) && compared(sent) != compared(now);
-        let by_evidence = body_token(rt, op, t, member) && stale(sent, now);
+        let by_evidence = (body_shaped(rt, op, t, member) || tracked_body.contains(member))
+            && body_candidate(rt, op, t, member)
+            && stale(sent, now);
         if by_words || by_evidence {
             codes = &[409, 412];
             break;
@@ -548,6 +569,7 @@ pub(super) async fn check(
     let mut advancing: Vec<String> = Vec::new();
     let mut mintable: Vec<String> = Vec::new();
     let (mut headers_after, mut seen_after) = (pairs.clone(), seen.clone());
+    let mut tracked_after = tracked_body.clone();
     if op.kind == OperationKind::Command(Effect::Update)
         && let Value::Object(held) = &target.data
     {
@@ -654,9 +676,18 @@ pub(super) async fn check(
             if as_text(value).is_none() || advancing.contains(member) {
                 continue;
             }
-            let by_body = body_token(rt, op, t, member);
+            let by_body = body_candidate(rt, op, t, member);
             let sent =
                 body.is_some_and(|b| b.contains_key(member)) || call.query.contains_key(member);
+            // Tracked: the client sends back the value it moved to.
+            if by_body
+                && sent
+                && !set_anew(member)
+                && is_confirmed(member)
+                && !tracked_after.contains(member)
+            {
+                tracked_after.push(member.clone());
+            }
             if is_confirmed(member) && (by_body || tracked(member)) {
                 advance(member, by_if_match(member), &mut advancing);
             } else if tied(rt, op, t, member) || (by_body && sent) {
@@ -672,6 +703,8 @@ pub(super) async fn check(
         seen,
         headers_after,
         seen_after,
+        tracked: tracked_body,
+        tracked_after,
         kept: doc.is_some(),
     })
 }
@@ -687,7 +720,9 @@ pub(super) async fn after_update(
     tokens: &Tokens,
     served: Option<&mut Value>,
 ) {
-    let pairings_moved = tokens.headers_after != tokens.headers || tokens.seen_after != tokens.seen;
+    let pairings_moved = tokens.headers_after != tokens.headers
+        || tokens.seen_after != tokens.seen
+        || tokens.tracked_after != tokens.tracked;
     if tokens.advancing.is_empty() && !pairings_moved {
         return;
     }
@@ -746,6 +781,7 @@ pub(super) async fn after_update(
                     "confirmed": confirmed,
                     "headers": tokens.headers_after,
                     "seen": tokens.seen_after,
+                    "tracked": tokens.tracked_after,
                 }),
             },
         )
