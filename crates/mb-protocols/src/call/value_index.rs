@@ -834,6 +834,12 @@ fn repeated_by(
 /// the create may be offered names ([`mb_engine::guards::a_refusal_names`]). Anything
 /// else finds nothing and pays nothing.
 ///
+/// First of all, a create whose body asks for its record's id under the identity field
+/// ([`mb_engine::guards::asked_identity`], a client-chosen `id`) is shown the record the
+/// session holds under that id, under that member, when it is in the collection the
+/// create runs in (as below): the one record it can only repeat, read by its key on any
+/// store, whatever the shape of its value.
+///
 /// The store is asked, whatever it is: the session's records of the type, at most
 /// [`MAX_SCAN`], newest first, in one listing. A listing the store failed, or the breaker
 /// held off, decides nothing. A value more than [`MAX_HOLDERS`] records hold is common;
@@ -869,8 +875,20 @@ pub(super) async fn same_values(
     {
         return Vec::new();
     }
+    let session = &plan.session;
+    let mut out: Vec<(StoredResource, String)> = Vec::new();
+    // The id the request asks for, held already in the collection the create runs in:
+    // the record a create can only repeat, whatever its shape.
+    if let Some(id) = mb_engine::guards::asked_identity(rt.bundle(), op, call)
+        && !known(own, &id)
+        && let Some(hit) = state.get(session, own, &id).await
+        && in_create_collection(rt, session, op, call, &hit)
+    {
+        let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+        out.push((hit, field.to_string()));
+    }
     let Some(schema) = write_memory::read_schema(rt, own) else {
-        return Vec::new();
+        return out;
     };
     let parts = schema_parts(rt.bundle(), Some(schema)).0;
     let asked: Vec<(&String, &str, Kind)> = body
@@ -883,21 +901,14 @@ pub(super) async fn same_values(
         })
         .collect();
     if asked.is_empty() {
-        return Vec::new();
+        return out;
     }
-    let session = &plan.session;
     let listed = state.list(session, own, MAX_SCAN).await;
     if !state.available() {
-        return Vec::new();
+        return out;
     }
     let whole = listed.len() < MAX_SCAN;
-    let collection = collection_of(op, call);
-    let placed = created_in_collections(rt.bundle(), own);
-    let in_collection = |hit: &StoredResource| match rt.collections().placement(session, hit) {
-        Some(at) => at == collection,
-        None => !placed && collection.is_none(),
-    };
-    let mut out: Vec<(StoredResource, String)> = Vec::new();
+    let in_collection = |hit: &StoredResource| in_create_collection(rt, session, op, call, hit);
     for (name, text, kind) in asked {
         if out.len() >= MAX_SAME_VALUES {
             break;

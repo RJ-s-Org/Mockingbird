@@ -1174,6 +1174,7 @@ pub(crate) async fn complete(
         cache,
         mut earlier,
         unlisted,
+        same_values,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1263,6 +1264,45 @@ pub(crate) async fn complete(
                 )
                 .await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
+                // A create answered for the id of a record held already does not replace
+                // it: nothing comes of it, and the answer agrees with the store. It is the
+                // refusal the prompt offered on that record, when it did; otherwise (a
+                // forced status, a scenario, no refusal declared or offered) the held
+                // record, under the status answered, as an idempotent create answers.
+                let repeated =
+                    repeated_record(&mut state, (session, op, t, state_call), &generated).await;
+                // Held in another collection (another parent's label of the same name):
+                // the answer is served, but stored over that record it is not.
+                if let Some(Repeated::Elsewhere(id)) = &repeated {
+                    unstored = true;
+                    tracing::info!(
+                        mock = %rt.name,
+                        operation = %op.id,
+                        id = %log_capped(id),
+                        "create not stored: its id is held in another collection"
+                    );
+                }
+                if let Some(Repeated::Here(held)) = repeated {
+                    unstored = true;
+                    drop_all_effects(rt, op, &held.id, &mut generated);
+                    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                    let offered = same_values
+                        .iter()
+                        .any(|(st, id, member)| st == t && *id == held.id && member == field);
+                    let refusal = offered
+                        .then(|| plan.engine.refuse_repeat(rt.bundle(), op, call, &generated))
+                        .flatten();
+                    match refusal {
+                        Some(mut refusal) => {
+                            refusal.effect_outcomes =
+                                std::mem::take(&mut generated.effect_outcomes);
+                            refusal.dropped_effects = generated.dropped_effects;
+                            answered = None;
+                            generated = refusal;
+                        }
+                        None => generated.body = Some(held.data),
+                    }
+                }
             }
             // An action's new record goes under its own id, not over another's.
             if generated.new_record {
@@ -1358,6 +1398,7 @@ pub(crate) async fn complete(
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
+            && !unstored
         {
             // The record an envelope holds is stored already, under its identity.
             let wrapped = answered.as_ref().map(|answer| GeneratedResponse {
@@ -1445,6 +1486,34 @@ pub(crate) async fn complete(
             let shown = shown_types(rt, target.as_ref(), &related, &created_since);
             resolve_effect_types(&mut state, session, rt, &shown, &mut generated.effects).await;
             write_memory::effects_on_target(&earlier, target.as_ref(), &mut generated.effects);
+            if let Some(t) =
+                resource_type.filter(|_| op.kind == OperationKind::Command(Effect::Create))
+            {
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let created = generated
+                    .body
+                    .as_ref()
+                    .and_then(|b| b.get(field))
+                    .and_then(id_string);
+                let effects = std::mem::take(&mut generated.effects);
+                let (kept, dropped) =
+                    sibling_effects(t, created.as_deref(), state_call.body.as_ref(), effects);
+                generated.effects = kept;
+                generated.dropped_effects += dropped.len();
+                generated
+                    .effect_outcomes
+                    .extend(dropped.into_iter().map(|effect| {
+                        EffectOutcome {
+                            effect,
+                            rejected: Some(
+                                "a create copies its request onto no other record of its type"
+                                    .to_string(),
+                            ),
+                            merged: None,
+                            applied: Vec::new(),
+                        }
+                    }));
+            }
             let outcomes = apply_effects(
                 &mut state,
                 session,
@@ -2397,11 +2466,18 @@ async fn taken_id(
 ) -> Option<String> {
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
-    let requested = call
-        .body
-        .as_ref()
-        .and_then(|b| b.get(field))
-        .and_then(id_string);
+    // A create asks for an id only under a member its request declares: one it does
+    // not, the API mints over (see [`mb_engine::guards::asked_identity`]).
+    let requested = match op.kind {
+        OperationKind::Command(Effect::Create) => {
+            mb_engine::guards::asked_identity(state.rt.bundle(), op, call)
+        }
+        _ => call
+            .body
+            .as_ref()
+            .and_then(|b| b.get(field))
+            .and_then(id_string),
+    };
     if requested.as_deref() == Some(id.as_str()) {
         return None;
     }
@@ -2481,6 +2557,136 @@ fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
         strings(body, field, 0, &mut out);
     }
     out
+}
+
+/// What the session holds under the id of a create's answer when that id is the one the
+/// request asked for by its body's identity field ([`mb_engine::guards::asked_identity`],
+/// a member the request declares): the record, when it is in the collection the create
+/// runs in ([`in_create_collection`]), so that the create repeats it; else that a record
+/// elsewhere holds the id. Storing the answer would replace that record either way, which
+/// no create does. A create
+/// sent with a declared idempotency key may be a retry the API answers as the first, and
+/// an HTTP `PUT` is an upsert by its method: neither is one. (A create naming its id in
+/// its path gets a fresh one drawn first, see [`unique_create_id`].)
+async fn repeated_record(
+    state: &mut StateAccess<'_>,
+    (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
+    generated: &GeneratedResponse,
+) -> Option<Repeated> {
+    let rt = state.rt;
+    if !matches!(op.kind, OperationKind::Command(Effect::Create))
+        || matches!(
+            op.binding,
+            Binding::Http {
+                method: mb_mcm::HttpMethod::Put,
+                ..
+            }
+        )
+        || mb_engine::guards::carries_an_idempotency_key(rt.bundle(), op, call)
+    {
+        return None;
+    }
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
+    if mb_engine::guards::asked_identity(rt.bundle(), op, call).as_deref() != Some(id.as_str()) {
+        return None;
+    }
+    let held = state.get(session, resource_type, &id).await?;
+    Some(if in_create_collection(rt, session, op, call, &held) {
+        Repeated::Here(held)
+    } else {
+        Repeated::Elsewhere(id)
+    })
+}
+
+/// What [`repeated_record`] found under the id a create asked for.
+enum Repeated {
+    /// The record, in the collection the create runs in: the create repeats it.
+    Here(StoredResource),
+    /// A record under that id the create does not repeat, in another collection (or
+    /// placed nowhere known, of a type also created under a parent): the create is new
+    /// there, but storing it would replace that record, so it is served unstored.
+    Elsewhere(String),
+}
+
+/// Drops every effect of `generated`, a create's answer that is not stored as it
+/// repeats the record held under `id` (see [`repeated_record`]), and says so in its
+/// outcomes: a duplicate changes nothing.
+fn drop_all_effects(rt: &MockRuntime, op: &Operation, id: &str, generated: &mut GeneratedResponse) {
+    const REASON: &str = "the create repeats a stored record's id: nothing is stored";
+    let dropped = std::mem::take(&mut generated.effects);
+    generated.dropped_effects += dropped.len();
+    generated
+        .effect_outcomes
+        .extend(dropped.into_iter().map(|effect| EffectOutcome {
+            effect,
+            rejected: Some(REASON.to_string()),
+            merged: None,
+            applied: Vec::new(),
+        }));
+    tracing::info!(
+        mock = %rt.name,
+        operation = %op.id,
+        id = %log_capped(id),
+        "create not stored: its id is a stored record's"
+    );
+}
+
+/// Whether `set`, what an effect sets a member to, repeats `asked`, what the request
+/// gives that member: equal (numbers by value), or, for objects, holding at any depth a
+/// value the request holds at the same place (`{"parent": {"id": "tr_1"}, "note": ..}`).
+fn copies_value(set: &Value, asked: &Value, depth: usize) -> bool {
+    match (set, asked) {
+        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Object(set), Value::Object(asked)) if depth < 8 => set
+            .iter()
+            .any(|(k, v)| asked.get(k).is_some_and(|a| copies_value(v, a, depth + 1))),
+        _ => set == asked,
+    }
+}
+
+/// Splits `effects`, those of a create of `resource_type` whose answer's record is
+/// `created`, into what may apply and what is rejected: on another record of its own
+/// type, every member whose value copies what the request gives that member (see
+/// [`copies_value`]) is taken out, as the request copied onto a sibling (Mollie's second
+/// payment setting the first one's amount, a request's `parent_id` making its parent its
+/// own parent), whatever the value: the sibling's own id is copied as much as any. The
+/// rest of the effect applies (a reply's count on its thread, clearing `is_default` on
+/// the old default); an effect with nothing left is rejected whole. Effects on the created record and on other
+/// types are left as they are. Each rejected part is returned as an effect of the
+/// members taken out.
+fn sibling_effects(
+    resource_type: &str,
+    created: Option<&str>,
+    body: Option<&Value>,
+    effects: Vec<ResourceEffect>,
+) -> (Vec<ResourceEffect>, Vec<ResourceEffect>) {
+    let empty = Map::new();
+    let body = match body {
+        Some(Value::Object(members)) => members,
+        _ => &empty,
+    };
+    let mut kept = Vec::with_capacity(effects.len());
+    let mut dropped = Vec::new();
+    for mut e in effects {
+        if e.resource_type != resource_type || created == Some(e.id.as_str()) {
+            kept.push(e);
+            continue;
+        }
+        let (copied, rest): (Map<String, Value>, Map<String, Value>) = std::mem::take(&mut e.set)
+            .into_iter()
+            .partition(|(k, v)| body.get(k).is_some_and(|asked| copies_value(v, asked, 0)));
+        if !copied.is_empty() {
+            dropped.push(ResourceEffect {
+                set: copied,
+                ..e.clone()
+            });
+        }
+        if !rest.is_empty() {
+            kept.push(ResourceEffect { set: rest, ..e });
+        }
+    }
+    (kept, dropped)
 }
 
 /// Gives a create's answer a fresh identity when its generated one is taken (see
@@ -4665,6 +4871,25 @@ fn created_in_collections(bundle: &mb_mcm::Bundle, t: &str) -> bool {
     })
 }
 
+/// Whether `hit`, a stored record of the type `call`, a create of `op`, makes, is in the
+/// collection the create runs in, as far as this runtime's writes tell: placed there, or,
+/// placed nowhere known, when the create is top-level and the contract never creates the
+/// type under a parent path (see [`created_in_collections`]). A record of a parent path
+/// counts only under that parent: a label `bug` of one repository is no other's.
+fn in_create_collection(
+    rt: &MockRuntime,
+    session: &SessionKey,
+    op: &Operation,
+    call: &OperationCall,
+    hit: &StoredResource,
+) -> bool {
+    let collection = collection_of(op, call);
+    match rt.collections().placement(session, hit) {
+        Some(at) => at == collection,
+        None => collection.is_none() && !created_in_collections(rt.bundle(), &hit.resource_type),
+    }
+}
+
 /// What [`Collections`] holds at most; it is emptied when full.
 const MAX_COLLECTIONS: usize = 4096;
 
@@ -6131,6 +6356,126 @@ mod tests {
         // Two shown types of one stem: no guess.
         let both: Vec<String> = vec!["entries".into(), "entry".into()];
         assert_eq!(stem_type(&both, "Entry", &[]), None);
+    }
+
+    #[test]
+    fn a_create_s_effects_copy_its_request_onto_no_sibling() {
+        let effect = |t: &str, id: &str, set: Value| ResourceEffect {
+            resource_type: t.into(),
+            id: id.into(),
+            set: set.as_object().cloned().unwrap_or_default(),
+        };
+        let sets = |v: &[ResourceEffect]| {
+            v.iter()
+                .map(|e| format!("{}:{}", e.id, Value::Object(e.set.clone())))
+                .collect::<Vec<_>>()
+        };
+        let split = |body: Value, effects: Vec<ResourceEffect>| {
+            let (kept, dropped) = sibling_effects("payments", Some("new"), Some(&body), effects);
+            (sets(&kept), sets(&dropped))
+        };
+        // The amount alone, though `1` is the sibling's id.
+        assert_eq!(
+            split(
+                json!({"amount": 1, "description": "Order X-2"}),
+                vec![effect("payments", "1", json!({"amount": 1}))],
+            ),
+            (vec![], vec!["1:{\"amount\":1}".to_string()])
+        );
+        // An amount the request does not give, and a default it does not copy, apply.
+        assert_eq!(
+            split(
+                json!({"amount": 9.99, "is_default": true}),
+                vec![effect(
+                    "payments",
+                    "1",
+                    json!({"amount": 9.990, "is_default": false, "replies": 1})
+                )],
+            ),
+            (
+                vec!["1:{\"is_default\":false,\"replies\":1}".to_string()],
+                vec!["1:{\"amount\":9.99}".to_string()]
+            )
+        );
+        // A nested object holding a copied value goes whole, its other members too.
+        assert_eq!(
+            split(
+                json!({"fields": {"parent": {"id": "tr_1"}, "note": "copied"}}),
+                vec![effect(
+                    "payments",
+                    "tr_1",
+                    json!({"fields": {"parent": {"id": "tr_1"}, "note": "copied"}, "replies": 2})
+                )],
+            ),
+            (
+                vec!["tr_1:{\"replies\":2}".to_string()],
+                vec![
+                    "tr_1:{\"fields\":{\"note\":\"copied\",\"parent\":{\"id\":\"tr_1\"}}}"
+                        .to_string()
+                ]
+            )
+        );
+        // So does one holding a nested value of the request beside values of its own.
+        assert_eq!(
+            split(
+                json!({"fields": {"parent": {"id": "tr_1"}, "note": "copied"}}),
+                vec![effect(
+                    "payments",
+                    "tr_1",
+                    json!({"fields": {"parent": {"id": "tr_1"}, "note": "its own"}})
+                )],
+            )
+            .0,
+            Vec::<String>::new()
+        );
+        // The sibling's own id is copied as much as any value: a reply's `in_reply_to`
+        // on its parent, a `parent_id` making a record its own parent, a `quantity` that
+        // happens to equal an id. What the request does not give still applies.
+        assert_eq!(
+            split(
+                json!({"amount": 3, "in_reply_to": 1_234_567}),
+                vec![effect(
+                    "payments",
+                    "1234567",
+                    json!({"in_reply_to": 1_234_567, "replies": 1})
+                )],
+            ),
+            (
+                vec!["1234567:{\"replies\":1}".to_string()],
+                vec!["1234567:{\"in_reply_to\":1234567}".to_string()]
+            )
+        );
+        assert_eq!(
+            split(
+                json!({"parent_id": "tr_1"}),
+                vec![effect("payments", "tr_1", json!({"parent_id": "tr_1"}))],
+            ),
+            (vec![], vec!["tr_1:{\"parent_id\":\"tr_1\"}".to_string()])
+        );
+        assert_eq!(
+            split(
+                json!({"amount": 2, "quantity": 1}),
+                vec![effect("payments", "1", json!({"quantity": 1}))],
+            ),
+            (vec![], vec!["1:{\"quantity\":1}".to_string()])
+        );
+        // The created record and other types are left as they are.
+        assert_eq!(
+            split(
+                json!({"amount": 1}),
+                vec![
+                    effect("payments", "new", json!({"amount": 1})),
+                    effect("customers", "1", json!({"amount": 1})),
+                ],
+            ),
+            (
+                vec![
+                    "new:{\"amount\":1}".to_string(),
+                    "1:{\"amount\":1}".to_string()
+                ],
+                vec![]
+            )
+        );
     }
 
     #[test]

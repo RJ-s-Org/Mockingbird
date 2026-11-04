@@ -20,6 +20,7 @@ mod backends;
 mod call;
 mod contract_types;
 mod create_refusals;
+mod create_repeats;
 mod data_plane_auth;
 mod data_plane_auth_protocols;
 #[cfg(feature = "amqp")]

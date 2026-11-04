@@ -1262,6 +1262,22 @@ impl Engine {
         response
     }
 
+    /// The refusal a create answered as a success for a record held already deserves: the
+    /// declared status its refusal offer would name first (see [`guards::refusal_codes`]:
+    /// a `409` before a `412` or a `422`, a `400` only alone), rendered as an LLM's
+    /// refusal is, with `answered`'s source and usage. `None` when `op` declares none.
+    #[must_use]
+    pub fn refuse_repeat(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        answered: &GeneratedResponse,
+    ) -> Option<GeneratedResponse> {
+        let code = guards::refusal_codes(op).first().copied()?;
+        Some(self.refused(bundle, op, call, code, answered.source, answered.usage))
+    }
+
     /// The declared error `code` an LLM refused a call with (see [`guards::refusals`]),
     /// rendered as a forced status's is offline: the contract's response for that
     /// status, faker-filled. Tagged with the LLM's `source`, as the LLM chose it, and
