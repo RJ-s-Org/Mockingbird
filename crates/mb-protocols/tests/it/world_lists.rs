@@ -2704,8 +2704,8 @@ async fn a_stored_run_leaves_the_flag_as_given() {
 }
 
 /// Lists whose next page is a URL in the answer: HAL's `_links.next.href`, a bare
-/// `next` beside the list, and JSON:API's `links.next`, each with the cursor in its
-/// query; and one with two parameters that could be the cursor.
+/// `next` beside `values`, JSON:API's `links.next`, each with the cursor in its query,
+/// and lists where no URL may be written.
 const LINKED: &str = r##"
 openapi: 3.1.0
 info: {title: Linked pages, version: "1"}
@@ -2715,7 +2715,7 @@ paths:
       operationId: listHal
       parameters:
         - {name: limit, in: query, schema: {type: integer}}
-        - {name: from, in: query, schema: {type: string}}
+        - {name: from, in: query, description: "The item to start at, as the `next` link carries it.", schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -2751,7 +2751,7 @@ paths:
                 required: [values]
                 properties:
                   values: {type: array, items: {$ref: "#/components/schemas/User"}}
-                  next: {type: string, format: uri}
+                  next: {type: string, format: uri, description: "The next page's URL, with its `page`."}
                   previous: {type: string, format: uri}
   /jsonapi:
     get:
@@ -2779,6 +2779,22 @@ paths:
                       next:
                         type: [string, "null"]
                         description: The next page's URL; null on the last page.
+  /unconfirmed:
+    get:
+      operationId: listUnconfirmed
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: from, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next: {type: string, format: uri}
   /ambiguous:
     get:
       operationId: listAmbiguous
@@ -2786,6 +2802,73 @@ paths:
         - {name: limit, in: query, schema: {type: integer}}
         - {name: from, in: query, schema: {type: string}}
         - {name: after, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next: {type: string, format: uri, description: "With `from` or `after`."}
+  /laravel:
+    get:
+      operationId: listLaravel
+      parameters:
+        - {name: page, in: query, schema: {type: integer}}
+        - {name: per_page, in: query, schema: {type: integer}}
+        - {name: search, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_url: {type: [string, "null"], format: uri, description: "The next page, with the `search` asked."}
+  /numbered:
+    get:
+      operationId: listNumbered
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: per_page, in: query, schema: {type: integer}}
+        - {name: search, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_url: {type: [string, "null"], format: uri, description: "The next page, with the `search` asked."}
+  /since:
+    get:
+      operationId: listSince
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: since, in: query, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next: {type: string, format: uri, description: "The next page, with `since`."}
+  /things/{id}/items:
+    get:
+      operationId: listThingItems
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: from, in: query, description: "As the `next` URL carries it.", schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -2818,9 +2901,27 @@ fn followed(url: &str) -> &str {
     &url[host + url[host..].find('/').unwrap_or(0)..]
 }
 
+/// [`Api::get`] with a `Host` header.
+async fn get_at(api: &Api, host: &str, uri: &str) -> Value {
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("host", host)
+        .body(Body::empty())
+        .unwrap();
+    let resp = api.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 /// A HAL page cut short gets a `_links.next` (a copy of `_links.self`, as the model's
-/// is `null`) whose URL carries the cursor under `from`, and the page size; following
-/// it serves the rest with no model call, and the last page's `next` is `null`.
+/// is `null`) whose URL is the mock's own, as the request reached it, never the host
+/// the model wrote, carrying the cursor under `from` (which the contract ties to the
+/// `next` link) and the page size; following it serves the rest with no model call,
+/// and the last page's `next` is `null`.
 #[tokio::test]
 async fn a_hal_next_link_carries_the_cursor() {
     let answer = json!({
@@ -2834,12 +2935,12 @@ async fn a_hal_next_link_carries_the_cursor() {
         },
     });
     let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
-    let first = api.get("/hal?limit=2").await;
+    let first = get_at(&api, "mock.test:9000", "/hal?limit=2").await;
     assert_eq!(ids_in(&first, "data"), ["u1", "u2"], "{first}");
     let next = &first["_links"]["next"];
     assert_eq!(next["type"], "application/hal+json", "{first}");
     let href = next["href"].as_str().unwrap_or_default();
-    assert!(href.starts_with("https://api.example.org/hal?"), "{href}");
+    assert!(href.starts_with("http://mock.test:9000/hal?"), "{href}");
     assert!(href.contains("limit=2") && href.contains("from="), "{href}");
     let last = api.get(followed(href)).await;
     assert_eq!(ids_in(&last, "data"), ["u3"], "{last}");
@@ -2847,15 +2948,12 @@ async fn a_hal_next_link_carries_the_cursor() {
     assert_eq!(api.provider.requests().len(), 1);
 }
 
-/// The Mollie case: a full page of one stored task, its `_links.next` `null`, while the
-/// session holds another: the link leads to it, served from the store.
-#[tokio::test]
-async fn a_hal_next_link_leads_to_the_stored_rest() {
-    let list = r##"    get:
+/// A HAL list of tasks, its `from` tied to the `next` link.
+const HAL_TASKS: &str = r##"    get:
       operationId: listTasks
       parameters:
         - {name: limit, in: query, schema: {type: integer}}
-        - {name: from, in: query, schema: {type: string}}
+        - {name: from, in: query, description: "As the `next` link carries it.", schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -2871,13 +2969,18 @@ async fn a_hal_next_link_leads_to_the_stored_rest() {
                     properties:
                       self: {type: object, required: [href], properties: {href: {type: string, format: uri}}}
                       next: {type: [object, "null"], required: [href], properties: {href: {type: string, format: uri}}}"##;
+
+/// The Mollie case: a full page of one stored task, its `_links.next` `null`, while the
+/// session holds another: the link leads to it, served from the store.
+#[tokio::test]
+async fn a_hal_next_link_leads_to_the_stored_rest() {
     let mut script = created("open");
     let page = json!({
         "data": [stored_task("t1", "A", "open")],
         "_links": {"self": {"href": "https://api.example.org/tasks?limit=1"}, "next": null},
     });
     script.push(Ok(page.to_string()));
-    let api = api_of(&stored_pages(list), true, script);
+    let api = api_of(&stored_pages(HAL_TASKS), true, script);
     two_tasks(&api).await;
     let first = api.get("/tasks?limit=1").await;
     let href = first["_links"]["next"]["href"].as_str().unwrap_or_default();
@@ -2892,8 +2995,28 @@ async fn a_hal_next_link_leads_to_the_stored_rest() {
     assert_eq!(api.provider.requests().len(), 3);
 }
 
+/// A next link the model gave, carrying the cursor, is its own next page's: the page
+/// stays as answered, and following it is the model's.
+#[tokio::test]
+async fn the_model_s_own_next_link_stays() {
+    let mut script = created("open");
+    let next = "https://api.example.org/tasks?limit=1&from=t2";
+    let page = json!({
+        "data": [stored_task("t1", "A", "open")],
+        "_links": {"self": {"href": "https://api.example.org/tasks?limit=1"}, "next": {"href": next}},
+    });
+    script.push(Ok(page.to_string()));
+    script.push(Ok(json!({"data": [stored_task("t2", "B", "open")], "_links": {"self": {"href": next}, "next": null}}).to_string()));
+    let api = api_of(&stored_pages(HAL_TASKS), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?limit=1").await, page);
+    api.get(followed(next)).await;
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
 /// A bare `next` URL beside `values`, the model leaving it out: the mock writes one
-/// carrying the cursor under `page`; the last page leaves it out.
+/// carrying the cursor under `page`, which its description names; the last page leaves
+/// it out.
 #[tokio::test]
 async fn a_bare_next_url_carries_the_cursor() {
     let answer = json!({"values": users(3)});
@@ -2901,28 +3024,35 @@ async fn a_bare_next_url_carries_the_cursor() {
     let first = api.get("/bare?limit=2").await;
     assert_eq!(ids_in(&first, "values"), ["u1", "u2"], "{first}");
     let next = first["next"].as_str().unwrap_or_default();
-    assert!(next.contains("/bare?") && next.contains("page="), "{first}");
+    assert!(
+        next.starts_with("http://localhost/bare?") && next.contains("page="),
+        "{first}"
+    );
     let last = api.get(followed(next)).await;
     assert_eq!(ids_in(&last, "values"), ["u3"], "{last}");
     assert!(last.get("next").is_none(), "{last}");
     assert_eq!(api.provider.requests().len(), 1);
 }
 
-/// JSON:API's `links.next`, a URL by its description: the cursor is `page[cursor]`,
-/// which shares its first word with the page size `page[size]` where `filter` is
-/// another text parameter; the URL keeps the request's filter.
+/// JSON:API's `links.next`, a URL by its description. The model's `self` carries both
+/// `filter` and `page[cursor]`, so both are confirmed: `page[cursor]` is the cursor, as
+/// it shares its first word with the page size `page[size]`.
 #[tokio::test]
 async fn a_json_api_next_link_carries_the_cursor() {
     let answer = json!({
         "data": users(3),
-        "links": {"self": "https://a.example.org/jsonapi", "prev": null, "next": null},
+        "links": {
+            "self": "https://a.example.org/jsonapi?filter=&page%5Bcursor%5D=&page%5Bsize%5D=2",
+            "prev": null,
+            "next": null,
+        },
     });
     let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
     let first = api.get("/jsonapi?page%5Bsize%5D=2").await;
     assert_eq!(ids_in(&first, "data"), ["u1", "u2"], "{first}");
     let next = first["links"]["next"].as_str().unwrap_or_default();
     assert!(
-        next.starts_with("https://a.example.org/jsonapi?") && next.contains("page%5Bcursor%5D="),
+        next.starts_with("http://localhost/jsonapi?") && next.contains("page%5Bcursor%5D="),
         "{first}"
     );
     let last = api.get(followed(next)).await;
@@ -2931,12 +3061,198 @@ async fn a_json_api_next_link_carries_the_cursor() {
     assert_eq!(api.provider.requests().len(), 1);
 }
 
-/// Two text parameters that could carry the cursor (`from`, `after`), and no page size
-/// of several words to tell them apart: the page is cut, and no next URL is written.
+/// A path value holding `/` stays one segment in the next URL.
 #[tokio::test]
-async fn two_cursor_parameters_write_no_next_url() {
+async fn a_next_url_keeps_a_path_value_encoded() {
     let answer = json!({"data": users(3)});
     let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
-    let first = api.get("/ambiguous?limit=2").await;
-    assert_eq!(first, json!({"data": users(2)}));
+    let first = api.get("/things/a%2Fb/items?limit=2").await;
+    let next = first["next"].as_str().unwrap_or_default();
+    assert!(
+        next.starts_with("http://localhost/things/a%2Fb/items?"),
+        "{first}"
+    );
+    assert!(next.contains("from="), "{first}");
+}
+
+/// No next URL is written, and the page is only cut: for a lone text parameter nothing
+/// ties to the URL (`unconfirmed`), two that are both tied with no page size to choose
+/// between them (`ambiguous`), or one a `format` shapes (`since`, a date-time).
+#[tokio::test]
+async fn no_next_url_without_one_confirmed_cursor() {
+    for route in ["unconfirmed", "ambiguous", "since"] {
+        let answer = json!({"data": users(3)});
+        let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+        let first = api.get(&format!("/{route}?limit=2")).await;
+        assert_eq!(first, json!({"data": users(2)}), "{route}");
+    }
+}
+
+/// A next URL the model wrote to another page of the route (`page=2`) stays, though a
+/// text parameter is tied to it; and a list paged by number takes no URL of the cursor:
+/// its pages are a run's.
+#[tokio::test]
+async fn a_numbered_next_url_is_not_overwritten() {
+    let next = "https://api.example.org/laravel?page=2&per_page=2";
+    let answer = json!({"data": users(3), "next_page_url": next});
+    let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/laravel?per_page=2").await;
+    assert_eq!(first["next_page_url"], next, "{first}");
+    let answer = json!({"data": users(3), "next_page_url": null});
+    let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/numbered?per_page=2").await;
+    assert_eq!(ids_in(&first, "data"), ["u1", "u2"], "{first}");
+    assert_eq!(first["next_page_url"], Value::Null, "{first}");
+}
+
+/// A list whose cursor is named as a credential, and lists whose parameters are
+/// credentials that members of the answer are named as.
+const CURSORS: &str = r##"
+openapi: 3.1.0
+info: {title: Cursors, version: "1"}
+paths:
+  /meetings:
+    get:
+      operationId: listMeetings
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer}}
+        - {name: next_page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  meetings: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_token: {type: string}
+  /sessions:
+    get:
+      operationId: listSessions
+      parameters:
+        - {name: access_token, in: query, schema: {type: string}}
+        - {name: refresh_token, in: query, schema: {type: string}}
+        - {name: token, in: query, schema: {type: string}}
+        - {name: client_secret, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  token: {type: string}
+                  auth:
+                    type: object
+                    properties:
+                      access_token: {type: string}
+                      new_refresh_token: {type: string}
+                      client_secret: {type: string}
+  /scoped:
+    get:
+      operationId: listScoped
+      parameters:
+        - {name: page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_token: {type: string}
+components:
+  securitySchemes:
+    key: {type: apiKey, in: query, name: page_token}
+  schemas:
+    User:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, name: {type: string}}
+"##;
+
+/// A `next_page_token` the session's answer served reaches the next request's prompt;
+/// one the client made up does not.
+#[tokio::test]
+async fn a_served_page_token_reaches_the_prompt() {
+    let script = vec![
+        Ok(json!({"meetings": users(1), "next_page_token": "tok-served-123"}).to_string()),
+        Ok(json!({"meetings": users(1), "next_page_token": ""}).to_string()),
+        Ok(json!({"meetings": users(1), "next_page_token": ""}).to_string()),
+    ];
+    let api = api_of(CURSORS, true, script);
+    api.get("/meetings?page_size=1").await;
+    api.get("/meetings?page_size=1&next_page_token=tok-served-123")
+        .await;
+    assert!(
+        api.prompt(1).contains("tok-served-123"),
+        "{}",
+        api.prompt(1)
+    );
+    api.get("/meetings?page_size=1&next_page_token=client-made-456")
+        .await;
+    assert!(
+        !api.prompt(2).contains("client-made-456"),
+        "{}",
+        api.prompt(2)
+    );
+}
+
+/// Credentials a client sends stay out of the prompt though members of the answer are
+/// named as them: `access_token`, `refresh_token`, a bare `token`, `client_secret`, and
+/// a parameter a security scheme carries in the query, even carrying the very value an
+/// answer served at its member.
+#[tokio::test]
+async fn credentials_named_as_answer_members_stay_hidden() {
+    let served = json!({
+        "sessions": users(1),
+        "token": "srv-token-1",
+        "auth": {"access_token": "srv-access-1", "new_refresh_token": "srv-refresh-1", "client_secret": "srv-secret-1"},
+    });
+    let script = vec![
+        Ok(served.to_string()),
+        Ok(served.to_string()),
+        Ok(json!({"items": users(1), "next_page_token": "srv-scoped-1"}).to_string()),
+        Ok(json!({"items": users(1)}).to_string()),
+    ];
+    let api = api_of(CURSORS, true, script);
+    api.get("/sessions").await;
+    api.get("/sessions?access_token=cli-access-1&refresh_token=cli-refresh-1&token=cli-token-1&client_secret=cli-secret-1")
+        .await;
+    let prompt = api.prompt(1);
+    for secret in [
+        "cli-access-1",
+        "cli-refresh-1",
+        "cli-token-1",
+        "cli-secret-1",
+    ] {
+        assert!(!prompt.contains(secret), "{secret}: {prompt}");
+    }
+    api.get("/scoped?page_token=cli-key-1").await;
+    api.get("/scoped?page_token=srv-scoped-1").await;
+    assert!(!api.prompt(3).contains("srv-scoped-1"), "{}", api.prompt(3));
+}
+
+/// A page cut short keeps the next link the model gave to its own next page, carrying
+/// the cursor: no cut serves it.
+#[tokio::test]
+async fn a_cut_page_keeps_the_model_s_next_link() {
+    let next = "https://api.example.org/hal?limit=2&from=u3";
+    let answer = json!({
+        "data": users(3),
+        "_links": {
+            "next": {"href": next, "type": "application/hal+json"},
+            "previous": null,
+            "self": {"href": "https://api.example.org/hal?limit=2", "type": "application/hal+json"},
+        },
+    });
+    let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/hal?limit=2").await;
+    assert_eq!(ids_in(&first, "data"), ["u1", "u2"], "{first}");
+    assert_eq!(first["_links"]["next"]["href"], next, "{first}");
 }

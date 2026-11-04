@@ -841,6 +841,7 @@ impl OwnedPlan {
             engine: self.engine.clone(),
             chaos: self.chaos,
             bearer: None,
+            page_url: None,
         })
     }
 }

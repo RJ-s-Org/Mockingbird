@@ -162,6 +162,12 @@ pub struct GenerationContext<'a> {
     /// with the request that got it, oldest first, which may have changed since. Scrubbed
     /// by whoever kept them, the values themselves included. For the prompt only.
     pub earlier_origins: &'a [Value],
+    /// The query parameters of the call, of those a prompt hides by name that are the
+    /// cursor of a member of the answer ([`prompt::hidden_cursor_pairs`]: Zoom's
+    /// `next_page_token`), whose value an answer of the operation served at that member
+    /// earlier in the session: the prompt shows them, as they carry what the mock said,
+    /// not a credential. For the prompt only.
+    pub served_cursors: &'a [String],
     /// Related records that writes of [`Self::earlier_requests`] created after the target
     /// was stored, so that what counts them has moved: shown as new, not among
     /// [`Self::related`]. Scrubbed by whoever found them. For the prompt only.

@@ -74,6 +74,8 @@ use mb_state::StateStore;
     )),
     allow(dead_code)
 )]
+#[cfg_attr(not(any(feature = "http-rest", feature = "soap")), allow(dead_code))]
+mod base_url;
 mod call;
 pub mod chaos;
 #[cfg_attr(

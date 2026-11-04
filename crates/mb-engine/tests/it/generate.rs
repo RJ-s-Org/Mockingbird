@@ -48,6 +48,7 @@ fn ctx() -> GenerationContext<'static> {
         earlier_answers: &[],
         earlier_writes: &[],
         earlier_origins: &[],
+        served_cursors: &[],
         created_since: &[],
         alongside: &[],
         same_values: &[],
@@ -281,6 +282,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     earlier_answers: &[],
                     earlier_writes: &[],
                     earlier_origins: &[],
+                    served_cursors: &[],
                     created_since: &[],
                     alongside: &[],
                     same_values: &[],
@@ -4926,6 +4928,7 @@ async fn a_settling_update_is_told_the_rule() {
 const MEETINGS: &str = r##"
 openapi: 3.0.0
 info: {title: Meetings, version: "1"}
+security: [{cursor: []}]
 paths:
   /meetings:
     get:
@@ -4936,6 +4939,7 @@ paths:
         - {name: api_token, in: query, description: The caller's key., schema: {type: string}}
         - {name: token, in: query, schema: {type: string}}
         - {name: page_token, in: query, schema: {type: string, format: password}}
+        - {name: cursor_token, in: query, schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -4950,6 +4954,7 @@ paths:
                       type: object
                       properties: {id: {type: string}}
                   next_page_token: {type: string}
+                  next_cursor_token: {type: string}
   /reports:
     get:
       operationId: getReport
@@ -4965,19 +4970,24 @@ paths:
                 properties:
                   total: {type: integer}
                   next_page_token: {type: string}
+components:
+  securitySchemes:
+    cursor: {type: apiKey, in: query, name: cursor_token}
 "##;
 
 /// A page's cursor the answer hands back (`next_page_token` beside the list) reaches
-/// the prompt, with its description, though its name holds a credential's word. A
-/// credential still does not: one named as a key, a bare `token` (a member only ends
-/// with its word), one the contract marks secret, or a cursor of an answer with no
+/// the prompt, with its description, though its name holds a credential's word, only
+/// when the session served the value it carries (`served_cursors`). A credential never
+/// does, even said to be served: one named as a key, a bare `token` (a member only ends
+/// with its word), one the contract marks secret, one a security scheme carries in the
+/// query though a member pairs it (`cursor_token`), or a cursor of an answer with no
 /// list.
 #[tokio::test]
-async fn a_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
+async fn a_served_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
     let bundle = inline(MEETINGS);
     let answer = json!({"meetings": [{"id": "m2"}], "next_page_token": ""}).to_string();
     let report = json!({"total": 1}).to_string();
-    let (provider, engine) = scripted(vec![Ok(answer), Ok(report)]);
+    let (provider, engine) = scripted(vec![Ok(answer.clone()), Ok(answer), Ok(report)]);
     let query = |pairs: &[(&str, &str)]| -> Map<String, Value> {
         pairs
             .iter()
@@ -4993,12 +5003,26 @@ async fn a_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
             ("api_token", "key-secret-1"),
             ("token", "bare-secret-2"),
             ("page_token", "sealed-secret-3"),
+            ("cursor_token", "scheme-secret-5"),
         ]),
         headers: Map::new(),
         body: None,
     };
     let op = bundle.operation("listMeetings").unwrap();
-    engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    let served: Vec<String> = [
+        "next_page_token",
+        "api_token",
+        "token",
+        "page_token",
+        "cursor_token",
+    ]
+    .map(String::from)
+    .to_vec();
+    let told = GenerationContext {
+        served_cursors: &served,
+        ..ctx()
+    };
+    engine.generate(&bundle, op, &call, told).await.unwrap();
     let user = provider.requests()[0].messages[1].content.clone();
     let request: Value = serde_json::from_str(tagged(&user, "request").unwrap()).unwrap();
     assert_eq!(
@@ -5008,9 +5032,19 @@ async fn a_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
     );
     assert!(user.contains("The token of the next page."), "{user}");
     assert!(!user.contains("The caller's key."), "{user}");
-    for secret in ["key-secret-1", "bare-secret-2", "sealed-secret-3"] {
+    for secret in [
+        "key-secret-1",
+        "bare-secret-2",
+        "sealed-secret-3",
+        "scheme-secret-5",
+    ] {
         assert!(!user.contains(secret), "{secret}: {user}");
     }
+    // Not served: hidden as any credential.
+    engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    let user = provider.requests()[1].messages[1].content.clone();
+    assert!(!user.contains("cursor-value-1"), "{user}");
+    assert!(!user.contains("The token of the next page."), "{user}");
     let call = OperationCall {
         operation_id: "getReport".into(),
         path_params: Map::new(),
@@ -5019,7 +5053,11 @@ async fn a_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
         body: None,
     };
     let op = bundle.operation("getReport").unwrap();
-    engine.generate(&bundle, op, &call, ctx()).await.unwrap();
-    let user = provider.requests()[1].messages[1].content.clone();
+    let told = GenerationContext {
+        served_cursors: &served,
+        ..ctx()
+    };
+    engine.generate(&bundle, op, &call, told).await.unwrap();
+    let user = provider.requests()[2].messages[1].content.clone();
     assert!(!user.contains("report-secret-4"), "{user}");
 }

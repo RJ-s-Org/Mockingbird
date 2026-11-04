@@ -30,6 +30,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Next pages given as URLs, and served page cursors in prompts
+
+No migration or configuration.
+
+- **Next page URLs**: a list answer's `next` URL member (`_links.next.href`, `next`, `links.next`) may now be written by the mock, pointing at the mock itself, where the LLM left it out, `null` or pointing at the same page (see the [changelog](../CHANGELOG.md)).
+- **Recorded prompts**: a request carrying a page cursor named as a credential (`next_page_token`) that the session served now shows it and its description, so a recording of such a call may not replay.
+- **Rust API**: `GenerationContext` gains a public field, `served_cursors`, which breaks code constructing it in full; add `..Default::default()`. `mb_engine::prompt::hidden_cursor_pairs` and `mb_mcm::ends_with_words` are new.
+
 ### Prompts carry the contract's API description
 
 No migration or configuration. The importer keeps an OpenAPI 3, Swagger 2 or AsyncAPI contract's `info.description` in the compiled bundle, and every generation shows it in an `<api_description>` block of the system message, framed as facts about how the API behaves across operations, never directions to the model.
