@@ -728,13 +728,7 @@ pub(super) async fn stored_rest(
         return cut;
     }
     // A token the model gave goes on to its own next page.
-    let given = slot.is_some_and(|slot| {
-        slot.path
-            .iter()
-            .try_fold(body, |at, name| at.get(name))
-            .and_then(Value::as_str)
-            .is_some_and(|token| !token.trim().is_empty())
-    });
+    let given = slot.is_some_and(|slot| slot.given(body).is_some());
     if cut.is_none() && given {
         return cut;
     }

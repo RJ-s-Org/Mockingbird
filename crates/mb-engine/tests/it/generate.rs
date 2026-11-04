@@ -4922,3 +4922,104 @@ async fn a_settling_update_is_told_the_rule() {
         assert!(!untold.contains("listed as effects"), "{untold}");
     }
 }
+
+const MEETINGS: &str = r##"
+openapi: 3.0.0
+info: {title: Meetings, version: "1"}
+paths:
+  /meetings:
+    get:
+      operationId: listMeetings
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer}}
+        - {name: next_page_token, in: query, description: The token of the next page., schema: {type: string}}
+        - {name: api_token, in: query, description: The caller's key., schema: {type: string}}
+        - {name: token, in: query, schema: {type: string}}
+        - {name: page_token, in: query, schema: {type: string, format: password}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  meetings:
+                    type: array
+                    items:
+                      type: object
+                      properties: {id: {type: string}}
+                  next_page_token: {type: string}
+  /reports:
+    get:
+      operationId: getReport
+      parameters:
+        - {name: next_page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: {type: integer}
+                  next_page_token: {type: string}
+"##;
+
+/// A page's cursor the answer hands back (`next_page_token` beside the list) reaches
+/// the prompt, with its description, though its name holds a credential's word. A
+/// credential still does not: one named as a key, a bare `token` (a member only ends
+/// with its word), one the contract marks secret, or a cursor of an answer with no
+/// list.
+#[tokio::test]
+async fn a_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
+    let bundle = inline(MEETINGS);
+    let answer = json!({"meetings": [{"id": "m2"}], "next_page_token": ""}).to_string();
+    let report = json!({"total": 1}).to_string();
+    let (provider, engine) = scripted(vec![Ok(answer), Ok(report)]);
+    let query = |pairs: &[(&str, &str)]| -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), json!(v)))
+            .collect()
+    };
+    let call = OperationCall {
+        operation_id: "listMeetings".into(),
+        path_params: Map::new(),
+        query: query(&[
+            ("page_size", "1"),
+            ("next_page_token", "cursor-value-1"),
+            ("api_token", "key-secret-1"),
+            ("token", "bare-secret-2"),
+            ("page_token", "sealed-secret-3"),
+        ]),
+        headers: Map::new(),
+        body: None,
+    };
+    let op = bundle.operation("listMeetings").unwrap();
+    engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    let user = provider.requests()[0].messages[1].content.clone();
+    let request: Value = serde_json::from_str(tagged(&user, "request").unwrap()).unwrap();
+    assert_eq!(
+        request["query"],
+        json!({"page_size": "1", "next_page_token": "cursor-value-1"}),
+        "{user}"
+    );
+    assert!(user.contains("The token of the next page."), "{user}");
+    assert!(!user.contains("The caller's key."), "{user}");
+    for secret in ["key-secret-1", "bare-secret-2", "sealed-secret-3"] {
+        assert!(!user.contains(secret), "{secret}: {user}");
+    }
+    let call = OperationCall {
+        operation_id: "getReport".into(),
+        path_params: Map::new(),
+        query: query(&[("next_page_token", "report-secret-4")]),
+        headers: Map::new(),
+        body: None,
+    };
+    let op = bundle.operation("getReport").unwrap();
+    engine.generate(&bundle, op, &call, ctx()).await.unwrap();
+    let user = provider.requests()[1].messages[1].content.clone();
+    assert!(!user.contains("report-secret-4"), "{user}");
+}

@@ -171,7 +171,9 @@ pub(crate) fn request_notes(bundle: &Bundle, op: &Operation, call: &OperationCal
 /// declared schema when there is one, when it holds any; `None` when all of it may be
 /// shown. A name hidden only by a word as often an identity's (`project_key`, see
 /// [`mb_mcm::credentials::may_be_an_identity`]) is still shown, as it was: it is what a
-/// list is filtered by. The request itself is left as it is.
+/// list is filtered by; so is a page's cursor the answer hands back ([`is_page_cursor`]:
+/// Zoom's `next_page_token`), as the next page is told by it. The request itself is
+/// left as it is.
 fn shown_query(
     bundle: &Bundle,
     op: &Operation,
@@ -182,6 +184,7 @@ fn shown_query(
         let identity_only = mb_mcm::credentials::may_be_an_identity(name)
             && !mb_mcm::credentials::is_credential_name(name);
         hides_parameter(bundle, name, props.and_then(|p| p.get(name)))
+            && !is_page_cursor(bundle, op, name, props.and_then(|p| p.get(name)))
             && !(identity_only
                 && !bundle.is_security_name(name)
                 && !props
@@ -205,6 +208,103 @@ pub(crate) fn declared<'a>(
         .map(|s| deref(bundle, s))
         .and_then(|s| s.get("properties"))
         .and_then(Value::as_object)
+}
+
+/// Whether `schema` is text, `null` aside, with no `const` or `enum`.
+fn is_free_text(bundle: &Bundle, schema: &Value) -> bool {
+    let schema = deref(bundle, schema);
+    let text = match schema.get("type") {
+        Some(Value::String(t)) => t == "string",
+        Some(Value::Array(types)) => {
+            types.iter().any(|t| t == "string")
+                && types.iter().all(|t| t == "string" || t == "null")
+        }
+        _ => false,
+    };
+    text && schema.get("const").is_none() && schema.get("enum").is_none()
+}
+
+/// The members object `schema` declares, through `$ref`s and the branches of an
+/// `anyOf`/`oneOf`/`allOf`, with their schemas.
+fn object_members<'a>(bundle: &'a Bundle, schema: &'a Value, out: &mut Vec<(&'a str, &'a Value)>) {
+    fn visit<'a>(
+        bundle: &'a Bundle,
+        schema: &'a Value,
+        depth: usize,
+        out: &mut Vec<(&'a str, &'a Value)>,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        let schema = deref(bundle, schema);
+        for (name, member) in schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            out.push((name, member));
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            for branch in schema
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                visit(bundle, branch, depth + 1, out);
+            }
+        }
+    }
+    visit(bundle, schema, 0, out);
+}
+
+/// Whether query parameter `name` of `op`, of schema `schema`, is a page's cursor its
+/// answer hands back, as the paging of a list pairs them: free text the contract does
+/// not mark secret, under no name a security scheme carries, of a list answer (see
+/// [`crate::consistency::list_members`]) declaring a text member beside the list, or in
+/// an object beside it, that is the parameter or ends with its words (Zoom's
+/// `next_page_token` for `next_page_token`, Pipedrive's `additional_data.next_cursor`
+/// for `cursor`). A parameter of one word only pairs a member of its very name: a bare
+/// `token` stays a credential's. Such a parameter carries what the mock answered, not a
+/// credential.
+fn is_page_cursor(bundle: &Bundle, op: &Operation, name: &str, schema: Option<&Value>) -> bool {
+    let Some(schema) = schema else {
+        return false;
+    };
+    if bundle.is_security_name(name)
+        || mb_mcm::credentials::schema_marks_secret(bundle, schema)
+        || !is_free_text(bundle, schema)
+    {
+        return false;
+    }
+    let Some(answer) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return false;
+    };
+    let lists = crate::consistency::list_members(bundle, answer);
+    if lists.is_empty() {
+        return false;
+    }
+    let words = mb_mcm::words(name).len();
+    let pairs = |member: &str| {
+        mb_mcm::joined_name(member) == mb_mcm::joined_name(name)
+            || (words > 1 && mb_mcm::ends_with_words(member, name))
+    };
+    let mut beside = Vec::new();
+    object_members(bundle, answer, &mut beside);
+    beside
+        .into_iter()
+        .filter(|(member, _)| !lists.iter().any(|list| list == member))
+        .any(|(member, member_schema)| {
+            if is_free_text(bundle, member_schema) {
+                return pairs(member);
+            }
+            let mut inner = Vec::new();
+            object_members(bundle, member_schema, &mut inner);
+            inner
+                .into_iter()
+                .any(|(inner, inner_schema)| is_free_text(bundle, inner_schema) && pairs(inner))
+        })
 }
 
 /// Whether a parameter called `name`, of schema `schema` when declared, stays out of a
@@ -291,7 +391,9 @@ fn parameter_descriptions(
             let Some(prop) = props.get(name.as_str()) else {
                 continue;
             };
-            if hides_parameter(bundle, name, Some(prop)) {
+            if hides_parameter(bundle, name, Some(prop))
+                && !(location == "query" && is_page_cursor(bundle, op, name, Some(prop)))
+            {
                 continue;
             }
             let Some(text) = prop
