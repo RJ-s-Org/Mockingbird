@@ -633,44 +633,25 @@ pub(crate) fn status_numbers(text: &str) -> Vec<u16> {
 
 /// The declared refusal status the contract ties to a repeated value of request member
 /// `member` of a create, strongly enough to refuse the repeat whatever an LLM answered:
-/// the first status [`refusal_codes`] offers whose own response description says so.
-/// A `409`'s says so when it names `member` (as [`a_refusal_names`] reads it: "A
-/// gadget with this serial is already on the shelf"). A `400`'s, `412`'s or `422`'s
-/// most often speaks of validation, so it says so only when it names `member` in code
-/// position, names no other member of the request in code position or as a word, and
-/// names no other status. Sentences of the operation's or the API's description never
-/// tie a refusal here: a number beside a member's name is as often a limit ("at most
-/// 400 characters") as a status. `None` for an operation that is no create, or a member
-/// nothing ties.
+/// a declared `409` whose own response description names `member` in code position and
+/// nothing else there ("A widget with this `sku` exists."). A `409` naming a member is
+/// taken for that member's uniqueness conflict; a `400`, `412` or `422` naming one is
+/// validation as often as uniqueness ("The `sku` is malformed."), and no sentence of the
+/// operation's or the API's description ties one: those stay offers to the model.
+/// `None` for an operation that is no create, or a member nothing ties.
 #[must_use]
-pub fn refusal_tied_to(
-    bundle: &mb_mcm::Bundle,
-    op: &mb_mcm::Operation,
-    member: &str,
-) -> Option<u16> {
+pub fn refusal_tied_to(op: &mb_mcm::Operation, member: &str) -> Option<u16> {
     if op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create) {
         return None;
     }
-    let others: Vec<String> = request_members(bundle, op)
-        .into_iter()
-        .filter(|m| m != member)
-        .collect();
-    offered_codes(op).into_iter().find(|code| {
-        let Some(description) = op
-            .output_for_status(*code)
-            .filter(|o| o.status == mb_mcm::StatusSelector::Code(*code))
-            .and_then(|o| o.description.as_deref())
-        else {
-            return false;
-        };
-        if *code == 409 {
-            return names_phrase(description, member);
-        }
-        let spans = crate::contract_values::code_spans(description);
-        spans.iter().any(|s| s == member)
-            && !others.iter().any(|m| names_phrase(description, m))
-            && status_numbers(description).iter().all(|n| n == code)
-    })
+    let description = op
+        .outputs
+        .iter()
+        .find(|o| o.status == mb_mcm::StatusSelector::Code(409))?
+        .description
+        .as_deref()?;
+    let spans = crate::contract_values::code_spans(description);
+    (spans.len() == 1 && spans[0] == member).then_some(409)
 }
 
 /// Whether `call` carries a header `op` declares as an idempotency key, by its name or

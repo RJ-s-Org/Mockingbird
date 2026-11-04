@@ -54,7 +54,7 @@ paths:
         content: {application/json: {schema: {type: object, properties: {serial: {type: string}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
-        "409": {description: A gadget with this serial is already on the shelf (code `serial_in_use`)., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+        "409": {description: A gadget with this `serial` is already on the shelf., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
   /gadgets/{gadget_id}:
     get:
       operationId: getGadget
@@ -217,11 +217,10 @@ async fn a_prose_tie_to_a_400_is_only_an_offer() {
     assert_eq!(status, StatusCode::CREATED, "{out}");
 }
 
-/// A 400 whose own description names the SKU in code position, and no other member or
-/// status, ties it: the success is refused, under the code the API description's
-/// sentence of that status, member and type names; nothing is stored.
+/// A 400 is validation as often as uniqueness: even naming the SKU in code position
+/// alone, it is only offered, and the LLM's success for a taken SKU stands.
 #[tokio::test]
-async fn a_400_naming_the_member_in_code_position_is_enforced_with_the_contracts_code() {
+async fn a_400_naming_the_member_in_code_position_is_only_an_offer() {
     let contract = CONTRACT.replace(
         "\"`sku_taken` when another widget has the SKU; `bad_param` for a property that is not valid.\"",
         "\"Another widget has this `sku`.\"",
@@ -237,9 +236,8 @@ async fn a_400_naming_the_member_in_code_position_is_enforced_with_the_contracts
     let body = json!({"sku": "WID-7781-BLU", "label": "Blue widget"});
     h.post("/widgets", body.clone()).await;
     let (status, out) = h.post("/widgets", body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{out} {}", h.prompt(1));
-    assert_eq!(out["code"], "sku_taken", "{out}");
-    assert_eq!(h.exported().await, ["widgets/wd-000001"], "nothing stored");
+    assert!(h.prompt(1).contains("same_values"), "{}", h.prompt(1));
+    assert_eq!(status, StatusCode::CREATED, "{out}");
 }
 
 /// The LLM's own refusal may be of anything: the API description's sentence about a
@@ -278,7 +276,7 @@ fn gadget(id: &str) -> Value {
 }
 
 /// A gadget whose serial one on the same shelf holds is refused with the 409 that names
-/// the serial, under the code its description gives; on another shelf it is created.
+/// the serial in code position; on another shelf it is created.
 #[tokio::test]
 async fn a_taken_serial_is_refused_on_its_shelf_only() {
     let h = harness(vec![gadget("gd-000001"), success(gadget("gd-000002"))]);
@@ -286,7 +284,6 @@ async fn a_taken_serial_is_refused_on_its_shelf_only() {
     h.post("/shelves/s1/gadgets", body.clone()).await;
     let (status, out) = h.post("/shelves/s1/gadgets", body.clone()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{out} {}", h.prompt(1));
-    assert_eq!(out["code"], "serial_in_use", "{out}");
     assert_eq!(h.exported().await, ["gadgets/gd-000001"]);
 
     // Shown nothing of the other shelf, the create is asked for a plain answer.

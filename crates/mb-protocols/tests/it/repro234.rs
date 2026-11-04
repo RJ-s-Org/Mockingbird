@@ -272,3 +272,151 @@ async fn an_answer_under_the_holders_identity_serves_the_stored_record() {
         "Old"
     );
 }
+
+// Round two of the review: a 400 or 422 naming a member is validation as often as
+// uniqueness, and is only offered; a 409 naming one is taken for its uniqueness conflict.
+
+fn one(status: &str, description: &str) -> String {
+    format!(
+        r##"        "{status}": {{description: "{description}", content: {{application/json: {{schema: {{$ref: "#/components/schemas/Error"}}}}}}}}"##
+    )
+}
+
+async fn repeat_email(c: &str) -> (StatusCode, Value, String) {
+    let h = harness(
+        c,
+        vec![
+            json!({"id": "wd-000001", "email": "jane.roe@example.com"}),
+            success(json!({"id": "wd-000002", "email": "jane.roe@example.com"})),
+        ],
+    );
+    h.post("/widgets", json!({"email": "jane.roe@example.com"}))
+        .await;
+    let (s, o) = h
+        .post("/widgets", json!({"email": "jane.roe@example.com"}))
+        .await;
+    (s, o, h.prompt(1))
+}
+
+async fn repeat_sku(c: &str) -> (StatusCode, Value, String) {
+    let h = harness(
+        c,
+        vec![
+            json!({"id": "wd-000001", "sku": "WID-7781-BLU"}),
+            success(json!({"id": "wd-000002", "sku": "WID-7781-BLU"})),
+        ],
+    );
+    h.post("/widgets", json!({"sku": "WID-7781-BLU"})).await;
+    let (s, o) = h.post("/widgets", json!({"sku": "WID-7781-BLU"})).await;
+    (s, o, h.prompt(1))
+}
+
+/// R6: a 422 that validates the `email` refuses nothing.
+#[tokio::test]
+async fn a_422_validating_the_member_refuses_nothing() {
+    let c = contract(
+        "Creates a widget.",
+        "A catalog.",
+        &one("422", "`email` must be a valid address."),
+    );
+    let (s, o, p) = repeat_email(&c).await;
+    assert!(p.contains("same_values"), "{p}");
+    assert_eq!(s, StatusCode::CREATED, "false refusal: {o}");
+}
+
+/// R7: a lone 400 saying the `sku` is malformed refuses nothing.
+#[tokio::test]
+async fn a_400_saying_the_member_is_malformed_refuses_nothing() {
+    let c = contract(
+        "Creates a widget.",
+        "A catalog.",
+        &one("400", "The `sku` is malformed."),
+    );
+    let (s, o, p) = repeat_sku(&c).await;
+    assert!(p.contains("same_values"), "{p}");
+    assert_eq!(s, StatusCode::CREATED, "false refusal: {o}");
+}
+
+/// R8, a known risk: a 409 naming a member is taken for that member's uniqueness
+/// conflict, though this one speaks of a verification. Structure cannot tell the two
+/// apart, so a repeated email is refused here.
+#[tokio::test]
+async fn known_risk_a_409_naming_a_member_is_taken_for_its_uniqueness_conflict() {
+    let c = contract(
+        "Creates a widget.",
+        "A catalog.",
+        &one(
+            "409",
+            "The `email` must be verified before a widget is made.",
+        ),
+    );
+    let (s, o, p) = repeat_email(&c).await;
+    assert!(p.contains("same_values"), "{p}");
+    assert_eq!(s, StatusCode::CONFLICT, "{o}");
+}
+
+/// R9: a 422 naming the `sku` with a length limit refuses nothing.
+#[tokio::test]
+async fn a_422_with_a_length_limit_refuses_nothing() {
+    let c = contract(
+        "Creates a widget.",
+        "A catalog.",
+        &one("422", "The `sku` is longer than 64 characters."),
+    );
+    let (s, o, p) = repeat_sku(&c).await;
+    assert!(p.contains("same_values"), "{p}");
+    assert_eq!(s, StatusCode::CREATED, "false refusal: {o}");
+}
+
+/// R10: a 422 saying the `sku` is taken is offered to the model, never enforced: the
+/// model's success stands.
+#[tokio::test]
+async fn a_422_naming_a_taken_member_is_only_an_offer() {
+    let c = contract(
+        "Creates a widget.",
+        "A catalog.",
+        &one("422", "Another widget has this `sku`."),
+    );
+    let (s, o, p) = repeat_sku(&c).await;
+    assert!(p.contains("same_values"), "{p}");
+    assert_eq!(s, StatusCode::CREATED, "{o}");
+}
+
+/// R11: an answer under the holder's id, holding its SKU but changing other members,
+/// serves the stored record unchanged and stores nothing.
+#[tokio::test]
+async fn an_answer_under_the_holders_id_with_changes_serves_the_stored_record() {
+    let c = contract(
+        "Creates a widget.",
+        "A catalog.",
+        &one("409", "A widget with this `sku` exists."),
+    );
+    let held = json!({"id": "wd-000001", "sku": "WID-7781-BLU", "label": "Old"});
+    let h = harness(
+        &c,
+        vec![
+            held.clone(),
+            success(
+                json!({"id": "wd-000001", "sku": "WID-7781-BLU", "label": "New", "email": "x@example.com"}),
+            ),
+        ],
+    );
+    h.post("/widgets", json!({"sku": "WID-7781-BLU", "label": "Old"}))
+        .await;
+    let (s, o) = h
+        .post(
+            "/widgets",
+            json!({"sku": "WID-7781-BLU", "label": "New", "email": "x@example.com"}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{o}");
+    assert_eq!(o, held, "the stored record, unchanged");
+    assert_eq!(h.exported().await, ["widgets/wd-000001"], "nothing stored");
+    let stored = h
+        .store
+        .get(&session(), "widgets", "wd-000001")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.data, held);
+}

@@ -392,15 +392,15 @@ fn the_api_description_names_a_repeats_code() {
     assert_ne!(repeat_body(&bundle, 400, "sku")["code"], "sku_taken");
 }
 
-/// What ties a repeat to a refusal strongly enough to enforce it: a 409 whose own
-/// description names the member, or another status whose own description names it in
-/// code position and names no other member of the request and no other status. No
-/// sentence of the API description ties one, whatever it says.
+/// What ties a repeat to a refusal strongly enough to enforce it: a declared 409 whose
+/// own description names the member in code position and nothing else there. A 409
+/// naming it in prose, or beside another span, a 400 or a 422 whatever it says, and any
+/// sentence of the API description tie nothing.
 #[test]
-fn a_refusal_is_tied_to_a_repeat_by_its_own_description_only() {
+fn only_a_409_naming_the_member_alone_in_code_position_ties_a_repeat() {
     use mb_engine::guards::refusal_tied_to;
     let tied = |bundle: &Bundle, member: &str| {
-        refusal_tied_to(bundle, bundle.operation("createThing").unwrap(), member)
+        refusal_tied_to(bundle.operation("createThing").unwrap(), member)
     };
     let set = |bundle: &mut Bundle, code: u16, description: &str| {
         let op = bundle
@@ -417,10 +417,19 @@ fn a_refusal_is_tied_to_a_repeat_by_its_own_description_only() {
     };
     let mut bundle = shop("A thing's `sku` is unique: a taken one is refused with 409.");
     assert_eq!(tied(&bundle, "sku"), None, "an API sentence ties nothing");
-    set(&mut bundle, 409, "A thing with this SKU exists.");
-    assert_eq!(tied(&bundle, "sku"), Some(409));
+    for (description, expected) in [
+        ("A thing with this `sku` exists.", Some(409)),
+        ("A thing with this SKU exists.", None),
+        ("A thing with this `sku` exists (code `sku_taken`).", None),
+        ("A thing with this `sku` or `name` exists.", None),
+    ] {
+        set(&mut bundle, 409, description);
+        assert_eq!(tied(&bundle, "sku"), expected, "{description}");
+    }
+    set(&mut bundle, 409, "A thing with this `sku` exists.");
     assert_eq!(tied(&bundle, "name"), None);
-    // Without the 409, the 400 is offered: in code position, alone, it ties.
+    // A 400 is never enforced, whatever it says.
+    set(&mut bundle, 400, "Another thing has this `sku`.");
     let op = bundle
         .operations
         .iter_mut()
@@ -428,19 +437,7 @@ fn a_refusal_is_tied_to_a_repeat_by_its_own_description_only() {
         .unwrap();
     op.outputs
         .retain(|o| o.status != mb_mcm::StatusSelector::Code(409));
-    for (description, expected) in [
-        ("Another thing has this `sku`.", Some(400)),
-        ("The SKU is too long.", None),
-        ("The `sku` holds at most 300 characters.", None),
-        (
-            "Another thing has this `sku`, or the `name` is empty.",
-            None,
-        ),
-        ("Another thing has this `sku`; 422 for anything else.", None),
-    ] {
-        set(&mut bundle, 400, description);
-        assert_eq!(tied(&bundle, "sku"), expected, "{description}");
-    }
+    assert_eq!(tied(&bundle, "sku"), None);
 }
 
 /// A sentence of the API description naming another status too, or another member of

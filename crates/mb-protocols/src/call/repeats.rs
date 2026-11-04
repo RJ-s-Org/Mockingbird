@@ -8,11 +8,12 @@
 //! refusal is enforced, and the success is replaced by the declared error:
 //!
 //! - the operation is a create, and the contract ties a declared refusal status to a
-//!   repeat of that member in that status's own response description
-//!   ([`mb_engine::guards::refusal_tied_to`]): a `409`'s naming the member, or another
-//!   status's naming it in code position and no other member or status. A sentence of
-//!   the operation's or the API's description never does: a number beside a member is
-//!   as often a limit as a status;
+//!   repeat of that member ([`mb_engine::guards::refusal_tied_to`]): a declared `409`
+//!   whose own response description names the member in code position and nothing
+//!   else there. A `409` naming a member is taken for that member's uniqueness
+//!   conflict; a `400`, `412` or `422` is validation as often as uniqueness, and a
+//!   sentence of the operation's or the API's description proves nothing, so those
+//!   stay offers;
 //! - a stored record of the type the create makes holds the very value the request
 //!   gives that member: read back now, in the collection the create runs in
 //!   ([`super::in_create_collection`]), and agreeing with the references the request
@@ -89,7 +90,7 @@ pub(super) async fn enforced(
                 stored: Some(held.data),
             });
         }
-        let Some(code) = mb_engine::guards::refusal_tied_to(rt.bundle(), op, member) else {
+        let Some(code) = mb_engine::guards::refusal_tied_to(op, member) else {
             continue;
         };
         return Some(Enforced::Refuse {
