@@ -4621,10 +4621,16 @@ fn guarded(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Option<Own
 /// there and an update of `/orgs/octo/teams/{slug}` alike. A target parameter in
 /// no segment of its own (`{slug}.json`) gives none.
 fn collection_of(op: &Operation, call: &OperationCall) -> Option<Collection> {
+    fill_path(call, &collection_segments(op)?)
+}
+
+/// The segments of `op`'s path naming the collection it writes or lists in, when a
+/// path parameter makes it one of many (see [`collection_of`]).
+fn collection_segments(op: &Operation) -> Option<Vec<&str>> {
     let Binding::Http { path, .. } = &op.binding else {
         return None;
     };
-    let segments = path_segments(path);
+    let mut segments = path_segments(path);
     let end = match target_param(op) {
         Some(target) => {
             let param = format!("{{{target}}}");
@@ -4632,12 +4638,21 @@ fn collection_of(op: &Operation, call: &OperationCall) -> Option<Collection> {
         }
         None => segments.len(),
     };
-    let segments = &segments[..end];
+    segments.truncate(end);
     segments
         .iter()
         .any(|s| segment_param(s).is_some())
-        .then(|| fill_path(call, segments))
-        .flatten()
+        .then_some(segments)
+}
+
+/// Whether the contract creates records of type `t` in a collection under a parent
+/// path (`POST /groups/{group}/contacts`): where such a record is then matters.
+fn created_in_collections(bundle: &mb_mcm::Bundle, t: &str) -> bool {
+    bundle.operations.iter().any(|op| {
+        op.kind == OperationKind::Command(Effect::Create)
+            && op.resource_type.as_deref() == Some(t)
+            && collection_segments(op).is_some()
+    })
 }
 
 /// What [`Collections`] holds at most; it is emptied when full.
@@ -4658,6 +4673,9 @@ pub(crate) struct Collections(std::sync::Mutex<CollectionRecords>);
 #[derive(Debug, Default)]
 struct CollectionRecords {
     records: HashMap<OwnRead, CollectionRecord>,
+    /// The resources a top-level create stored, in no collection, until a write puts
+    /// them in one.
+    top_level: std::collections::HashSet<OwnRead>,
     /// The order of the next record.
     next: u64,
 }
@@ -4687,12 +4705,14 @@ impl Collections {
         let Ok(mut held) = self.0.lock() else {
             return;
         };
-        if held.records.len() >= MAX_COLLECTIONS {
+        if held.records.len() + held.top_level.len() >= MAX_COLLECTIONS {
             held.records.clear();
+            held.top_level.clear();
         }
         let order = held.next;
         held.next += 1;
         let key = OwnReads::key(session, r);
+        held.top_level.remove(&key);
         // A later write or list there leaves what a create put there.
         let created = created
             || held
@@ -4710,8 +4730,37 @@ impl Collections {
 
     fn forget(&self, session: &SessionKey, r: &StoredResource) {
         if let Ok(mut held) = self.0.lock() {
-            held.records.remove(&OwnReads::key(session, r));
+            let key = OwnReads::key(session, r);
+            held.records.remove(&key);
+            held.top_level.remove(&key);
         }
+    }
+
+    /// Records that a top-level create stored `r`, in no collection.
+    fn place_top_level(&self, session: &SessionKey, r: &StoredResource) {
+        let Ok(mut held) = self.0.lock() else {
+            return;
+        };
+        if held.records.len() + held.top_level.len() >= MAX_COLLECTIONS {
+            held.records.clear();
+            held.top_level.clear();
+        }
+        let key = OwnReads::key(session, r);
+        held.records.remove(&key);
+        held.top_level.insert(key);
+    }
+
+    /// Where `r` is, as far as this runtime's writes tell: `Some(Some(_))` in a
+    /// collection (as [`Collections::get`] says), `Some(None)` stored by a top-level
+    /// create in none, and `None` unknown (another node's, a seed's, or forgotten).
+    fn placement(&self, session: &SessionKey, r: &StoredResource) -> Option<Option<Collection>> {
+        if let Some(collection) = self.get(session, r) {
+            return Some(Some(collection));
+        }
+        let held = self.0.lock().ok()?;
+        held.top_level
+            .contains(&OwnReads::key(session, r))
+            .then_some(None)
     }
 
     /// The collection `r` was recorded under, as it stands.
@@ -5941,6 +5990,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                             .record(session, &stored, collection, created);
                     }
                     (None, Some(held)) => rt.collections().carry(session, &held, &stored),
+                    (None, None) if created => rt.collections().place_top_level(session, &stored),
                     (None, None) => {}
                 }
             }

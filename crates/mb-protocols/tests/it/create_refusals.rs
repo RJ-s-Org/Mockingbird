@@ -826,6 +826,16 @@ fn stored(t: &str, data: Value) -> mb_state::StoredResource {
     }
 }
 
+/// [`CONTRACT`] with no route creating contacts under a parent path: every contact is
+/// then in no collection, wherever it came from.
+fn flat_contract() -> String {
+    let start = CONTRACT.find("  /groups/{group}/contacts:").unwrap();
+    let end = CONTRACT.find("components:").unwrap();
+    let flat = format!("{}{}", &CONTRACT[..start], &CONTRACT[end..]);
+    assert!(!flat.contains("/groups/"));
+    flat
+}
+
 /// On a store another process writes to, the record that process stored is what the
 /// create repeats: it is found by asking the store, not this runtime's index. A plain
 /// name two records hold is still no match.
@@ -842,7 +852,7 @@ async fn a_shared_store_finds_a_record_another_node_stored() {
         .upsert(&session(), stored("contacts", held))
         .await
         .unwrap();
-    let h = harness_on(ours, CONTRACT, vec![refusal()]);
+    let h = harness_on(ours, &flat_contract(), vec![refusal()]);
     let (status, _) = h
         .post(
             "/contacts",
@@ -875,75 +885,161 @@ async fn a_shared_store_finds_a_record_another_node_stored() {
     assert!(!h.prompt(0).contains("same_values"), "{}", h.prompt(0));
 }
 
-/// A shared store whose listing fails.
-struct FailingList(Arc<dyn StateStore>);
+/// Two runtimes on one SQLite file: what runtime A created under a parent path
+/// (`/groups/g1/contacts`) is in a collection runtime B cannot know, so B's top-level
+/// create of the same contact is no repeat of it.
+#[tokio::test]
+async fn a_top_level_create_skips_another_runtime_s_record_of_a_parent_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("state.db").display());
+    let ttl = Duration::from_secs(3600);
+    let a = harness_on(
+        mb_state::connect(&url, ttl).await.unwrap(),
+        CONTRACT,
+        vec![contact("ct-000101", "Jane Roe", "jane.roe@example.com")],
+    );
+    let b = harness_on(
+        mb_state::connect(&url, ttl).await.unwrap(),
+        CONTRACT,
+        vec![
+            contact("ct-000102", "Jane Roe", "jane.roe@example.com"),
+            refusal(),
+        ],
+    );
+    let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
+    let (status, _) = a.post("/groups/g1/contacts", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = b.post("/contacts", body.clone()).await;
+    let prompt = b.prompt(0);
+    assert_eq!(status, StatusCode::CREATED, "{prompt}");
+    assert!(!prompt.contains("ct-000101"), "{prompt}");
+    assert!(!prompt.contains("same_values"), "{prompt}");
+
+    // What B created at the top level, it knows is in no collection: a repeat counts.
+    let (status, _) = b.post("/contacts", body).await;
+    let prompt = b.prompt(1);
+    assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+    let same = block(&prompt, "same_values").unwrap_or_default();
+    assert!(
+        same.contains("ct-000102") && !same.contains("ct-000101"),
+        "{prompt}"
+    );
+}
+
+/// A record the Admin API seeded or upserted is existing data a create repeats, on
+/// every store alike: a create with its email is shown it and offered the 409.
+#[tokio::test]
+async fn a_seeded_record_counts_on_every_store() {
+    let mut stores = sql_stores().await;
+    let memory: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    stores.push(("memory", memory, None));
+    for (backend, store, _dir) in stores {
+        let held = contact("ct-000901", "Jane Roe", "jane.roe@example.com");
+        store
+            .seed(&session(), vec![stored("contacts", held)])
+            .await
+            .unwrap();
+        let h = harness_on(store, &flat_contract(), vec![refusal()]);
+        let (status, _) = h
+            .post(
+                "/contacts",
+                json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
+            )
+            .await;
+        let prompt = h.prompt(0);
+        assert_eq!(status, StatusCode::CONFLICT, "{backend}: {prompt}");
+        let same = block(&prompt, "same_values").unwrap_or_default();
+        assert!(same.contains("ct-000901"), "{backend}: {prompt}");
+    }
+}
+
+/// A store whose listing fails when told to.
+struct FailingList {
+    inner: Arc<dyn StateStore>,
+    fail: bool,
+}
 
 #[async_trait::async_trait]
 impl StateStore for FailingList {
     async fn get(&self, s: &SessionKey, t: &str, id: &str) -> Result<Option<Stored>, Failed> {
-        self.0.get(s, t, id).await
+        self.inner.get(s, t, id).await
     }
-    async fn list(&self, _: &SessionKey, _: &str, _: usize) -> Result<Vec<Stored>, Failed> {
-        Err(Failed::Backend("list failed".into()))
+    async fn list(&self, s: &SessionKey, t: &str, limit: usize) -> Result<Vec<Stored>, Failed> {
+        if self.fail {
+            return Err(Failed::Backend("list failed".into()));
+        }
+        self.inner.list(s, t, limit).await
     }
     async fn upsert(&self, s: &SessionKey, r: Stored) -> Result<(), Failed> {
-        self.0.upsert(s, r).await
+        self.inner.upsert(s, r).await
     }
     async fn delete(&self, s: &SessionKey, t: &str, id: &str) -> Result<bool, Failed> {
-        self.0.delete(s, t, id).await
+        self.inner.delete(s, t, id).await
     }
     async fn reset(&self, s: &SessionKey) -> Result<(), Failed> {
-        self.0.reset(s).await
+        self.inner.reset(s).await
     }
     async fn reset_mock(&self, w: &str, m: &str) -> Result<(), Failed> {
-        self.0.reset_mock(w, m).await
+        self.inner.reset_mock(w, m).await
     }
     async fn touch(&self, s: &SessionKey) -> Result<(), Failed> {
-        self.0.touch(s).await
+        self.inner.touch(s).await
     }
     async fn sessions(&self, w: &str, m: &str) -> Result<Vec<mb_state::SessionInfo>, Failed> {
-        self.0.sessions(w, m).await
+        self.inner.sessions(w, m).await
     }
     async fn export(&self, s: &SessionKey) -> Result<Vec<Stored>, Failed> {
-        self.0.export(s).await
+        self.inner.export(s).await
     }
     async fn seed(&self, s: &SessionKey, r: Vec<Stored>) -> Result<(), Failed> {
-        self.0.seed(s, r).await
+        self.inner.seed(s, r).await
     }
     async fn ping(&self) -> Result<(), Failed> {
-        self.0.ping().await
+        self.inner.ping().await
     }
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<mb_state::StateChanged> {
-        self.0.subscribe()
+        self.inner.subscribe()
     }
 }
 
 type Stored = mb_state::StoredResource;
 type Failed = mb_state::StateError;
 
-/// On a shared store whose listing fails, what a create repeats is unknown: it is shown
-/// nothing and offered no refusal, though the store holds a contact with its email.
+/// A store holding a contact with a create's email: when its listing answers, the
+/// create is refused; when it fails, what the create repeats is unknown, and it is shown
+/// nothing and offered no refusal.
 #[tokio::test]
 async fn a_failed_listing_decides_nothing() {
-    let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
-    let held = contact("ct-000101", "Jane Roe", "jane.roe@example.com");
-    store
-        .upsert(&session(), stored("contacts", held))
-        .await
-        .unwrap();
-    let h = harness_on(
-        Arc::new(FailingList(store)),
-        CONTRACT,
-        vec![contact("ct-000102", "Jane Roe", "jane.roe@example.com")],
-    );
-    let (status, _) = h
-        .post(
-            "/contacts",
-            json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let prompt = h.prompt(0);
-    assert!(!prompt.contains("same_values"), "{prompt}");
-    assert!(!prompt.contains("refusal"), "{prompt}");
+    for fail in [false, true] {
+        let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let held = contact("ct-000101", "Jane Roe", "jane.roe@example.com");
+        store
+            .upsert(&session(), stored("contacts", held))
+            .await
+            .unwrap();
+        let h = harness_on(
+            Arc::new(FailingList { inner: store, fail }),
+            &flat_contract(),
+            vec![if fail {
+                contact("ct-000102", "Jane Roe", "jane.roe@example.com")
+            } else {
+                refusal()
+            }],
+        );
+        let (status, _) = h
+            .post(
+                "/contacts",
+                json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
+            )
+            .await;
+        let prompt = h.prompt(0);
+        if fail {
+            assert_eq!(status, StatusCode::CREATED, "{prompt}");
+            assert!(!prompt.contains("same_values"), "{prompt}");
+            assert!(!prompt.contains("refusal"), "{prompt}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
+            assert!(prompt.contains("same_values"), "{prompt}");
+        }
+    }
 }
