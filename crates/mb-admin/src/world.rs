@@ -7,10 +7,11 @@
 //! revision's entries that validate against the version's bundle, the
 //! author of each overlaid entry, what was refused, and the gaps.
 //! [`carry_forward`] starts a new version from an earlier one's newest
-//! overlay, keeping each entry's author; [`carry_forward_into`] finds that
-//! earlier version and is called right after a contract version is added
-//! that serves or may serve (uploaded, reconciled from the config file, or
-//! a draft when it is approved).
+//! overlay, keeping each entry's author, and the new version's effective
+//! world reports the entries that no longer validate; [`carry_forward_into`]
+//! finds that earlier version and is called right after a contract version
+//! is added that serves or may serve (uploaded, reconciled from the config
+//! file, or a draft when it is approved).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +19,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use mb_import::world::tier0;
 use mb_mcm::Bundle;
-use mb_mcm::world::{Author, OpDesc, Refusal, RefusalCode, TypeDesc, World, overlay, validate};
+use mb_mcm::world::{Author, Refusal, RefusalCode, World, overlay, validate};
 use mb_protocols::world_gaps::{Gap, gaps};
 use mb_store::{ContractStatus, ControlStore, NewWorldRevision, StoreError, WorldRevision};
 use serde::Serialize;
@@ -30,7 +31,7 @@ use uuid::Uuid;
 /// attributed to the oldest revision read.
 const MAX_ATTRIBUTION_REVISIONS: i64 = 64;
 
-/// How many earlier contract versions [`carry_forward_into`] looks through,
+/// How many other contract versions [`carry_forward_into`] looks through,
 /// newest first, for one with a revision.
 const MAX_CARRY_VERSIONS: usize = 32;
 
@@ -62,8 +63,9 @@ pub struct EffectiveWorld {
 /// The newest revision's document is validated against `bundle` before it
 /// is laid over tier 0, so a stale or refused entry falls back to tier 0's
 /// value instead of removing it. A document that is not a world description
-/// at all is refused whole (an empty path) and tier 0 applies. With no
-/// revision it is tier 0 at revision `0`. It fails only when the store does.
+/// at all is refused whole (an empty path) and tier 0 applies, without
+/// falling back to an earlier revision. With no revision it is tier 0 at
+/// revision `0`. It fails only when the store does.
 pub async fn effective_world(
     store: &dyn ControlStore,
     mock_id: Uuid,
@@ -98,7 +100,7 @@ pub async fn effective_world(
             }],
         ),
     };
-    let authors = attribute(store, &latest, &applied)
+    let authors = attribute(store, &latest, &serde_json::to_value(&applied)?)
         .await?
         .into_iter()
         .map(|(pointer, origin)| (pointer, origin.author))
@@ -160,18 +162,21 @@ impl Origin {
     }
 }
 
-/// The origin of each entry of `applied` (the validated part of `latest`):
-/// walking back from `latest`, the newest revision in the run of revisions
-/// that hold the entry's current value.
+/// The origin of each entry of `doc` (a part of `latest`'s document, such as
+/// its validated entries): walking back from `latest`, the newest revision
+/// in the run of revisions that hold the entry's current value.
+///
+/// It reads the earlier revisions one at a time and stops as soon as every
+/// entry is attributed, at most [`MAX_ATTRIBUTION_REVISIONS`] of them; this
+/// is an admin read, never on the request path.
 async fn attribute(
     store: &dyn ControlStore,
     latest: &WorldRevision,
-    applied: &World,
+    doc: &Value,
 ) -> Result<BTreeMap<String, Origin>, StoreError> {
-    let applied = serde_json::to_value(applied)?;
     let current = entries(&latest.document);
     // The raw values, so an entry the validator trimmed compares as written.
-    let mut pending: BTreeMap<String, Value> = entries(&applied)
+    let mut pending: BTreeMap<String, Value> = entries(doc)
         .into_keys()
         .filter_map(|p| current.get(&p).cloned().map(|v| (p, v)))
         .collect();
@@ -233,16 +238,21 @@ fn retain_entries(doc: &Value, keep: &BTreeSet<&str>) -> Value {
 }
 
 /// Starts contract version `to` of `mock_id` from version `from`'s newest
-/// overlay: the entries of it that validate against `to_bundle` become the
-/// first revisions of `to`, so that each entry keeps its author. The
-/// entries are replayed oldest first, one revision for each author (and
-/// `created_by`) that set one, each revision holding its entries and all
-/// earlier ones; the last holds them all. It returns that last revision.
-/// The entries that don't validate are dropped; what they described shows
-/// in `to`'s gaps.
+/// overlay: its entries become the first revisions of `to`, so that each
+/// entry keeps its author. The entries are replayed oldest first, one
+/// revision for each author (and `created_by`) that set one, each revision
+/// holding its entries and all earlier ones; the last holds them all. It
+/// returns that last revision.
 ///
-/// It does nothing (`Ok(None)`) when `from` has no revision, when no entry
-/// validates, when the revision is not a world description, or when `to`
+/// Only the entries that validate against `to_bundle` apply in `to`: the
+/// whole overlay is carried, so [`effective_world`] of `to` refuses the
+/// stale ones (an entry on a member `to` no longer has is `unresolved`),
+/// lists each as a gap, and lays tier 0 under them. The author sees what
+/// the new contract dropped, and an entry comes back if a later contract
+/// restores what it names.
+///
+/// It does nothing (`Ok(None)`) when `from` has no revision, when the
+/// revision sets no entry or is not a world description, or when `to`
 /// already has a revision.
 pub async fn carry_forward(
     store: &dyn ControlStore,
@@ -267,18 +277,24 @@ async fn carry(
     let Ok(doc) = serde_json::from_value::<World>(latest.document.clone()) else {
         return Ok(None);
     };
-    let mut applied = validate(&doc, to_bundle).applied;
-    // A type or operation every entry of which went stale carries nothing.
-    applied.types.retain(|_, t| *t != TypeDesc::default());
-    applied.operations.retain(|_, op| *op != OpDesc::default());
-    if applied.types.is_empty() && applied.operations.is_empty() {
+    let document = &latest.document;
+    if entries(document).is_empty() {
         return Ok(None);
     }
-    let origins = attribute(store, &latest, &applied).await?;
-    let document = serde_json::to_value(&applied)?;
+    let stale = validate(&doc, to_bundle).refused.len();
+    if stale > 0 {
+        tracing::debug!(
+            mock = %latest.mock_id,
+            from = latest.version,
+            to,
+            stale,
+            "carrying world entries that no longer validate; they show as refused"
+        );
+    }
+    let origins = attribute(store, &latest, document).await?;
     // The entries of each author, in the order their oldest entry was set.
     let mut groups: Vec<(Origin, Vec<String>)> = Vec::new();
-    for pointer in entries(&document).into_keys() {
+    for pointer in entries(document).into_keys() {
         let origin = origins
             .get(&pointer)
             .cloned()
@@ -305,7 +321,7 @@ async fn carry(
                 to,
                 NewWorldRevision {
                     author: origin.author,
-                    document: retain_entries(&document, &keep),
+                    document: retain_entries(document, &keep),
                     created_by: origin.created_by.clone(),
                     expect: Some(expect),
                 },
@@ -321,26 +337,28 @@ async fn carry(
     Ok(added)
 }
 
-/// [`carry_forward`] into the contract version `to` from the newest earlier
-/// version that has a revision, of the 32 newest earlier ones. Versions that
-/// are not drafts come first: a draft's description is used only when no
-/// other version has one, so an abandoned draft is not carried on.
+/// [`carry_forward`] into the contract version `to` from the newest other
+/// version that has a revision, of the 32 newest. Versions that are not
+/// drafts come first: a draft's description is used only when no other
+/// version has one, so an abandoned draft is not carried on. Later versions
+/// count too, so a draft approved after a newer upload was revised starts
+/// from that upload's description; when `to` was just added there are none.
 pub async fn carry_forward_into(
     store: &dyn ControlStore,
     mock_id: Uuid,
     to: i64,
     to_bundle: &Bundle,
 ) -> Result<Option<WorldRevision>, StoreError> {
-    let mut earlier: Vec<(bool, i64)> = store
+    let mut others: Vec<(bool, i64)> = store
         .list_contract_version_infos(mock_id)
         .await?
         .into_iter()
-        .filter(|v| v.version < to)
+        .filter(|v| v.version != to)
         .map(|v| (v.status == ContractStatus::Draft, v.version))
         .collect();
     // Not drafts first, newest first within each.
-    earlier.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-    let found = stream::iter(earlier.into_iter().take(MAX_CARRY_VERSIONS))
+    others.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let found = stream::iter(others.into_iter().take(MAX_CARRY_VERSIONS))
         .map(|(_, from)| store.latest_world_revision(mock_id, from))
         .buffered(CARRY_LOOKAHEAD)
         .try_filter_map(|r| async move { Ok(r) })

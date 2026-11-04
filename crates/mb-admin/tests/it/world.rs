@@ -324,22 +324,41 @@ async fn carry_forward_keeps_valid_entries_and_drops_stale() {
     assert_eq!(carried.version, to);
     assert_eq!(carried.revision, 1);
     assert_eq!(carried.author, Author::Agent);
+    // The whole overlay is carried, the stale entry with it, so that the
+    // new version reports it instead of losing it.
     assert_eq!(
         carried.document,
         json!({
             "version": 1,
+            "types": {t.clone(): {"unique": [{"members": ["color"]}]}},
             "operations": {
                 "getWidget": {"not_found": 404},
                 "listWidgets": {"order": {"member": "name"}},
             },
         })
     );
-    // The effective world of the new version has nothing refused.
     let eff = effective_world(store.as_ref(), mock, to, &b2)
         .await
         .unwrap();
     assert_eq!(eff.revision, 1);
-    assert!(eff.refused.is_empty(), "{:?}", eff.refused);
+    // The valid entries apply; the stale one is refused and listed as a gap.
+    assert_eq!(eff.world.operations["getWidget"].not_found, Some(404));
+    assert!(eff.world.operations["listWidgets"].order.is_some());
+    assert_eq!(eff.refused.len(), 1, "{:?}", eff.refused);
+    assert!(
+        eff.refused[0]
+            .path
+            .starts_with(&format!("/types/{t}/unique")),
+        "{:?}",
+        eff.refused
+    );
+    assert_eq!(eff.refused[0].code, RefusalCode::Unresolved);
+    assert!(
+        eff.gaps.iter().any(|g| g.code == GapCode::Refused),
+        "{:?}",
+        eff.gaps
+    );
+    assert!(!eff.authors.contains_key(&format!("/types/{t}/unique")));
 
     // A version with no revision carries nothing.
     let (next, b3) = add_version(store.as_ref(), mock, &v2()).await;
@@ -350,6 +369,40 @@ async fn carry_forward_keeps_valid_entries_and_drops_stale() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn carry_forward_of_only_stale_entries_still_reports_them() {
+    let (store, mock) = store_with_mock().await;
+    let (from, b1) = add_version(store.as_ref(), mock, V1).await;
+    let t = widget_type(&b1);
+    revise(
+        store.as_ref(),
+        mock,
+        from,
+        Author::User,
+        json!({"version": 1, "types": {t.clone(): {"unique": [{"members": ["color"]}]}}}),
+    )
+    .await;
+    let (to, b2) = add_version(store.as_ref(), mock, &v2()).await;
+    let carried = carry_forward(store.as_ref(), mock, from, to, &b2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.author, Author::User);
+    let eff = effective_world(store.as_ref(), mock, to, &b2)
+        .await
+        .unwrap();
+    assert_eq!(eff.revision, 1);
+    assert_eq!(eff.refused.len(), 1, "{:?}", eff.refused);
+    assert_eq!(eff.refused[0].code, RefusalCode::Unresolved);
+    assert!(
+        eff.gaps.iter().any(|g| g.code == GapCode::Refused),
+        "{:?}",
+        eff.gaps
+    );
+    assert!(eff.authors.is_empty(), "{:?}", eff.authors);
+    assert_eq!(eff.world, tier0(&b2));
 }
 
 /// `Bearer editor` → an editor in `default`.
@@ -433,16 +486,17 @@ async fn carry_forward_runs_on_import_of_a_new_version() {
         .unwrap()
         .unwrap();
     let t = widget_type(&compile(V1));
+    let described = json!({
+        "version": 1,
+        "types": {t.clone(): {"unique": [{"members": ["color"]}]}},
+        "operations": {"getWidget": {"not_found": 404}},
+    });
     revise(
         st.store.as_ref(),
         mock.id,
         from,
         Author::User,
-        json!({
-            "version": 1,
-            "types": {t: {"unique": [{"members": ["color"]}]}},
-            "operations": {"getWidget": {"not_found": 404}},
-        }),
+        described.clone(),
     )
     .await;
 
@@ -464,13 +518,17 @@ async fn carry_forward_runs_on_import_of_a_new_version() {
         .unwrap();
     assert_eq!(carried.revision, 1);
     assert_eq!(carried.author, Author::User);
-    assert_eq!(
-        carried.document,
-        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}})
-    );
+    assert_eq!(carried.document, described);
+    // The second version has no `color`: its unique entry is refused.
+    let eff = effective_world(st.store.as_ref(), mock.id, to, &compile(&v2()))
+        .await
+        .unwrap();
+    assert_eq!(eff.refused.len(), 1, "{:?}", eff.refused);
+    assert_eq!(eff.refused[0].code, RefusalCode::Unresolved);
 
     // A third upload carries the second version's description on, skipping
     // nothing: the newest earlier version with a revision is the source.
+    // It has `color` again, so the unique entry applies again.
     let third = send(
         &app,
         Method::POST,
@@ -479,16 +537,19 @@ async fn carry_forward_runs_on_import_of_a_new_version() {
         V1.as_bytes().to_vec(),
     )
     .await;
+    let third = third["version"].as_i64().unwrap();
     let carried = st
         .store
-        .latest_world_revision(mock.id, third["version"].as_i64().unwrap())
+        .latest_world_revision(mock.id, third)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        carried.document,
-        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}})
-    );
+    assert_eq!(carried.document, described);
+    let eff = effective_world(st.store.as_ref(), mock.id, third, &compile(V1))
+        .await
+        .unwrap();
+    assert!(eff.refused.is_empty(), "{:?}", eff.refused);
+    assert_eq!(eff.authors[&format!("/types/{t}/unique")], Author::User);
 }
 
 /// One `file` part of a multipart body, and its content type.
@@ -874,4 +935,82 @@ async fn carry_forward_prefers_a_version_that_is_not_a_draft() {
         .unwrap();
     assert_eq!(carried.document, active_doc);
     assert_eq!(carried.author, Author::User);
+}
+
+#[tokio::test]
+async fn carry_forward_on_approve_takes_a_later_version_revised_since_the_draft() {
+    let (st, app) = admin().await;
+    let uri = format!("{BASE}/widgets/contracts");
+    let first = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let from = first["version"].as_i64().unwrap();
+    let mock = widgets_mock(&st).await;
+    revise(
+        st.store.as_ref(),
+        mock,
+        from,
+        Author::User,
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}}),
+    )
+    .await;
+    let draft = st
+        .store
+        .add_draft_contract_version(
+            mock,
+            NewContractVersion {
+                source: V1.as_bytes().to_vec(),
+                bundle: compile(V1),
+                status: ContractStatus::Draft,
+                created_by: None,
+            },
+            json!({}),
+        )
+        .await
+        .unwrap();
+    // A later upload carries from the first version and is then revised.
+    let later = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await["version"]
+        .as_i64()
+        .unwrap();
+    assert!(later > draft.version);
+    let newest = json!({
+        "version": 1,
+        "operations": {
+            "getWidget": {"not_found": 404},
+            "listWidgets": {"order": {"member": "name"}},
+        },
+    });
+    revise(
+        st.store.as_ref(),
+        mock,
+        later,
+        Author::Agent,
+        newest.clone(),
+    )
+    .await;
+    approve(&app, draft.version).await;
+    let eff = effective_world(st.store.as_ref(), mock, draft.version, &draft.bundle)
+        .await
+        .unwrap();
+    assert!(eff.world.operations["listWidgets"].order.is_some());
+    assert_eq!(
+        eff.authors.get("/operations/listWidgets/order"),
+        Some(&Author::Agent)
+    );
+    assert_eq!(
+        eff.authors.get("/operations/getWidget/not_found"),
+        Some(&Author::User)
+    );
 }
