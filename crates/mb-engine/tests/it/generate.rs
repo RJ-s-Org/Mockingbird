@@ -73,6 +73,31 @@ async fn valid_llm_output_is_llm_source() {
     assert_eq!(provider.requests().len(), 1);
 }
 
+/// Member names written with JSON after them are the declared ones before the
+/// answer is checked: a required one is no longer missing (no repair call), and
+/// an optional one is no longer an extra member of an open object.
+#[tokio::test]
+async fn corrupted_member_names_are_mended_before_the_check() {
+    let bundle = orders();
+    let op = bundle.operation("getOrder").unwrap();
+    let mut answer = valid_order();
+    let total = answer.as_object_mut().unwrap().remove("total").unwrap();
+    answer["total:"] = total;
+    answer[" note"] = json!("leave at the door");
+    answer["category"] = json!({"name\":\"books\"},": "books"});
+    let (provider, engine) = scripted(vec![Ok(answer.to_string())]);
+    let out = engine
+        .generate(&bundle, op, &call("getOrder"), ctx())
+        .await
+        .unwrap();
+    assert_eq!(out.source, Source::Llm);
+    let mut expected = valid_order_at_o1();
+    expected["note"] = json!("leave at the door");
+    expected["category"] = json!({"name": "books"});
+    assert_eq!(out.body, Some(expected));
+    assert_eq!(provider.requests().len(), 1);
+}
+
 #[tokio::test]
 async fn invalid_then_repaired() {
     let bundle = orders();
