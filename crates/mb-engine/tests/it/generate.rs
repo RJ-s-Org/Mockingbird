@@ -4955,6 +4955,37 @@ paths:
                       properties: {id: {type: string}}
                   next_page_token: {type: string}
                   next_cursor_token: {type: string}
+  /tokens:
+    get:
+      operationId: listTokens
+      parameters:
+        - {name: token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {type: object, properties: {id: {type: string}}}}
+                  next_token: {type: string}
+  /twice:
+    get:
+      operationId: listTwice
+      parameters:
+        - {name: page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {type: object, properties: {id: {type: string}}}}
+                  next_page_token: {type: string}
+                  meta: {type: object, properties: {page_token: {type: string}}}
   /reports:
     get:
       operationId: getReport
@@ -5060,4 +5091,40 @@ async fn a_served_page_cursor_reaches_the_prompt_and_a_credential_does_not() {
     engine.generate(&bundle, op, &call, told).await.unwrap();
     let user = provider.requests()[2].messages[1].content.clone();
     assert!(!user.contains("report-secret-4"), "{user}");
+}
+
+/// A one-word parameter pairs no member it only ends (`token`, `next_token`), and a
+/// parameter two members pair (`next_page_token`, `meta.page_token`) is no cursor: both
+/// stay hidden, said to be served.
+#[tokio::test]
+async fn a_bare_or_twice_paired_cursor_stays_hidden() {
+    let bundle = inline(MEETINGS);
+    let answer = json!({"items": []}).to_string();
+    let (provider, engine) = scripted(vec![Ok(answer.clone()), Ok(answer)]);
+    let served: Vec<String> = ["token", "page_token"].map(String::from).to_vec();
+    for (at, (op, param, value)) in [
+        ("listTokens", "token", "bare-secret-6"),
+        ("listTwice", "page_token", "twice-secret-7"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let call = OperationCall {
+            operation_id: op.into(),
+            path_params: Map::new(),
+            query: Map::from_iter([(param.to_string(), json!(value))]),
+            headers: Map::new(),
+            body: None,
+        };
+        let told = GenerationContext {
+            served_cursors: &served,
+            ..ctx()
+        };
+        engine
+            .generate(&bundle, bundle.operation(op).unwrap(), &call, told)
+            .await
+            .unwrap();
+        let user = provider.requests()[at].messages[1].content.clone();
+        assert!(!user.contains(value), "{value}: {user}");
+    }
 }

@@ -68,12 +68,16 @@
 //! and `next` share a schema, so only the link relation's name tells them apart. Its
 //! parameter is one [`slot`] could pair with a token (not carried, no page size, naming
 //! no member of the items) that no `format` or `pattern` shapes (`since`, a date-time),
-//! and that the answer or the contract ties to the URL: a URL of the route the model
-//! wrote outside the list (its `self`) carries it, the parameter's description names the
-//! `next` member, or the URL's description (or its link object's) names the parameter.
-//! Of several so tied, the one sharing its first word with a page size of several words
-//! (`page[cursor]` beside `page[size]`); two such, none, or two such members, are no
-//! place. A URL the model wrote there to another page of the route by anything but the
+//! found by, in this order: a link of this very request the model wrote outside the list
+//! (of the route, showing every value of the request's query: its `self`) carrying it
+//! empty, as a first page's cursor is (a filter it carries with a value, `status=open`,
+//! is none), the one of those, or of several the one below; the one parameter of several
+//! words sharing its first word with a page size of several words (`page[cursor]` beside
+//! `page[size]`, not a bare `page`); the one whose description names the `next` member
+//! as code (`` `next` ``, `` `_links.next` ``), or that the `next` member's own
+//! description (not a shared link schema's) names as code or as a query key (`from=`).
+//! Prose never ties one (`q`, "sent again with the next request"). None, two, or two
+//! such members, are no place. A URL the model wrote there to another page of the route by anything but the
 //! cursor (`page=2`) stays as it is: there is no place. One carrying the cursor is its
 //! token, and stays too: no cut serves it. The token is written as the URL of its page:
 //! the mock's own, as the request reached it ([`CallPlan::page_url`]: the scheme and
@@ -246,15 +250,33 @@ fn descriptions<'a>(bundle: &'a mb_mcm::Bundle, schema: Option<&'a Value>) -> Ve
         .collect()
 }
 
-/// Whether `text` holds `name` whole: not inside a longer name (`from` is not in
-/// `fromage`).
-fn mentions(text: &str, name: &str) -> bool {
-    let inside = |c: char| c.is_alphanumeric() || c == '_';
-    text.match_indices(name).any(|(at, _)| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + name.len()..].chars().next();
-        !before.is_some_and(inside) && !after.is_some_and(inside)
+/// Whether `url` shows every value of `call`'s query: a link of this very request.
+fn shows_request(url: &url::Url, call: &OperationCall) -> bool {
+    let shown = query_without(url, "");
+    call_pairs(call, "").is_some_and(|asked| asked.iter().all(|pair| shown.contains(pair)))
+}
+
+/// Whether `text` holds `name` as code: in backticks (`` `from` ``).
+fn quotes(text: &str, name: &str) -> bool {
+    text.contains(&format!("`{name}`"))
+}
+
+/// Whether `text` holds `name` set off as a query key: `?from=`, `&from=`, or `from=`
+/// not inside a longer name.
+fn names_as_key(text: &str, name: &str) -> bool {
+    let key = format!("{name}=");
+    text.match_indices(&key).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '[' || c == '.'))
     })
+}
+
+/// The description `schema` holds itself, not one of a schema it refers to (a shared
+/// link schema's).
+fn own_description(schema: &Value) -> Option<&str> {
+    schema.get("description").and_then(Value::as_str)
 }
 
 /// Whether `schema` holds a URL: free text (see [`is_free_text`]) whose `format` is a
@@ -325,13 +347,10 @@ fn same_path(a: &[(String, &Value)], b: &[(String, &Value)]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|((x, _), (y, _))| x == y)
 }
 
-/// The cursor a URL of the next page carries, of `params`: the one there, else the one
-/// that shares its first word with a page size of several words (`page[cursor]` beside
-/// `page[size]`, where `filter` is another). Two such, or none, is no cursor.
-fn cursor_param<'a>(params: &[&'a str], size_param: &str) -> Option<&'a str> {
-    if let [one] = params {
-        return Some(one);
-    }
+/// The one of `params` of several words that shares its first word with a page size of
+/// several words (`page[cursor]` beside `page[size]`, where `filter`, or a bare `page`,
+/// is another). Two such, or none, is none.
+fn sharing_size<'a>(params: &[&'a str], size_param: &str) -> Option<&'a str> {
     let size_words = mb_mcm::words(size_param);
     let [lead, _, ..] = size_words.as_slice() else {
         return None;
@@ -343,6 +362,14 @@ fn cursor_param<'a>(params: &[&'a str], size_param: &str) -> Option<&'a str> {
     });
     let first = sharing.next()?;
     sharing.next().is_none().then_some(*first)
+}
+
+/// The cursor of `params`: the one there, else the one [`sharing_size`] picks.
+fn cursor_param<'a>(params: &[&'a str], size_param: &str) -> Option<&'a str> {
+    match params {
+        [one] => Some(one),
+        _ => sharing_size(params, size_param),
+    }
 }
 
 /// The one place answer `body` to `call`, which reached `page_url` (of schema `schema`,
@@ -364,40 +391,61 @@ fn url_slot(
         return None;
     };
     let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
-    // What the contract says of the URL and of the link object holding it.
-    let link_texts: Vec<&str> = path
-        .iter()
-        .skip(path.len().saturating_sub(2))
-        .flat_map(|(_, schema)| descriptions(bundle, Some(schema)))
-        .collect();
-    let next_name = names.iter().find(|name| names_next(name))?;
-    // The URLs the model wrote outside the list, of this route.
+    let at = names.iter().position(|name| names_next(name))?;
+    let next_name = &names[at];
+    // The `next` member as its own parent declares it, not a shared schema it refers to.
+    let next_own = own_description(path[at].1);
+    // The URLs of this very request the model wrote outside the list (its `self`).
     let mut shown = Vec::new();
     urls_in(body, Some(list), &own, 0, &mut shown);
-    shown.retain(|url| same_route(url, &own, segments));
+    shown.retain(|url| same_route(url, &own, segments) && shows_request(url, call));
     let declared = op.input.query.as_ref().and_then(|q| q.get("properties"));
-    // A cursor no format or pattern shapes, that the answer or the contract ties to the
-    // URL: a URL of the route the model wrote carries it, or the description of one
-    // names the other.
-    let confirmed: Vec<&str> = params
+    // No format or pattern shapes a cursor (`since`, a date-time).
+    let candidates: Vec<&str> = params
         .iter()
-        .filter(|(name, schema)| {
+        .filter(|(_, schema)| {
             let (parts, _) = schema_parts(bundle, Some(schema));
-            let shaped = parts
+            !parts
                 .iter()
-                .any(|p| p.get("format").is_some() || p.get("pattern").is_some());
-            let carried = shown
-                .iter()
-                .any(|url| url.query_pairs().any(|(key, _)| key == *name));
-            let told = descriptions(bundle, declared.and_then(|d| d.get(*name)))
-                .iter()
-                .any(|text| mentions(text, next_name))
-                || link_texts.iter().any(|text| mentions(text, name));
-            !shaped && (carried || told)
+                .any(|p| p.get("format").is_some() || p.get("pattern").is_some())
         })
         .map(|(name, _)| *name)
         .collect();
-    let param = cursor_param(&confirmed, size_param)?;
+    // Carried empty by a link of this request: a first page's cursor, which a filter
+    // the request did not send (`status=open`) is not.
+    let carried: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|name| {
+            shown.iter().any(|url| {
+                url.query_pairs()
+                    .any(|(key, value)| key == *name && value.trim().is_empty())
+            })
+        })
+        .collect();
+    // Named as code: the parameter's description names the `next` member (`` `next` ``,
+    // `_links.next`), or the `next` member's own description names the parameter
+    // (`` `from` ``, `from=`).
+    let full = names[..=at].join(".");
+    let told: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|name| {
+            descriptions(bundle, declared.and_then(|d| d.get(*name)))
+                .iter()
+                .any(|text| quotes(text, next_name) || (at > 0 && quotes(text, &full)))
+                || next_own.is_some_and(|text| quotes(text, name) || names_as_key(text, name))
+        })
+        .collect();
+    // What a link of the request carries, then the page size's first word, then what
+    // the contract's descriptions say.
+    let param = cursor_param(&carried, size_param)
+        .or_else(|| sharing_size(&candidates, size_param))
+        .or(match told.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        })?;
+
     // A URL the model wrote there, of this route, to another page by anything but the
     // cursor (`page=2`) stays as it is: the page it names is the model's.
     let given = names

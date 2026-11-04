@@ -2862,6 +2862,96 @@ paths:
                 properties:
                   data: {type: array, items: {$ref: "#/components/schemas/User"}}
                   next: {type: string, format: uri, description: "The next page, with `since`."}
+  /typed:
+    get:
+      operationId: listTyped
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: type, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  _links:
+                    type: object
+                    properties:
+                      self: {$ref: "#/components/schemas/DescribedLink"}
+                      next: {$ref: "#/components/schemas/DescribedLink"}
+  /searched:
+    get:
+      operationId: listSearched
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: q, in: query, description: "Search text, sent again with the next request.", schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next: {type: string, format: uri}
+  /filtered:
+    get:
+      operationId: listFiltered
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: status, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  self: {type: string, format: uri}
+                  next: {type: string, format: uri}
+  /notfirst:
+    get:
+      operationId: listNotFirst
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: from, in: query, description: "As `page_next` carries it.", schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  page_next: {type: string, format: uri}
+  /paged:
+    get:
+      operationId: listPaged
+      parameters:
+        - {name: page, in: query, schema: {type: string}}
+        - {name: "page[size]", in: query, schema: {type: integer}}
+        - {name: "page[cursor]", in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  links:
+                    type: object
+                    properties:
+                      self: {type: string, format: uri}
+                      next: {type: [string, "null"], format: uri}
   /things/{id}/items:
     get:
       operationId: listThingItems
@@ -2893,6 +2983,12 @@ components:
       type: [object, "null"]
       required: [href, type]
       properties: {href: {type: string, format: uri}, type: {type: string}}
+    DescribedLink:
+      type: [object, "null"]
+      description: "A link, with its `href` and media `type`."
+      properties:
+        href: {type: string, format: uri, description: "The URL, with its `type`."}
+        type: {type: string}
 "##;
 
 /// The path and query of absolute URL `url`, as a client following it asks for them.
@@ -3088,6 +3184,52 @@ async fn no_next_url_without_one_confirmed_cursor() {
     }
 }
 
+/// Ordinary filters are not taken for the cursor: `type`, which only a link schema the
+/// `next` member shares names (not the member's own description); `q`, whose
+/// description says "next" in prose; and `status`, which the model's `self` carries
+/// with a value the request did not send. Nor is a member whose name has `next` only as
+/// a later word (`page_next`) a next link, though `from`'s description names it.
+#[tokio::test]
+async fn ordinary_filters_are_no_cursor() {
+    let cases = [
+        (
+            "typed",
+            json!({"data": users(3), "_links": {"self": {"href": "https://api.example.org/typed?limit=2"}, "next": null}}),
+        ),
+        ("searched", json!({"data": users(3)})),
+        (
+            "filtered",
+            json!({"data": users(3), "self": "https://api.example.org/filtered?limit=2&status=open"}),
+        ),
+        ("notfirst", json!({"data": users(3)})),
+    ];
+    let mut taken = Vec::new();
+    for (route, answer) in cases {
+        let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+        let first = api.get(&format!("/{route}?limit=2")).await;
+        let mut expected = answer.clone();
+        expected["data"] = json!(users(2));
+        if first != expected {
+            taken.push(format!("{route}: {first}"));
+        }
+    }
+    assert!(taken.is_empty(), "{taken:#?}");
+}
+
+/// Of the parameters a link of the request carries empty, a bare `page` shares the page
+/// size's first word but is one word: `page[cursor]` is the cursor.
+#[tokio::test]
+async fn a_one_word_parameter_is_not_the_page_size_s() {
+    let answer = json!({
+        "data": users(3),
+        "links": {"self": "https://a.example.org/paged?page=&page%5Bcursor%5D=&page%5Bsize%5D=2", "next": null},
+    });
+    let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/paged?page%5Bsize%5D=2").await;
+    let next = first["links"]["next"].as_str().unwrap_or_default();
+    assert!(next.contains("page%5Bcursor%5D="), "{first}");
+}
+
 /// A next URL the model wrote to another page of the route (`page=2`) stays, though a
 /// text parameter is tied to it; and a list paged by number takes no URL of the cursor:
 /// its pages are a run's.
@@ -3151,6 +3293,22 @@ paths:
                       access_token: {type: string}
                       new_refresh_token: {type: string}
                       client_secret: {type: string}
+  /webinars:
+    get:
+      operationId: listWebinars
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer}}
+        - {name: next_page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webinars: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next_page_token: {type: string}
   /scoped:
     get:
       operationId: listScoped
@@ -3177,7 +3335,7 @@ components:
 "##;
 
 /// A `next_page_token` the session's answer served reaches the next request's prompt;
-/// one the client made up does not.
+/// one the client made up does not, nor one another operation served.
 #[tokio::test]
 async fn a_served_page_token_reaches_the_prompt() {
     let script = vec![
@@ -3201,12 +3359,20 @@ async fn a_served_page_token_reaches_the_prompt() {
         "{}",
         api.prompt(2)
     );
+    api.get("/webinars?page_size=1&next_page_token=tok-served-123")
+        .await;
+    assert!(
+        !api.prompt(3).contains("tok-served-123"),
+        "{}",
+        api.prompt(3)
+    );
 }
 
 /// Credentials a client sends stay out of the prompt though members of the answer are
-/// named as them: `access_token`, `refresh_token`, a bare `token`, `client_secret`, and
-/// a parameter a security scheme carries in the query, even carrying the very value an
-/// answer served at its member.
+/// named as them (`access_token`, `refresh_token`, a bare `token`, `client_secret`):
+/// their values are the client's, never one an answer served. A parameter a security
+/// scheme carries in the query stays out even carrying the value an answer served at
+/// the member it pairs.
 #[tokio::test]
 async fn credentials_named_as_answer_members_stay_hidden() {
     let served = json!({
