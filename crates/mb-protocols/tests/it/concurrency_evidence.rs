@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 /// Notes guarded by `If-Match` against their `etag`, served in an `ETag` header too;
-/// ledgers guarded by a `revision` their update requires in its body (and their delete
-/// in its query); boards guarded by a `revision` sent in a header of their own.
+/// ledgers guarded by a `revision` their `{revision, actions}` update requires in its
+/// body (and their delete in its query); boards guarded by a `revision` sent in a header of their own.
 const CONTRACT: &str = r##"
 openapi: 3.0.0
 info: {title: Shelf, version: "1"}
@@ -82,7 +82,9 @@ paths:
             schema:
               type: object
               required: [revision]
-              properties: {revision: {type: integer}, name: {type: string}, views: {type: integer}}
+              properties:
+                revision: {type: integer}
+                actions: {type: array, items: {type: object, properties: {action: {type: string}, name: {type: string}}}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ledger"}}}}
         "409": {description: "Conflict (`StaleWrite`).", content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
@@ -131,7 +133,6 @@ components:
         id: {type: string}
         name: {type: string}
         revision: {type: integer}
-        views: {type: integer}
     Board:
       type: object
       required: [id, name, revision]
@@ -370,93 +371,84 @@ async fn no_token_a_wildcard_or_nothing_stored_is_never_refused() {
     assert!(h.calls() > 5, "it reached the model");
 }
 
-fn ledger(name: &str, revision: i64, views: i64) -> Value {
-    json!({"id": "l1", "name": name, "revision": revision, "views": views})
+fn ledger(name: &str, revision: i64) -> Value {
+    json!({"id": "l1", "name": name, "revision": revision})
 }
 
-/// A `revision` the update requires and no create sets, echoed, and seen to advance:
-/// a token though the `409` names nothing. A stale one in the body or in the delete's
-/// query is refused; the current one goes through. A counter the write may send is
-/// never a token, however it moves.
+fn rename(revision: i64, name: &str) -> Value {
+    json!({"revision": revision, "actions": [{"action": "rename", "name": name}]})
+}
+
+/// A `revision` that is the only member of the record its update declares, required,
+/// set by no create, echoed and seen to advance: a token though the `409` names nothing.
+/// A lower one in the body or in the delete's query is refused; the current one, or a
+/// higher one, reaches the model.
 #[tokio::test]
 async fn a_body_token_is_tied_by_evidence() {
     let h = harness(vec![
-        ledger("a", 1, 10),
-        answer(ledger("b", 2, 11)),
-        answer(ledger("c", 3, 12)),
+        ledger("a", 1),
+        answer(ledger("b", 2)),
+        answer(ledger("c", 3)),
+        answer(ledger("d", 4)),
     ]);
     h.send("POST", "/ledgers", Some(json!({"name": "a"})), &[])
         .await;
     let (status, _, body) = h
-        .send(
-            "PUT",
-            "/ledgers/l1",
-            Some(json!({"revision": 1, "name": "b", "views": 10})),
-            &[],
-        )
+        .send("PUT", "/ledgers/l1", Some(rename(1, "b")), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let held = h.held("ledgers", "l1").await;
-    assert_eq!(held["revision"], 2, "the answer's revision stands: {held}");
-    assert_eq!(held["views"], 10, "the request's counter stands: {held}");
+    assert_eq!(
+        h.held("ledgers", "l1").await["revision"],
+        2,
+        "the answer's revision stands"
+    );
+    let before = h.held("ledgers", "l1").await;
 
     let (status, _, body) = h
-        .send(
-            "PUT",
-            "/ledgers/l1",
-            Some(json!({"revision": 1, "name": "stale"})),
-            &[],
-        )
+        .send("PUT", "/ledgers/l1", Some(rename(1, "stale")), &[])
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let (status, _, _) = h.send("DELETE", "/ledgers/l1?revision=1", None, &[]).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(h.calls(), 2);
-    assert_eq!(h.held("ledgers", "l1").await["name"], "b");
+    assert_eq!(h.held("ledgers", "l1").await, before, "nothing changed");
 
-    // An old counter is no stale token.
     let (status, _, body) = h
-        .send(
-            "PUT",
-            "/ledgers/l1",
-            Some(json!({"revision": 2, "name": "c", "views": 3})),
-            &[],
-        )
+        .send("PUT", "/ledgers/l1", Some(rename(2, "c")), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(h.held("ledgers", "l1").await["revision"], 3);
+    // A higher one is no stale read: the model answers it.
+    let (status, _, body) = h
+        .send("PUT", "/ledgers/l1", Some(rename(9, "d")), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.calls(), 4);
 }
 
-/// A header of the contract's own that the client fills with the board's `revision`:
-/// paired by its echo. The model left it the first time: nothing was seen of how it
-/// moves, so it is neither minted nor refused. Once the model moved it, a model that
-/// leaves it has it minted one higher, and a stale one is refused with the declared
-/// `409`.
+/// A header of the contract's own that the client fills with the board's `revision`
+/// pairs with it only once the client is seen to track it: the header followed the
+/// revision when it moved. It is never minted; a stale one is then refused with the
+/// declared `409`.
 #[tokio::test]
-async fn a_version_header_pairs_with_its_member() {
+async fn a_version_header_pairs_once_the_client_tracks_it() {
     let board = |name: &str, revision: i64| json!({"id": "b1", "name": name, "revision": revision});
     let h = harness(vec![
         board("a", 4),
-        answer(board("b", 4)),
-        answer(board("c", 4)),
-        answer(board("d", 5)),
-        answer(board("e", 5)),
+        answer(board("b", 5)),
+        answer(board("c", 5)),
+        answer(board("d", 6)),
     ]);
     h.send("POST", "/boards", Some(json!({"name": "a"})), &[])
         .await;
-    let (status, _, body) = h.put_board("b", "4").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(h.held("boards", "b1").await["revision"], 4, "not minted");
-    let (status, _, _) = h.put_board("c", "3").await;
-    assert_eq!(status, StatusCode::OK, "nothing seen to move: not refused");
-    // The model moves it.
-    assert_eq!(h.put_board("d", "4").await.0, StatusCode::OK);
+    // A candidate: the header holds the revision, which the model moves.
+    assert_eq!(h.put_board("b", "4").await.0, StatusCode::OK);
     assert_eq!(h.held("boards", "b1").await["revision"], 5);
-    // The model leaves it: minted one higher.
-    let (status, _, body) = h.put_board("e", "5").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["revision"], 6, "minted one higher: {body}");
+    // The header followed it: tracked. The model leaves it, and nothing mints it.
+    assert_eq!(h.put_board("c", "5").await.0, StatusCode::OK);
+    assert_eq!(h.held("boards", "b1").await["revision"], 5, "not minted");
+    assert_eq!(h.put_board("d", "5").await.0, StatusCode::OK);
     assert_eq!(h.held("boards", "b1").await["revision"], 6);
     assert_eq!(h.put_board("stale", "5").await.0, StatusCode::CONFLICT);
-    assert_eq!(h.calls(), 5);
+    assert_eq!(h.calls(), 4);
 }

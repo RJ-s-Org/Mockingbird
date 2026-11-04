@@ -7,42 +7,48 @@
 //!
 //! - **By the contract's words**: the `409`/`412`'s description names the member in code
 //!   position (`` `version` ``), and the server manages it (the read marks it `readOnly`,
-//!   or no create or update of the type lets a client set it).
-//! - **By a header**: the write declares a request header (`If-Match`, or any other)
-//!   whose value is the record's held member, an entity tag compared by its opaque value
-//!   (`W/"3"` is `"3"` is `3`). That pairs the header with the member, for the record.
-//!   A header other than `If-Match` pairs only with a member no create of the type sets.
-//! - **By the body or the query**: the write declares the member, requires it (or the
-//!   read marks it `readOnly`), no create of the type sets it, and the request echoes
-//!   its held value. A counter the write may send, or a name a create sets, is none.
+//!   or no create or update of the type lets a client set it). Its body is compared.
+//! - **By `If-Match`**: the header's entity-tag list (RFC 9110, quoted tags kept whole,
+//!   compared by opaque value: `W/"3"` is `"3"`) holds the record's value of one string
+//!   member the server manages, as above. That pairs `If-Match` with the member, for the
+//!   record.
+//! - **By another header the write declares**, holding (whole) the value of one member
+//!   the server manages: a *candidate* pairing. It pairs only once the client was seen to
+//!   track the member as it moves: a later write whose header holds the member's moved
+//!   value. A header that stays the same while the member moves drops the candidate.
+//! - **By the body or the query**: the write declares and requires the member, it is the
+//!   only member of the record the write's input declares (the `{version, actions}`
+//!   shape), or the read marks it `readOnly`; no create of the type sets it, and the
+//!   request echoes its held value. An integer one is stale only when lower than the
+//!   current value.
 //!
 //! No member's date, time or wording is read beyond that.
 //!
-//! Once an update the model answered was seen to change a token (or, for a token sent
-//! in `If-Match`, once the mock advanced it, below), a write sending another value than
-//! the record's current one is answered with the declared `409`/`412` (a body's token the
-//! `409` first, a header's the `412` first), its error body filled from the contract,
-//! before any LLM call, and nothing changes. A record's first write is never refused
-//! this way, nor is a request sending no token or `If-Match: *`, nor a write to a record
-//! nothing stores, nor an operation declaring neither status.
+//! Once an update the model answered was seen to change a token (or, for `If-Match`,
+//! once the mock advanced it, below), a write sending a stale value is answered with the
+//! declared `409`/`412` (a body's token the `409` first, a header's the `412` first),
+//! its error body filled from the contract, before any LLM call, and nothing changes. A
+//! record's first write is never refused this way, nor is a request sending no token or
+//! `If-Match: *`, nor a write to a record nothing stores, nor a header pairing not yet
+//! seen tracked, nor an operation declaring neither status.
 //!
 //! A token the request sends no new value for (it sends none, or the held one) is
 //! *advanced* by the update: the model's new value (another string, a greater integer)
 //! is stored, even for a `readOnly` member, where the settling of an update otherwise
 //! keeps the copy's, and the request's echo does not stand over it (see
-//! [`mb_engine::UpdateGuard::advances`]). When the model left a token as it was, one that
-//! was seen to change before, or is sent in `If-Match`, is *minted* anew in the same
-//! format: an integer one higher, a string with its trailing number one higher, or else
-//! each letter and digit redrawn in its class (hex staying hex), an entity tag's `W/`
-//! and quotes kept. A token paired with `If-Match` is also served in a declared `ETag`
+//! [`mb_engine::UpdateGuard::advances`]). When the model left an `If-Match` token as it
+//! was, it is *minted* anew in the same format: its trailing number one higher, or else
+//! each letter and digit redrawn in its class (hex staying hex), `W/` and quotes kept.
+//! No other token is minted. The `If-Match` token is also served in a declared `ETag`
 //! response header.
 //!
-//! Which tokens were seen to change, and which headers pair with which member, is kept
-//! per record under the store's reserved type ([`mb_state::INTERNAL_TYPE`]), so every
-//! backend and node sees the same, sessions, TTLs and resets clear it, a session keeps
-//! [`MAX_RECORDS`] records' worth, the newest, and a delete of the record ends it. A
-//! document is read, changed and written back: two writes to one record at once can
-//! lose a change, which only leaves a stale write to the model.
+//! Which tokens were seen to change, and which headers pair (or may pair) with which
+//! member, is kept per record under the store's reserved type
+//! ([`mb_state::INTERNAL_TYPE`]), so every backend and node sees the same, sessions, TTLs
+//! and resets clear it, a session keeps [`MAX_RECORDS`] records' worth, the newest, and
+//! any delete of the record ends it. A document is read, changed and written back: two
+//! writes to one record at once can lose a change, which only leaves a stale write to
+//! the model.
 //!
 //! HTTP, an LLM and `consistency: on` only, with no scenario or forced status:
 //! everything else is as it was.
@@ -70,10 +76,14 @@ pub(super) struct Tokens {
     mintable: Vec<String>,
     /// The tokens an update was seen to change, as read.
     confirmed: Vec<String>,
-    /// Which header pairs with which member, as read (lowercase header names).
+    /// Which header pairs with which member (lowercase header names), as read.
     headers: Map<String, Value>,
-    /// The pairs this write found that were not read.
-    paired: Vec<(String, String)>,
+    /// Candidate pairings, `{header: {member, value}}`, as read.
+    seen: Map<String, Value>,
+    /// `headers` after this write.
+    headers_after: Map<String, Value>,
+    /// `seen` after this write.
+    seen_after: Map<String, Value>,
     /// Whether the record has a document of its tokens.
     kept: bool,
 }
@@ -253,9 +263,60 @@ fn settable_by(rt: &MockRuntime, t: &str, member: &str, updates: bool) -> bool {
     })
 }
 
+/// The top-level member names object `schema` declares, through `$ref`s and `allOf`s.
+fn properties_of(bundle: &mb_mcm::Bundle, schema: &Value, depth: usize, out: &mut Vec<String>) {
+    if depth > 8 {
+        return;
+    }
+    let node = deref_schema(bundle, schema);
+    if let Some(Value::Object(props)) = node.get("properties") {
+        for name in props.keys() {
+            if !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+    }
+    for part in node
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        properties_of(bundle, part, depth + 1, out);
+    }
+}
+
+/// Whether the server manages member `member` of a stored `t` that may be a token by
+/// its shape: the read marks it `readOnly`, or no create or update of the type sets it.
+fn server_managed(rt: &MockRuntime, t: &str, member: &str) -> bool {
+    token_schema(rt, t, member, false).is_some_and(|schema| {
+        read_only(rt.bundle(), &schema, 0) || !settable_by(rt, t, member, true)
+    })
+}
+
+/// Whether `If-Match` on `op` may hold member `member` of a stored `t`: `op` declares a
+/// `409` or a `412`, and the member is a string the server manages.
+fn if_match_member(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
+    declares_conflict(op)
+        && server_managed(rt, t, member)
+        && token_schema(rt, t, member, false).is_some_and(|schema| {
+            let node = deref_schema(rt.bundle(), &schema);
+            match node.get("type") {
+                Some(Value::String(t)) => t == "string",
+                Some(Value::Array(ts)) => ts.iter().any(|t| t.as_str() == Some("string")),
+                _ => false,
+            }
+        })
+}
+
+/// Whether another request header of `op` may hold member `member` of a stored `t`:
+/// `op` declares a `409` or a `412`, and the server manages the member.
+fn header_member(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
+    declares_conflict(op) && server_managed(rt, t, member)
+}
+
 /// Whether `op` may carry member `member` of a stored `t` as a token in its body or its
-/// query (see the module's documentation): it declares a `409` or a `412` and the
-/// member, requires it (or the read marks it `readOnly`), and no create sets it.
+/// query (see the module's documentation).
 fn body_token(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
     if !declares_conflict(op) {
         return false;
@@ -271,25 +332,79 @@ fn body_token(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
     if body.is_none() && query.is_none() {
         return false;
     }
+    if settable_by(rt, t, member, false) {
+        return false;
+    }
+    if read_only(bundle, &read, 0) {
+        return true;
+    }
     let required = [body, query]
         .into_iter()
         .flatten()
         .any(|s| requires(bundle, s, member, 0));
-    (required || read_only(bundle, &read, 0)) && !settable_by(rt, t, member, false)
+    // The only member of the record the write's input declares.
+    let mut record = Vec::new();
+    if let Some(schema) = write_memory::read_schema(rt, t) {
+        properties_of(bundle, schema, 0, &mut record);
+    }
+    let mut input = Vec::new();
+    for schema in [op.input.body.as_ref(), op.input.query.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        properties_of(bundle, schema, 0, &mut input);
+    }
+    let shared: Vec<&String> = input.iter().filter(|m| record.contains(m)).collect();
+    required && shared.len() == 1 && shared[0] == member
 }
 
-/// Whether `op` may carry member `member` of a stored `t` as a token in its request
-/// header `header` (lowercase): it declares a `409` or a `412`, and the header is
-/// `If-Match` or the member is one no create sets.
-fn header_token(rt: &MockRuntime, op: &Operation, t: &str, header: &str, member: &str) -> bool {
-    declares_conflict(op)
-        && token_schema(rt, t, member, false).is_some()
-        && (header == IF_MATCH || !settable_by(rt, t, member, false))
+/// Whether a body token `sent` is stale against `now`: for an integer one, lower; for
+/// any other, another value.
+fn stale(sent: &Value, now: &Value) -> bool {
+    if let Some(now) = now.as_i64() {
+        let sent = match sent {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        };
+        if let Some(sent) = sent {
+            return sent < now;
+        }
+    }
+    compared(sent) != compared(now)
 }
 
-/// The request headers `op` declares that `call` sends, lowercase, each with the values
-/// it sends as compared (an entity-tag list split). None for a header holding `*`, which
-/// any current representation matches.
+/// The entity tags of an `If-Match` value (RFC 9110 §8.8.3), each by its opaque value: a
+/// quoted tag is kept whole, commas and all. None for `*`, which any current
+/// representation matches, or for an empty list.
+fn entity_tags(text: &str) -> Option<Vec<String>> {
+    let mut tags = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        if rest.is_empty() {
+            break;
+        }
+        if rest.starts_with('*') {
+            return None;
+        }
+        let body = rest.strip_prefix("W/").unwrap_or(rest);
+        if let Some(quoted) = body.strip_prefix('"') {
+            let end = quoted.find('"').unwrap_or(quoted.len());
+            tags.push(quoted[..end].to_string());
+            rest = quoted.get(end + 1..).unwrap_or("");
+        } else {
+            let end = body.find(',').unwrap_or(body.len());
+            tags.push(body[..end].trim().to_string());
+            rest = &body[end..];
+        }
+    }
+    tags.retain(|t| !t.is_empty());
+    (!tags.is_empty()).then_some(tags)
+}
+
+/// The request headers `op` declares that `call` sends, lowercase: `If-Match` with its
+/// entity tags (none for `*`), any other with its whole value, trimmed.
 fn sent_headers(op: &Operation, call: &OperationCall) -> Vec<(String, Vec<String>)> {
     let Some(Value::Object(declared)) = op.input.headers.as_ref().and_then(|s| s.get("properties"))
     else {
@@ -303,15 +418,30 @@ fn sent_headers(op: &Operation, call: &OperationCall) -> Vec<(String, Vec<String
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .and_then(|(_, v)| as_text(v))?;
-            let tags: Vec<String> = text
-                .split(',')
-                .map(normalized)
-                .filter(|t| !t.is_empty())
-                .collect();
-            (!tags.is_empty() && !tags.iter().any(|t| t == "*"))
-                .then(|| (name.to_ascii_lowercase(), tags))
+            let lower = name.to_ascii_lowercase();
+            let values = if lower == IF_MATCH {
+                entity_tags(&text)?
+            } else {
+                let whole = text.trim().to_string();
+                if whole.is_empty() {
+                    return None;
+                }
+                vec![whole]
+            };
+            Some((lower, values))
         })
         .collect()
+}
+
+/// Whether header `header`'s `values` hold `held`: an entity tag by its opaque value for
+/// `If-Match`, the whole text for any other.
+fn holds(header: &str, values: &[String], held: &Value) -> bool {
+    let held = if header == IF_MATCH {
+        compared(held)
+    } else {
+        as_text(held)
+    };
+    held.is_some_and(|held| values.contains(&held))
 }
 
 /// The document of `t` `id`'s tokens.
@@ -341,60 +471,61 @@ pub(super) async fn check(
     let doc = state
         .get(&plan.session, INTERNAL_TYPE, &key(t, &target.id))
         .await;
-    let confirmed: Vec<String> = doc
-        .as_ref()
-        .and_then(|d| d.data.get("confirmed"))
+    let part = |name: &str| doc.as_ref().and_then(|d| d.data.get(name));
+    let confirmed: Vec<String> = part("confirmed")
         .and_then(|c| serde_json::from_value(c.clone()).ok())
         .unwrap_or_default();
-    let pairs: Map<String, Value> = doc
-        .as_ref()
-        .and_then(|d| d.data.get("headers"))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let object = |name: &str| {
+        part(name)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (pairs, seen) = (object("headers"), object("seen"));
     let body = match call.body.as_ref() {
         Some(Value::Object(members)) => Some(members),
         _ => None,
     };
-    let current = |member: &str| target.data.get(member).and_then(compared);
-    // What the body (else the query) sends for a member, as the answer settles on both.
-    let sent = |member: &str| {
-        body.and_then(|b| b.get(member))
-            .or_else(|| call.query.get(member))
-            .and_then(compared)
-    };
+    let current = |member: &str| target.data.get(member).filter(|v| as_text(v).is_some());
     let headers = sent_headers(op, call);
     let is_confirmed = |member: &str| confirmed.iter().any(|m| m == member);
 
     let mut codes: &[u16] = &[];
-    let named = body
-        .into_iter()
-        .flat_map(|b| b.keys())
-        .chain(call.query.keys());
-    for member in named {
-        let (Some(sent), Some(now)) = (sent(member), current(member)) else {
+    // The body: a token tied by words or by evidence; the query: by evidence only.
+    let sent_members = body.into_iter().flatten().map(|(m, v)| (m, v, true)).chain(
+        call.query
+            .iter()
+            .filter(|(m, _)| body.is_none_or(|b| !b.contains_key(*m)))
+            .map(|(m, v)| (m, v, false)),
+    );
+    for (member, sent, in_body) in sent_members {
+        let Some(now) = current(member) else {
             continue;
         };
-        if sent != now
-            && is_confirmed(member)
-            && (tied(rt, op, t, member) || body_token(rt, op, t, member))
-        {
+        if compared(sent).is_none() || !is_confirmed(member) {
+            continue;
+        }
+        let by_words = in_body && tied(rt, op, t, member) && compared(sent) != compared(now);
+        let by_evidence = body_token(rt, op, t, member) && stale(sent, now);
+        if by_words || by_evidence {
             codes = &[409, 412];
             break;
         }
     }
+    // A header: only a pairing seen tracked.
     if codes.is_empty() {
-        for (header, tags) in &headers {
+        for (header, values) in &headers {
             let Some(member) = pairs.get(header).and_then(Value::as_str) else {
                 continue;
             };
             let Some(now) = current(member) else {
                 continue;
             };
-            if !tags.contains(&now)
-                && is_confirmed(member)
-                && header_token(rt, op, t, header, member)
-            {
+            let gate = match header.as_str() {
+                IF_MATCH => if_match_member(rt, op, t, member),
+                _ => header_member(rt, op, t, member),
+            };
+            if gate && is_confirmed(member) && !holds(header, values, now) {
                 codes = &[412, 409];
                 break;
             }
@@ -416,66 +547,120 @@ pub(super) async fn check(
     // What the update advances: a token its body or query sets no new value for.
     let mut advancing: Vec<String> = Vec::new();
     let mut mintable: Vec<String> = Vec::new();
-    let mut paired = Vec::new();
+    let (mut headers_after, mut seen_after) = (pairs.clone(), seen.clone());
     if op.kind == OperationKind::Command(Effect::Update)
         && let Value::Object(held) = &target.data
     {
         // The client sets it anew: it is the client's.
-        let set_anew = |member: &str| sent(member).is_some_and(|s| Some(s) != current(member));
-        // A header holding a member's current value: the member it pairs with, else the
-        // one member holding that value.
-        for (header, tags) in &headers {
-            let learned = pairs
-                .get(header)
-                .and_then(Value::as_str)
-                .filter(|m| held.contains_key(*m));
-            let member = match learned {
-                Some(m) => m.to_string(),
-                None => {
-                    let matching: Vec<&String> = held
-                        .iter()
-                        .filter(|(_, v)| compared(v).is_some_and(|v| tags.contains(&v)))
-                        .map(|(k, _)| k)
-                        .collect();
-                    match matching.as_slice() {
-                        [one] => (*one).clone(),
-                        _ => continue,
-                    }
+        let set_anew = |member: &str| {
+            body.and_then(|b| b.get(member))
+                .or_else(|| call.query.get(member))
+                .is_some_and(|s| compared(s) != current(member).and_then(compared))
+        };
+        let mut advance = |member: &str, mint: bool, advancing: &mut Vec<String>| {
+            if !set_anew(member) && !advancing.iter().any(|m| m == member) {
+                advancing.push(member.to_string());
+                if mint {
+                    mintable.push(member.to_string());
                 }
-            };
-            if !current(&member).is_some_and(|now| tags.contains(&now))
-                || set_anew(&member)
-                || !header_token(rt, op, t, header, &member)
-            {
+            }
+        };
+        // The one member holding what a header holds, of those it may hold.
+        let only_match = |header: &str, values: &[String], fits: &dyn Fn(&str) -> bool| {
+            let matching: Vec<&String> = held
+                .iter()
+                .filter(|(k, v)| fits(k) && holds(header, values, v))
+                .map(|(k, _)| k)
+                .collect();
+            match matching.as_slice() {
+                [one] => Some((*one).clone()),
+                _ => None,
+            }
+        };
+        for (header, values) in &headers {
+            let header = header.as_str();
+            if header == IF_MATCH {
+                let fits = |m: &str| if_match_member(rt, op, t, m);
+                let learned = pairs
+                    .get(IF_MATCH)
+                    .and_then(Value::as_str)
+                    .filter(|m| held.contains_key(*m) && fits(m))
+                    .map(str::to_string);
+                let Some(member) = learned.or_else(|| only_match(header, values, &fits)) else {
+                    continue;
+                };
+                if current(&member).is_some_and(|now| holds(header, values, now)) {
+                    headers_after.insert(IF_MATCH.to_string(), Value::String(member.clone()));
+                    advance(&member, true, &mut advancing);
+                }
                 continue;
             }
-            if learned.is_none() {
-                paired.push((header.clone(), member.clone()));
-            }
-            if !advancing.contains(&member) {
-                advancing.push(member.clone());
-                // `If-Match` names an entity tag, which a change moves by definition;
-                // another header's member is minted once the model was seen to move it.
-                if header == IF_MATCH || is_confirmed(&member) {
-                    mintable.push(member);
+            let fits = |m: &str| held.contains_key(m) && header_member(rt, op, t, m);
+            // A pairing seen tracked.
+            if let Some(member) = pairs.get(header).and_then(Value::as_str) {
+                if fits(member) && current(member).is_some_and(|now| holds(header, values, now)) {
+                    advance(member, false, &mut advancing);
                 }
+                continue;
+            }
+            // A candidate: tracked once the header follows the member as it moves; dropped
+            // when the header stays while the member moves.
+            if let Some(candidate) = seen.get(header) {
+                let member = candidate.get("member").and_then(Value::as_str);
+                let was = candidate.get("value").and_then(Value::as_str);
+                let (Some(member), Some(was)) = (member, was) else {
+                    seen_after.remove(header);
+                    continue;
+                };
+                let now = current(member);
+                let moved = now.and_then(as_text).is_some_and(|now| now != was);
+                if !fits(member) {
+                    seen_after.remove(header);
+                } else if moved && now.is_some_and(|now| holds(header, values, now)) {
+                    seen_after.remove(header);
+                    headers_after.insert(header.to_string(), Value::String(member.to_string()));
+                    advance(member, false, &mut advancing);
+                    continue;
+                } else if moved {
+                    seen_after.remove(header);
+                    continue;
+                } else if now.is_some_and(|now| holds(header, values, now)) {
+                    advance(member, false, &mut advancing);
+                    continue;
+                }
+            }
+            if let Some(member) = only_match(header, values, &fits)
+                && let Some(value) = current(&member).and_then(as_text)
+            {
+                seen_after.insert(
+                    header.to_string(),
+                    serde_json::json!({ "member": member, "value": value }),
+                );
+                advance(&member, false, &mut advancing);
             }
         }
-        let header_paired = |member: &str| pairs.values().any(|m| m.as_str() == Some(member));
+        let tracked = |member: &str| {
+            headers_after.iter().any(|(header, m)| {
+                m.as_str() == Some(member)
+                    && match header.as_str() {
+                        IF_MATCH => if_match_member(rt, op, t, member),
+                        _ => header_member(rt, op, t, member),
+                    }
+            })
+        };
+        let by_if_match =
+            |member: &str| headers_after.get(IF_MATCH).and_then(Value::as_str) == Some(member);
         for (member, value) in held {
-            if as_text(value).is_none() || advancing.contains(member) || set_anew(member) {
+            if as_text(value).is_none() || advancing.contains(member) {
                 continue;
             }
-            let by_words = tied(rt, op, t, member);
             let by_body = body_token(rt, op, t, member);
-            let by_header = header_paired(member)
-                && declares_conflict(op)
-                && token_schema(rt, t, member, false).is_some();
-            if is_confirmed(member) && (by_words || by_body || by_header) {
-                advancing.push(member.clone());
-                mintable.push(member.clone());
-            } else if by_words || (by_body && sent(member).is_some()) {
-                advancing.push(member.clone());
+            let sent =
+                body.is_some_and(|b| b.contains_key(member)) || call.query.contains_key(member);
+            if is_confirmed(member) && (by_body || tracked(member)) {
+                advance(member, by_if_match(member), &mut advancing);
+            } else if tied(rt, op, t, member) || (by_body && sent) {
+                advance(member, false, &mut advancing);
             }
         }
     }
@@ -484,15 +669,17 @@ pub(super) async fn check(
         mintable,
         confirmed,
         headers: pairs,
-        paired,
+        seen,
+        headers_after,
+        seen_after,
         kept: doc.is_some(),
     })
 }
 
 /// After a 2xx update of `before` the model answered: each advancing token it changed is
-/// confirmed, so a later write sending another value is refused; one it left as it was
-/// is minted anew when it may be (see the module's documentation), in the store and in
-/// the served record `served`.
+/// confirmed, so a later write sending a stale value is refused; an `If-Match` token it
+/// left as it was is minted anew, in the store and in the served record `served`. The
+/// header pairings the write found are kept.
 pub(super) async fn after_update(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -500,7 +687,8 @@ pub(super) async fn after_update(
     tokens: &Tokens,
     served: Option<&mut Value>,
 ) {
-    if tokens.advancing.is_empty() {
+    let pairings_moved = tokens.headers_after != tokens.headers || tokens.seen_after != tokens.seen;
+    if tokens.advancing.is_empty() && !pairings_moved {
         return;
     }
     let t = before.resource_type.as_str();
@@ -544,11 +732,7 @@ pub(super) async fn after_update(
             }
         }
     }
-    let mut headers = tokens.headers.clone();
-    for (header, member) in &tokens.paired {
-        headers.insert(header.clone(), Value::String(member.clone()));
-    }
-    if confirmed == tokens.confirmed && headers == tokens.headers {
+    if confirmed == tokens.confirmed && !pairings_moved {
         return;
     }
     let id = key(t, &before.id);
@@ -558,7 +742,11 @@ pub(super) async fn after_update(
             StoredResource {
                 resource_type: INTERNAL_TYPE.to_string(),
                 id: id.clone(),
-                data: serde_json::json!({ "confirmed": confirmed, "headers": headers }),
+                data: serde_json::json!({
+                    "confirmed": confirmed,
+                    "headers": tokens.headers_after,
+                    "seen": tokens.seen_after,
+                }),
             },
         )
         .await;
@@ -587,23 +775,15 @@ pub(super) async fn after_update(
         .await;
 }
 
-/// After a 2xx delete of `t` `id`: its tokens go with it. The index keeps the entry,
-/// which the bound takes out.
-pub(super) async fn after_delete(
-    state: &mut StateAccess<'_>,
-    session: &SessionKey,
-    t: &str,
-    id: &str,
-    tokens: &Tokens,
-) {
-    if tokens.kept {
-        state.delete(session, INTERNAL_TYPE, &key(t, id)).await;
-    }
+/// After any 2xx delete of `t` `id`, whatever answered it: its tokens go with it. The
+/// index keeps the entry, which the bound takes out.
+pub(super) async fn forget(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) {
+    state.delete(session, INTERNAL_TYPE, &key(t, id)).await;
 }
 
 /// The declared `ETag` response header of a 2xx answer, by its name as declared, with
-/// the record's token paired with `If-Match` (else with another header) as an entity
-/// tag: what the client sends back. None for a record with no paired token.
+/// the record's token paired with `If-Match` as an entity tag: what the client sends
+/// back. None for a record with no such token, a scenario or a forced status.
 #[cfg(feature = "http-rest")]
 pub(super) async fn entity_tag(
     rt: &MockRuntime,
@@ -613,6 +793,7 @@ pub(super) async fn entity_tag(
 ) -> Option<(String, String)> {
     let op = plan.op;
     if !rt.consistency
+        || !plain(plan)
         || !matches!(op.binding, Binding::Http { .. })
         || !(200..300).contains(&answer.status)
     {
@@ -635,10 +816,10 @@ pub(super) async fn entity_tag(
     let doc = state
         .get(&plan.session, INTERNAL_TYPE, &key(t, &id))
         .await?;
-    let pairs = doc.data.get("headers")?.as_object()?;
-    let member = pairs
-        .get(IF_MATCH)
-        .or_else(|| pairs.values().next())?
+    let member = doc
+        .data
+        .get("headers")?
+        .get(IF_MATCH)?
         .as_str()?
         .to_string();
     let value = match record.and_then(|r| r.get(&member)).and_then(as_text) {
@@ -781,6 +962,30 @@ mod tests {
         assert_eq!(normalized(" 3 "), "3");
         assert_eq!(compared(&json!("W/\"abc\"")), compared(&json!("\"abc\"")));
         assert_ne!(compared(&json!("\"abc\"")), compared(&json!("\"abd\"")));
+    }
+
+    #[test]
+    fn if_match_is_an_entity_tag_list_that_respects_quotes() {
+        let tags = |s: &str| entity_tags(s);
+        assert_eq!(tags("\"x,y\""), Some(vec!["x,y".to_string()]));
+        assert_eq!(
+            tags("W/\"a\", \"b,c\""),
+            Some(vec!["a".to_string(), "b,c".to_string()])
+        );
+        assert_eq!(tags("abc"), Some(vec!["abc".to_string()]));
+        assert_eq!(tags("*"), None);
+        assert_eq!(tags("\"a\", *"), None);
+        assert_eq!(tags(" , "), None);
+    }
+
+    #[test]
+    fn an_integer_body_token_is_stale_only_when_lower() {
+        assert!(stale(&json!(1), &json!(2)));
+        assert!(stale(&json!("1"), &json!(2)));
+        assert!(!stale(&json!(2), &json!(2)));
+        assert!(!stale(&json!(9), &json!(2)));
+        assert!(stale(&json!("a"), &json!("b")));
+        assert!(!stale(&json!("\"b\""), &json!("b")));
     }
 
     #[test]

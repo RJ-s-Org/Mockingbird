@@ -1637,30 +1637,27 @@ pub(crate) async fn complete(
                 Source::Llm | Source::Patched | Source::Repaired
             )
             && let Some(before) = target.as_ref()
+            && op.kind == OperationKind::Command(Effect::Update)
+            && !generated.new_record
         {
-            match op.kind {
-                OperationKind::Command(Effect::Update) if !generated.new_record => {
-                    tokens::after_update(
-                        &mut state,
-                        session,
-                        before,
-                        &tokens,
-                        generated.body.as_mut(),
-                    )
-                    .await;
-                }
-                OperationKind::Command(Effect::Delete) => {
-                    tokens::after_delete(
-                        &mut state,
-                        session,
-                        &before.resource_type,
-                        &before.id,
-                        &tokens,
-                    )
-                    .await;
-                }
-                _ => {}
-            }
+            tokens::after_update(
+                &mut state,
+                session,
+                before,
+                &tokens,
+                generated.body.as_mut(),
+            )
+            .await;
+        }
+        // Any delete of a record ends its tokens, whatever answered it.
+        if (200..300).contains(&generated.status)
+            && rt.consistency
+            && !foreign_key
+            && matches!(op.binding, Binding::Http { .. })
+            && op.kind == OperationKind::Command(Effect::Delete)
+            && let Some(before) = target.as_ref()
+        {
+            tokens::forget(&mut state, session, &before.resource_type, &before.id).await;
         }
         // After the effects: one on the resource means it shows the write.
         write_memory::after_write(
