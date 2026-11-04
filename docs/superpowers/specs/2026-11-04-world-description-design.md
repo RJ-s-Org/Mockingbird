@@ -1,6 +1,6 @@
 # World descriptions: design
 
-Status: draft for review. Date: 2026-11-04. Evidence: the blind benchmark rounds in `docs/benchmarks/blind*/`, the eighth and ninth set diagnoses, and the cross-suite diagnosis of blind sets 1–7.
+Status: draft for review; open questions answered 2026-11-04. Date: 2026-11-04. Evidence: the blind benchmark rounds in `docs/benchmarks/blind*/`, the eighth and ninth set diagnoses, and the cross-suite diagnosis of blind sets 1–7.
 
 ## Problem
 
@@ -106,7 +106,11 @@ Vocabulary:
   - `lifecycle`: status member, states, initial state, soft delete and how it is listed.
   - `unique`: member sets, scope, declared conflict status.
   - `concurrency`: body member and/or header, conflict status, how the token advances.
-  - `derived`: optional, for members that follow others, such as a count or a balance. Stated, never computed by guess.
+  - `derived`: members the engine computes exactly from stored records, so a model never does the arithmetic. Two forms are supported:
+    - the count of a child list;
+    - the sum of a member over child records, optionally filtered by state (e.g. a balance as the sum of posted entry amounts).
+
+    Nothing else is derived. Members not described stay with the model, as today.
 - **operations:**
   - `kind`: create, read, list, update, replace, delete, action.
   - `type` and `target`: which path parameter or body member names the record.
@@ -130,7 +134,11 @@ Vocabulary:
 
    Today none of this is exposed.
 3. **The assistant** reads the contract and the diagnostics, then writes entries with `put_world` (whole document) or `patch_world` (JSON merge patch). Validation answers with what was applied and what was refused, and why.
-4. **Activation:** a description change makes a new contract version, as `edit_draft` and activation do today, so it can be rolled back and diffed. Config-file mocks take `mocks.<name>.world: <path>`.
+4. **Revisions:**
+   - Each change adds a numbered revision of the description, attached to its contract version. The newest revision applies at once, as `put_scenario` does today.
+   - Revisions can be listed, diffed and rolled back. Changing one never recompiles the contract or adds a contract version.
+   - A new contract version starts from the previous description. Entries that still validate carry forward, and the rest appear as gaps.
+   - Config-file mocks take `mocks.<name>.world: <path>`.
 5. **Runtime:** the modules that guess today (identity, envelopes, `pages`, `runs`, `lists`, `tokens`, `guards`, `deleted`) read the description first and guess only where it is silent.
 6. **Snapshots** carry the description as a new `SnapshotPart`.
 
@@ -178,15 +186,16 @@ Each step is its own PR with independent review, and each is measured on blind s
    - operation kind, target and transition;
    - lifecycle and soft delete;
    - unique members and concurrency;
-   - paging, filters and scope.
+   - paging, filters and scope;
+   - derived counts and sums.
 
    Each module keeps its heuristic as the fallback.
 4. **Benchmark `--world` tiers**, and a blind tenth set measured on all three.
 5. **Convention detectors** (tier 0), one PR per convention family.
-6. **Tier-2 `mockingbird world draft`.**
+6. **Tier-2 `mockingbird world draft`.** It runs only when asked, never automatically at import.
 
-## Open questions
+## Decisions
 
-1. Whether a description change should make a new contract version (auditable, as proposed) or update the active version in place (less churn).
-2. Whether tier 2 should run automatically at import when an LLM profile is configured and no assistant is involved, or only when asked (proposed: only when asked).
-3. How much of `derived` to support in the first cut (proposed: none, since a count follows from the stored list).
+1. A description change adds a revision attached to its contract version. It doesn't add a contract version (see Flow, step 4).
+2. Tier 2 runs only on request.
+3. Derived counts and sums are in scope, as their own runtime step. The benchmark checks stay as they are: they already test what the contracts document.
