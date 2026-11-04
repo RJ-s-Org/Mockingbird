@@ -649,6 +649,18 @@ pub(crate) async fn generate_once(
     generate_narrowed(rt, plan, call, None).await
 }
 
+/// The declared `ETag` response header of `generated`, with its record's concurrency
+/// token, when one is paired with a request header (see [`tokens`]).
+#[cfg(feature = "http-rest")]
+pub(crate) async fn entity_tag(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) -> Option<(String, String)> {
+    tokens::entity_tag(rt, plan, call, generated).await
+}
+
 /// The stored target and related resources a read-only generation of `call`
 /// takes into account (as [`generate_once`] reads them, but for the hops,
 /// which its callers do not read); the session is marked used.
@@ -1612,7 +1624,14 @@ pub(crate) async fn complete(
         {
             match op.kind {
                 OperationKind::Command(Effect::Update) if !generated.new_record => {
-                    tokens::after_update(&mut state, session, before, &tokens).await;
+                    tokens::after_update(
+                        &mut state,
+                        session,
+                        before,
+                        &tokens,
+                        generated.body.as_mut(),
+                    )
+                    .await;
                 }
                 OperationKind::Command(Effect::Delete) => {
                     tokens::after_delete(

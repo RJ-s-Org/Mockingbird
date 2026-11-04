@@ -19,6 +19,7 @@ mod api;
 mod backends;
 mod call;
 mod concurrency;
+mod concurrency_evidence;
 mod contract_types;
 mod create_refusals;
 mod create_repeats;
