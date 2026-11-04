@@ -67,6 +67,12 @@ Suites (contracts are in-repo, so the bench is reproducible):
   (OData), Azure DevOps work items (JSON Patch), commercetools carts, eBay Trading
   listings (SOAP) and Meilisearch documents. Not in the default suites. Same rule;
   no check gates the rest.
+- journeys_blind9: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind9/`: Cloud Resource Manager folders (long-running
+  operations, soft delete, moves), Directus items (bracket filters), Cloudinary images
+  (multipart uploads), Modern Treasury ledgers (idempotency keys, header cursors) and
+  Xero contacts (a tenant header). Not in the default suites. Same rule; no check
+  gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -101,6 +107,7 @@ import random
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -110,6 +117,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
@@ -117,7 +125,7 @@ from xml.etree import ElementTree
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
           "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
-          "journeys_blind8")
+          "journeys_blind8", "journeys_blind9")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -1051,17 +1059,20 @@ class Journey:
         self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
         self.last_infra = None  # the infra reason the latest check failed on, if any
         self.raw = b""  # the raw body of the latest answer
+        self.answer_headers = {}  # the headers of the latest answer
 
     def call(self, method, path, query=None, body=None, form=None, data=None):
         """The JSON body of the response, or {} when it is not a JSON object. `data` is a
         raw body, sent with the content-type in `self.headers`; `self.raw` keeps the raw
-        body of the response, for answers that are not JSON."""
+        body of the response, for answers that are not JSON, and `self.answer_headers`
+        its headers, for paging that answers in headers."""
         url = f"{self.srv.data}/{self.name}{path}"
         if query:
             url += "?" + urllib.parse.urlencode(query)
         ms, status, hdrs, parsed, raw = request(url, method, self.headers, json_body=body, form=form, data=data,
                                                 timeout=self.args.timeout)
         self.raw = raw
+        self.answer_headers = hdrs or {}
         self.last = {"status": status, "source": source_of(hdrs), "ms": ms,
                      "fallback_reason": fallback_reason(hdrs)}
         if status >= 400 or status == 0:
@@ -5376,6 +5387,631 @@ def run_journeys_blind8(srv, sink, args):
     run_journey_table(BLIND8_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- ninth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind9/). They were picked for
+# API styles: long-running operations polled until done, custom methods (`:move`,
+# `:undelete`), soft deletes that `showDeleted` lists, a tree whose folders move between
+# parents, and partial responses by `fields` (Cloud Resource Manager), filters in
+# bracket notation with `_and`/`_or` and rules through relations, dotted `fields`, `-`
+# sorts and `meta` counts (Directus), signed multipart uploads carrying an asset's
+# metadata, cursors in the body, search expressions, renames, a bulk delete by
+# `public_ids[]` and a restore from backup (Cloudinary), idempotency keys on creates,
+# double-entry balances, bare-array lists paged by a response header and `metadata[key]`
+# filters (Modern Treasury), and the organisation named by a `Xero-tenant-id` header,
+# PascalCase envelopes, `where`/`order` expressions, .NET JSON dates and archiving with
+# a restore (Xero). No check gates the rest: a journey goes on with an id of its own
+# when a call gave none. A check asserts only what its contract promises a client. Do
+# not edit a check to suit results.
+BLIND9_CHECKS = {
+    "resourcemanager": [
+        "create answers an operation with its metadata", "the create operation finishes with the folder",
+        "a folder reads as active under its parent", "fields answers only the fields asked for",
+        "a taken display name is refused among siblings", "list answers the parent's folders by display name",
+        "pageSize 1 answers one folder and a token", "the page token reaches the next folder",
+        "move finishes under the new parent", "a moved folder leaves its old parent's list",
+        "search finds the folder by display name", "delete marks the folder for deletion",
+        "showDeleted lists a folder marked for deletion", "undelete makes the folder active again",
+    ],
+    "directus": [
+        "a created product keeps its fields", "a batch create answers every product in order",
+        "read by id matches the created product", "fields answers only the fields asked for",
+        "a dotted field reads through the category", "a taken sku is refused",
+        "_eq and _gte filters narrow the list", "an _or filter joins its branches",
+        "a filter reaches through the category", "sort -price orders the products",
+        "limit and offset page the sorted products", "meta counts the filtered items",
+        "a batch update changes every key", "a deleted product answers FORBIDDEN",
+    ],
+    "cloudinary": [
+        "an upload keeps its public id, tags and context", "an upload answers the file's format and name",
+        "details read back the upload", "overwrite false answers the stored asset",
+        "the tag list answers the newest first", "max_results 1 answers one asset and a cursor",
+        "next_cursor reaches the other asset", "an update replaces the tags",
+        "search matches a tag and the context", "rename keeps the tags under the new public id",
+        "the old public id is not found after a rename", "a delete reports each public id",
+        "a deleted asset leaves the tag list", "restore brings the deleted asset back",
+    ],
+    "moderntreasury": [
+        "a new ledger account has zero balances", "a pending transaction keeps its entries",
+        "a repeated idempotency key answers the same transaction", "a repeated key makes no second transaction",
+        "pending entries move only the pending balance", "a credit-normal account counts credits as positive",
+        "unbalanced entries are refused", "posting sets posted_at", "posted entries reach the posted balance",
+        "a posted transaction cannot be archived", "a posted refund nets the balance",
+        "metadata filters the transactions", "per_page 1 answers the newest and a cursor header",
+        "after_cursor reaches the older transaction",
+    ],
+    "xero": [
+        "a created contact keeps its fields", "dates are .NET JSON dates", "read by ContactID matches the created contact",
+        "a taken name is refused as a ValidationException", "an update keeps what it was not sent",
+        "where matches the contact by name", "order sorts the matching contacts",
+        "page and pageSize page the ordered contacts", "an archived contact leaves the list",
+        "includeArchived lists the archived contact", "restoring makes the contact active again",
+        "a contact group holds the contacts added to it", "a contact removed from a group leaves it",
+        "another organisation does not see the contacts",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND9_CHECKS)
+BLIND9_DIR = "scripts/llm-bench/contracts/blind9"
+# Contracts alone: no persona.
+BLIND9_MOCKS = {name: (f"{BLIND9_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND9_CHECKS}
+
+
+def resourcemanager_steps(j):
+    # Changes answer operations; the journey polls each until it is done (or gives up
+    # after a few reads) and goes on either way. The organization is made up for this
+    # run, so the folders under it are the ones made here.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    org = f"organizations/{j.rng.randrange(10**11, 10**12)}"
+    folder_name = "folders/[0-9]+"
+
+    def own(name):
+        return name if matches(folder_name, name) else f"folders/{j.rng.randrange(10**11, 10**12)}"
+
+    def settle(op, polls=4):
+        op = obj(op)
+        name = op.get("name")
+        for _ in range(0 if op.get("done") is True or not matches("operations/[^/]+", name) else polls):
+            op = obj(j.call("GET", f"/v3/{name}"))
+            if op.get("done") is True:
+                break
+        return op
+
+    def create(parent, display):
+        return obj(j.call("POST", "/v3/folders", body={"parent": parent, "displayName": display}))
+
+    def listed(parent, **query):
+        page = obj(j.call("GET", "/v3/folders", query=dict({"parent": parent}, **query)))
+        return [f.get("name") for f in dicts(page.get("folders"))], page
+
+    def finished(op):
+        return op.get("done") is True and not op.get("error")
+
+    finance, engineering, payroll = f"Finance-{tag}", f"Engineering-{tag}", f"Payroll-{tag}"
+    op = create(org, finance)
+    meta = obj(op.get("metadata"))
+    j.check("create answers an operation with its metadata",
+            j.last["status"] == 200 and matches("operations/.+", op.get("name"))
+            and eq(meta.get("displayName"), finance) and eq(meta.get("parent"), org),
+            operation=op.get("name"), metadata=meta)
+    done = settle(op)
+    made = obj(done.get("response"))
+    j.check("the create operation finishes with the folder",
+            finished(done) and matches(folder_name, made.get("name")) and eq(made.get("displayName"), finance)
+            and eq(made.get("parent"), org),
+            done=done.get("done"), error=done.get("error"), response=made)
+    a = own(made.get("name"))
+    read = obj(j.call("GET", f"/v3/{a}"))
+    j.check("a folder reads as active under its parent",
+            eq(read.get("name"), a) and eq(read.get("displayName"), finance) and eq(read.get("parent"), org)
+            and eq(read.get("state"), "ACTIVE"),
+            folder=read.get("name"), parent=read.get("parent"), state=read.get("state"))
+    part = obj(j.call("GET", f"/v3/{a}", query={"fields": "name,displayName"}))
+    j.check("fields answers only the fields asked for", part == {"name": a, "displayName": finance}, answer=part)
+    taken = obj(obj(j.call("POST", "/v3/folders", body={"parent": org, "displayName": finance})).get("error"))
+    j.check("a taken display name is refused among siblings",
+            j.last["status"] == 400 and eq(taken.get("status"), "FAILED_PRECONDITION") and eq(taken.get("code"), 400),
+            error=taken)
+    b = own(obj(settle(create(org, engineering)).get("response")).get("name"))
+    c = own(obj(settle(create(a, payroll)).get("response")).get("name"))
+    # Sorted by displayName: "Engineering" comes before "Finance".
+    rows, _ = listed(org)
+    j.check("list answers the parent's folders by display name", rows == [b, a], listed=rows)
+    first, page = listed(org, pageSize=1)
+    token = given(page.get("nextPageToken"), None)
+    j.check("pageSize 1 answers one folder and a token", first == [b] and token is not None,
+            listed=first, next_page_token=token)
+    rest, page = listed(org, pageSize=1, pageToken=token or made_up(j, "", 24))
+    j.check("the page token reaches the next folder", rest == [a] and not page.get("nextPageToken"),
+            first=first, listed=rest, next_page_token=page.get("nextPageToken"))
+    moved = settle(obj(j.call("POST", f"/v3/{c}:move", body={"destinationParent": b})))
+    response = obj(moved.get("response"))
+    j.check("move finishes under the new parent",
+            finished(moved) and eq(response.get("name"), c) and eq(response.get("parent"), b),
+            done=moved.get("done"), response=response)
+    under_b, _ = listed(b)
+    under_a, _ = listed(a)
+    j.check("a moved folder leaves its old parent's list",
+            under_b == [c] and under_a == [] and j.last["status"] == 200,
+            new_parent=under_b, old_parent=under_a)
+    found = obj(j.call("GET", "/v3/folders:search", query={"query": f'displayName="{payroll}"'}))
+    hits = [f.get("name") for f in dicts(found.get("folders"))]
+    j.check("search finds the folder by display name", hits == [c], hits=hits)
+    settle(obj(j.call("DELETE", f"/v3/{c}")))
+    read = obj(j.call("GET", f"/v3/{c}"))
+    j.check("delete marks the folder for deletion",
+            eq(read.get("name"), c) and eq(read.get("state"), "DELETE_REQUESTED")
+            and instant(read.get("deleteTime")) is not None,
+            state=read.get("state"), deleteTime=read.get("deleteTime"))
+    hidden, _ = listed(b)
+    shown, _ = listed(b, showDeleted="true")
+    j.check("showDeleted lists a folder marked for deletion", hidden == [] and shown == [c],
+            listed=hidden, with_deleted=shown)
+    settle(obj(j.call("POST", f"/v3/{c}:undelete", body={})))
+    state = obj(j.call("GET", f"/v3/{c}")).get("state")
+    back, _ = listed(b)
+    j.check("undelete makes the folder active again", eq(state, "ACTIVE") and back == [c], state=state, listed=back)
+
+
+def directus_steps(j):
+    # Every list filters on a sku prefix made for this run, so it holds only the products
+    # made here. Filters are sent in bracket notation.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    prefix = f"BN{tag}-"
+    scoped = {"filter[sku][_starts_with]": prefix}
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**4, 10**6)
+
+    def data(answer):
+        return obj(answer).get("data")
+
+    def listed(query, scope=True):
+        page = obj(j.call("GET", "/items/products", query=dict(scoped, **query) if scope else query))
+        return ids_of(page.get("data")), page
+
+    def code(answer):
+        return obj(head(obj(answer).get("errors")).get("extensions")).get("code")
+
+    lighting = own(obj(data(j.call("POST", "/items/categories", body={"name": f"Lighting {tag}"}))).get("id"))
+    furniture = own(obj(data(j.call("POST", "/items/categories", body={"name": f"Furniture {tag}"}))).get("id"))
+    fields = ("sku", "name", "price", "stock", "status", "category")
+    lamp = {"sku": f"{prefix}1", "name": "Desk lamp", "price": 49.0, "stock": 12, "status": "published",
+            "category": lighting}
+    made = obj(data(j.call("POST", "/items/products", body=lamp)))
+    j.check("a created product keeps its fields",
+            j.last["status"] == 200 and is_int(made.get("id")) and same(made, lamp, *fields),
+            id=made.get("id"), product={f: made.get(f) for f in fields})
+    p1 = own(made.get("id"))
+    batch = [{"sku": f"{prefix}2", "name": "Floor lamp", "price": 129.0, "stock": 3, "status": "published",
+              "category": lighting},
+             {"sku": f"{prefix}3", "name": "Oak shelf", "price": 89.0, "stock": 0, "status": "draft",
+              "category": furniture},
+             {"sku": f"{prefix}4", "name": "Wall hook", "price": 9.5, "stock": 40, "status": "published",
+              "category": furniture}]
+    answered = dicts(data(j.call("POST", "/items/products", body=batch)))
+    ids = ids_of(answered)
+    j.check("a batch create answers every product in order",
+            [p.get("sku") for p in answered] == [p["sku"] for p in batch]
+            and all(is_int(i) for i in ids) and len(set(ids)) == 3 and p1 not in ids,
+            skus=[p.get("sku") for p in answered], ids=ids)
+    p2, p3, p4 = (own(ids[n]) if len(ids) == 3 else own(None) for n in range(3))
+    read = obj(data(j.call("GET", f"/items/products/{p1}")))
+    j.check("read by id matches the created product", eq(read.get("id"), p1) and same(read, lamp, *fields),
+            id=read.get("id"), product={f: read.get(f) for f in fields})
+    part = data(j.call("GET", f"/items/products/{p1}", query={"fields": "id,name"}))
+    j.check("fields answers only the fields asked for", part == {"id": p1, "name": "Desk lamp"}, answer=part)
+    part = data(j.call("GET", f"/items/products/{p1}", query={"fields": "sku,category.name"}))
+    j.check("a dotted field reads through the category",
+            part == {"sku": lamp["sku"], "category": {"name": f"Lighting {tag}"}}, answer=part)
+    taken = j.call("POST", "/items/products", body={"sku": lamp["sku"], "name": "Desk lamp, again", "price": 1.0})
+    j.check("a taken sku is refused", j.last["status"] == 400 and eq(code(taken), "RECORD_NOT_UNIQUE"),
+            code=code(taken))
+    rows, _ = listed({"filter[status][_eq]": "published", "filter[price][_gte]": 40})
+    j.check("_eq and _gte filters narrow the list", same_items(rows, [p1, p2]), listed=rows)
+    rows, _ = listed({"filter[_and][0][sku][_starts_with]": prefix,
+                      "filter[_and][1][_or][0][stock][_lt]": 5,
+                      "filter[_and][1][_or][1][status][_eq]": "draft"}, scope=False)
+    j.check("an _or filter joins its branches", same_items(rows, [p2, p3]), listed=rows)
+    rows, _ = listed({"filter[category][name][_eq]": f"Furniture {tag}"})
+    j.check("a filter reaches through the category", same_items(rows, [p3, p4]), listed=rows)
+    # By price, highest first: 129, 89, 49, 9.5.
+    rows, _ = listed({"sort": "-price"})
+    j.check("sort -price orders the products", rows == [p2, p3, p1, p4], listed=rows)
+    rows, _ = listed({"sort": "-price", "limit": 2, "offset": 2})
+    j.check("limit and offset page the sorted products", rows == [p1, p4], listed=rows)
+    rows, page = listed({"filter[status][_eq]": "published", "meta": "filter_count,total_count", "limit": 1})
+    meta = obj(page.get("meta"))
+    total = meta.get("total_count")
+    j.check("meta counts the filtered items",
+            len(rows) == 1 and eq(meta.get("filter_count"), 3) and is_int(total) and total >= 4,
+            listed=rows, meta=meta)
+    changed = dicts(data(j.call("PATCH", "/items/products", body={"keys": [p3, p4], "data": {"status": "archived"}})))
+    rows, _ = listed({"filter[status][_eq]": "archived"})
+    j.check("a batch update changes every key",
+            same_items(ids_of(changed), [p3, p4]) and all(eq(p.get("status"), "archived") for p in changed)
+            and same_items(rows, [p3, p4]),
+            answered=ids_of(changed), listed=rows)
+    j.call("DELETE", f"/items/products/{p2}")
+    deleted = j.last["status"]
+    gone = j.call("GET", f"/items/products/{p2}")
+    j.check("a deleted product answers FORBIDDEN", j.last["status"] == 403 and eq(code(gone), "FORBIDDEN"),
+            delete_status=deleted, code=code(gone))
+
+
+def tiny_png():
+    """A valid 1x1 PNG."""
+    def chunk(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+
+
+def multipart_body(j, fields, files):
+    """(content-type, body) of a multipart/form-data request: `fields` as text parts in
+    order, then `files` ({name: (filename, content-type, bytes)}) as file parts."""
+    boundary = "----bench" + "".join(j.rng.choice("0123456789abcdef") for _ in range(24))
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+             for name, value in fields.items()]
+    for name, (filename, kind, content) in files.items():
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                     f"Content-Type: {kind}\r\n\r\n".encode() + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return f"multipart/form-data; boundary={boundary}", b"".join(parts)
+
+
+CLOUDINARY_KEY, CLOUDINARY_SECRET = "614335564976464", "bench-placeholder-secret"
+
+
+def cloudinary_signed(params, key=CLOUDINARY_KEY, secret=CLOUDINARY_SECRET):
+    """`params` with `api_key` and the `signature` Cloudinary's Upload API checks: the hex
+    SHA-1 of the signed parameters, sorted and joined as `name=value&...`, then the secret."""
+    unsigned = ("file", "api_key", "resource_type", "cloud_name")
+    text = "&".join(f"{k}={params[k]}" for k in sorted(params) if k not in unsigned and params[k] != "")
+    return dict(params, api_key=key, signature=hashlib.sha1((text + secret).encode()).hexdigest())
+
+
+def cloudinary_steps(j):
+    # Uploads are signed multipart bodies; Admin API calls use Basic authentication. The
+    # tags are made for this run, so a tag's list holds only the assets uploaded here.
+    j.headers["authorization"] = "Basic " + base64.b64encode(
+        f"{CLOUDINARY_KEY}:{CLOUDINARY_SECRET}".encode()).decode()
+    tag = j.rng.randrange(10**5, 10**6)
+    base = f"/v1_1/bench-{tag}"
+    label, helmets = f"bench{tag}", f"helmets{tag}"
+    bike, helmet, renamed = f"bike_{tag}", f"helmet_{tag}", f"bike_red_{tag}"
+    png = tiny_png()
+
+    def upload(public_id, filename, tags, context, **extra):
+        params = cloudinary_signed(dict({"public_id": public_id, "tags": tags, "context": context,
+                                         "timestamp": str(int(time.time()))}, **extra))
+        kind, body = multipart_body(j, params, {"file": (filename, "image/png", png)})
+        with sent_headers(j, {"content-type": kind}):
+            return obj(j.call("POST", f"{base}/image/upload", data=body))
+
+    def details(public_id):
+        return obj(j.call("GET", f"{base}/resources/image/upload/{public_id}"))
+
+    def by_tag(name, **query):
+        page = obj(j.call("GET", f"{base}/resources/image/tags/{name}", query=dict({"tags": "true"}, **query)))
+        return ids_of(page.get("resources"), "public_id"), page
+
+    def custom(asset):
+        return obj(obj(obj(asset).get("context")).get("custom"))
+
+    def same_asset(asset, asset_id):
+        # The asset id the upload answered, or any asset id when it answered none.
+        if given(asset_id, None) is not None:
+            return eq(asset.get("asset_id"), asset_id)
+        return given(asset.get("asset_id"), None) is not None
+
+    bike_context = {"alt": "Red bike", "caption": "Front view"}
+    up = upload(bike, "bike.png", f"{label},bikes", "alt=Red bike|caption=Front view")
+    j.check("an upload keeps its public id, tags and context",
+            j.last["status"] == 200 and eq(up.get("public_id"), bike) and same_items(up.get("tags"), [label, "bikes"])
+            and custom(up) == bike_context,
+            public_id=up.get("public_id"), tags=up.get("tags"), context=up.get("context"))
+    j.check("an upload answers the file's format and name",
+            eq(up.get("format"), "png") and eq(up.get("original_filename"), "bike")
+            and eq(up.get("resource_type"), "image"),
+            format=up.get("format"), original_filename=up.get("original_filename"))
+    asset_id, version = up.get("asset_id"), up.get("version")
+    read = details(bike)
+    j.check("details read back the upload",
+            eq(read.get("public_id"), bike) and same_asset(read, asset_id)
+            and same_items(read.get("tags"), [label, "bikes"]) and custom(read) == bike_context,
+            public_id=read.get("public_id"), asset_id=read.get("asset_id"), tags=read.get("tags"))
+    again = upload(bike, "bike-again.png", label, "alt=Another bike", overwrite="false")
+    j.check("overwrite false answers the stored asset",
+            again.get("existing") is True and eq(again.get("public_id"), bike) and same_asset(again, asset_id)
+            and (eq(again.get("version"), version) if is_int(version) else is_int(again.get("version")))
+            and same_items(again.get("tags"), [label, "bikes"]),
+            existing=again.get("existing"), version=again.get("version"), tags=again.get("tags"))
+    upload(helmet, "helmet.png", label, "alt=Blue helmet")
+    # Newest first: the helmet was uploaded after the bike.
+    rows, _ = by_tag(label)
+    j.check("the tag list answers the newest first", rows == [helmet, bike], listed=rows)
+    first, page = by_tag(label, max_results=1)
+    cursor = given(page.get("next_cursor"), None)
+    j.check("max_results 1 answers one asset and a cursor", first == [helmet] and cursor is not None,
+            listed=first, next_cursor=cursor)
+    rest, page = by_tag(label, max_results=1, next_cursor=cursor or made_up(j, "", 32, LOWER_ALNUM))
+    j.check("next_cursor reaches the other asset", rest == [bike] and not page.get("next_cursor"),
+            first=first, listed=rest, next_cursor=page.get("next_cursor"))
+    updated = obj(j.call("POST", f"{base}/resources/image/upload/{helmet}", body={"tags": f"{label},{helmets}"}))
+    rows, _ = by_tag(helmets)
+    j.check("an update replaces the tags", same_items(updated.get("tags"), [label, helmets]) and rows == [helmet],
+            tags=updated.get("tags"), listed=rows)
+    found = obj(j.call("POST", f"{base}/resources/search", body={
+        "expression": f'tags={label} AND context.alt="Red bike"', "with_field": ["tags", "context"]}))
+    hits = ids_of(found.get("resources"), "public_id")
+    j.check("search matches a tag and the context", hits == [bike] and eq(found.get("total_count"), 1),
+            hits=hits, total_count=found.get("total_count"))
+    j.call("POST", f"{base}/image/rename", form=cloudinary_signed(
+        {"from_public_id": bike, "to_public_id": renamed, "timestamp": str(int(time.time()))}))
+    rename_status = j.last["status"]
+    read = details(renamed)
+    j.check("rename keeps the tags under the new public id",
+            eq(read.get("public_id"), renamed) and same_asset(read, asset_id)
+            and same_items(read.get("tags"), [label, "bikes"]) and custom(read) == bike_context,
+            rename_status=rename_status, public_id=read.get("public_id"), tags=read.get("tags"))
+    old = obj(details(bike).get("error"))
+    j.check("the old public id is not found after a rename",
+            j.last["status"] == 404 and given(old.get("message"), None) is not None, error=old)
+    nothing = f"nothing_{tag}"
+    answer = obj(j.call("DELETE", f"{base}/resources/image/upload",
+                        query=[("public_ids[]", helmet), ("public_ids[]", nothing)]))
+    j.check("a delete reports each public id", answer.get("deleted") == {helmet: "deleted", nothing: "not_found"},
+            deleted=answer.get("deleted"))
+    rows, _ = by_tag(label)
+    j.check("a deleted asset leaves the tag list", rows == [renamed], listed=rows)
+    restored = obj(obj(j.call("POST", f"{base}/resources/image/upload/restore",
+                              body={"public_ids": [helmet]})).get(helmet))
+    back = details(helmet)
+    rows, _ = by_tag(label)
+    j.check("restore brings the deleted asset back",
+            eq(restored.get("public_id"), helmet) and eq(back.get("public_id"), helmet)
+            and same_items(rows, [helmet, renamed]),
+            restored=restored.get("public_id"), read=back.get("public_id"), listed=rows)
+
+
+def moderntreasury_steps(j):
+    # Every create sends an Idempotency-Key; the replay sends the first one again. The
+    # ledger is new, and lists filter on metadata made for this run, so they hold only the
+    # transactions made here (the refused one carries other metadata).
+    j.headers["authorization"] = "Basic " + base64.b64encode(b"bench-org-id:bench-placeholder-key").decode()
+    tag = j.rng.randrange(10**5, 10**6)
+    run = {"run": str(tag)}
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_guid(j)
+
+    def post(path, body, key=None):
+        with sent_headers(j, {"Idempotency-Key": key or made_guid(j)}):
+            return obj(j.call("POST", path, body=body))
+
+    def account(aid):
+        return obj(obj(j.call("GET", f"/api/ledger_accounts/{aid}")).get("balances"))
+
+    def balance(balances, which):
+        return obj(obj(balances).get(which))
+
+    def amounts(bal, amount, debits, credits):
+        return eq(bal.get("amount"), amount) and eq(bal.get("debits"), debits) and eq(bal.get("credits"), credits)
+
+    def entries(thing):
+        return any_order([(e.get("direction"), e.get("amount"), e.get("ledger_account_id"))
+                          for e in dicts(obj(thing).get("ledger_entries"))])
+
+    def transactions(**query):
+        rows = j.call("GET", "/api/ledger_transactions",
+                      query=dict({"ledger_id": ledger, "metadata[run]": str(tag)}, **query))
+        return ids_of(rows if isinstance(rows, list) else []), j.answer_headers.get("X-After-Cursor")
+
+    def entry(amount, direction, aid):
+        return {"amount": amount, "direction": direction, "ledger_account_id": aid}
+
+    ledger = own(post("/api/ledgers", {"name": f"Bench books {tag}", "metadata": run}).get("id"))
+    made = post("/api/ledger_accounts", {"name": f"Cash {tag}", "normal_balance": "debit", "currency": "USD",
+                                         "ledger_id": ledger})
+    balances = obj(made.get("balances"))
+    j.check("a new ledger account has zero balances",
+            j.last["status"] == 201 and eq(made.get("normal_balance"), "debit") and eq(made.get("ledger_id"), ledger)
+            and all(amounts(balance(balances, w), 0, 0, 0) and eq(balance(balances, w).get("currency"), "USD")
+                    for w in ("pending_balance", "posted_balance", "available_balance")),
+            normal_balance=made.get("normal_balance"), balances=balances)
+    cash = own(made.get("id"))
+    revenue = own(post("/api/ledger_accounts", {"name": f"Revenue {tag}", "normal_balance": "credit",
+                                                "currency": "USD", "ledger_id": ledger}).get("id"))
+    key = made_guid(j)
+    sale = {"description": f"Order {tag}", "status": "pending", "metadata": dict(run, kind="sale"),
+            "ledger_entries": [entry(10000, "debit", cash), entry(10000, "credit", revenue)]}
+    first = post("/api/ledger_transactions", sale, key)
+    j.check("a pending transaction keeps its entries",
+            j.last["status"] == 201 and eq(first.get("status"), "pending") and eq(first.get("ledger_id"), ledger)
+            and entries(first) == entries(sale) and first.get("metadata") == sale["metadata"],
+            transaction_status=first.get("status"), entries=entries(first), metadata=first.get("metadata"))
+    t1 = own(first.get("id"))
+    replay = post("/api/ledger_transactions", sale, key)
+    j.check("a repeated idempotency key answers the same transaction", eq(replay.get("id"), first.get("id")),
+            first=first.get("id"), replay=replay.get("id"))
+    rows, _ = transactions()
+    j.check("a repeated key makes no second transaction", rows == [t1], listed=rows)
+    balances = account(cash)
+    j.check("pending entries move only the pending balance",
+            amounts(balance(balances, "pending_balance"), 10000, 10000, 0)
+            and amounts(balance(balances, "posted_balance"), 0, 0, 0),
+            pending=balance(balances, "pending_balance"), posted=balance(balances, "posted_balance"))
+    balances = account(revenue)
+    j.check("a credit-normal account counts credits as positive",
+            amounts(balance(balances, "pending_balance"), 10000, 0, 10000),
+            pending=balance(balances, "pending_balance"))
+    bad = post("/api/ledger_transactions", {"description": f"Off by one {tag}", "metadata": {"run": f"bad-{tag}"},
+                                            "ledger_entries": [entry(500, "debit", cash), entry(400, "credit", revenue)]})
+    j.check("unbalanced entries are refused",
+            j.last["status"] == 422 and eq(obj(bad.get("errors")).get("code"), "parameter_invalid"),
+            errors=bad.get("errors"))
+    posted = obj(j.call("PATCH", f"/api/ledger_transactions/{t1}", body={"status": "posted"}))
+    patched = j.last["status"]
+    read = obj(j.call("GET", f"/api/ledger_transactions/{t1}"))
+    j.check("posting sets posted_at",
+            patched == 200 and eq(posted.get("id"), t1) and eq(posted.get("status"), "posted")
+            and instant(posted.get("posted_at")) is not None
+            and eq(read.get("status"), "posted")
+            and eq(instant(read.get("posted_at")), instant(posted.get("posted_at"))),
+            patch_status=patched, transaction_status=posted.get("status"), posted_at=posted.get("posted_at"),
+            read_status=read.get("status"), read_posted_at=read.get("posted_at"))
+    balances = account(cash)
+    j.check("posted entries reach the posted balance",
+            amounts(balance(balances, "posted_balance"), 10000, 10000, 0)
+            and amounts(balance(balances, "pending_balance"), 10000, 10000, 0),
+            posted=balance(balances, "posted_balance"), pending=balance(balances, "pending_balance"))
+    j.call("PATCH", f"/api/ledger_transactions/{t1}", body={"status": "archived"})
+    j.check("a posted transaction cannot be archived", j.last["status"] == 422)
+    refund = post("/api/ledger_transactions", {
+        "description": f"Refund {tag}", "status": "posted", "metadata": dict(run, kind="refund"),
+        "ledger_entries": [entry(2500, "debit", revenue), entry(2500, "credit", cash)]})
+    t2 = own(refund.get("id"))
+    balances = account(cash)
+    j.check("a posted refund nets the balance", amounts(balance(balances, "posted_balance"), 7500, 10000, 2500),
+            posted=balance(balances, "posted_balance"))
+    rows, _ = transactions(**{"metadata[kind]": "refund"})
+    j.check("metadata filters the transactions", rows == [t2], listed=rows)
+    # Newest first: the refund was made after the sale.
+    rows, cursor = transactions(per_page=1)
+    cursor = given(cursor, None)
+    j.check("per_page 1 answers the newest and a cursor header", rows == [t2] and cursor is not None,
+            listed=rows, after_cursor=cursor)
+    rest, more = transactions(per_page=1, after_cursor=cursor or made_up(j, "", 24))
+    j.check("after_cursor reaches the older transaction", rest == [t1] and not more,
+            first=rows, listed=rest, after_cursor=more)
+
+
+XERO_DATE = r"/Date\(-?[0-9]+([+-][0-9]{4})?\)/"
+
+
+def xero_steps(j):
+    # Every call names the organisation in Xero-tenant-id. Lists filter on an account
+    # number prefix made for this run, so they hold only the contacts made here.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    j.headers["Xero-tenant-id"] = made_guid(j)
+    root = "/api.xro/2.0"
+    scope = f'AccountNumber.StartsWith("AT{tag}")'
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_guid(j)
+
+    def one(answer):
+        return head(obj(answer).get("Contacts"))
+
+    def contact(cid):
+        return one(j.call("GET", f"{root}/Contacts/{cid}"))
+
+    def update(cid, **fields):
+        return one(j.call("POST", f"{root}/Contacts/{cid}", body={"Contacts": [dict({"ContactID": cid}, **fields)]}))
+
+    def listed(**query):
+        where = query.pop("where", scope)
+        answer = obj(j.call("GET", f"{root}/Contacts", query=dict({"where": where}, **query)))
+        return ids_of(answer.get("Contacts"), "ContactID"), answer
+
+    def members(gid):
+        group = head(obj(j.call("GET", f"{root}/ContactGroups/{gid}")).get("ContactGroups"))
+        return ids_of(group.get("Contacts"), "ContactID")
+
+    bikes = {"Name": f"Atlas Bikes {tag}", "FirstName": "Ana", "LastName": "Silva",
+             "EmailAddress": f"ana.{tag}@atlasbikes.example", "AccountNumber": f"AT{tag}-1",
+             "Phones": [{"PhoneType": "DEFAULT", "PhoneNumber": "555 0101", "PhoneAreaCode": "09",
+                         "PhoneCountryCode": "64"}],
+             "Addresses": [{"AddressType": "STREET", "AddressLine1": "12 Queen Street", "City": "Auckland",
+                            "PostalCode": "1010", "Country": "New Zealand"}]}
+    names = ("Name", "FirstName", "LastName", "EmailAddress", "AccountNumber")
+    answer = obj(j.call("PUT", f"{root}/Contacts", body={"Contacts": [bikes]}))
+    made = one(answer)
+    j.check("a created contact keeps its fields",
+            j.last["status"] == 200 and same(made, bikes, *names) and eq(made.get("ContactStatus"), "ACTIVE")
+            and given(made.get("ContactID"), None) is not None,
+            contact={f: made.get(f) for f in names + ("ContactID", "ContactStatus")})
+    j.check("dates are .NET JSON dates",
+            matches(XERO_DATE, made.get("UpdatedDateUTC")) and matches(XERO_DATE, answer.get("DateTimeUTC")),
+            UpdatedDateUTC=made.get("UpdatedDateUTC"), DateTimeUTC=answer.get("DateTimeUTC"))
+    c1 = own(made.get("ContactID"))
+    read = contact(c1)
+    j.check("read by ContactID matches the created contact",
+            eq(read.get("ContactID"), c1) and same(read, bikes, *names)
+            and eq(head(read.get("Addresses")).get("City"), "Auckland"),
+            ContactID=read.get("ContactID"), Name=read.get("Name"), Addresses=read.get("Addresses"))
+    refused = obj(j.call("PUT", f"{root}/Contacts",
+                         body={"Contacts": [{"Name": bikes["Name"], "AccountNumber": f"DUP{tag}"}]}))
+    errors = [e for el in dicts(refused.get("Elements")) for e in dicts(el.get("ValidationErrors"))]
+    j.check("a taken name is refused as a ValidationException",
+            j.last["status"] == 400 and eq(refused.get("ErrorNumber"), 10)
+            and eq(refused.get("Type"), "ValidationException")
+            and bool(errors) and all(given(e.get("Message"), None) is not None for e in errors),
+            ErrorNumber=refused.get("ErrorNumber"), Type=refused.get("Type"), errors=errors)
+    email = f"accounts.{tag}@atlasbikes.example"
+    update(c1, EmailAddress=email)
+    read = contact(c1)
+    j.check("an update keeps what it was not sent",
+            eq(read.get("EmailAddress"), email)
+            and same(read, bikes, "Name", "FirstName", "LastName", "AccountNumber"),
+            contact={f: read.get(f) for f in names})
+    c2 = own(one(j.call("PUT", f"{root}/Contacts", body={"Contacts": [{
+        "Name": f"Atlas Cycles {tag}", "EmailAddress": f"hello.{tag}@atlascycles.example",
+        "AccountNumber": f"AT{tag}-2"}]})).get("ContactID"))
+    rows, _ = listed(where=f'Name=="Atlas Bikes {tag}"')
+    j.check("where matches the contact by name", rows == [c1], listed=rows)
+    # By name, descending: "Atlas Cycles" comes before "Atlas Bikes".
+    rows, _ = listed(order="Name DESC")
+    j.check("order sorts the matching contacts", rows == [c2, c1], listed=rows)
+    rows, answer = listed(order="Name DESC", page=2, pageSize=1)
+    paging = obj(answer.get("pagination"))
+    j.check("page and pageSize page the ordered contacts",
+            rows == [c1] and eq(paging.get("page"), 2) and eq(paging.get("itemCount"), 2)
+            and eq(paging.get("pageCount"), 2),
+            listed=rows, pagination=paging)
+    archived = update(c2, ContactStatus="ARCHIVED")
+    rows, _ = listed(order="Name ASC")
+    j.check("an archived contact leaves the list", eq(archived.get("ContactStatus"), "ARCHIVED") and rows == [c1],
+            ContactStatus=archived.get("ContactStatus"), listed=rows)
+    rows, answer = listed(order="Name ASC", includeArchived="true")
+    states = {c.get("ContactID"): c.get("ContactStatus") for c in dicts(answer.get("Contacts"))}
+    j.check("includeArchived lists the archived contact", rows == [c1, c2] and eq(states.get(c2), "ARCHIVED"),
+            listed=rows, states=list(states.values()))
+    update(c2, ContactStatus="ACTIVE")
+    state = contact(c2).get("ContactStatus")
+    rows, _ = listed(order="Name ASC")
+    j.check("restoring makes the contact active again", eq(state, "ACTIVE") and rows == [c1, c2],
+            ContactStatus=state, listed=rows)
+    group = head(obj(j.call("PUT", f"{root}/ContactGroups",
+                            body={"ContactGroups": [{"Name": f"Wholesale {tag}"}]})).get("ContactGroups"))
+    gid = own(group.get("ContactGroupID"))
+    j.call("PUT", f"{root}/ContactGroups/{gid}/Contacts", body={"Contacts": [{"ContactID": c1}, {"ContactID": c2}]})
+    held = members(gid)
+    j.check("a contact group holds the contacts added to it", same_items(held, [c1, c2]), members=held)
+    j.call("DELETE", f"{root}/ContactGroups/{gid}/Contacts/{c2}")
+    removed = j.last["status"]
+    held = members(gid)
+    j.check("a contact removed from a group leaves it", held == [c1], delete_status=removed, members=held)
+    with sent_headers(j, {"Xero-tenant-id": made_guid(j)}):
+        rows, answer = listed(includeArchived="true")
+    j.check("another organisation does not see the contacts",
+            j.last["status"] == 200 and isinstance(answer.get("Contacts"), list) and rows == [],
+            listed=rows)
+
+
+BLIND9_JOURNEYS = {"resourcemanager": resourcemanager_steps, "directus": directus_steps,
+                   "cloudinary": cloudinary_steps, "moderntreasury": moderntreasury_steps, "xero": xero_steps}
+
+
+def run_journeys_blind9(srv, sink, args):
+    run_journey_table(BLIND9_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -5392,6 +6028,7 @@ RUNNERS = {
     "journeys_blind6": (BLIND6_MOCKS, run_journeys_blind6),
     "journeys_blind7": (BLIND7_MOCKS, run_journeys_blind7),
     "journeys_blind8": (BLIND8_MOCKS, run_journeys_blind8),
+    "journeys_blind9": (BLIND9_MOCKS, run_journeys_blind9),
 }
 
 

@@ -1,0 +1,420 @@
+openapi: 3.0.3
+info:
+  title: Modern Treasury Ledgers API
+  version: "1"
+  description: |
+    A subset of Modern Treasury's Ledgers API, written from its public documentation:
+    ledgers, ledger accounts and ledger transactions. Authentication is HTTP Basic with
+    the organization id as the user name and an API key as the password.
+
+    Amounts are integers in the currency's smallest unit (10000 is 100.00 USD).
+    A ledger transaction holds two or more `ledger_entries`, each an `amount`, a
+    `direction` (`credit` or `debit`) and a `ledger_account_id`; the credits and the
+    debits of each currency must sum to the same amount, or the create is refused with
+    422 and the error code `parameter_invalid`. A transaction is `pending`, `posted` or
+    `archived`. `PATCH` can move a pending transaction to `posted` (setting `posted_at`)
+    or to `archived`, or change its entries; a posted or archived transaction cannot be
+    changed, and such a `PATCH` is refused with 422.
+
+    A ledger account has a `normal_balance`. Its balances are
+    `{credits, debits, amount, currency, currency_exponent}` objects: `posted_balance`
+    counts its posted entries, `pending_balance` its posted and pending entries, and
+    `available_balance` its posted entries that add to it less its posted and pending
+    entries that take from it. For a `debit`-normal account `amount` is debits minus
+    credits; for a `credit`-normal account it is credits minus debits. Archived entries
+    count in no balance.
+
+    Every `POST` takes an `Idempotency-Key` header. A request that repeats a key used in
+    the last 24 hours with the same body is not performed again: it answers what the
+    first request answered (the same object, the same id), and nothing new is made.
+
+    Lists answer a JSON array of objects, newest first (by `created_at`), and page by
+    cursor: `per_page` (default 25, at most 100) sets the page size, and when more
+    objects follow, the `X-After-Cursor` response header holds a cursor that the next
+    request sends as `after_cursor` with the same other parameters. `X-Per-Page` echoes
+    the page size. `metadata` is a map of string keys to string values set at create;
+    lists filter on it with `metadata[key]=value`, and every key given must match.
+    Errors are `{errors: {code, message, parameter}}`: 404 `resource_not_found`, 422
+    `parameter_invalid` or `parameter_missing`, 401 `unauthorized`.
+servers:
+  - url: https://app.moderntreasury.com
+security:
+  - basic: []
+tags:
+  - name: Ledgers
+  - name: Ledger Accounts
+  - name: Ledger Transactions
+paths:
+  /api/ledgers:
+    post:
+      tags: [Ledgers]
+      operationId: createLedger
+      summary: Create a ledger
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                description: {type: string, nullable: true}
+                metadata: {$ref: "#/components/schemas/Metadata"}
+      responses:
+        "201":
+          description: The ledger.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ledger"}
+        "401": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/ledgers/{id}:
+    get:
+      tags: [Ledgers]
+      operationId: getLedger
+      summary: Get a ledger
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: The ledger.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ledger"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/ledger_accounts:
+    get:
+      tags: [Ledger Accounts]
+      operationId: listLedgerAccounts
+      summary: List ledger accounts
+      description: Newest first; paged by the X-After-Cursor header and after_cursor.
+      parameters:
+        - name: ledger_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: currency
+          in: query
+          schema: {type: string}
+        - $ref: "#/components/parameters/metadata"
+        - $ref: "#/components/parameters/perPage"
+        - $ref: "#/components/parameters/afterCursor"
+      responses:
+        "200":
+          description: A page of ledger accounts.
+          headers:
+            X-After-Cursor: {$ref: "#/components/headers/X-After-Cursor"}
+            X-Per-Page: {$ref: "#/components/headers/X-Per-Page"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/LedgerAccount"}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Ledger Accounts]
+      operationId: createLedgerAccount
+      summary: Create a ledger account
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, normal_balance, currency, ledger_id]
+              properties:
+                name: {type: string}
+                description: {type: string, nullable: true}
+                normal_balance: {type: string, enum: [credit, debit]}
+                currency: {type: string, example: USD}
+                currency_exponent: {type: integer, nullable: true}
+                ledger_id: {type: string, format: uuid}
+                metadata: {$ref: "#/components/schemas/Metadata"}
+      responses:
+        "201":
+          description: The ledger account, with zero balances.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LedgerAccount"}
+        "401": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/ledger_accounts/{id}:
+    get:
+      tags: [Ledger Accounts]
+      operationId: getLedgerAccount
+      summary: Get a ledger account and its balances
+      parameters:
+        - $ref: "#/components/parameters/id"
+      responses:
+        "200":
+          description: The ledger account.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LedgerAccount"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/ledger_transactions:
+    get:
+      tags: [Ledger Transactions]
+      operationId: listLedgerTransactions
+      summary: List ledger transactions
+      description: Newest first; paged by the X-After-Cursor header and after_cursor.
+      parameters:
+        - name: ledger_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: ledger_account_id
+          in: query
+          description: Transactions with an entry on this account.
+          schema: {type: string, format: uuid}
+        - name: status
+          in: query
+          schema: {type: string, enum: [pending, posted, archived]}
+        - name: external_id
+          in: query
+          schema: {type: string}
+        - $ref: "#/components/parameters/metadata"
+        - $ref: "#/components/parameters/perPage"
+        - $ref: "#/components/parameters/afterCursor"
+      responses:
+        "200":
+          description: A page of ledger transactions.
+          headers:
+            X-After-Cursor: {$ref: "#/components/headers/X-After-Cursor"}
+            X-Per-Page: {$ref: "#/components/headers/X-Per-Page"}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/LedgerTransaction"}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Ledger Transactions]
+      operationId: createLedgerTransaction
+      summary: Create a ledger transaction
+      description: "Its entries must balance per currency, or it is refused with 422 `parameter_invalid`. A repeated Idempotency-Key with the same body answers the first transaction and makes no new one."
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ledger_entries]
+              properties:
+                description: {type: string, nullable: true}
+                status: {type: string, enum: [pending, posted], default: pending}
+                effective_at: {type: string, format: date-time}
+                external_id: {type: string, nullable: true, description: Unique among the ledger's pending and posted transactions.}
+                ledger_entries:
+                  type: array
+                  minItems: 2
+                  items: {$ref: "#/components/schemas/LedgerEntryInput"}
+                metadata: {$ref: "#/components/schemas/Metadata"}
+      responses:
+        "201":
+          description: The ledger transaction.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LedgerTransaction"}
+        "401": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/ledger_transactions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Ledger Transactions]
+      operationId: getLedgerTransaction
+      summary: Get a ledger transaction
+      responses:
+        "200":
+          description: The ledger transaction.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LedgerTransaction"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Ledger Transactions]
+      operationId: updateLedgerTransaction
+      summary: Update a pending ledger transaction
+      description: "Moves a pending transaction to `posted` or `archived`, or changes its description, metadata or entries. A posted or archived transaction is refused with 422."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: {type: string, nullable: true}
+                status: {type: string, enum: [posted, archived]}
+                metadata: {$ref: "#/components/schemas/Metadata"}
+                ledger_entries:
+                  type: array
+                  minItems: 2
+                  items: {$ref: "#/components/schemas/LedgerEntryInput"}
+      responses:
+        "200":
+          description: The updated ledger transaction.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LedgerTransaction"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+      description: The organization id as the user name and an API key as the password.
+  headers:
+    X-After-Cursor:
+      description: "The cursor of the next page, sent as `after_cursor`; absent on the last page."
+      schema: {type: string}
+    X-Per-Page:
+      description: The page size used.
+      schema: {type: integer}
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: "A unique key for this request. Repeating it with the same body within 24 hours answers the first request's object and makes nothing new."
+      schema: {type: string, maxLength: 255}
+    metadata:
+      name: metadata
+      in: query
+      style: deepObject
+      explode: true
+      description: "Filters on metadata, as `metadata[key]=value`; every key given must match."
+      schema:
+        type: object
+        additionalProperties: {type: string}
+    perPage:
+      name: per_page
+      in: query
+      description: The page size (default 25, at most 100).
+      schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    afterCursor:
+      name: after_cursor
+      in: query
+      description: The X-After-Cursor of the previous page.
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{errors: {code, message, parameter}}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [parameter_invalid, parameter_missing, resource_not_found, unauthorized, conflict]
+            message: {type: string}
+            parameter: {type: string, nullable: true, description: The request parameter at fault.}
+    Metadata:
+      type: object
+      description: String keys to string values.
+      additionalProperties: {type: string}
+    Balance:
+      type: object
+      required: [credits, debits, amount, currency, currency_exponent]
+      properties:
+        credits: {type: integer, description: "Sum of the credit entries counted, in the smallest unit."}
+        debits: {type: integer, description: "Sum of the debit entries counted, in the smallest unit."}
+        amount: {type: integer, description: "Debits minus credits for a debit-normal account; credits minus debits for a credit-normal one."}
+        currency: {type: string}
+        currency_exponent: {type: integer, example: 2}
+    Ledger:
+      type: object
+      required: [id, object, name, metadata, live_mode, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        object: {type: string, enum: [ledger]}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        metadata: {$ref: "#/components/schemas/Metadata"}
+        live_mode: {type: boolean}
+        discarded_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    LedgerAccount:
+      type: object
+      required: [id, object, name, ledger_id, normal_balance, balances, lock_version, metadata, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        object: {type: string, enum: [ledger_account]}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        ledger_id: {type: string, format: uuid}
+        normal_balance: {type: string, enum: [credit, debit]}
+        balances:
+          type: object
+          required: [pending_balance, posted_balance, available_balance]
+          properties:
+            pending_balance: {$ref: "#/components/schemas/Balance"}
+            posted_balance: {$ref: "#/components/schemas/Balance"}
+            available_balance: {$ref: "#/components/schemas/Balance"}
+        lock_version: {type: integer, description: One more for each entry written to the account.}
+        metadata: {$ref: "#/components/schemas/Metadata"}
+        live_mode: {type: boolean}
+        discarded_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    LedgerEntryInput:
+      type: object
+      required: [amount, direction, ledger_account_id]
+      properties:
+        amount: {type: integer, minimum: 0}
+        direction: {type: string, enum: [credit, debit]}
+        ledger_account_id: {type: string, format: uuid}
+    LedgerEntry:
+      type: object
+      required: [id, object, amount, direction, status, ledger_account_id, ledger_transaction_id]
+      properties:
+        id: {type: string, format: uuid}
+        object: {type: string, enum: [ledger_entry]}
+        amount: {type: integer}
+        direction: {type: string, enum: [credit, debit]}
+        status: {type: string, enum: [pending, posted, archived]}
+        ledger_account_id: {type: string, format: uuid}
+        ledger_account_currency: {type: string}
+        ledger_account_currency_exponent: {type: integer}
+        ledger_transaction_id: {type: string, format: uuid}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    LedgerTransaction:
+      type: object
+      required: [id, object, status, ledger_id, ledger_entries, metadata, effective_at, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        object: {type: string, enum: [ledger_transaction]}
+        description: {type: string, nullable: true}
+        status: {type: string, enum: [pending, posted, archived]}
+        ledger_id: {type: string, format: uuid}
+        ledger_entries:
+          type: array
+          items: {$ref: "#/components/schemas/LedgerEntry"}
+        external_id: {type: string, nullable: true}
+        metadata: {$ref: "#/components/schemas/Metadata"}
+        effective_at: {type: string, format: date-time}
+        effective_date: {type: string, format: date}
+        posted_at: {type: string, format: date-time, nullable: true, description: Set when the transaction is posted.}
+        live_mode: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}

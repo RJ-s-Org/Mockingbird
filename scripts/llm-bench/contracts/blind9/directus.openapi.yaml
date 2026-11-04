@@ -1,0 +1,399 @@
+openapi: 3.0.3
+info:
+  title: Directus Items API (products and categories)
+  version: "11"
+  description: |
+    A subset of the Directus REST API, written from its public documentation, for a
+    project with two collections: `products` and `categories`. A product's `category`
+    is a many-to-one relation holding a category's `id`. Every answer is wrapped in
+    `data`; a list answers `{data: [...]}`, plus `meta` when it is asked for.
+
+    `POST /items/products` takes one item, answered as `{data: item}`, or an array of
+    items, created in order and answered as `{data: [items]}` in the same order. Ids are
+    integers the server assigns. `sku` is unique: a create or update that would give
+    two products one `sku` is refused with 400 and the error code `RECORD_NOT_UNIQUE`,
+    and nothing is written. `PATCH /items/products/{id}` changes only the fields it is
+    sent. `PATCH /items/products` with `{keys: [ids], data: {fields}}` applies the same
+    change to every product in `keys` and answers them. `DELETE` answers 204.
+
+    Reads take the global query parameters:
+
+    - `fields`: the comma-separated fields to answer, as in `fields=id,name`; only those
+      are answered. A dotted field reads through a relation: `fields=sku,category.name`
+      answers `category` as an object holding only `name`, and `*` means every field.
+    - `filter`: rules in bracket notation, `filter[field][_operator]=value`. Operators
+      include `_eq`, `_neq`, `_lt`, `_lte`, `_gt`, `_gte`, `_in` and `_nin` (a
+      comma-separated list), `_contains`, `_icontains`, `_starts_with`, `_null` and
+      `_nnull`. Several fields in one filter must all match. `_and` and `_or` take a
+      list of filters, as in `filter[_or][0][stock][_lt]=5&filter[_or][1][status][_eq]=draft`,
+      and nest. A rule can reach through a relation: `filter[category][name][_eq]=Lighting`
+      matches the products whose category is named Lighting. The same filter can also be
+      sent as one JSON object, `filter={"price":{"_gte":40}}`.
+    - `sort`: comma-separated fields, ascending, or descending with a leading `-`, as in
+      `sort=-price,name`. Without `sort`, items come in the order of their ids.
+    - `limit` (default 100; `-1` for all) and `offset`, or `page` (1-based, with `limit`).
+    - `search`: matches items with a string or text field containing the value.
+    - `meta`: `total_count` (every item in the collection), `filter_count` (the items
+      that match `filter` and `search`, before `limit` and `offset`), or `*` for both,
+      answered in `meta`.
+
+    Errors are `{errors: [{message, extensions: {code}}]}`. A filter or field that names
+    something the collection lacks is 400 `INVALID_QUERY`, a body that does not fit the
+    collection is 400 `INVALID_PAYLOAD`. Reading, changing or deleting an item that does
+    not exist answers 403 `FORBIDDEN`, as for an item the token may not access, so a
+    client cannot tell whether an id was ever used; a deleted item answers the same.
+servers:
+  - url: https://cms.example.com
+security:
+  - bearer: []
+tags:
+  - name: Items
+paths:
+  /items/categories:
+    get:
+      tags: [Items]
+      operationId: readCategories
+      summary: List categories
+      parameters:
+        - $ref: "#/components/parameters/fields"
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/sort"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/meta"
+      responses:
+        "200":
+          description: The categories.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Category"}
+                  meta: {$ref: "#/components/schemas/Meta"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Items]
+      operationId: createCategory
+      summary: Create a category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CategoryInput"}
+      responses:
+        "200":
+          description: The created category.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: "#/components/schemas/Category"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+  /items/products:
+    get:
+      tags: [Items]
+      operationId: readProducts
+      summary: List products
+      parameters:
+        - $ref: "#/components/parameters/fields"
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/sort"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/meta"
+      responses:
+        "200":
+          description: The products that match, sorted and paged as asked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Product"}
+                  meta: {$ref: "#/components/schemas/Meta"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Items]
+      operationId: createProducts
+      summary: Create one product or several
+      description: "One item answers `{data: item}`; an array answers `{data: [items]}` in the order sent. A taken `sku` is refused with 400 RECORD_NOT_UNIQUE."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/ProductInput"
+                - type: array
+                  items: {$ref: "#/components/schemas/ProductInput"}
+      responses:
+        "200":
+          description: The created product, or the created products in order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    oneOf:
+                      - $ref: "#/components/schemas/Product"
+                      - type: array
+                        items: {$ref: "#/components/schemas/Product"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Items]
+      operationId: updateProducts
+      summary: Update several products
+      description: "Applies `data` to every product in `keys` and answers them."
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keys, data]
+              properties:
+                keys:
+                  type: array
+                  items: {type: integer}
+                data: {$ref: "#/components/schemas/ProductPatch"}
+      responses:
+        "200":
+          description: The updated products.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Product"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /items/products/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The product's id.
+        schema: {type: integer}
+    get:
+      tags: [Items]
+      operationId: readProduct
+      summary: Get a product
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      responses:
+        "200":
+          description: The product.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: "#/components/schemas/Product"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+    patch:
+      tags: [Items]
+      operationId: updateProduct
+      summary: Update a product
+      description: Changes only the fields sent.
+      parameters:
+        - $ref: "#/components/parameters/fields"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProductPatch"}
+      responses:
+        "200":
+          description: The updated product.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: {$ref: "#/components/schemas/Product"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+    delete:
+      tags: [Items]
+      operationId: deleteProduct
+      summary: Delete a product
+      responses:
+        "204":
+          description: Deleted.
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A static token or an access token from /auth/login.
+  parameters:
+    fields:
+      name: fields
+      in: query
+      description: "Comma-separated fields to answer, such as `id,name`; dotted fields read through relations (`category.name`); `*` is every field."
+      schema: {type: string}
+    filter:
+      name: filter
+      in: query
+      style: deepObject
+      explode: true
+      description: |
+        Filter rules in bracket notation, `filter[field][_operator]=value`, with
+        `_and`/`_or` lists (`filter[_or][0][stock][_lt]=5`) and rules through relations
+        (`filter[category][name][_eq]=Lighting`). Every field rule must match.
+      schema:
+        type: object
+        additionalProperties: true
+    sort:
+      name: sort
+      in: query
+      description: "Comma-separated fields; a leading `-` sorts that field descending, such as `-price,name`."
+      schema: {type: string}
+    limit:
+      name: limit
+      in: query
+      description: The most items to answer (default 100; -1 for every item).
+      schema: {type: integer, minimum: -1}
+    offset:
+      name: offset
+      in: query
+      description: Items to skip first.
+      schema: {type: integer, minimum: 0}
+    page:
+      name: page
+      in: query
+      description: A 1-based page of `limit` items.
+      schema: {type: integer, minimum: 1}
+    search:
+      name: search
+      in: query
+      description: Matches items with a string or text field containing the value.
+      schema: {type: string}
+    meta:
+      name: meta
+      in: query
+      description: "`total_count`, `filter_count`, or `*` for both, comma-separated."
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{errors: [{message, extensions: {code}}]}`: 400 `INVALID_QUERY`, `INVALID_PAYLOAD` or `RECORD_NOT_UNIQUE`; 401 `INVALID_CREDENTIALS` or `TOKEN_EXPIRED`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Errors"}
+    Forbidden:
+      description: "403 `FORBIDDEN`: the item does not exist (never did, or was deleted) or the token may not access it."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Errors"}
+  schemas:
+    Errors:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          items:
+            type: object
+            required: [message, extensions]
+            properties:
+              message: {type: string, example: "You don't have permission to access this."}
+              extensions:
+                type: object
+                required: [code]
+                properties:
+                  code:
+                    type: string
+                    enum: [FORBIDDEN, INVALID_QUERY, INVALID_PAYLOAD, RECORD_NOT_UNIQUE, INVALID_CREDENTIALS, TOKEN_EXPIRED, INTERNAL_SERVER_ERROR]
+                  field: {type: string, description: "The field at fault, for RECORD_NOT_UNIQUE and INVALID_PAYLOAD."}
+    Meta:
+      type: object
+      properties:
+        total_count: {type: integer, description: Every item in the collection.}
+        filter_count: {type: integer, description: "The items matching `filter` and `search`, before `limit` and `offset`."}
+    Category:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        date_created: {type: string, format: date-time}
+    CategoryInput:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+    Product:
+      type: object
+      description: "With `fields`, only the fields asked for; `category` is the category's id, or an object of the category's fields asked for with dotted fields."
+      properties:
+        id: {type: integer}
+        sku: {type: string}
+        name: {type: string}
+        price: {type: number, description: "In euros, such as 49.5."}
+        stock: {type: integer}
+        status:
+          type: string
+          enum: [draft, published, archived]
+        category:
+          description: The category's id, or the category's fields asked for.
+          oneOf:
+            - type: integer
+              nullable: true
+            - $ref: "#/components/schemas/Category"
+        date_created: {type: string, format: date-time}
+        date_updated: {type: string, format: date-time, nullable: true}
+    ProductInput:
+      type: object
+      required: [sku, name, price]
+      properties:
+        sku: {type: string}
+        name: {type: string}
+        price: {type: number}
+        stock: {type: integer, default: 0}
+        status:
+          type: string
+          enum: [draft, published, archived]
+          default: draft
+        category: {type: integer, nullable: true}
+    ProductPatch:
+      type: object
+      properties:
+        sku: {type: string}
+        name: {type: string}
+        price: {type: number}
+        stock: {type: integer}
+        status:
+          type: string
+          enum: [draft, published, archived]
+        category: {type: integer, nullable: true}
