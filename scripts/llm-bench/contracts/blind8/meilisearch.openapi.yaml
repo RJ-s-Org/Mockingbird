@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Meilisearch API (indexes, documents, settings, search and tasks)
-  version: "1.11"
+  version: "1.16"
   description: |
     A subset of the Meilisearch HTTP API, written from its public documentation.
     Writes are asynchronous. Creating an index, adding, updating or deleting documents
@@ -29,7 +29,8 @@ info:
     `limit` (default 20) page the hits; the answer echoes them and counts all matches in
     `estimatedTotalHits`. Hits are the documents themselves.
 
-    `GET /indexes/{index_uid}/documents` pages the documents with `offset` and `limit`
+    `GET /indexes/{index_uid}/documents` pages the documents with `offset` and `limit`,
+    sorted by `sort` (`attribute:asc` or `attribute:desc` over `sortableAttributes`),
     and answers `total`. A document that does not exist, or was deleted, answers 404
     `document_not_found`; an unknown index answers 404 `index_not_found`. Errors are
     `{message, code, type, link}`.
@@ -133,6 +134,10 @@ paths:
         - name: filter
           in: query
           description: A filter expression over filterable attributes.
+          schema: {type: string}
+        - name: sort
+          in: query
+          description: "Comma-separated `attribute:asc` or `attribute:desc` over sortable attributes, such as `year:asc`."
           schema: {type: string}
       responses:
         "200":

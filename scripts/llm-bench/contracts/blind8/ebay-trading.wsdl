@@ -31,12 +31,14 @@
 
     ReviseFixedPriceItem changes only the Item fields it is sent and keeps the others;
     the ItemID does not change. EndFixedPriceItem ends the listing at once and answers
-    its EndTime; afterwards GetItem still answers the item, with ListingStatus Completed
-    (or Ended), and the listing is no longer in the seller's ActiveList.
+    its EndTime; afterwards GetItem still answers the item, with ListingStatus Completed,
+    and the listing is no longer in the seller's ActiveList.
 
     GetMyeBaySelling answers the seller's ActiveList when it is asked for with Include
     true, paged by Pagination (EntriesPerPage, PageNumber from 1); PaginationResult
     holds TotalNumberOfEntries (the active listings in all pages) and TotalNumberOfPages.
+    Sort orders the list: StartTime puts the listing that started first first,
+    StartTimeDescending the newest first, ItemID and ItemIDDescending by ItemID.
   </wsdl:documentation>
   <wsdl:types>
     <xs:schema targetNamespace="urn:ebay:apis:eBLBaseComponents" elementFormDefault="qualified">
@@ -89,6 +91,16 @@
           <xs:enumeration value="Active"/>
           <xs:enumeration value="Ended"/>
           <xs:enumeration value="Completed"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="ItemSortTypeCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="ItemID"/>
+          <xs:enumeration value="ItemIDDescending"/>
+          <xs:enumeration value="StartTime"/>
+          <xs:enumeration value="StartTimeDescending"/>
+          <xs:enumeration value="Title"/>
+          <xs:enumeration value="TitleDescending"/>
         </xs:restriction>
       </xs:simpleType>
       <xs:simpleType name="InventoryTrackingMethodCodeType">
@@ -223,7 +235,7 @@
       <xs:complexType name="ItemListCustomizationType">
         <xs:sequence>
           <xs:element name="Include" type="xs:boolean" minOccurs="0"/>
-          <xs:element name="Sort" type="xs:token" minOccurs="0"/>
+          <xs:element name="Sort" type="ns:ItemSortTypeCodeType" minOccurs="0"/>
           <xs:element name="Pagination" type="ns:PaginationType" minOccurs="0"/>
         </xs:sequence>
       </xs:complexType>
@@ -396,12 +408,12 @@
       <wsdl:output message="ns:ReviseFixedPriceItemResponse"/>
     </wsdl:operation>
     <wsdl:operation name="EndFixedPriceItem">
-      <wsdl:documentation>Ends a listing at once and answers its EndTime. The listing then reads as Completed (or Ended) and leaves the seller's ActiveList.</wsdl:documentation>
+      <wsdl:documentation>Ends a listing at once and answers its EndTime. The listing then reads as Completed and leaves the seller's ActiveList.</wsdl:documentation>
       <wsdl:input message="ns:EndFixedPriceItemRequest"/>
       <wsdl:output message="ns:EndFixedPriceItemResponse"/>
     </wsdl:operation>
     <wsdl:operation name="GetMyeBaySelling">
-      <wsdl:documentation>Answers the seller's active listings (ActiveList with Include true), paged by Pagination; PaginationResult.TotalNumberOfEntries counts them across all pages.</wsdl:documentation>
+      <wsdl:documentation>Answers the seller's active listings (ActiveList with Include true), ordered by Sort (StartTime: the listing that started first first) and paged by Pagination; PaginationResult.TotalNumberOfEntries counts them across all pages.</wsdl:documentation>
       <wsdl:input message="ns:GetMyeBaySellingRequest"/>
       <wsdl:output message="ns:GetMyeBaySellingResponse"/>
     </wsdl:operation>

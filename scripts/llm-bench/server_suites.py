@@ -4859,23 +4859,21 @@ def businesscentral_steps(j):
         "postalCode": postal, "email": f"hello.{tag}@atlascycles.example"})).get("id"))
     rows, _ = listed({"$filter": f"displayName eq 'Atlas Bikes {tag}'"})
     j.check("$filter finds only the customer", rows == [c1], listed=rows)
-    by_postal = f"postalCode eq '{postal}'"
-    first, page = listed({"$filter": by_postal, "$top": 1, "$count": "true"})
-    j.check("$top 1 answers one customer and the count",
-            len(first) == 1 and first[0] in (c1, c2) and eq(page.get("@odata.count"), 2),
+    # Sorted by displayName: "Atlas Bikes" comes before "Atlas Cycles".
+    by_postal = {"$filter": f"postalCode eq '{postal}'", "$orderby": "displayName"}
+    first, page = listed(dict(by_postal, **{"$top": 1, "$count": "true"}))
+    j.check("$top 1 answers one customer and the count", first == [c1] and eq(page.get("@odata.count"), 2),
             listed=first, count=page.get("@odata.count"))
-    rest, _ = listed({"$filter": by_postal, "$top": 1, "$skip": 1})
-    j.check("$skip 1 reaches the other customer", len(rest) == 1 and same_items(first + rest, [c1, c2]),
-            first=first, listed=rest)
-    first, page = listed({"$filter": by_postal}, prefer="odata.maxpagesize=1")
+    rest, _ = listed(dict(by_postal, **{"$top": 1, "$skip": 1}))
+    j.check("$skip 1 reaches the other customer", rest == [c2], first=first, listed=rest)
+    first, page = listed(by_postal, prefer="odata.maxpagesize=1")
     nxt = page.get("@odata.nextLink")
     j.check("maxpagesize 1 answers a nextLink",
-            len(first) == 1 and query_value(nxt, "$skiptoken") is not None, listed=first, next_link=nxt)
-    follow = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(nxt).query)) if query_value(nxt, "$skiptoken") else {
-        "$filter": by_postal, "$skiptoken": made_up(j, "", 12)}
+            first == [c1] and query_value(nxt, "$skiptoken") is not None, listed=first, next_link=nxt)
+    follow = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(nxt).query)) if query_value(nxt, "$skiptoken") else dict(
+        by_postal, **{"$skiptoken": made_up(j, "", 12)})
     rest, page = listed(follow, prefer="odata.maxpagesize=1")
-    j.check("nextLink reaches the other customer",
-            len(rest) == 1 and same_items(first + rest, [c1, c2]) and not page.get("@odata.nextLink"),
+    j.check("nextLink reaches the other customer", rest == [c2] and not page.get("@odata.nextLink"),
             first=first, listed=rest, next_link=page.get("@odata.nextLink"))
     item = own(obj(j.call("POST", f"{base}/items", body={
         "number": f"BK-{tag}", "displayName": "Commuter helmet", "type": "Inventory", "unitPrice": 12.5,
@@ -4897,8 +4895,10 @@ def businesscentral_steps(j):
     with sent_headers(j, {"If-Match": etag(customer(c2)) or "*"}):
         j.call("DELETE", f"{base}/customers({c2})")
     deleted = j.last["status"]
-    j.call("GET", f"{base}/customers({c2})")
-    j.check("deleted customer is not found", j.last["status"] == 404, delete_status=deleted)
+    gone = obj(obj(j.call("GET", f"{base}/customers({c2})")).get("error"))
+    j.check("deleted customer is not found",
+            j.last["status"] == 404 and given(gone.get("code"), None) is not None and isinstance(gone.get("message"), str),
+            delete_status=deleted, error=gone)
 
 
 def azuredevops_steps(j):
@@ -5012,8 +5012,11 @@ def azuredevops_steps(j):
             totalCount=page.get("totalCount"), listed=ids_of(page.get("comments")))
     j.call("DELETE", f"{root}/workitems/{i2}", query=version)
     deleted = j.last["status"]
-    work_item(i2)
-    j.check("deleted work item is not found", j.last["status"] == 404, delete_status=deleted)
+    gone = work_item(i2)
+    j.check("deleted work item is not found",
+            j.last["status"] == 404 and given(gone.get("message"), None) is not None
+            and given(gone.get("typeKey"), None) is not None,
+            delete_status=deleted, message=gone.get("message"), typeKey=gone.get("typeKey"))
 
 
 def commercetools_steps(j):
@@ -5096,13 +5099,13 @@ def commercetools_steps(j):
     c2 = own(other.get("id"))
     rows, _ = query(where=f'customerEmail = "{email}"')
     j.check("where finds only the cart", rows == [c1], listed=rows)
-    first, page = query(where=f'anonymousId = "{anon}"', limit=1)
+    # Oldest first: the first cart was made before the second.
+    first, page = query(where=f'anonymousId = "{anon}"', sort="createdAt asc", limit=1)
     j.check("limit 1 answers one cart and the total",
-            len(first) == 1 and first[0] in (c1, c2) and eq(page.get("count"), 1) and eq(page.get("total"), 2),
+            first == [c1] and eq(page.get("count"), 1) and eq(page.get("total"), 2),
             listed=first, count=page.get("count"), total=page.get("total"))
-    rest, _ = query(where=f'anonymousId = "{anon}"', limit=1, offset=1)
-    j.check("offset 1 reaches the other cart", len(rest) == 1 and same_items(first + rest, [c1, c2]),
-            first=first, listed=rest)
+    rest, _ = query(where=f'anonymousId = "{anon}"', sort="createdAt asc", limit=1, offset=1)
+    j.check("offset 1 reaches the other cart", rest == [c2], first=first, listed=rest)
     order = obj(j.call("POST", f"{p}/orders", body={"cart": {"typeId": "cart", "id": c1}, "version": v3}))
     j.check("an order takes the cart's total",
             j.last["status"] == 201 and eq(order.get("orderState"), "Open") and euros(total(order), 3750)
@@ -5204,7 +5207,7 @@ def ebay_steps(j):
         return xml_one(soap("GetItem", **which), "Item")
 
     def active(per_page, page):
-        answer = soap("GetMyeBaySelling", ActiveList={"Include": True,
+        answer = soap("GetMyeBaySelling", ActiveList={"Include": True, "Sort": "StartTime",
                                                       "Pagination": {"EntriesPerPage": per_page, "PageNumber": page}})
         items = [xml_text(i, "ItemID") for i in xml_all(answer, "ActiveList/ItemArray/Item")]
         return items, xml_text(answer, "ActiveList/PaginationResult/TotalNumberOfEntries")
@@ -5262,18 +5265,18 @@ def ebay_steps(j):
             xml_text(second, "Ack") == "Success" and matches("[0-9]+", second_id) and second_id != i1,
             ack=xml_text(second, "Ack"), item_id=second_id)
     i2 = second_id if matches("[0-9]+", second_id) and second_id != i1 else own(None)
+    # Sorted by StartTime, oldest first: the first listing was made before the second.
     first, entries = active(1, 1)
-    j.check("the active list counts both listings", len(first) == 1 and first[0] in (i1, i2) and entries == "2",
+    j.check("the active list counts both listings", first == [i1] and entries == "2",
             listed=first, total_entries=entries)
     rest, _ = active(1, 2)
-    j.check("page 2 reaches the other listing", len(rest) == 1 and same_items(first + rest, [i1, i2]),
-            first=first, listed=rest)
+    j.check("page 2 reaches the other listing", rest == [i2], first=first, listed=rest)
     ended = soap("EndFixedPriceItem", ItemID=i2, EndingReason="NotAvailable")
     j.check("ending answers the end time",
             xml_text(ended, "Ack") == "Success" and instant(xml_text(ended, "EndTime")) is not None,
             ack=xml_text(ended, "Ack"), end_time=xml_text(ended, "EndTime"))
     status = xml_text(get_item(ItemID=i2), "SellingStatus/ListingStatus")
-    j.check("an ended listing reads as completed", status in ("Completed", "Ended"), listing_status=status)
+    j.check("an ended listing reads as completed", status == "Completed", listing_status=status)
     rows, entries = active(10, 1)
     j.check("the active list leaves out the ended listing", rows == [i1] and entries == "1",
             listed=rows, total_entries=entries)
@@ -5333,13 +5336,13 @@ def meilisearch_steps(j):
     doc = obj(j.call("GET", f"{index}/documents/{d1}"))
     j.check("a document reads by its primary key", same(doc, books[0], "isbn", "title", "author", "genre", "year"),
             document=doc)
-    page = obj(j.call("GET", f"{index}/documents", query={"limit": 2}))
+    page = obj(j.call("GET", f"{index}/documents", query={"limit": 2, "sort": "year:asc"}))
     first = ids_of(page.get("results"), "isbn")
-    j.check("the document list counts every document", len(first) == 2 and eq(page.get("total"), 3),
+    j.check("the document list counts every document", first == [d2, d1] and eq(page.get("total"), 3),
             listed=first, total=page.get("total"))
-    rest = ids_of(obj(j.call("GET", f"{index}/documents", query={"limit": 2, "offset": 2})).get("results"), "isbn")
-    j.check("offset reaches the last document", len(rest) == 1 and same_items(first + rest, [d1, d2, d3]),
-            first=first, listed=rest)
+    rest = ids_of(obj(j.call("GET", f"{index}/documents",
+                             query={"limit": 2, "offset": 2, "sort": "year:asc"})).get("results"), "isbn")
+    j.check("offset reaches the last document", rest == [d3], first=first, listed=rest)
     hits, _ = search(q="neuromancer")
     j.check("a query finds the matching document", hits == [d3], hits=hits)
     hits, _ = search(q="", filter="genre = scifi")

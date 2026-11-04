@@ -349,7 +349,7 @@ components:
   schemas:
     Error:
       type: object
-      required: [message]
+      required: [message, typeKey]
       properties:
         $id: {type: string}
         innerException: {type: object, nullable: true}
