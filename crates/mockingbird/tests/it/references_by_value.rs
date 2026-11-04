@@ -1,7 +1,7 @@
 //! Records a request refers to by a member value, through the store a server builds:
 //! [`ha::cached_shared_state`] over the in-memory store. On one node (a local bus) this
 //! process sees every write, so a unique email names its contact; with a bus other nodes
-//! write through, a member value's uniqueness cannot be known here, and only ids match.
+//! write through, the store is asked whether the email is unique before it names one.
 #![cfg(test)]
 
 use std::sync::Arc;
@@ -133,14 +133,18 @@ async fn a_local_bus_matches_member_values() {
     );
 }
 
-/// Several nodes: another may have written the same email, so it names nothing here.
+/// Several nodes: another may have written the same email, so the store is asked, and
+/// as it shows one contact holding it, the email names that contact.
 #[tokio::test]
-async fn a_shared_bus_matches_no_member_values() {
+async fn a_shared_bus_matches_member_values_the_store_shows_unique() {
     let hub = MemoryBusHub::new_shared();
     let (local, prompt) = ticket_prompt(hub.join("n1".into())).await;
     assert!(
         !local,
         "a store other nodes write through is not local only"
     );
-    assert!(related(&prompt).is_none(), "{prompt}");
+    assert!(
+        related(&prompt).is_some_and(|r| r.contains("ct-000101")),
+        "{prompt}"
+    );
 }

@@ -746,33 +746,46 @@ async fn a_sibling_sharing_a_held_id_is_not_shown() {
     assert!(!related_holds(&prompt, "tk-000001"), "{prompt}");
 }
 
-/// With a store other nodes write to, a member value's uniqueness cannot be known here,
-/// so it matches nothing; an id is unique by construction and still matches.
+/// With a store other nodes write to, a member value the index finds is checked against
+/// the store: unique there, it matches; once another node stored a contact with the same
+/// email, it names neither. An id is unique by construction and matches as it is.
 #[tokio::test]
-async fn a_shared_store_matches_ids_but_not_member_values() {
+async fn a_shared_store_matches_member_values_the_store_shows_unique() {
     let store = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let shared = Arc::new(Shared(Arc::clone(&store))) as Arc<dyn StateStore>;
     let h = harness_on(
         shared,
-        store,
+        Arc::clone(&store),
         vec![
             contact("ct-000101", "jane.roe@example.com"),
             json!({"id": "tk-000001", "subject": "Help"}),
+            json!({"id": "tk-000002", "subject": "Help"}),
             json!({"id": TRACK, "name": "Song of the Mock"}),
             json!({"effects": [], "response": {"ok": true}}),
         ],
     );
+    let asks = json!({"subject": "Help", "email": "jane.roe@example.com"});
     create_contact(&h, None).await;
-    create_ticket(
-        &h,
-        None,
-        json!({"subject": "Help", "email": "jane.roe@example.com"}),
-    )
-    .await;
+    create_ticket(&h, None, asks.clone()).await;
+    assert!(related_holds(&h.prompt(1), "ct-000101"), "{}", h.prompt(1));
+    // Another node stores a contact with the same email: this one cannot see it written.
+    let twin = json!({"id": "ct-000202", "name": "J. Roe", "email": "jane.roe@example.com"});
+    store
+        .upsert(
+            &session(),
+            StoredResource {
+                resource_type: "contacts".into(),
+                id: "ct-000202".into(),
+                data: twin,
+            },
+        )
+        .await
+        .unwrap();
+    create_ticket(&h, None, asks).await;
     assert!(
-        block(&h.prompt(1), "related_resources").is_none(),
+        block(&h.prompt(2), "related_resources").is_none_or(|r| !r.contains("ct-000")),
         "{}",
-        h.prompt(1)
+        h.prompt(2)
     );
     h.call("POST", "/tracks", Some(json!({"name": "Song of the Mock"})))
         .await;
@@ -783,9 +796,9 @@ async fn a_shared_store_matches_ids_but_not_member_values() {
     )
     .await;
     assert!(
-        related_holds(&h.prompt(3), "Song of the Mock"),
+        related_holds(&h.prompt(4), "Song of the Mock"),
         "{}",
-        h.prompt(3)
+        h.prompt(4)
     );
 }
 

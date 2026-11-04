@@ -470,6 +470,16 @@ async fn generate_in(
                         }
                     };
                     let generated = match generated {
+                        // A read of what the session deleted: no record, but an error.
+                        Ok(gone) if gone.status == 404 && gone.source == Source::State => {
+                            let detail = gone
+                                .body
+                                .as_ref()
+                                .and_then(|b| b.get("detail"))
+                                .and_then(Value::as_str)
+                                .map_or_else(|| forced_message(404), str::to_string);
+                            Err(Failure::new(404, detail))
+                        }
                         Ok(mut generated) => {
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
@@ -615,7 +625,8 @@ async fn write_by_id(
         return;
     };
     if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
-        call::delete_resource(rt, &plan.session, held).await;
+        let marks = !contradicts(generated.body.as_ref(), Some(&held.resource_type), &held.id);
+        call::delete_resource(rt, plan, call, held, marks).await;
         return;
     }
     let update = super::state::update_of(&rt.bundle, &held, args);
@@ -627,6 +638,43 @@ async fn write_by_id(
         };
         call::store_resources(rt, &plan.session, vec![resource], true).await;
     }
+}
+
+/// Whether a delete's payload says the record `id` was not deleted (see
+/// [`contradicts`]), the record's type untold.
+#[cfg(test)]
+fn payload_contradicts(payload: Option<&Value>, id: &str) -> bool {
+    contradicts(payload, None, id)
+}
+
+/// Whether a delete's payload says record `id`, of type `t`, was not deleted: it
+/// holds a non-empty `userErrors` or `errors` list, or a member naming the deleted
+/// record that is `null` or another id. Only `id`, a `deleted…Id` (`deletedId`,
+/// `deletedCommentId`, `deleted_comment_id`) and `<type>Id` / `<type>_id` for `t`
+/// name it: a Relay `clientMutationId`, or the parent's `issueId`, says nothing of
+/// the record. A delete so answered is no evidence the record is gone, and leaves
+/// no marker.
+fn contradicts(payload: Option<&Value>, t: Option<&str>, id: &str) -> bool {
+    let Some(Value::Object(members)) = payload else {
+        return false;
+    };
+    let own = t.map(|t| format!("{}id", t.to_lowercase().replace(['_', '-'], "")));
+    members.iter().any(|(name, value)| {
+        let errors = matches!(name.as_str(), "userErrors" | "errors")
+            && value.as_array().is_some_and(|list| !list.is_empty());
+        let flat = name.to_lowercase().replace('_', "");
+        let names_record = flat == "id"
+            || (flat.starts_with("deleted") && flat.ends_with("id"))
+            || own.as_deref() == Some(flat.as_str());
+        let other_id = names_record
+            && match value {
+                Value::Null => true,
+                Value::String(text) => text != id,
+                Value::Number(n) => n.to_string() != id,
+                _ => false,
+            };
+        errors || other_id
+    })
 }
 
 /// Whether an answer of `status` from `source` makes [`write_by_id`]'s
@@ -765,6 +813,45 @@ pub(crate) fn project(value: Value, ty: &Type, shapes: &Shapes) -> Option<FieldV
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_payload_contradicting_the_delete_leaves_no_marker() {
+        use serde_json::json;
+        let marks = |payload: Value| !payload_contradicts(Some(&payload), "c-1");
+        assert!(marks(json!({"success": true, "entityId": "c-1"})));
+        assert!(marks(json!({"deletedId": "c-1", "userErrors": []})));
+        assert!(!marks(json!({"deletedId": null})));
+        assert!(!marks(json!({"deletedId": "c-2"})));
+        assert!(!marks(
+            json!({"deletedId": "c-1", "userErrors": [{"message": "no"}]})
+        ));
+        assert!(!marks(json!({"errors": [{"message": "no"}]})));
+        // The record's own type names it too.
+        assert!(contradicts(
+            Some(&json!({"commentId": "c-2"})),
+            Some("comment"),
+            "c-1"
+        ));
+        assert!(!contradicts(
+            Some(&json!({"commentId": "c-1"})),
+            Some("comment"),
+            "c-1"
+        ));
+    }
+
+    // A Relay payload: the deleted id plus the standard clientMutationId echo.
+    #[test]
+    fn g1_relay_client_mutation_id_does_not_contradict_the_delete() {
+        let payload = serde_json::json!({"deletedId": "c-1", "clientMutationId": "abc"});
+        assert!(!payload_contradicts(Some(&payload), "c-1"));
+    }
+
+    // A delete payload naming the parent the record belonged to.
+    #[test]
+    fn g1_a_parent_id_does_not_contradict_the_delete() {
+        let payload = serde_json::json!({"deletedCommentId": "c-1", "issueId": "i-9"});
+        assert!(!payload_contradicts(Some(&payload), "c-1"));
+    }
 
     #[test]
     fn only_a_generated_2xx_answer_writes_by_id() {

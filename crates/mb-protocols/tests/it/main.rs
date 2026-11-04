@@ -57,6 +57,7 @@ mod sibling_writes;
 mod soap;
 mod sse;
 mod state_reads;
+mod structural_ties;
 mod webhooks;
 mod world;
 mod world_lists;

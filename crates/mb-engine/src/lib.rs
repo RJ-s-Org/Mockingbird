@@ -1273,7 +1273,8 @@ impl Engine {
     }
 
     /// A `404` for a resource the session does not hold: the operation's
-    /// declared `404` response, faker-filled, else a problem+json body with
+    /// declared `404` response (or its `default`), faker-filled; else its
+    /// declared `410`, rendered so; else a problem+json `404` body with
     /// `detail`. Always tagged `State`.
     pub fn not_found(
         &self,
@@ -1282,15 +1283,22 @@ impl Engine {
         call: &OperationCall,
         detail: &str,
     ) -> GeneratedResponse {
-        let declared = op.output_for_status(404).map(|variant| {
-            let ctx = GenerationContext {
-                forced_status: Some(404),
-                ..GenerationContext::default()
-            };
-            let mut response = self.fallback(bundle, op, variant, 404, call, &ctx);
-            self.fill_contract_values(bundle, op, variant, &mut response, (&[], false));
-            response
-        });
+        let declared = op
+            .output_for_status(404)
+            .map(|variant| (404, variant))
+            .or_else(|| {
+                let code = missing_status(op)?;
+                Some((code, op.output_for_status(code)?))
+            })
+            .map(|(code, variant)| {
+                let ctx = GenerationContext {
+                    forced_status: Some(code),
+                    ..GenerationContext::default()
+                };
+                let mut response = self.fallback(bundle, op, variant, code, call, &ctx);
+                self.fill_contract_values(bundle, op, variant, &mut response, (&[], false));
+                response
+            });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
             status: 404,
             content_type: Some("application/problem+json".into()),
@@ -3514,6 +3522,104 @@ fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generate
         target.data.clone()
     } else {
         generated
+    }
+}
+
+/// The status `op` declares for a read of what is not there when it declares no
+/// `404` (a `4XX` range declares one) and no `default`: a declared `410`, which by
+/// its status says the resource is gone. No other status stands in: a `403` is about
+/// who asks, whatever its description says, and keeps the problem+json `404`.
+fn missing_status(op: &Operation) -> Option<u16> {
+    if op.output_for_status(404).is_some() {
+        return None;
+    }
+    op.outputs
+        .iter()
+        .any(|o| o.status == StatusSelector::Code(410))
+        .then_some(410)
+}
+
+#[cfg(test)]
+mod missing_status_tests {
+    use super::missing_status;
+
+    fn op_at(path: &str, responses: &str) -> mb_mcm::Operation {
+        let contract = format!(
+            r#"
+openapi: 3.0.0
+info: {{title: t, version: "1"}}
+paths:
+  {path}:
+    get:
+      operationId: readOne
+      parameters: [{{name: id, in: path, required: true, schema: {{type: string}}}}]
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string}}}}}}}}}}}}
+{responses}
+"#
+        );
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        bundle
+            .operations
+            .into_iter()
+            .find(|o| o.id == "readOne")
+            .unwrap()
+    }
+
+    fn op_of(responses: &str) -> mb_mcm::Operation {
+        op_at("/items/products/{id}", responses)
+    }
+
+    #[test]
+    fn a_declared_410_stands_for_404() {
+        let gone = r#"        "400": {description: "Bad query."}
+        "410": {description: "Gone."}"#;
+        assert_eq!(missing_status(&op_of(gone)), Some(410));
+    }
+
+    #[test]
+    fn otherwise_the_404_stays() {
+        // A 403 of any description, a declared 404, a 4XX range, or a default.
+        let fits = r#"        "403": {description: "FORBIDDEN: the item does not exist."}"#;
+        assert_eq!(missing_status(&op_of(fits)), None);
+        let declared = r#"        "404": {description: "Not found."}
+        "410": {description: "Gone."}"#;
+        assert_eq!(missing_status(&op_of(declared)), None);
+        let range = r#"        "4XX": {description: "A client error."}
+        "410": {description: "Gone."}"#;
+        assert_eq!(missing_status(&op_of(range)), None);
+        let default = r#"        "410": {description: "Gone."}
+        default: {description: "An error."}"#;
+        assert_eq!(missing_status(&op_of(default)), None);
+        assert_eq!(missing_status(&op_of("")), None);
+    }
+
+    #[test]
+    fn n5_api_key_403_is_not_a_missing_record() {
+        let op = op_at(
+            "/api/accounts/{id}",
+            r#"        "401": {description: "No token."}
+        "403": {description: "The API key lacks the required scope."}"#,
+        );
+        assert_eq!(missing_status(&op), None);
+    }
+
+    #[test]
+    fn n5_user_permission_403_is_not_a_missing_record() {
+        let op = op_at(
+            "/users/{id}",
+            r#"        "403": {description: "The authenticated user does not have permission for this action."}"#,
+        );
+        assert_eq!(missing_status(&op), None);
+    }
+
+    #[test]
+    fn n5_permission_403_naming_the_resource() {
+        let op = op_at(
+            "/items/products/{id}",
+            r#"        "403": {description: "You are not allowed to view this product."}"#,
+        );
+        assert_eq!(missing_status(&op), None);
     }
 }
 
