@@ -54,6 +54,7 @@ use crate::guards::{Checked, Checks, Echoes, Fill};
 pub mod budget;
 pub mod compact;
 pub mod consistency;
+mod contract_values;
 mod encoded;
 pub mod extract;
 pub mod faker;
@@ -202,6 +203,15 @@ pub trait UpdateGuard: std::fmt::Debug + Sync {
     fn keep_identity(&self, candidate: Value) -> Value;
     /// Whether `candidate` is still the target's owner's.
     fn keeps_owner(&self, candidate: &Value) -> bool;
+    /// Whether the update advances the target's top-level `member`, a concurrency token
+    /// the runtime has seen change on its writes, or one this request sends the held
+    /// value of: an LLM answer's new value (a string, or an integer above the held one)
+    /// stands over the stored copy's, and the request's own value never stands over it.
+    /// None does by default.
+    fn advances(&self, member: &str) -> bool {
+        let _ = member;
+        false
+    }
 }
 
 /// What a credential's value becomes in a body kept beyond its request (see
@@ -1243,7 +1253,9 @@ impl Engine {
                 forced_status: Some(404),
                 ..GenerationContext::default()
             };
-            self.fallback(bundle, op, variant, 404, call, &ctx)
+            let mut response = self.fallback(bundle, op, variant, 404, call, &ctx);
+            self.fill_contract_values(bundle, op, variant, &mut response);
+            response
         });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
             status: 404,
@@ -1284,6 +1296,24 @@ impl Engine {
         Some(self.refused(bundle, op, call, code, answered.source, answered.usage))
     }
 
+    /// A write's refusal decided from state alone, before any LLM call (a stale
+    /// concurrency token): `op`'s response declared for `code` by that very status,
+    /// rendered as an LLM's refusal is, tagged `State`. `None` when `op` declares no
+    /// response for `code` itself (a `default` one is not a refusal the contract names).
+    #[must_use]
+    pub fn refuse_from_state(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        code: u16,
+    ) -> Option<GeneratedResponse> {
+        op.outputs
+            .iter()
+            .any(|o| o.status == StatusSelector::Code(code))
+            .then(|| self.refused(bundle, op, call, code, Source::State, Usage::default()))
+    }
+
     /// The declared error `code` an LLM refused a call with (see [`guards::refusals`]),
     /// rendered as a forced status's is offline: the contract's response for that
     /// status, faker-filled. Tagged with the LLM's `source`, as the LLM chose it, and
@@ -1303,7 +1333,11 @@ impl Engine {
             ..GenerationContext::default()
         };
         let mut response = match op.output_for_status(code) {
-            Some(variant) => self.fallback(bundle, op, variant, code, call, &ctx),
+            Some(variant) => {
+                let mut response = self.fallback(bundle, op, variant, code, call, &ctx);
+                self.fill_contract_values(bundle, op, variant, &mut response);
+                response
+            }
             // Not offered: a refusal names only a status the operation declares.
             None => GeneratedResponse {
                 status: code,
@@ -1319,7 +1353,7 @@ impl Engine {
                 patched: None,
             },
         };
-        tracing::info!(operation = %op.id, status = code, "the LLM refused the call with a declared error");
+        tracing::info!(operation = %op.id, status = code, "the call was refused with a declared error");
         // A body the faker could not make valid says so, as a fallback's does.
         if response.fallback_reason.is_none() {
             response.source = source;
@@ -1328,6 +1362,34 @@ impl Engine {
         }
         response.usage = usage;
         response
+    }
+
+    /// The members of `response`, a body the mock built itself for `variant`, that the
+    /// contract names a value for, holding it (see [`contract_values`]).
+    fn fill_contract_values(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        variant: &OutputVariant,
+        response: &mut GeneratedResponse,
+    ) {
+        if media::is_non_json(op, variant) {
+            return;
+        }
+        let (Some(schema), Some(body)) = (variant.schema.as_ref(), response.body.take()) else {
+            return;
+        };
+        let body = match self.validator(bundle, op, response.status, schema) {
+            Ok(validator) => contract_values::fill(
+                bundle,
+                &validator,
+                schema,
+                variant.description.as_deref(),
+                body,
+            ),
+            Err(_) => body,
+        };
+        response.body = Some(body);
     }
 
     /// Post-process a generated response: reflect request and state, keep
@@ -2289,7 +2351,13 @@ fn reflect(
                 response.new_record = true;
                 overlaid
             } else {
-                match (ctx.target, settling_guard(op, ctx, &response)) {
+                // A concurrency token the update advances is the answer's, not the
+                // stored copy's or the request's (see [`UpdateGuard::advances`]).
+                let advancing = advancing_members(ctx, from_llm);
+                let stripped = (!advancing.is_empty()).then(|| without_members(call, &advancing));
+                let call = stripped.as_ref().unwrap_or(call);
+                let raw = (!advancing.is_empty()).then(|| body.clone());
+                let body = match (ctx.target, settling_guard(op, ctx, &response)) {
                     (Some(target), Some(guard)) => {
                         let named = named_inputs(call);
                         let body = settled_update(validator, guard, body, target, named.as_deref());
@@ -2314,6 +2382,12 @@ fn reflect(
                         };
                         overlay_request(validator, body, call.body.as_ref())
                     }
+                };
+                match (raw, ctx.target) {
+                    (Some(raw), Some(target)) => {
+                        advanced(validator, body, &raw, target, &advancing)
+                    }
+                    _ => body,
                 }
             }
         }
@@ -2329,6 +2403,59 @@ fn reflect(
         force_identity(validator, op, call, body)
     });
     response
+}
+
+/// The top-level members of an update's stored target its LLM answer advances (see
+/// [`UpdateGuard::advances`]); none for a faker's answer, which knows of no write.
+fn advancing_members(ctx: &GenerationContext<'_>, from_llm: bool) -> Vec<String> {
+    let (true, Some(guard), Some(Value::Object(held))) =
+        (from_llm, ctx.update_guard, ctx.target.map(|t| &t.data))
+    else {
+        return Vec::new();
+    };
+    held.keys().filter(|k| guard.advances(k)).cloned().collect()
+}
+
+/// `call` without `members` in its body or its query: what it says of them is a
+/// precondition, not a value to write.
+fn without_members(call: &OperationCall, members: &[String]) -> OperationCall {
+    let mut out = call.clone();
+    if let Some(Value::Object(body)) = out.body.as_mut() {
+        body.retain(|k, _| !members.contains(k));
+    }
+    out.query.retain(|k, _| !members.contains(k));
+    out
+}
+
+/// `body` with each of `members` holding what the LLM's `raw` answer gave it, when that
+/// advances what `target` holds: another string, or a greater integer. Each only where
+/// `body` stays valid (see [`overlay`]).
+fn advanced(
+    validator: &SchemaValidator,
+    body: Value,
+    raw: &Value,
+    target: &StoredResource,
+    members: &[String],
+) -> Value {
+    let moved: Map<String, Value> = members
+        .iter()
+        .filter_map(|k| {
+            let (held, answered) = (target.data.get(k)?, raw.get(k)?);
+            let ahead = match (held, answered) {
+                (Value::String(a), Value::String(b)) => a != b,
+                (Value::Number(a), Value::Number(b)) => match (a.as_i64(), b.as_i64()) {
+                    (Some(a), Some(b)) => b > a,
+                    _ => false,
+                },
+                _ => false,
+            };
+            ahead.then(|| (k.clone(), answered.clone()))
+        })
+        .collect();
+    if moved.is_empty() {
+        return body;
+    }
+    overlay(validator, body, Some(&Value::Object(moved)))
 }
 
 /// What an update names of its resource, for its answer to settle on ([`settled_update`]):

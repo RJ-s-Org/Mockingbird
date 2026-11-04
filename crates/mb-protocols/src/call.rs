@@ -35,6 +35,7 @@ mod lists;
 mod minted;
 mod pages;
 mod runs;
+mod tokens;
 mod value_index;
 mod world;
 
@@ -693,6 +694,7 @@ pub(crate) async fn generate_pending(
             plan,
             call,
             held,
+            advancing: &pending.tokens.advancing,
         });
     let ctx = GenerationContext {
         related: &pending.related,
@@ -787,6 +789,8 @@ pub(crate) struct Pending<'a> {
     /// Those of `related` of a create's type that hold a value of its request, with the
     /// member (see [`shown_same_values`]).
     same_values: Vec<(String, String, String)>,
+    /// What a write found of its target's concurrency tokens (see [`tokens`]).
+    tokens: tokens::Tokens,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -882,6 +886,24 @@ pub(crate) async fn prepare<'a>(
         let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
+    }
+
+    // A write sending a token its record held before is refused before generating.
+    let mut tokens = tokens::Tokens::default();
+    if !foreign_key
+        && tokens::applies(rt, plan)
+        && let Some(held) = &target
+    {
+        match tokens::check(&mut state, plan, call, held)
+            .instrument(state_span())
+            .await
+        {
+            Ok(found) => tokens = found,
+            Err(refusal) => {
+                state.touch(session).instrument(state_span()).await;
+                return Prepared::Answered(refusal);
+            }
+        }
     }
 
     let target_missing = target.is_none();
@@ -1088,6 +1110,7 @@ pub(crate) async fn prepare<'a>(
         served_cursors,
         alongside,
         same_values,
+        tokens,
     }))
 }
 
@@ -1193,6 +1216,7 @@ pub(crate) async fn complete(
         mut earlier,
         unlisted,
         same_values,
+        tokens,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1560,6 +1584,33 @@ pub(crate) async fn complete(
                     &mut generated,
                 )
                 .await;
+            }
+        }
+        // After the effects, which may advance a token too.
+        if (200..300).contains(&generated.status)
+            && !unstored
+            && !foreign_key
+            && matches!(
+                generated.source,
+                Source::Llm | Source::Patched | Source::Repaired
+            )
+            && let Some(before) = target.as_ref()
+        {
+            match op.kind {
+                OperationKind::Command(Effect::Update) if !generated.new_record => {
+                    tokens::after_update(&mut state, session, before, &tokens).await;
+                }
+                OperationKind::Command(Effect::Delete) => {
+                    tokens::after_delete(
+                        &mut state,
+                        session,
+                        &before.resource_type,
+                        &before.id,
+                        &tokens,
+                    )
+                    .await;
+                }
+                _ => {}
             }
         }
         // After the effects: one on the resource means it shows the write.
