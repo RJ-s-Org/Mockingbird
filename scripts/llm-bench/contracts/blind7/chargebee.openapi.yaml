@@ -1,0 +1,502 @@
+openapi: 3.0.3
+info:
+  title: Chargebee API v2 (customers, promotional credits, comments)
+  version: "2.0.0"
+  description: |
+    A subset of the Chargebee API v2, written from its public documentation.
+    Requests that change something are POSTs with `application/x-www-form-urlencoded`
+    bodies; nested attributes use brackets (`billing_address[city]=Lisbon`). Reads
+    are GETs. Every answer wraps the resource in a key named after it:
+    `{"customer": {...}}`, `{"promotional_credit": {...}}`, `{"comment": {...}}`.
+
+    Money is in the currency's minor unit as an integer: 1250 is 12.50 EUR.
+    Timestamps (`created_at`, `updated_at`) are Unix epoch seconds as integers.
+
+    A customer's `id` can be given on create; it is unique, and a create with an id
+    in use is refused with 400 and `api_error_code` `duplicate_entry`. An update is a
+    POST to the customer's URL and changes only the attributes it is sent. Adding
+    promotional credits raises the customer's `promotional_credits` balance by the
+    amount and deducting lowers it; each change is a promotional credit record whose
+    `closing_balance` is the balance after it. A deleted customer answers 404 with
+    `api_error_code` `resource_not_found`, as does an unknown id.
+
+    Lists answer `list`, an array of wrapped resources, and `next_offset` when more
+    remain; send it back as `offset` to read the next page. `limit` is 1 to 100
+    (default 10). Filters take an operator in brackets: `email[is]=ana@example.org`,
+    `company[is]=...`, `entity_id[is]=...`.
+servers:
+  - url: https://{site}.chargebee.com
+    variables:
+      site: {default: acme-test}
+security:
+  - basic: []
+tags:
+  - name: Customers
+  - name: Promotional credits
+  - name: Comments
+paths:
+  /api/v2/customers:
+    get:
+      tags: [Customers]
+      operationId: list_customers
+      summary: List customers
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - {name: "email[is]", in: query, schema: {type: string}, description: "Customers with exactly this email."}
+        - {name: "company[is]", in: query, schema: {type: string}, description: "Customers with exactly this company."}
+        - {name: "first_name[is]", in: query, schema: {type: string}}
+        - {name: "last_name[is]", in: query, schema: {type: string}}
+        - name: "sort_by[asc]"
+          in: query
+          schema: {type: string, enum: [created_at, updated_at]}
+        - name: "sort_by[desc]"
+          in: query
+          schema: {type: string, enum: [created_at, updated_at]}
+      responses:
+        "200":
+          description: A page of customers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [list]
+                properties:
+                  list:
+                    type: array
+                    items:
+                      type: object
+                      required: [customer]
+                      properties:
+                        customer: {$ref: "#/components/schemas/Customer"}
+                  next_offset: {$ref: "#/components/schemas/NextOffset"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Customers]
+      operationId: create_customer
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: "#/components/schemas/CustomerForm"}
+      responses:
+        "200":
+          description: The created customer.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CustomerResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v2/customers/{customer_id}:
+    parameters:
+      - $ref: "#/components/parameters/customer_id"
+    get:
+      tags: [Customers]
+      operationId: retrieve_customer
+      summary: Retrieve a customer
+      responses:
+        "200":
+          description: The customer, with its current credit balances.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CustomerResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Customers]
+      operationId: update_customer
+      summary: Update a customer
+      description: Changes only the attributes sent; the others keep their values.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                first_name: {type: string, maxLength: 150}
+                last_name: {type: string, maxLength: 150}
+                email: {type: string, format: email}
+                company: {type: string, maxLength: 250}
+                phone: {type: string}
+                preferred_currency_code: {type: string, pattern: "^[A-Z]{3}$"}
+                net_term_days: {type: integer}
+                auto_collection: {type: string, enum: ["on", "off"]}
+                locale: {type: string}
+      responses:
+        "200":
+          description: The updated customer.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CustomerResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/customers/{customer_id}/delete:
+    parameters:
+      - $ref: "#/components/parameters/customer_id"
+    post:
+      tags: [Customers]
+      operationId: delete_customer
+      summary: Delete a customer
+      description: The customer answers 404 afterwards.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                delete_payment_method: {type: boolean, default: true}
+      responses:
+        "200":
+          description: The deleted customer.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CustomerResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/promotional_credits/add:
+    post:
+      tags: [Promotional credits]
+      operationId: add_promotional_credits
+      summary: Add promotional credits to a customer
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: "#/components/schemas/CreditForm"}
+      responses:
+        "200":
+          description: The credit record and the customer with its new balance.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CreditResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/promotional_credits/deduct:
+    post:
+      tags: [Promotional credits]
+      operationId: deduct_promotional_credits
+      summary: Deduct promotional credits from a customer
+      description: The amount cannot be more than the customer's balance; that is refused with 400.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: "#/components/schemas/CreditForm"}
+      responses:
+        "200":
+          description: The credit record and the customer with its new balance.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CreditResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/promotional_credits:
+    get:
+      tags: [Promotional credits]
+      operationId: list_promotional_credits
+      summary: List promotional credit records
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - {name: "customer_id[is]", in: query, schema: {type: string}, description: "Records of this customer."}
+        - name: "type[is]"
+          in: query
+          schema: {type: string, enum: [increment, decrement]}
+      responses:
+        "200":
+          description: A page of credit records, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [list]
+                properties:
+                  list:
+                    type: array
+                    items:
+                      type: object
+                      required: [promotional_credit]
+                      properties:
+                        promotional_credit: {$ref: "#/components/schemas/PromotionalCredit"}
+                  next_offset: {$ref: "#/components/schemas/NextOffset"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/v2/comments:
+    get:
+      tags: [Comments]
+      operationId: list_comments
+      summary: List comments
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - name: entity_type
+          in: query
+          schema: {$ref: "#/components/schemas/EntityType"}
+        - {name: entity_id, in: query, schema: {type: string}, description: "Comments on this entity."}
+      responses:
+        "200":
+          description: A page of comments, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [list]
+                properties:
+                  list:
+                    type: array
+                    items:
+                      type: object
+                      required: [comment]
+                      properties:
+                        comment: {$ref: "#/components/schemas/Comment"}
+                  next_offset: {$ref: "#/components/schemas/NextOffset"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Comments]
+      operationId: create_comment
+      summary: Add a comment to an entity
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [entity_type, entity_id, notes]
+              properties:
+                entity_type: {$ref: "#/components/schemas/EntityType"}
+                entity_id: {type: string}
+                notes: {type: string, maxLength: 1000}
+                added_by: {type: string}
+      responses:
+        "200":
+          description: The created comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CommentResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/comments/{comment_id}:
+    parameters:
+      - {name: comment_id, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Comments]
+      operationId: retrieve_comment
+      summary: Retrieve a comment
+      responses:
+        "200":
+          description: The comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CommentResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v2/comments/{comment_id}/delete:
+    parameters:
+      - {name: comment_id, in: path, required: true, schema: {type: string}}
+    post:
+      tags: [Comments]
+      operationId: delete_comment
+      summary: Delete a comment
+      responses:
+        "200":
+          description: The deleted comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CommentResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+      description: The site's API key as the user name and an empty password.
+  parameters:
+    customer_id:
+      name: customer_id
+      in: path
+      required: true
+      schema: {type: string, maxLength: 50}
+    limit:
+      name: limit
+      in: query
+      description: Resources per page.
+      schema: {type: integer, minimum: 1, maximum: 100, default: 10}
+    offset:
+      name: offset
+      in: query
+      description: The `next_offset` of the previous page.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: |
+        A parameter is missing or not valid (`api_error_code` `invalid_request` or
+        `param_wrong_value`), or a value that must be unique is in use
+        (`duplicate_entry`, with `param` naming it).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: The API key is missing or not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No resource has the id (`api_error_code` `resource_not_found`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [message, api_error_code, http_status_code]
+      properties:
+        message: {type: string}
+        type: {type: string, enum: [payment, invalid_request, operation_failed]}
+        api_error_code:
+          type: string
+          example: duplicate_entry
+          description: |
+            What went wrong: `duplicate_entry`, `resource_not_found`,
+            `invalid_request`, `param_wrong_value`, `api_authentication_failed` and so on.
+        error_code: {type: string}
+        param: {type: string, description: "The parameter at fault, when there is one."}
+        http_status_code: {type: integer}
+    NextOffset:
+      type: string
+      description: Present when more resources remain; send it as `offset` for the next page.
+    EntityType:
+      type: string
+      enum: [customer, subscription, invoice, quote, credit_note, transaction, plan, addon, coupon, order,
+             item_family, item, item_price]
+    Timestamp:
+      type: integer
+      format: int64
+      description: Unix epoch seconds.
+      example: 1762160400
+    BillingAddress:
+      type: object
+      properties:
+        first_name: {type: string}
+        last_name: {type: string}
+        email: {type: string, format: email}
+        company: {type: string}
+        line1: {type: string}
+        line2: {type: string}
+        city: {type: string}
+        state: {type: string}
+        zip: {type: string}
+        country: {type: string, pattern: "^[A-Z]{2}$"}
+        validation_status: {type: string, enum: [not_validated, valid, partially_valid, invalid]}
+        object: {type: string, enum: [billing_address]}
+    CustomerForm:
+      type: object
+      properties:
+        id: {type: string, maxLength: 50, description: "The customer's id; generated when not given. Unique."}
+        first_name: {type: string, maxLength: 150}
+        last_name: {type: string, maxLength: 150}
+        email: {type: string, format: email}
+        company: {type: string, maxLength: 250}
+        phone: {type: string}
+        preferred_currency_code: {type: string, pattern: "^[A-Z]{3}$"}
+        net_term_days: {type: integer, default: 0}
+        auto_collection: {type: string, enum: ["on", "off"], default: "on"}
+        locale: {type: string}
+        "billing_address[first_name]": {type: string}
+        "billing_address[last_name]": {type: string}
+        "billing_address[line1]": {type: string}
+        "billing_address[city]": {type: string}
+        "billing_address[zip]": {type: string}
+        "billing_address[country]": {type: string, pattern: "^[A-Z]{2}$"}
+    Customer:
+      type: object
+      required: [id, auto_collection, net_term_days, allow_direct_debit, created_at, taxability, deleted, object,
+                 promotional_credits, refundable_credits, excess_payments, unbilled_charges, resource_version]
+      properties:
+        id: {type: string}
+        first_name: {type: string}
+        last_name: {type: string}
+        email: {type: string, format: email}
+        company: {type: string}
+        phone: {type: string}
+        preferred_currency_code: {type: string}
+        auto_collection: {type: string, enum: ["on", "off"]}
+        net_term_days: {type: integer}
+        allow_direct_debit: {type: boolean}
+        taxability: {type: string, enum: [taxable, exempt]}
+        locale: {type: string}
+        billing_address: {$ref: "#/components/schemas/BillingAddress"}
+        created_at: {$ref: "#/components/schemas/Timestamp"}
+        updated_at: {$ref: "#/components/schemas/Timestamp"}
+        resource_version: {type: integer, format: int64, description: "Changes on every update; in milliseconds."}
+        deleted: {type: boolean}
+        object: {type: string, enum: [customer]}
+        promotional_credits: {type: integer, description: "The promotional credit balance in the minor unit."}
+        refundable_credits: {type: integer, description: "In the minor unit."}
+        excess_payments: {type: integer, description: "In the minor unit."}
+        unbilled_charges: {type: integer, description: "In the minor unit."}
+        card_status: {type: string, enum: [no_card, valid, expiring, expired]}
+    CustomerResult:
+      type: object
+      required: [customer]
+      properties:
+        customer: {$ref: "#/components/schemas/Customer"}
+    CreditForm:
+      type: object
+      required: [customer_id, amount, description]
+      properties:
+        customer_id: {type: string}
+        amount: {type: integer, minimum: 1, description: "In the minor unit of the currency."}
+        currency_code: {type: string, pattern: "^[A-Z]{3}$"}
+        description: {type: string, maxLength: 250}
+        credit_type: {type: string, enum: [loyalty_credits, referral_rewards, general], default: general}
+        reference: {type: string, maxLength: 500}
+    PromotionalCredit:
+      type: object
+      required: [id, customer_id, type, amount, currency_code, description, credit_type, closing_balance,
+                 created_at, object]
+      properties:
+        id: {type: string, example: pc_16CQtCTrgrYwi9n2E}
+        customer_id: {type: string}
+        type: {type: string, enum: [increment, decrement], description: "increment for an add, decrement for a deduct."}
+        amount: {type: integer, description: "In the minor unit."}
+        amount_in_decimal: {type: string}
+        currency_code: {type: string}
+        description: {type: string}
+        credit_type: {type: string, enum: [loyalty_credits, referral_rewards, general]}
+        reference: {type: string}
+        closing_balance: {type: integer, description: "The customer's balance after this change; in the minor unit."}
+        done_by: {type: string}
+        created_at: {$ref: "#/components/schemas/Timestamp"}
+        object: {type: string, enum: [promotional_credit]}
+    CreditResult:
+      type: object
+      required: [customer, promotional_credit]
+      properties:
+        customer: {$ref: "#/components/schemas/Customer"}
+        promotional_credit: {$ref: "#/components/schemas/PromotionalCredit"}
+    Comment:
+      type: object
+      required: [id, entity_type, entity_id, notes, type, created_at, object]
+      properties:
+        id: {type: string, example: cmt_3Nl8ArbS5g7o9NU}
+        entity_type: {$ref: "#/components/schemas/EntityType"}
+        entity_id: {type: string}
+        notes: {type: string}
+        added_by: {type: string}
+        type: {type: string, enum: [user, system]}
+        created_at: {$ref: "#/components/schemas/Timestamp"}
+        object: {type: string, enum: [comment]}
+    CommentResult:
+      type: object
+      required: [comment]
+      properties:
+        comment: {$ref: "#/components/schemas/Comment"}

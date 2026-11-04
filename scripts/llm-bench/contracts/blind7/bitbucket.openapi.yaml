@@ -1,0 +1,619 @@
+openapi: 3.0.3
+info:
+  title: Bitbucket Cloud REST API 2.0 (repositories, pull requests, comments)
+  version: "2.0"
+  description: |
+    A subset of the Bitbucket Cloud REST API 2.0, written from its public
+    documentation. Resources nest under the workspace and the repository:
+    `/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/comments/{comment_id}`.
+    A repository is created at its own URL; its `full_name` is
+    `{workspace}/{repo_slug}`, and a slug already in use in the workspace is refused
+    with 400.
+
+    Pull request ids are integers counted from 1 within each repository: each new
+    pull request takes the next id. A pull request is created `OPEN` from a source
+    branch to a destination branch. `/decline` makes it `DECLINED` and `/merge` makes
+    it `MERGED`; it keeps that state afterwards. Listing pull requests answers only
+    the states asked for with `state`, and only `OPEN` ones when no state is given.
+    `comment_count` counts the comments that are not deleted.
+
+    A comment's text is `content.raw`. Deleting a comment answers 204; the comment is
+    kept, and reads afterwards with `deleted` true. A `PUT` changes only the fields
+    sent.
+
+    Lists are pages of `values` with `pagelen` (items per page, 1 to 50, default 10),
+    `page` (from 1), `size` (all items) and `next`, the URL of the next page, absent
+    on the last one. Errors are `{"type": "error", "error": {"message": ...}}`; an
+    unknown workspace, repository, pull request or comment answers 404.
+servers:
+  - url: https://api.bitbucket.org
+security:
+  - bearer: []
+tags:
+  - name: Repositories
+  - name: Pull requests
+  - name: Comments
+paths:
+  /2.0/repositories/{workspace}/{repo_slug}:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+    get:
+      tags: [Repositories]
+      operationId: getRepository
+      summary: Get a repository
+      responses:
+        "200":
+          description: The repository.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Repository"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Repositories]
+      operationId: createRepository
+      summary: Create a repository
+      description: Creates the repository at this URL. A slug in use in the workspace is refused with 400.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scm: {type: string, enum: [git], default: git}
+                is_private: {type: boolean, default: true}
+                description: {type: string}
+                language: {type: string}
+                fork_policy: {type: string, enum: [allow_forks, no_public_forks, no_forks]}
+                project:
+                  type: object
+                  properties:
+                    key: {type: string}
+      responses:
+        "200":
+          description: The created repository.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Repository"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Repositories]
+      operationId: deleteRepository
+      summary: Delete a repository
+      responses:
+        "204":
+          description: Deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /2.0/repositories/{workspace}/{repo_slug}/pullrequests:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+    get:
+      tags: [Pull requests]
+      operationId: listPullRequests
+      summary: List a repository's pull requests
+      parameters:
+        - name: state
+          in: query
+          description: The states to list; repeat it for more than one. Only OPEN when not given.
+          schema:
+            type: array
+            items: {$ref: "#/components/schemas/PullRequestState"}
+          style: form
+          explode: true
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pagelen"
+      responses:
+        "200":
+          description: A page of pull requests, newest first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      values:
+                        type: array
+                        items: {$ref: "#/components/schemas/PullRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Pull requests]
+      operationId: createPullRequest
+      summary: Create a pull request
+      description: The pull request is OPEN and takes the repository's next id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, source]
+              properties:
+                title: {type: string}
+                description: {type: string}
+                source: {$ref: "#/components/schemas/Endpoint"}
+                destination:
+                  allOf:
+                    - $ref: "#/components/schemas/Endpoint"
+                  description: The repository's main branch when not given.
+                close_source_branch: {type: boolean, default: false}
+                reviewers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      uuid: {type: string}
+      responses:
+        "201":
+          description: The created pull request.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PullRequest"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+      - $ref: "#/components/parameters/pull_request_id"
+    get:
+      tags: [Pull requests]
+      operationId: getPullRequest
+      summary: Get a pull request
+      responses:
+        "200":
+          description: The pull request, in its current state.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PullRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Pull requests]
+      operationId: updatePullRequest
+      summary: Update a pull request
+      description: Changes only the fields sent; the branches stay unless sent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: {type: string}
+                description: {type: string}
+                destination: {$ref: "#/components/schemas/Endpoint"}
+                close_source_branch: {type: boolean}
+      responses:
+        "200":
+          description: The updated pull request.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PullRequest"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/decline:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+      - $ref: "#/components/parameters/pull_request_id"
+    post:
+      tags: [Pull requests]
+      operationId: declinePullRequest
+      summary: Decline a pull request
+      responses:
+        "200":
+          description: The pull request, now DECLINED.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PullRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/merge:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+      - $ref: "#/components/parameters/pull_request_id"
+    post:
+      tags: [Pull requests]
+      operationId: mergePullRequest
+      summary: Merge a pull request
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: {type: string}
+                close_source_branch: {type: boolean}
+                merge_strategy: {type: string, enum: [merge_commit, squash, fast_forward], default: merge_commit}
+      responses:
+        "200":
+          description: The pull request, now MERGED.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PullRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/comments:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+      - $ref: "#/components/parameters/pull_request_id"
+    get:
+      tags: [Comments]
+      operationId: listPullRequestComments
+      summary: List a pull request's comments
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pagelen"
+      responses:
+        "200":
+          description: A page of comments, oldest first, deleted ones included.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      values:
+                        type: array
+                        items: {$ref: "#/components/schemas/Comment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Comments]
+      operationId: createPullRequestComment
+      summary: Comment on a pull request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: object
+                  required: [raw]
+                  properties:
+                    raw: {type: string, description: The text in Markdown.}
+                parent:
+                  type: object
+                  description: The comment this one replies to.
+                  properties:
+                    id: {type: integer}
+                inline:
+                  type: object
+                  properties:
+                    path: {type: string}
+                    to: {type: integer, nullable: true}
+                    from: {type: integer, nullable: true}
+      responses:
+        "201":
+          description: The created comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Comment"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pull_request_id}/comments/{comment_id}:
+    parameters:
+      - $ref: "#/components/parameters/workspace"
+      - $ref: "#/components/parameters/repo_slug"
+      - $ref: "#/components/parameters/pull_request_id"
+      - {name: comment_id, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Comments]
+      operationId: getPullRequestComment
+      summary: Get a comment
+      description: A deleted comment still answers, with `deleted` true.
+      responses:
+        "200":
+          description: The comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Comment"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    put:
+      tags: [Comments]
+      operationId: updatePullRequestComment
+      summary: Update a comment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: object
+                  required: [raw]
+                  properties:
+                    raw: {type: string}
+      responses:
+        "200":
+          description: The updated comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Comment"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Comments]
+      operationId: deletePullRequestComment
+      summary: Delete a comment
+      description: The comment is kept and reads with `deleted` true afterwards.
+      responses:
+        "204":
+          description: Deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A repository, project or workspace access token, or an OAuth 2.0 access token.
+  parameters:
+    workspace:
+      name: workspace
+      in: path
+      required: true
+      description: "The workspace's slug, or its UUID in braces."
+      schema: {type: string}
+    repo_slug:
+      name: repo_slug
+      in: path
+      required: true
+      description: "The repository's slug, or its UUID in braces."
+      schema: {type: string}
+    pull_request_id:
+      name: pull_request_id
+      in: path
+      required: true
+      schema: {type: integer}
+    page:
+      name: page
+      in: query
+      description: The page to read, from 1.
+      schema: {type: integer, minimum: 1, default: 1}
+    pagelen:
+      name: pagelen
+      in: query
+      description: Items per page.
+      schema: {type: integer, minimum: 1, maximum: 50, default: 10}
+  responses:
+    BadRequest:
+      description: The request is not valid, such as a repository slug already in use.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: No valid credentials.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No such workspace, repository, pull request or comment.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Conflict:
+      description: The pull request is not open, so it cannot be declined or merged.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [type, error]
+      properties:
+        type: {type: string, enum: [error]}
+        error:
+          type: object
+          required: [message]
+          properties:
+            message: {type: string}
+            detail: {type: string}
+            fields:
+              type: object
+              additionalProperties:
+                type: array
+                items: {type: string}
+    Link:
+      type: object
+      properties:
+        href: {type: string, format: uri}
+        name: {type: string}
+    Page:
+      type: object
+      required: [pagelen, values]
+      properties:
+        size: {type: integer, description: The number of items in all pages.}
+        page: {type: integer, description: "This page's number, from 1."}
+        pagelen: {type: integer, description: Items per page.}
+        next: {type: string, format: uri, description: The next page's URL; absent on the last page.}
+        previous: {type: string, format: uri}
+        values:
+          type: array
+          items: {}
+    Account:
+      type: object
+      required: [type, uuid, display_name]
+      properties:
+        type: {type: string, enum: [user, team, app_user]}
+        uuid: {type: string, example: "{c5a0d676-fd27-4bd4-ac69-a7540d7b495b}"}
+        account_id: {type: string}
+        nickname: {type: string}
+        display_name: {type: string}
+        links:
+          type: object
+          properties:
+            self: {$ref: "#/components/schemas/Link"}
+            avatar: {$ref: "#/components/schemas/Link"}
+            html: {$ref: "#/components/schemas/Link"}
+    Repository:
+      type: object
+      required: [type, uuid, full_name, name, slug, is_private, scm, created_on, updated_on, links]
+      properties:
+        type: {type: string, enum: [repository]}
+        uuid: {type: string, example: "{0b8f7a3b-4b1e-4d4f-9c8a-2f3c1f9d6e21}"}
+        full_name: {type: string, description: "`{workspace}/{repo_slug}`."}
+        name: {type: string}
+        slug: {type: string}
+        description: {type: string}
+        is_private: {type: boolean}
+        scm: {type: string, enum: [git]}
+        language: {type: string}
+        fork_policy: {type: string, enum: [allow_forks, no_public_forks, no_forks]}
+        size: {type: integer}
+        has_issues: {type: boolean}
+        has_wiki: {type: boolean}
+        mainbranch:
+          type: object
+          properties:
+            type: {type: string, enum: [branch]}
+            name: {type: string, example: main}
+        workspace:
+          type: object
+          properties:
+            type: {type: string, enum: [workspace]}
+            slug: {type: string}
+            name: {type: string}
+            uuid: {type: string}
+        owner: {$ref: "#/components/schemas/Account"}
+        created_on: {type: string, format: date-time}
+        updated_on: {type: string, format: date-time}
+        links:
+          type: object
+          properties:
+            self: {$ref: "#/components/schemas/Link"}
+            html: {$ref: "#/components/schemas/Link"}
+            pullrequests: {$ref: "#/components/schemas/Link"}
+            clone:
+              type: array
+              items: {$ref: "#/components/schemas/Link"}
+    PullRequestState:
+      type: string
+      enum: [OPEN, MERGED, DECLINED, SUPERSEDED]
+    Endpoint:
+      type: object
+      required: [branch]
+      properties:
+        branch:
+          type: object
+          required: [name]
+          properties:
+            name: {type: string}
+        commit:
+          type: object
+          properties:
+            hash: {type: string}
+        repository:
+          type: object
+          properties:
+            full_name: {type: string}
+            uuid: {type: string}
+    PullRequest:
+      type: object
+      required: [type, id, title, state, author, source, destination, comment_count, task_count,
+                 close_source_branch, created_on, updated_on, links]
+      properties:
+        type: {type: string, enum: [pullrequest]}
+        id: {type: integer, description: Counted from 1 within the repository.}
+        title: {type: string}
+        description: {type: string}
+        summary:
+          type: object
+          properties:
+            raw: {type: string}
+            markup: {type: string, enum: [markdown, creole, plaintext]}
+            html: {type: string}
+        state: {$ref: "#/components/schemas/PullRequestState"}
+        author: {$ref: "#/components/schemas/Account"}
+        source: {$ref: "#/components/schemas/Endpoint"}
+        destination: {$ref: "#/components/schemas/Endpoint"}
+        merge_commit:
+          type: object
+          nullable: true
+          properties:
+            hash: {type: string}
+        comment_count: {type: integer, description: The comments that are not deleted.}
+        task_count: {type: integer}
+        close_source_branch: {type: boolean}
+        closed_by:
+          allOf:
+            - $ref: "#/components/schemas/Account"
+          nullable: true
+        reason: {type: string, description: Why it was declined.}
+        created_on: {type: string, format: date-time}
+        updated_on: {type: string, format: date-time}
+        reviewers:
+          type: array
+          items: {$ref: "#/components/schemas/Account"}
+        links:
+          type: object
+          properties:
+            self: {$ref: "#/components/schemas/Link"}
+            html: {$ref: "#/components/schemas/Link"}
+            comments: {$ref: "#/components/schemas/Link"}
+            approve: {$ref: "#/components/schemas/Link"}
+            decline: {$ref: "#/components/schemas/Link"}
+            merge: {$ref: "#/components/schemas/Link"}
+            diff: {$ref: "#/components/schemas/Link"}
+    Comment:
+      type: object
+      required: [type, id, content, user, deleted, created_on, updated_on, pullrequest, links]
+      properties:
+        type: {type: string, enum: [pullrequest_comment]}
+        id: {type: integer}
+        content:
+          type: object
+          required: [raw]
+          properties:
+            raw: {type: string}
+            markup: {type: string, enum: [markdown, creole, plaintext]}
+            html: {type: string}
+        user: {$ref: "#/components/schemas/Account"}
+        deleted: {type: boolean, description: True once the comment is deleted.}
+        pending: {type: boolean}
+        parent:
+          type: object
+          properties:
+            id: {type: integer}
+        inline:
+          type: object
+          properties:
+            path: {type: string}
+            to: {type: integer, nullable: true}
+            from: {type: integer, nullable: true}
+        pullrequest:
+          type: object
+          required: [type, id]
+          properties:
+            type: {type: string, enum: [pullrequest]}
+            id: {type: integer, description: The pull request the comment is on.}
+            title: {type: string}
+        created_on: {type: string, format: date-time}
+        updated_on: {type: string, format: date-time}
+        links:
+          type: object
+          properties:
+            self: {$ref: "#/components/schemas/Link"}
+            html: {$ref: "#/components/schemas/Link"}

@@ -55,6 +55,10 @@ Suites (contracts are in-repo, so the bench is reproducible):
   `scripts/llm-bench/contracts/blind6/`: Dropbox folders, Klaviyo profiles and lists,
   WooCommerce products and orders, Statuspage incidents and Zoho Books invoices. Not
   in the default suites. Same rule; no check gates the rest.
+- journeys_blind7: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind7/`: Linear issues (GraphQL), Mollie payments,
+  Chargebee customers and credits, Bitbucket pull requests and Cloudflare DNS
+  records. Not in the default suites. Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -90,7 +94,7 @@ from datetime import datetime, timedelta, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
-          "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6")
+          "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -3981,6 +3985,529 @@ def run_journeys_blind6(srv, sink, args):
             run_one_journey(name, steps, srv, sink, args, rep)
 
 
+# ---------------------------------------------------------------- seventh blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind7/). They were picked for
+# API styles: a GraphQL schema with Relay connections, filters and archiving (Linear),
+# HAL documents with _links, amounts as currency and decimal strings and from/limit
+# paging (Mollie), form-encoded bodies with bracketed keys, money in minor units and
+# epoch-second timestamps, inside resource-named wrappers (Chargebee), resources three
+# levels deep with a next URL in the body and soft-deleted comments (Bitbucket), and a
+# success/errors/result envelope with result_info, numbered error codes and a batch
+# endpoint (Cloudflare). No check gates the rest: a journey goes on with an id of its
+# own when a call gave none. A check asserts only what its contract promises a client.
+# Do not edit a check to suit results.
+BLIND7_CHECKS = {
+    "linear": [
+        "team keeps its name and key", "issue keeps its title and team", "identifier carries the team key",
+        "read matches the created issue", "update changes the priority and keeps the title",
+        "first 1 answers one issue and a cursor", "after the cursor reaches the other issue",
+        "priority filter finds only the urgent issue", "comment keeps its body and issue",
+        "issue comments hold the comment", "archived issue reads with archivedAt",
+        "archived issue leaves the team's issues", "includeArchived lists the archived issue",
+        "deleted comment is not found",
+    ],
+    "mollie": [
+        "customer keeps its name and email", "customer links to itself", "update changes the locale and keeps the email",
+        "payment keeps its amount and customer", "a new payment is open", "payment links to its customer",
+        "an amount without two decimals is refused", "read matches the created payment",
+        "limit 1 answers one payment and a next link", "next link reaches the other payment",
+        "payment update changes the description and keeps the amount", "cancel answers the canceled payment",
+        "canceled payment reads as canceled", "deleted customer is not found",
+    ],
+    "chargebee": [
+        "customer keeps its id, names and email", "customer keeps its billing address", "created_at counts seconds",
+        "a taken id is refused", "read matches the created customer", "update changes the company and keeps the email",
+        "added credits raise the balance in minor units", "a deduction closes at the rest",
+        "customer reads the remaining credits", "limit 1 answers one customer and a next_offset",
+        "next_offset reaches the other customer", "email filter finds only the customer",
+        "customer comments list the note", "deleted customer is not found",
+    ],
+    "bitbucket": [
+        "repository keeps its full name", "a taken slug is refused", "pull request opens on its branches",
+        "read matches the created pull request", "update changes the title and keeps the branches",
+        "comment keeps its text and pull request", "pagelen 1 answers one comment and a next link",
+        "next reaches the other comment", "pull request counts its comments", "a deleted comment reads as deleted",
+        "comment_count leaves out the deleted comment", "the next pull request takes the next id",
+        "declined pull request reads as declined", "open list leaves out the declined one",
+    ],
+    "cloudflare": [
+        "zone keeps its name", "record answers the full name", "an identical record is refused",
+        "read matches the created record", "patch changes the content sent", "patch keeps the fields it was not sent",
+        "type filter lists only A records", "result_info counts the matching records", "name filter finds only the record",
+        "put replaces the record", "batch answers each change", "a batch patch reads back",
+        "a batch delete removes the record", "deleted record leaves the zone's records",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND7_CHECKS)
+BLIND7_DIR = "scripts/llm-bench/contracts/blind7"
+BLIND7_CONTRACTS = {"linear": "linear.graphql"}
+# Contracts alone: no persona.
+BLIND7_MOCKS = {name: (f"{BLIND7_DIR}/{BLIND7_CONTRACTS.get(name, f'{name}.openapi.yaml')}", f"/{name}", None)
+                for name in BLIND7_CHECKS}
+UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def query_value(url, name):
+    """The first value of query parameter `name` in `url`, or None."""
+    if not isinstance(url, str):
+        return None
+    values = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get(name)
+    return values[0] if values else None
+
+
+def linear_steps(j):
+    # One POST /graphql per call, each with its selection set. The team is new, so its
+    # issues are the two made here; the second one is archived, which takes it out of
+    # the team's list until a list asks for archived issues.
+    j.headers["authorization"] = "lin_api_bench-placeholder"
+    tag = j.rng.randrange(10**5, 10**6)
+    fields = "id identifier number title description priority archivedAt team { id key }"
+
+    def gql(query, **variables):
+        answer = obj(j.call("POST", "/graphql", body={"query": query, "variables": variables}))
+        return obj(answer.get("data")), answer.get("errors")
+
+    def own(value):
+        return value if isinstance(value, str) and value else str(uuid.UUID(int=j.rng.getrandbits(128), version=4))
+
+    def issue(iid, selection=fields):
+        return obj(gql(f"query($id: String!) {{ issue(id: $id) {{ {selection} }} }}", id=iid)[0].get("issue"))
+
+    def create(sent):
+        data, _ = gql(f"mutation($input: IssueCreateInput!) {{ issueCreate(input: $input) {{ success issue {{ {fields} }} }} }}",
+                      input=sent)
+        return obj(obj(data.get("issueCreate")).get("issue"))
+
+    def listed(filt, **extra):
+        args = "".join(f", ${k}: {t}" for k, t in (("first", "Int"), ("after", "String"), ("archived", "Boolean"))
+                       if k in extra)
+        use = "".join(f", {'includeArchived' if k == 'archived' else k}: ${k}"
+                      for k in ("first", "after", "archived") if k in extra)
+        data, _ = gql(f"query($filter: IssueFilter{args}) {{ issues(filter: $filter{use}) "
+                      "{ nodes { id } pageInfo { hasNextPage endCursor } } }", filter=filt, **extra)
+        conn = obj(data.get("issues"))
+        return ids_of(conn.get("nodes")), obj(conn.get("pageInfo"))
+
+    key, name = made_up(j, "Q", 3, UPPER), f"Billing {tag}"
+    data, _ = gql("mutation($input: TeamCreateInput!) { teamCreate(input: $input) { success team { id key name } } }",
+                  input={"name": name, "key": key})
+    made = obj(data.get("teamCreate"))
+    team = obj(made.get("team"))
+    j.check("team keeps its name and key",
+            made.get("success") is True and eq(team.get("name"), name) and eq(team.get("key"), key),
+            success=made.get("success"), team=team)
+    tid = own(team.get("id"))
+    sent = {"teamId": tid, "title": f"Invoice totals round wrong {tag}",
+            "description": "Totals are off by one cent on multi-line invoices.", "priority": 2}
+    one = create(sent)
+    j.check("issue keeps its title and team",
+            eq(one.get("title"), sent["title"]) and eq(one.get("priority"), 2) and eq(obj(one.get("team")).get("id"), tid),
+            title=one.get("title"), priority=one.get("priority"), team=one.get("team"))
+    ident, number = one.get("identifier"), one.get("number")
+    j.check("identifier carries the team key",
+            matches(rf"{key}-[0-9]+", ident) and is_number(number) and ident == f"{key}-{int(number)}",
+            identifier=ident, number=number)
+    i1 = own(one.get("id"))
+    read = issue(i1)
+    j.check("read matches the created issue",
+            eq(read.get("id"), i1) and same(read, sent, "title", "description", "priority"),
+            title=read.get("title"), priority=read.get("priority"))
+    data, _ = gql("mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+                  id=i1, input={"priority": 1})
+    updated = obj(data.get("issueUpdate")).get("success")
+    read = issue(i1)
+    j.check("update changes the priority and keeps the title",
+            eq(read.get("priority"), 1) and same(read, sent, "title", "description"),
+            update_success=updated, priority=read.get("priority"), title=read.get("title"))
+    i2 = own(create({"teamId": tid, "title": f"Export drops the header row {tag}", "priority": 3}).get("id"))
+    team_filter = {"team": {"id": {"eq": tid}}}
+    first, info = listed(team_filter, first=1)
+    cursor = info.get("endCursor")
+    j.check("first 1 answers one issue and a cursor",
+            len(first) == 1 and info.get("hasNextPage") is True and isinstance(cursor, str) and bool(cursor),
+            listed=first, page_info=info)
+    rest, info = listed(team_filter, first=1, after=given(cursor, made_up(j, "", 24)))
+    j.check("after the cursor reaches the other issue",
+            len(rest) == 1 and same_items(first + rest, [i1, i2]) and info.get("hasNextPage") is False,
+            first=first, listed=rest, page_info=info)
+    rows, _ = listed(dict(team_filter, priority={"eq": 1}))
+    j.check("priority filter finds only the urgent issue", rows == [i1], listed=rows)
+    body = f"Reproduced on invoice INV-{tag}: 3 lines at 0.335 each."
+    data, _ = gql("mutation($input: CommentCreateInput!) { commentCreate(input: $input) "
+                  "{ success comment { id body issue { id } } } }", input={"issueId": i1, "body": body})
+    comment = obj(obj(data.get("commentCreate")).get("comment"))
+    j.check("comment keeps its body and issue",
+            eq(comment.get("body"), body) and eq(obj(comment.get("issue")).get("id"), i1),
+            body=comment.get("body"), issue=comment.get("issue"))
+    cid = own(comment.get("id"))
+    nodes = obj(issue(i1, "id comments { nodes { id body } }").get("comments")).get("nodes")
+    j.check("issue comments hold the comment", eq(by_id(nodes, cid).get("body"), body), listed=ids_of(nodes))
+    data, _ = gql("mutation($id: String!) { issueArchive(id: $id) { success } }", id=i2)
+    archived = obj(data.get("issueArchive")).get("success")
+    read = issue(i2, "id archivedAt")
+    j.check("archived issue reads with archivedAt", eq(read.get("id"), i2) and instant(read.get("archivedAt")) is not None,
+            archive_success=archived, archivedAt=read.get("archivedAt"))
+    rows, _ = listed(team_filter)
+    j.check("archived issue leaves the team's issues", rows == [i1], listed=rows)
+    rows, _ = listed(team_filter, archived=True)
+    j.check("includeArchived lists the archived issue", same_items(rows, [i1, i2]), listed=rows)
+    data, _ = gql("mutation($id: String!) { commentDelete(id: $id) { success entityId } }", id=cid)
+    deleted = obj(data.get("commentDelete"))
+    data, errors = gql("query($id: String!) { comment(id: $id) { id body } }", id=cid)
+    j.check("deleted comment is not found", bool(dicts(errors)) and not data.get("comment"),
+            delete_success=deleted.get("success"), errors=errors if isinstance(errors, list) else None)
+
+
+def mollie_steps(j):
+    # HAL throughout: links are objects with href. Payments are made for a new customer,
+    # so its list holds the two made here. A bank transfer is cancelable while open.
+    j.headers["authorization"] = "Bearer test_bench-placeholder"
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def own(value, prefix):
+        return value if isinstance(value, str) and value.startswith(prefix) else made_up(j, prefix, 10)
+
+    def link(thing, rel):
+        return obj(obj(obj(thing).get("_links")).get(rel)).get("href")
+
+    def payments(**query):
+        page = obj(j.call("GET", f"/v2/customers/{cid}/payments", query=query))
+        return page, dicts(obj(page.get("_embedded")).get("payments"))
+
+    sent = {"name": f"Ana Silva {tag}", "email": f"ana.{tag}@example.org", "locale": "pt_PT",
+            "metadata": {"ref": f"bench-{tag}"}}
+    made = obj(j.call("POST", "/v2/customers", body=sent))
+    j.check("customer keeps its name and email",
+            j.last["status"] == 201 and eq(made.get("resource"), "customer") and same(made, sent, "name", "email"),
+            resource=made.get("resource"), customer_name=made.get("name"), email=made.get("email"))
+    cid = own(made.get("id"), "cst_")
+    self_link = link(made, "self")
+    j.check("customer links to itself", isinstance(self_link, str) and cid in self_link, self_link=self_link)
+    j.call("PATCH", f"/v2/customers/{cid}", body={"locale": "nl_NL"})
+    patched = j.last["status"]
+    read = obj(j.call("GET", f"/v2/customers/{cid}"))
+    j.check("update changes the locale and keeps the email",
+            eq(read.get("locale"), "nl_NL") and same(read, sent, "name", "email"),
+            patch_status=patched, locale=read.get("locale"), email=read.get("email"))
+    amount = {"currency": "EUR", "value": "24.50"}
+    order = {"amount": amount, "description": f"Order {tag}", "redirectUrl": f"https://shop.example.org/orders/{tag}",
+             "method": "banktransfer", "metadata": {"order_id": f"{tag}"}}
+    pay = obj(j.call("POST", f"/v2/customers/{cid}/payments", body=order))
+    j.check("payment keeps its amount and customer",
+            j.last["status"] == 201 and eq(pay.get("amount"), amount) and eq(pay.get("customerId"), cid),
+            amount=pay.get("amount"), customerId=pay.get("customerId"))
+    j.check("a new payment is open", eq(pay.get("status"), "open"), payment_status=pay.get("status"))
+    customer_link = link(pay, "customer")
+    j.check("payment links to its customer", isinstance(customer_link, str) and cid in customer_link,
+            customer_link=customer_link)
+    p1 = own(pay.get("id"), "tr_")
+    bad = obj(j.call("POST", f"/v2/customers/{cid}/payments",
+                     body=dict(order, amount={"currency": "EUR", "value": "24.5"})))
+    j.check("an amount without two decimals is refused", j.last["status"] == 422 and eq(bad.get("field"), "amount.value"),
+            field=bad.get("field"))
+    read = obj(j.call("GET", f"/v2/payments/{p1}"))
+    j.check("read matches the created payment",
+            eq(read.get("id"), p1) and same(read, order, "description", "amount")
+            and eq(obj(read.get("metadata")).get("order_id"), f"{tag}"),
+            description=read.get("description"), amount=read.get("amount"), metadata=read.get("metadata"))
+    p2 = own(obj(j.call("POST", f"/v2/customers/{cid}/payments", body={
+        "amount": {"currency": "EUR", "value": "9.99"}, "description": f"Order {tag}-2", "method": "banktransfer",
+        "redirectUrl": f"https://shop.example.org/orders/{tag}-2"})).get("id"), "tr_")
+    page, first = payments(limit=1)
+    after = query_value(obj(obj(page.get("_links")).get("next")).get("href"), "from")
+    j.check("limit 1 answers one payment and a next link", len(first) == 1 and eq(page.get("count"), 1) and bool(after),
+            listed=ids_of(first), count=page.get("count"), next=obj(page.get("_links")).get("next"))
+    _, rest = payments(limit=1, **{"from": given(after, p1)})
+    j.check("next link reaches the other payment", len(rest) == 1 and same_items(ids_of(first + rest), [p1, p2]),
+            first=ids_of(first), listed=ids_of(rest))
+    text = f"Order {tag} (gift wrapped)"
+    j.call("PATCH", f"/v2/payments/{p1}", body={"description": text})
+    patched = j.last["status"]
+    read = obj(j.call("GET", f"/v2/payments/{p1}"))
+    j.check("payment update changes the description and keeps the amount",
+            eq(read.get("description"), text) and eq(read.get("amount"), amount),
+            patch_status=patched, description=read.get("description"), amount=read.get("amount"))
+    canceled = obj(j.call("DELETE", f"/v2/payments/{p2}"))
+    j.check("cancel answers the canceled payment", j.last["status"] == 200 and eq(canceled.get("status"), "canceled"),
+            payment_status=canceled.get("status"))
+    read = obj(j.call("GET", f"/v2/payments/{p2}"))
+    j.check("canceled payment reads as canceled",
+            eq(read.get("status"), "canceled") and instant(read.get("canceledAt")) is not None,
+            payment_status=read.get("status"), canceledAt=read.get("canceledAt"))
+    j.call("DELETE", f"/v2/customers/{cid}")
+    deleted = j.last["status"]
+    j.call("GET", f"/v2/customers/{cid}")
+    j.check("deleted customer is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def chargebee_steps(j):
+    # Writes are form posts with bracketed keys; answers wrap each resource in its name.
+    # Credits are in cents: 1250 added, 450 deducted, 800 left. The company is unique to
+    # this run, so its filter matches only the two customers made here.
+    j.headers["authorization"] = "Basic " + base64.b64encode(b"test_bench-placeholder:").decode()
+    tag = j.rng.randrange(10**5, 10**6)
+    api = "/api/v2"
+
+    def customer(value):
+        return obj(obj(value).get("customer"))
+
+    def listed(**query):
+        page = obj(j.call("GET", f"{api}/customers", query=query))
+        return [customer(r).get("id") for r in dicts(page.get("list"))], page.get("next_offset")
+
+    def credit(action, amount):
+        answer = obj(j.call("POST", f"{api}/promotional_credits/{action}", form={
+            "customer_id": c1, "amount": amount, "currency_code": "EUR", "description": f"{action} {tag}"}))
+        return obj(answer.get("promotional_credit")), customer(answer)
+
+    c1, email = f"bench_{tag}", f"ana.{tag}@example.org"
+    form = {"id": c1, "first_name": "Ana", "last_name": "Silva", "email": email, "company": f"Silva {tag}",
+            "preferred_currency_code": "EUR", "billing_address[city]": "Lisbon", "billing_address[country]": "PT"}
+    made = customer(j.call("POST", f"{api}/customers", form=form))
+    j.check("customer keeps its id, names and email",
+            j.last["status"] == 200 and same(made, form, "id", "first_name", "last_name", "email"),
+            id=made.get("id"), first_name=made.get("first_name"), email=made.get("email"))
+    address = obj(made.get("billing_address"))
+    j.check("customer keeps its billing address", eq(address.get("city"), "Lisbon") and eq(address.get("country"), "PT"),
+            billing_address=address)
+    created = made.get("created_at")
+    j.check("created_at counts seconds", is_int(created) and 10**9 <= created < 10**10, created_at=created)
+    dup = obj(j.call("POST", f"{api}/customers", form={"id": c1, "first_name": "Rui", "email": f"rui.{tag}@example.org"}))
+    j.check("a taken id is refused", j.last["status"] == 400 and eq(dup.get("api_error_code"), "duplicate_entry"),
+            api_error_code=dup.get("api_error_code"))
+    read = customer(j.call("GET", f"{api}/customers/{c1}"))
+    j.check("read matches the created customer", same(read, form, "id", "first_name", "last_name", "email", "company"))
+    company = f"Atlas {tag} Lda"
+    j.call("POST", f"{api}/customers/{c1}", form={"company": company})
+    updated = j.last["status"]
+    read = customer(j.call("GET", f"{api}/customers/{c1}"))
+    j.check("update changes the company and keeps the email",
+            eq(read.get("company"), company) and same(read, form, "email", "first_name"),
+            update_status=updated, company=read.get("company"), email=read.get("email"))
+    record, after = credit("add", 1250)
+    j.check("added credits raise the balance in minor units",
+            eq(record.get("amount"), 1250) and eq(record.get("type"), "increment")
+            and eq(after.get("promotional_credits"), 1250),
+            amount=record.get("amount"), type=record.get("type"), balance=after.get("promotional_credits"))
+    record, _ = credit("deduct", 450)
+    j.check("a deduction closes at the rest",
+            eq(record.get("type"), "decrement") and eq(record.get("closing_balance"), 800),
+            type=record.get("type"), closing_balance=record.get("closing_balance"))
+    now = customer(j.call("GET", f"{api}/customers/{c1}")).get("promotional_credits")
+    j.check("customer reads the remaining credits", eq(now, 800), promotional_credits=now)
+    c2 = f"bench_{tag}_b"
+    j.call("POST", f"{api}/customers", form={"id": c2, "first_name": "Rui", "last_name": "Mendes",
+                                             "email": f"rui.{tag}@example.org", "company": company})
+    first, offset = listed(**{"company[is]": company, "limit": 1})
+    j.check("limit 1 answers one customer and a next_offset",
+            len(first) == 1 and first[0] in (c1, c2) and isinstance(offset, str) and bool(offset),
+            listed=first, next_offset=offset)
+    rest, more = listed(**{"company[is]": company, "limit": 1, "offset": given(offset, made_up(j, "", 16))})
+    j.check("next_offset reaches the other customer",
+            len(rest) == 1 and same_items(first + rest, [c1, c2]) and more is None,
+            first=first, listed=rest, next_offset=more)
+    rows, _ = listed(**{"email[is]": email})
+    j.check("email filter finds only the customer", rows == [c1], listed=rows)
+    notes = f"Asked for invoices in Portuguese, ref {tag}."
+    note = obj(obj(j.call("POST", f"{api}/comments", form={
+        "entity_type": "customer", "entity_id": c1, "notes": notes})).get("comment"))
+    nid = given(note.get("id"), made_up(j, "cmt_", 16))
+    rows = [obj(r.get("comment")) for r in dicts(obj(j.call("GET", f"{api}/comments", query={
+        "entity_type": "customer", "entity_id": c1})).get("list"))]
+    j.check("customer comments list the note", eq(by_id(rows, nid).get("notes"), notes), listed=ids_of(rows))
+    j.call("POST", f"{api}/customers/{c2}/delete", form={})
+    deleted = j.last["status"]
+    gone = obj(j.call("GET", f"{api}/customers/{c2}"))
+    j.check("deleted customer is not found",
+            j.last["status"] == 404 and eq(gone.get("api_error_code"), "resource_not_found"),
+            delete_status=deleted, api_error_code=gone.get("api_error_code"))
+
+
+def bitbucket_steps(j):
+    # Everything lives under a repository made for this run, so its pull requests and
+    # comments are the ones made here, and its first pull request is number 1.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    repo = f"/2.0/repositories/bench-team/ledger-{tag}"
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**3, 10**4)
+
+    def pull(n):
+        return obj(j.call("GET", f"{repo}/pullrequests/{n}"))
+
+    def branches(pr):
+        return (obj(obj(pr.get("source")).get("branch")).get("name"),
+                obj(obj(pr.get("destination")).get("branch")).get("name"))
+
+    made = obj(j.call("POST", repo, body={"scm": "git", "is_private": True, "description": "Bench ledger."}))
+    j.check("repository keeps its full name",
+            j.last["status"] == 200 and eq(made.get("full_name"), f"bench-team/ledger-{tag}")
+            and made.get("is_private") is True,
+            full_name=made.get("full_name"), is_private=made.get("is_private"))
+    again = obj(j.call("POST", repo, body={"scm": "git", "is_private": True}))
+    j.check("a taken slug is refused",
+            j.last["status"] == 400 and isinstance(obj(again.get("error")).get("message"), str), error=again.get("error"))
+    source = f"feature/rounding-{tag}"
+    sent = {"title": f"Round invoice totals once {tag}", "description": "Rounds the total, not each line.",
+            "source": {"branch": {"name": source}}, "destination": {"branch": {"name": "main"}}}
+    pr = obj(j.call("POST", f"{repo}/pullrequests", body=sent))
+    j.check("pull request opens on its branches",
+            j.last["status"] == 201 and eq(pr.get("state"), "OPEN") and branches(pr) == (source, "main"),
+            pr_state=pr.get("state"), branches=branches(pr))
+    n1 = own(pr.get("id"))
+    read = pull(n1)
+    j.check("read matches the created pull request",
+            eq(read.get("id"), n1) and same(read, sent, "title", "description") and branches(read) == (source, "main"))
+    title = f"Round invoice totals once, not per line {tag}"
+    j.call("PUT", f"{repo}/pullrequests/{n1}", body={"title": title})
+    put = j.last["status"]
+    read = pull(n1)
+    j.check("update changes the title and keeps the branches",
+            eq(read.get("title"), title) and eq(read.get("description"), sent["description"])
+            and branches(read) == (source, "main"),
+            put_status=put, title=read.get("title"), branches=branches(read))
+    comments = f"{repo}/pullrequests/{n1}/comments"
+    text = f"Totals match the ledger now ({tag})."
+    one = obj(j.call("POST", comments, body={"content": {"raw": text}}))
+    j.check("comment keeps its text and pull request",
+            j.last["status"] == 201 and eq(obj(one.get("content")).get("raw"), text)
+            and eq(obj(one.get("pullrequest")).get("id"), n1),
+            content=one.get("content"), pullrequest=one.get("pullrequest"))
+    c1 = own(one.get("id"))
+    c2 = own(obj(j.call("POST", comments, body={"content": {"raw": f"Can we add a test for 0.335? ({tag})"}})).get("id"))
+    page = obj(j.call("GET", comments, query={"pagelen": 1}))
+    first, nxt = dicts(page.get("values")), page.get("next")
+    j.check("pagelen 1 answers one comment and a next link", len(first) == 1 and isinstance(nxt, str) and bool(nxt),
+            listed=ids_of(first), next=nxt)
+    page = obj(j.call("GET", comments, query={"pagelen": 1, "page": query_value(nxt, "page") or 2}))
+    rest = dicts(page.get("values"))
+    j.check("next reaches the other comment",
+            len(rest) == 1 and same_items(ids_of(first + rest), [c1, c2]) and not page.get("next"),
+            first=ids_of(first), listed=ids_of(rest), next=page.get("next"))
+    count = pull(n1).get("comment_count")
+    j.check("pull request counts its comments", eq(count, 2), comment_count=count)
+    j.call("DELETE", f"{comments}/{c2}")
+    deleted = j.last["status"]
+    gone = obj(j.call("GET", f"{comments}/{c2}"))
+    j.check("a deleted comment reads as deleted", deleted == 204 and gone.get("deleted") is True,
+            delete_status=deleted, deleted=gone.get("deleted"))
+    count = pull(n1).get("comment_count")
+    j.check("comment_count leaves out the deleted comment", eq(count, 1), comment_count=count)
+    two = obj(j.call("POST", f"{repo}/pullrequests", body={
+        "title": f"Export the header row {tag}", "source": {"branch": {"name": f"fix/export-{tag}"}},
+        "destination": {"branch": {"name": "main"}}}))
+    j.check("the next pull request takes the next id", is_int(pr.get("id")) and eq(two.get("id"), pr.get("id") + 1),
+            first_id=pr.get("id"), next_id=two.get("id"))
+    n2 = own(two.get("id"))
+    j.call("POST", f"{repo}/pullrequests/{n2}/decline")
+    declined = j.last["status"]
+    now = pull(n2).get("state")
+    j.check("declined pull request reads as declined", eq(now, "DECLINED"), decline_status=declined, pr_state=now)
+    rows = ids_of(obj(j.call("GET", f"{repo}/pullrequests", query={"state": "OPEN"})).get("values"))
+    j.check("open list leaves out the declined one", rows == [n1], listed=rows)
+
+
+def cloudflare_steps(j):
+    # Every answer is an envelope around `result`. The zone is new, so its records are
+    # the ones made here; short names are answered in full. The batch deletes the TXT
+    # record, patches the api record and adds a CNAME.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    zone_name = f"ledger-{tag}.com"
+
+    def result(value):
+        return obj(obj(value).get("result"))
+
+    def rows_of(value):
+        return dicts(obj(value).get("result"))
+
+    def own(value):
+        return value if matches("[0-9a-f]{32}", value) else hex_id(j, "")
+
+    def code(value):
+        return head(obj(value).get("errors")).get("code")
+
+    zone = obj(j.call("POST", "/client/v4/zones", body={
+        "name": zone_name, "account": {"id": hex_id(j, "")}, "type": "full", "jump_start": False}))
+    z = result(zone)
+    j.check("zone keeps its name",
+            zone.get("success") is True and eq(z.get("name"), zone_name) and matches("[0-9a-f]{32}", z.get("id")),
+            success=zone.get("success"), zone_name=z.get("name"), id=z.get("id"))
+    records = f"/client/v4/zones/{own(z.get('id'))}/dns_records"
+    www_sent = {"type": "A", "name": "www", "content": "203.0.113.10", "ttl": 3600, "proxied": False,
+                "comment": f"web {tag}"}
+    www = result(j.call("POST", records, body=www_sent))
+    full = f"www.{zone_name}"
+    j.check("record answers the full name",
+            eq(www.get("name"), full) and same(www, www_sent, "type", "content"),
+            record_name=www.get("name"), content=www.get("content"))
+    wid = own(www.get("id"))
+    dup = obj(j.call("POST", records, body=www_sent))
+    j.check("an identical record is refused",
+            j.last["status"] == 400 and dup.get("success") is False and eq(code(dup), 81058),
+            success=dup.get("success"), code=code(dup))
+    read = result(j.call("GET", f"{records}/{wid}"))
+    j.check("read matches the created record",
+            eq(read.get("id"), wid) and eq(read.get("name"), full) and same(read, www_sent, "type", "content", "ttl", "comment"))
+    patched = result(j.call("PATCH", f"{records}/{wid}", body={"content": "203.0.113.20"}))
+    j.check("patch changes the content sent", eq(patched.get("content"), "203.0.113.20"), content=patched.get("content"))
+    read = result(j.call("GET", f"{records}/{wid}"))
+    j.check("patch keeps the fields it was not sent",
+            eq(read.get("name"), full) and same(read, www_sent, "type", "ttl", "comment"),
+            ttl=read.get("ttl"), comment=read.get("comment"))
+    api = own(result(j.call("POST", records, body={
+        "type": "A", "name": "api", "content": "203.0.113.30", "ttl": 300, "proxied": False,
+        "comment": f"api {tag}"})).get("id"))
+    txt = own(result(j.call("POST", records, body={
+        "type": "TXT", "name": f"_verify.{zone_name}", "content": f"bench-verify-{tag}", "ttl": 3600})).get("id"))
+    page = obj(j.call("GET", records, query={"type": "A"}))
+    rows = rows_of(page)
+    j.check("type filter lists only A records",
+            same_items(ids_of(rows), [wid, api]) and all(r.get("type") == "A" for r in rows), listed=ids_of(rows))
+    info = obj(page.get("result_info"))
+    j.check("result_info counts the matching records", eq(info.get("count"), 2) and eq(info.get("total_count"), 2),
+            result_info=info)
+    rows = ids_of(rows_of(j.call("GET", records, query={"name": f"api.{zone_name}"})))
+    j.check("name filter finds only the record", rows == [api], listed=rows)
+    j.call("PUT", f"{records}/{api}", body={"type": "A", "name": "api", "content": "203.0.113.31"})
+    put = j.last["status"]
+    read = result(j.call("GET", f"{records}/{api}"))
+    j.check("put replaces the record",
+            eq(read.get("content"), "203.0.113.31") and eq(read.get("ttl"), 1) and not read.get("comment"),
+            put_status=put, content=read.get("content"), ttl=read.get("ttl"), comment=read.get("comment"))
+    batch = result(j.call("POST", f"{records}/batch", body={
+        "deletes": [{"id": txt}], "patches": [{"id": api, "content": "203.0.113.40"}],
+        "posts": [{"type": "CNAME", "name": "docs", "content": full, "ttl": 1, "proxied": False}]}))
+    patch, post = head(batch.get("patches")), head(batch.get("posts"))
+    j.check("batch answers each change",
+            ids_of(batch.get("deletes")) == [txt] and eq(patch.get("id"), api) and eq(patch.get("content"), "203.0.113.40")
+            and eq(post.get("type"), "CNAME") and eq(post.get("name"), f"docs.{zone_name}"),
+            deletes=ids_of(batch.get("deletes")), patch=patch.get("content"), post=post.get("name"))
+    docs = own(post.get("id"))
+    now = result(j.call("GET", f"{records}/{api}")).get("content")
+    j.check("a batch patch reads back", eq(now, "203.0.113.40"), content=now)
+    gone = obj(j.call("GET", f"{records}/{txt}"))
+    j.check("a batch delete removes the record", j.last["status"] == 404 and eq(code(gone), 81044), code=code(gone))
+    j.call("DELETE", f"{records}/{wid}")
+    deleted = j.last["status"]
+    rows = ids_of(rows_of(j.call("GET", records)))
+    j.check("deleted record leaves the zone's records", same_items(rows, [api, docs]),
+            delete_status=deleted, listed=rows)
+
+
+BLIND7_JOURNEYS = {"linear": linear_steps, "mollie": mollie_steps, "chargebee": chargebee_steps,
+                   "bitbucket": bitbucket_steps, "cloudflare": cloudflare_steps}
+
+
+def run_journeys_blind7(srv, sink, args):
+    for rep in range(args.repeat):
+        for name, steps in BLIND7_JOURNEYS.items():
+            run_one_journey(name, steps, srv, sink, args, rep)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -3995,6 +4522,7 @@ RUNNERS = {
     "journeys_blind4": (BLIND4_MOCKS, run_journeys_blind4),
     "journeys_blind5": (BLIND5_MOCKS, run_journeys_blind5),
     "journeys_blind6": (BLIND6_MOCKS, run_journeys_blind6),
+    "journeys_blind7": (BLIND7_MOCKS, run_journeys_blind7),
 }
 
 
