@@ -708,8 +708,19 @@ pub(crate) async fn generate_pending(
             held,
             advancing: &pending.tokens.advancing,
         });
+    // A client's retry of a write answering no body is shown nothing beyond its target,
+    // so it is asked for no effects a second time (see [`write_memory::is_retry`]).
+    pending.retry = write_memory::is_retry(&mut pending.state, plan, call)
+        .instrument(state_span())
+        .await;
+    let repeat = pending.retry && write_memory::answers_no_body(plan);
+    let (related, created_since): (&[StoredResource], &[StoredResource]) = if repeat {
+        (&[], &[])
+    } else {
+        (&pending.related, &pending.created_since)
+    };
     let ctx = GenerationContext {
-        related: &pending.related,
+        related,
         target: pending.target.as_ref(),
         forced_status: plan.forced_status,
         scenario: plan.scenario.map(|s| &s.spec),
@@ -720,7 +731,7 @@ pub(crate) async fn generate_pending(
         earlier_writes: &pending.earlier_writes,
         earlier_origins: &pending.earlier_origins,
         served_cursors: &pending.served_cursors,
-        created_since: &pending.created_since,
+        created_since,
         alongside: &pending.alongside,
         same_values: &pending.same_values,
         changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
@@ -803,6 +814,9 @@ pub(crate) struct Pending<'a> {
     same_values: Vec<(String, String, String)>,
     /// What a write found of its target's concurrency tokens (see [`tokens`]).
     tokens: tokens::Tokens,
+    /// The write is a client's retry of the session's latest (see
+    /// [`write_memory::is_retry`]).
+    retry: bool,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -1123,6 +1137,7 @@ pub(crate) async fn prepare<'a>(
         alongside,
         same_values,
         tokens,
+        retry: false,
     }))
 }
 
@@ -1229,6 +1244,7 @@ pub(crate) async fn complete(
         unlisted,
         same_values,
         tokens,
+        retry,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1637,6 +1653,7 @@ pub(crate) async fn complete(
                 foreign_key,
                 unstored,
                 earlier: &earlier,
+                retry,
             },
         )
         .await;
@@ -1645,7 +1662,7 @@ pub(crate) async fn complete(
             plan,
             call,
             &generated,
-            foreign_key || unstored,
+            (foreign_key || unstored, retry),
         )
         .await;
         // Served as it was answered, holding the record as state now has it.
@@ -3138,6 +3155,11 @@ pub(crate) struct BundleIndex {
     single_reads: HashMap<String, usize>,
     /// Per path a command and a list read by no path parameter share, that list.
     written_lists: HashMap<String, WrittenList>,
+    /// Per path of a command with a path parameter, the list reads one level under its
+    /// parent: the path through its last parameter (see [`SiblingList`]).
+    sibling_lists: HashMap<String, Vec<SiblingList>>,
+    /// The paths of those lists, whose reads are told what was written to them.
+    told_lists: HashSet<String>,
     /// Per type of items, how many list reads of it the contract has whose path has no
     /// parameter (`/tasks`, `/me/tasks`, `/tasks.list`), by any method: the type their
     /// `$defs` entry is, else the operation's, as [`BundleIndex::item_type`] finds it.
@@ -3295,6 +3317,27 @@ struct WrittenList {
     items: Value,
 }
 
+/// A list read one level under the parent of a command's path: the path through the
+/// command's last parameter, then one literal segment, that the command's route ends in
+/// (`/lists/{id}/profiles` of `POST /lists/{id}/relationships/profiles`), or of a command
+/// on the parent itself (`PUT /lists/{id}`). A deeper parameter is another record, a
+/// longer tail another list (`/lists/{id}/archived/profiles`), and an ancestor's lists
+/// are not this parent's.
+#[derive(Debug, Clone)]
+struct SiblingList {
+    /// The list read's path template.
+    path: String,
+    /// How many segments of the command's path are the parent's.
+    prefix: usize,
+    /// The list read's one segment after the parent's.
+    rest: Vec<String>,
+    /// The command's route ends in the list's segment (`relationships/profiles` and
+    /// `profiles`): it writes that list. Otherwise the command is on the parent itself,
+    /// and the list is told only what a body member named for it says.
+    by_route: bool,
+    list: WrittenList,
+}
+
 impl BundleIndex {
     pub(crate) fn new(bundle: &mb_mcm::Bundle) -> Self {
         let mut by_id = HashMap::with_capacity(bundle.operations.len());
@@ -3362,8 +3405,13 @@ impl BundleIndex {
         // `offers` of a flight search are offers.
         let by_path_types: HashSet<String> = detail_reads.keys().cloned().collect();
         let in_detail_reads = |name: &String| by_path_types.contains(name);
-        let (single_reads, written_lists, unscoped_lists) =
+        let (single_reads, written_lists, unscoped_lists, sibling_lists) =
             routes_of(bundle, &read_types, &list_members_of);
+        let told_lists = sibling_lists
+            .values()
+            .flatten()
+            .map(|s| s.path.clone())
+            .collect();
         let record_schemas = record_schemas_of(bundle, &detail_reads);
         let mut effect_types: Vec<String> =
             detail_reads.keys().chain(shapes.keys()).cloned().collect();
@@ -3417,6 +3465,8 @@ impl BundleIndex {
             effect_types,
             single_reads,
             written_lists,
+            sibling_lists,
+            told_lists,
             unscoped_lists: unscoped_counts,
             unscoped_paths,
             mints: bundle
@@ -3545,17 +3595,21 @@ struct UnscopedList {
     resource_type: String,
 }
 
+/// What [`routes_of`] finds: single reads, written lists, unscoped lists and sibling lists.
+type Routes = (
+    HashMap<String, usize>,
+    HashMap<String, WrittenList>,
+    Vec<UnscopedList>,
+    HashMap<String, Vec<SiblingList>>,
+);
+
 /// What routes the contract's operations share: see [`BundleIndex::single_reads`],
 /// [`BundleIndex::written_lists`] and [`BundleIndex::unscoped_lists`].
 fn routes_of(
     bundle: &mb_mcm::Bundle,
     read_types: &HashSet<String>,
     members_of: &[Vec<String>],
-) -> (
-    HashMap<String, usize>,
-    HashMap<String, WrittenList>,
-    Vec<UnscopedList>,
-) {
+) -> Routes {
     let (mut single_reads, mut written_lists) = (HashMap::new(), HashMap::new());
     let mut unscoped_lists: Vec<UnscopedList> = Vec::new();
     let mut lists: HashMap<&str, WrittenList> = HashMap::new();
@@ -3597,14 +3651,61 @@ fn routes_of(
             single_reads.insert(path.clone(), i);
         }
     }
+    let mut sibling_lists: HashMap<String, Vec<SiblingList>> = HashMap::new();
     for op in &bundle.operations {
-        if let (OperationKind::Command(_), Binding::Http { path, .. }) = (&op.kind, &op.binding)
-            && let Some(list) = lists.get(path.as_str())
-        {
+        let (OperationKind::Command(_), Binding::Http { path, .. }) = (&op.kind, &op.binding)
+        else {
+            continue;
+        };
+        if let Some(list) = lists.get(path.as_str()) {
             written_lists.insert(path.clone(), list.clone());
         }
+        if !sibling_lists.contains_key(path) {
+            let siblings = siblings_of(path, &lists);
+            if !siblings.is_empty() {
+                sibling_lists.insert(path.clone(), siblings);
+            }
+        }
     }
-    (single_reads, written_lists, unscoped_lists)
+    (single_reads, written_lists, unscoped_lists, sibling_lists)
+}
+
+/// The list reads of `lists` one level under the parent of a command's `path` that it
+/// can be told to (see [`SiblingList`]), sorted by path. None when the path has no
+/// parameter.
+fn siblings_of(path: &str, lists: &HashMap<&str, WrittenList>) -> Vec<SiblingList> {
+    let segments = path_segments(path);
+    let Some(last) = segments.iter().rposition(|s| segment_param(s).is_some()) else {
+        return Vec::new();
+    };
+    let prefix = last + 1;
+    let own_end = segments.last().filter(|_| segments.len() > prefix);
+    let on_parent = segments.len() == prefix;
+    // Its own route's list is told by its path (see [`BundleIndex::written_lists`]).
+    let mut out: Vec<SiblingList> = lists
+        .iter()
+        .filter_map(|(list, read)| {
+            let below = path_segments(list);
+            let rest = below.get(prefix..).filter(|rest| rest.len() == 1)?;
+            let by_route = own_end.is_some_and(|end| rest.last() == Some(end));
+            if !(by_route || on_parent)
+                || write_memory::same_route(&segments, &below)
+                || !write_memory::same_route(&segments[..prefix], &below[..prefix])
+                || rest.iter().any(|s| segment_param(s).is_some())
+            {
+                return None;
+            }
+            Some(SiblingList {
+                path: (*list).to_string(),
+                prefix,
+                rest: rest.iter().map(|s| (*s).to_string()).collect(),
+                by_route,
+                list: read.clone(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
 }
 
 /// The item schema of `op`'s success answer when it is a list: an array, or an object
@@ -6772,6 +6873,53 @@ mod tests {
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn siblings_are_one_level_under_the_parent() {
+        let read = |t: &str| WrittenList {
+            resource_type: t.to_string(),
+            items: json!({"type": "object"}),
+        };
+        let lists: HashMap<&str, WrittenList> = HashMap::from([
+            ("/lists/{list_id}/members", read("members")),
+            ("/lists/{list_id}/links/members", read("members")),
+            ("/lists/{list_id}/archived/members", read("members")),
+            ("/lists/{list_id}/owners", read("owners")),
+            ("/lists/{list_id}/members/{member_id}/notes", read("notes")),
+            ("/lists", read("lists")),
+            ("/teams/{team_id}/members", read("members")),
+        ]);
+        let of = |path: &str| -> Vec<(String, bool)> {
+            siblings_of(path, &lists)
+                .into_iter()
+                .map(|s| (s.path, s.by_route))
+                .collect()
+        };
+        // Its route names the members: it writes that list. Two segments down, or
+        // another segment, is another list.
+        assert_eq!(
+            of("/lists/{id}/links/members"),
+            vec![("/lists/{list_id}/members".to_string(), true)]
+        );
+        // On the parent itself: the lists one segment under it, by member only.
+        assert_eq!(
+            of("/lists/{list_id}"),
+            vec![
+                ("/lists/{list_id}/members".to_string(), false),
+                ("/lists/{list_id}/owners".to_string(), false),
+            ]
+        );
+        // A child's own route: its parent is the member, whose list is one level down.
+        assert_eq!(
+            of("/lists/{list_id}/members/{member_id}"),
+            vec![(
+                "/lists/{list_id}/members/{member_id}/notes".to_string(),
+                false
+            )]
+        );
+        // No parameter, no parent.
+        assert!(of("/lists").is_empty());
+    }
 
     #[test]
     fn request_kind_follows_protocol() {

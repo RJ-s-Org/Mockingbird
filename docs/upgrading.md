@@ -38,6 +38,16 @@ No migration or configuration.
 - **Listing order:** the records one write stores (a list answer's items, the records an answer mentions) list in the answer's order, newest write first; `export` gives them in reverse within the write, so `seed` restores the same order.
 - **Rust API**: `mb_mcm::RecordAt` gains the variant `MemberItem`, which breaks an exhaustive `match` on it; `Identity::envelope_member` and `StateStore::insert_seeded_all` (with a default) are new.
 
+### Sibling-route writes reach a parent's lists, and bodyless writes get effects
+
+No migration or configuration.
+
+- **One more LLM call for most nested 204 writes**: a 2xx write whose declared answer has no body (a `204`) now makes one LLM call, for its effects only, when its prompt shows records besides its target. That is nearly every nested `204` write under a parent the session holds, as the parent is shown. Before, it made none. A delete, such a write shown nothing else, and a client's retry still make none: a `PUT` or `DELETE`, or a `POST` with an `Idempotency-Key` header, repeating the session's latest 2xx write (same method, operation, path, body and key) within 30 seconds. Two `POST`s without the header are two writes, each asked. A failed call answers the write as before, changing nothing. Count them with `mb_bodyless_effects_calls_total{outcome}` (`answered`, `failed`).
+- **Parent reads catch up after a child's delete**: deleting a record the session holds under a parent it holds (`DELETE /posts/{id}/comments/{comment_id}`) now tells that parent, so its next read generates (one LLM call) instead of answering from state. A delete of a record the session never held tells nothing.
+- **Retries are remembered once**: a client's retry (as above) identical to the newest request a resource or route remembers replaces it, so retries push no other request out.
+- **One more internal document per session**: the latest retryable write is kept as `#last-write` under the reserved internal type, beside the write memory and deleted markers (not exported, counted or seeded). Every other write removes it.
+- **Longer list prompts**: a list read one level under a write's parent may now be told that write in `<earlier_writes>`, so a recording of such a read may not replay.
+
 ### Next pages given as URLs, and served page cursors in prompts
 
 No migration or configuration.
