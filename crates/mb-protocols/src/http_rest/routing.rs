@@ -6,28 +6,41 @@
 //! 1. static text (`/orders`);
 //! 2. a template: parameters with literal text around or between them in
 //!    one segment (`/files/{name}.json`, `/items/{id}:archive`, OData keys
-//!    `/companies({id})` and `/pairs(a={a},b={b})`), the one with more
-//!    literal text first;
+//!    `/companies({id})` and `/pairs(a={a},b={b})`). Between templates, the
+//!    one with more literal text (bytes, all its pieces together) comes
+//!    first; templates with as much literal text are ordered by their
+//!    pieces, compared as text, so the order never depends on the contract's
+//!    order;
 //! 3. a parameter that is the whole segment (`/orders/{id}`);
 //! 4. a catch-all, the last segment only (`/static/{*path}`), which takes
 //!    the rest of the path, slashes included.
 //!
 //! The first segment where two matching routes differ decides between
-//! them, so `/a/b/{x}` wins over `/a/{y}/c` for `/a/b/c`. A parameter
-//! never matches an empty string nor a `/`, `{{` and `}}` stand for
-//! literal braces, and two parameters of one segment must be separated by
-//! literal text. Between parameters, the literal text is the first
-//! occurrence that lets the rest match (`{a}-{b}` reads `1-2-3` as `1` and
-//! `2-3`); a trailing literal is matched at the end of the segment.
+//! them, so `/a/b/{x}` wins over `/a/{y}/c` for `/a/b/c`: a route that
+//! fails further down gives way to the next candidate of that segment
+//! (backtracking). A parameter never matches an empty string nor a `/`,
+//! `{{` and `}}` stand for literal braces, and two parameters of one
+//! segment must be separated by literal text.
 //!
-//! These are `matchit`'s rules (which this module replaced) for every route
-//! set `matchit` accepted; unlike `matchit`, any number of parameters per
-//! segment and any siblings below a template (`/c({id})/a`,
-//! `/c({id})/b({x})`) are accepted, and only routes matching exactly the
+//! Within a template, values are split lazily: each literal between two
+//! parameters is its first occurrence (after at least one byte of value)
+//! that lets the rest match, so `{name}.{ext}` reads `a.tar.gz` as `a` and
+//! `tar.gz`, and `{a}-{b}` reads `1-2-3` as `1` and `2-3`. A literal ending
+//! the segment is matched at its end (`{name}.json` reads `a.b.json` as
+//! `a.b`). Matching a segment against a template takes time linear in the
+//! segment's length times the template's number of pieces.
+//!
+//! This module replaced `matchit`. Wherever `matchit` matched a request,
+//! this router picks the same operation and parameters; it also matches
+//! some requests `matchit` answered with a 404 because `matchit` did not
+//! backtrack out of a template (`/files/{id}/{rev}` with
+//! `/files/{name}.json/meta` routes `GET /files/f.json/7` to the first), and
+//! it accepts route sets `matchit` refused: any number of parameters per
+//! segment, any siblings below a template (`/c({id})/a`, `/c({id})/b({x})`)
+//! and a catch-all beside deeper routes. Only routes matching exactly the
 //! same requests conflict.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
 
 use mb_mcm::{Binding, Bundle, HttpMethod};
 use serde_json::{Map, Value};
@@ -78,19 +91,19 @@ impl RouteError {
 /// `/orders`). A path matched by a contract route is never taken by a
 /// prefixed one.
 pub struct RouteTable {
-    by_method: HashMap<HttpMethod, Routes>,
+    contract: Trie,
     /// The contract routes under the base paths, consulted when no
     /// contract route matches.
-    prefixed: HashMap<HttpMethod, Routes>,
+    prefixed: Trie,
     skipped: Vec<RouteError>,
 }
 
-/// Shows how many methods have routes and which operations were skipped.
+/// Shows how many routes there are and which operations were skipped.
 impl std::fmt::Debug for RouteTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RouteTable")
-            .field("methods", &self.by_method.len())
-            .field("prefixed_methods", &self.prefixed.len())
+            .field("routes", &self.contract.routes.len())
+            .field("prefixed_routes", &self.prefixed.routes.len())
             .field("skipped", &self.skipped)
             .finish_non_exhaustive()
     }
@@ -105,6 +118,19 @@ const ALL_METHODS: [HttpMethod; 7] = [
     HttpMethod::Head,
     HttpMethod::Options,
 ];
+
+/// The index of `method` in [`ALL_METHODS`].
+fn slot(method: HttpMethod) -> usize {
+    match method {
+        HttpMethod::Get => 0,
+        HttpMethod::Post => 1,
+        HttpMethod::Put => 2,
+        HttpMethod::Patch => 3,
+        HttpMethod::Delete => 4,
+        HttpMethod::Head => 5,
+        HttpMethod::Options => 6,
+    }
+}
 
 impl RouteTable {
     /// The routes of every HTTP operation of `bundle`. An operation whose
@@ -125,22 +151,17 @@ impl RouteTable {
     /// [`RouteTable::skipped`].
     #[must_use]
     pub fn with_base_paths(bundle: &Bundle, base_paths: &[String]) -> Self {
-        let mut by_method: HashMap<HttpMethod, Routes> = HashMap::new();
+        let mut contract = Trie::default();
         let mut skipped = Vec::new();
         for op in &bundle.operations {
             let Binding::Http { method, path } = &op.binding else {
                 continue;
             };
-            let inserted =
-                by_method
-                    .entry(*method)
-                    .or_default()
-                    .insert(normalize(path), path, &op.id);
-            if let Err(e) = inserted {
+            if let Err(e) = contract.insert(*method, normalize(path), path, &op.id) {
                 skipped.push(e.for_operation(&op.id, *method, path));
             }
         }
-        let mut prefixed: HashMap<HttpMethod, Routes> = HashMap::new();
+        let mut prefixed = Trie::default();
         for base in base_paths.iter().filter_map(|b| base_path(b)) {
             for op in &bundle.operations {
                 let Binding::Http { method, path } = &op.binding else {
@@ -150,18 +171,14 @@ impl RouteTable {
                     "/" => base.to_owned(),
                     route => format!("{base}{route}"),
                 };
-                let inserted = prefixed
-                    .entry(*method)
-                    .or_default()
-                    .insert(&route, &route, &op.id);
-                if let Err(e) = inserted {
+                if let Err(e) = prefixed.insert(*method, &route, &route, &op.id) {
                     let error = e.for_operation(&op.id, *method, &route);
                     tracing::debug!(operation = %op.id, base_path = base, %error, "prefixed route skipped");
                 }
             }
         }
         Self {
-            by_method,
+            contract,
             prefixed,
             skipped,
         }
@@ -178,12 +195,15 @@ impl RouteTable {
     #[must_use]
     pub fn find(&self, method: HttpMethod, path: &str) -> Option<(String, Map<String, Value>)> {
         let path = normalize(path);
-        let (route, raw) = [&self.by_method, &self.prefixed]
+        let mut values = Vec::new();
+        let route = [&self.contract, &self.prefixed]
             .into_iter()
-            .find_map(|routers| routers.get(&method)?.at(path))?;
-        let params = raw
-            .into_iter()
-            .map(|(k, v)| (k.to_owned(), Value::String(percent_decode(v))))
+            .find_map(|trie| trie.find(slot(method), path, &mut values))?;
+        let params = route
+            .names
+            .iter()
+            .zip(values)
+            .map(|(k, v)| (k.clone(), Value::String(percent_decode(v))))
             .collect();
         Some((route.op.clone(), params))
     }
@@ -192,28 +212,25 @@ impl RouteTable {
     #[must_use]
     pub fn allowed(&self, path: &str) -> Vec<HttpMethod> {
         let path = normalize(path);
+        let mut found = 0u8;
+        let mut scratch = Vec::new();
+        let left = tokens(path);
+        for trie in [&self.contract, &self.prefixed] {
+            trie.root
+                .allowed(path, Some(0), left, &mut found, &mut scratch);
+        }
         ALL_METHODS
             .into_iter()
-            .filter(|m| {
-                [&self.by_method, &self.prefixed]
-                    .into_iter()
-                    .any(|routers| routers.get(m).is_some_and(|r| r.at(path).is_some()))
-            })
+            .filter(|m| found & (1 << slot(*m)) != 0)
             .collect()
     }
 }
 
-/// The routes of one method.
+/// The routes of every method, as a tree of segments.
 #[derive(Debug, Default)]
-struct Routes {
+struct Trie {
+    root: Node,
     routes: Vec<Route>,
-    /// Indexes into `routes` of the routes without a catch-all, by their
-    /// number of segments (a request must have exactly as many).
-    by_len: HashMap<usize, Vec<usize>>,
-    /// Indexes into `routes` of the routes ending in a catch-all.
-    catch_all: Vec<usize>,
-    /// The route index of each route shape, to detect conflicts.
-    shapes: HashMap<Vec<Rank>, usize>,
 }
 
 #[derive(Debug)]
@@ -221,9 +238,133 @@ struct Route {
     op: String,
     /// The path as the contract wrote it, for conflict messages.
     path: String,
-    segments: Vec<Segment>,
-    /// The precedence of each segment; also the route's shape.
-    rank: Vec<Rank>,
+    /// The parameter names, in the order their values are captured.
+    names: Vec<String>,
+}
+
+/// One segment position of the tree. Children are tried in precedence
+/// order: static, templates (sorted by [`TemplateRank`]), parameter, then
+/// the catch-alls ending here.
+#[derive(Debug)]
+struct Node {
+    /// By method slot, the route whose last segment is this node.
+    routes: [Option<usize>; 7],
+    /// By method slot, the route whose catch-all follows this node.
+    catch_all: [Option<usize>; 7],
+    /// The method slots with a route in this node or below it.
+    methods: u8,
+    /// The fewest and most tokens a request may have left at this node
+    /// to reach a route in it or below (`usize::MAX`: a catch-all).
+    min_left: usize,
+    max_left: usize,
+    /// Sorted by text, for binary search.
+    statics: Vec<(String, Node)>,
+    templates: Vec<Template>,
+    /// `templates` by leading literal, rebuilt when one is added.
+    template_index: TemplateIndex,
+    param: Option<Box<Node>>,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Node {
+            routes: [None; 7],
+            catch_all: [None; 7],
+            methods: 0,
+            min_left: usize::MAX,
+            max_left: 0,
+            statics: Vec::new(),
+            templates: Vec::new(),
+            template_index: TemplateIndex::default(),
+            param: None,
+        }
+    }
+}
+
+/// How many templates a node scans one by one; above that, and when a
+/// token has at most this many candidate leading literals, only templates
+/// whose leading literal starts the token are tried.
+const TEMPLATE_SCAN: usize = 8;
+
+/// A node's templates by leading literal (empty for a template that
+/// starts with a parameter).
+#[derive(Debug, Default)]
+struct TemplateIndex {
+    /// Sorted by literal: the indexes into `templates` (ascending, so in
+    /// rank order) of the templates starting with it.
+    by_prefix: Vec<(String, Vec<usize>)>,
+    /// The distinct leading literal lengths, ascending.
+    lens: Vec<usize>,
+}
+
+impl TemplateIndex {
+    fn new(templates: &[Template]) -> Self {
+        let mut by_prefix: Vec<(String, Vec<usize>)> = Vec::new();
+        for (i, t) in templates.iter().enumerate() {
+            let prefix = match t.rank.pieces.first() {
+                Some(Piece::Lit(text)) => text.as_str(),
+                _ => "",
+            };
+            match by_prefix.binary_search_by(|(p, _)| p.as_str().cmp(prefix)) {
+                Ok(at) => by_prefix[at].1.push(i),
+                Err(at) => by_prefix.insert(at, (prefix.to_owned(), vec![i])),
+            }
+        }
+        let mut lens: Vec<usize> = by_prefix.iter().map(|(p, _)| p.len()).collect();
+        lens.sort_unstable();
+        lens.dedup();
+        Self { by_prefix, lens }
+    }
+}
+
+/// The indexes of the templates that may match a token, in rank order.
+enum Candidates<'n> {
+    All(std::ops::Range<usize>),
+    /// Ascending index lists, merged.
+    Merge {
+        lists: [&'n [usize]; TEMPLATE_SCAN],
+        k: usize,
+    },
+}
+
+impl Iterator for Candidates<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        match self {
+            Candidates::All(range) => range.next(),
+            Candidates::Merge { lists, k } => {
+                let (j, first) = lists[..*k]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, l)| Some((j, *l.first()?)))
+                    .min_by_key(|(_, first)| *first)?;
+                lists[j] = &lists[j][1..];
+                Some(first)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Template {
+    rank: TemplateRank,
+    node: Node,
+}
+
+/// A template's precedence among its siblings: lower sorts first.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TemplateRank {
+    /// More literal text first.
+    literal: Reverse<usize>,
+    /// The literal text and parameter positions, names left out.
+    pieces: Vec<Piece>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Piece {
+    Lit(String),
+    Param,
 }
 
 /// Why a route was not inserted, before the operation is known.
@@ -254,105 +395,340 @@ impl InsertError {
     }
 }
 
-impl Routes {
+impl Trie {
     /// Add `pattern` (normalized) for `op`; `path` is the contract's own
     /// spelling, kept for messages.
-    fn insert(&mut self, pattern: &str, path: &str, op: &str) -> Result<(), InsertError> {
+    fn insert(
+        &mut self,
+        method: HttpMethod,
+        pattern: &str,
+        path: &str,
+        op: &str,
+    ) -> Result<(), InsertError> {
         let segments = parse(pattern).map_err(InsertError::Invalid)?;
-        let rank: Vec<Rank> = segments.iter().map(Segment::rank).collect();
-        if let Some(&i) = self.shapes.get(&rank) {
+        let slot = slot(method);
+        let bit = 1u8 << slot;
+        let mut names = Vec::new();
+        // A conflict means the same nodes already exist: marking them with
+        // the method on the way down changes nothing then.
+        let mut node = &mut self.root;
+        let mut end_catch_all = false;
+        let catch_all = matches!(segments.last(), Some(Segment::CatchAll(_)));
+        let n = segments.len();
+        for (depth, segment) in segments.iter().enumerate() {
+            node.methods |= bit;
+            node.widen(n - depth, catch_all);
+            node = match segment {
+                Segment::Static(text) => {
+                    let i = match node.statics.binary_search_by(|(t, _)| t.as_str().cmp(text)) {
+                        Ok(i) => i,
+                        Err(i) => {
+                            node.statics.insert(i, (text.clone(), Node::default()));
+                            i
+                        }
+                    };
+                    &mut node.statics[i].1
+                }
+                Segment::Template(parts) => {
+                    names.extend(parts.iter().filter_map(|p| match p {
+                        Part::Param(name) => Some(name.clone()),
+                        Part::Lit(_) => None,
+                    }));
+                    let rank = template_rank(parts);
+                    let i = match node.templates.binary_search_by(|t| t.rank.cmp(&rank)) {
+                        Ok(i) => i,
+                        Err(i) => {
+                            node.templates.insert(
+                                i,
+                                Template {
+                                    rank,
+                                    node: Node::default(),
+                                },
+                            );
+                            node.template_index = TemplateIndex::new(&node.templates);
+                            i
+                        }
+                    };
+                    &mut node.templates[i].node
+                }
+                Segment::Param(name) => {
+                    names.push(name.clone());
+                    node.param.get_or_insert_with(Box::default)
+                }
+                Segment::CatchAll(name) => {
+                    names.push(name.clone());
+                    end_catch_all = true;
+                    break;
+                }
+            };
+        }
+        node.methods |= bit;
+        if !end_catch_all {
+            node.widen(0, false);
+        }
+        let target = if end_catch_all {
+            &mut node.catch_all[slot]
+        } else {
+            &mut node.routes[slot]
+        };
+        if let Some(i) = *target {
             let other = &self.routes[i];
             return Err(InsertError::Conflict {
                 other: other.op.clone(),
                 other_path: other.path.clone(),
             });
         }
-        let index = self.routes.len();
-        if matches!(segments.last(), Some(Segment::CatchAll(_))) {
-            self.catch_all.push(index);
-        } else {
-            self.by_len.entry(segments.len()).or_default().push(index);
-        }
-        self.shapes.insert(rank.clone(), index);
+        *target = Some(self.routes.len());
         self.routes.push(Route {
             op: op.to_owned(),
             path: path.to_owned(),
-            segments,
-            rank,
+            names,
         });
         Ok(())
     }
 
-    /// The route of highest precedence matching `path` (normalized), with
-    /// its raw parameters.
-    fn at<'p>(&self, path: &'p str) -> Option<(&Route, Vec<(&str, &'p str)>)> {
-        let tokens: Vec<(usize, &str)> = split(path).collect();
-        let exact = self.by_len.get(&tokens.len()).into_iter().flatten();
-        let mut best: Option<(&Route, Vec<(&str, &'p str)>)> = None;
-        for &i in exact.chain(&self.catch_all) {
-            let route = &self.routes[i];
-            if best.as_ref().is_some_and(|(b, _)| b.rank <= route.rank) {
+    /// The route of highest precedence for method `slot` matching `path`
+    /// (normalized); its raw parameter values are left in `values`.
+    fn find<'p>(&self, slot: usize, path: &'p str, values: &mut Vec<&'p str>) -> Option<&Route> {
+        values.clear();
+        let i = self
+            .root
+            .find(slot, 1 << slot, path, Some(0), tokens(path), values)?;
+        self.routes.get(i)
+    }
+}
+
+/// The token starting at `at` and where the next one starts, if any.
+fn token(path: &str, at: usize) -> (&str, Option<usize>) {
+    let rest = &path[at..];
+    match rest.find('/') {
+        Some(end) => (&rest[..end], Some(at + end + 1)),
+        None => (rest, None),
+    }
+}
+
+/// How many tokens `path` has.
+fn tokens(path: &str) -> usize {
+    path.bytes().filter(|&b| b == b'/').count() + 1
+}
+
+impl Node {
+    /// Count a route reaching this node with `left` tokens to go (at
+    /// least `left` for a catch-all).
+    fn widen(&mut self, left: usize, catch_all: bool) {
+        self.min_left = self.min_left.min(left);
+        self.max_left = if catch_all {
+            usize::MAX
+        } else {
+            self.max_left.max(left)
+        };
+    }
+
+    /// Whether a route of this node or below may take a request with
+    /// `left` tokens to go.
+    fn reaches(&self, left: usize) -> bool {
+        (self.min_left..=self.max_left).contains(&left)
+    }
+
+    /// The templates that may match `token`, in rank order.
+    fn candidates(&self, token: &str) -> Candidates<'_> {
+        let all = Candidates::All(0..self.templates.len());
+        if self.templates.len() <= TEMPLATE_SCAN {
+            return all;
+        }
+        let index = &self.template_index;
+        let mut lists: [&[usize]; TEMPLATE_SCAN] = [&[]; TEMPLATE_SCAN];
+        let mut k = 0;
+        for &len in &index.lens {
+            let Some(prefix) = token.get(..len) else {
+                continue;
+            };
+            if let Ok(i) = index
+                .by_prefix
+                .binary_search_by(|(p, _)| p.as_str().cmp(prefix))
+            {
+                if k == TEMPLATE_SCAN {
+                    return all;
+                }
+                lists[k] = &index.by_prefix[i].1;
+                k += 1;
+            }
+        }
+        Candidates::Merge { lists, k }
+    }
+
+    /// Depth-first in precedence order, so the first route found is the
+    /// one whose first differing segment ranks highest. `at` is where the
+    /// next token starts (`None` past the last one), `left` how many
+    /// tokens remain. Every node is visited at most once per request.
+    fn find<'p>(
+        &self,
+        slot: usize,
+        bit: u8,
+        path: &'p str,
+        at: Option<usize>,
+        left: usize,
+        values: &mut Vec<&'p str>,
+    ) -> Option<usize> {
+        if self.methods & bit == 0 || !self.reaches(left) {
+            return None;
+        }
+        let Some(at) = at else {
+            return self.routes[slot];
+        };
+        let (token, next) = token(path, at);
+        let below = left - 1;
+        if let Ok(i) = self
+            .statics
+            .binary_search_by(|(t, _)| t.as_str().cmp(token))
+            && let Some(found) = self.statics[i].1.find(slot, bit, path, next, below, values)
+        {
+            return Some(found);
+        }
+        for i in self.candidates(token) {
+            let template = &self.templates[i];
+            if template.node.methods & bit == 0 || !template.node.reaches(below) {
                 continue;
             }
-            if let Some(params) = route.matches(path, &tokens) {
-                best = Some((route, params));
+            let mark = values.len();
+            if match_template(&template.rank.pieces, token, values)
+                && let Some(found) = template.node.find(slot, bit, path, next, below, values)
+            {
+                return Some(found);
+            }
+            values.truncate(mark);
+        }
+        if let Some(child) = &self.param
+            && !token.is_empty()
+        {
+            values.push(token);
+            if let Some(found) = child.find(slot, bit, path, next, below, values) {
+                return Some(found);
+            }
+            values.pop();
+        }
+        if let Some(found) = self.catch_all[slot] {
+            let rest = &path[at..];
+            if !rest.is_empty() {
+                values.push(rest);
+                return Some(found);
             }
         }
-        best
+        None
     }
-}
 
-impl Route {
-    /// The raw parameters when this route matches `path`, split into
-    /// `tokens` (each with its byte offset).
-    fn matches<'r, 'p>(
-        &'r self,
+    /// Adds to `found` the method bits of every route matching `path` from
+    /// here, in one walk; `scratch` takes template values, unused.
+    fn allowed<'p>(
+        &self,
         path: &'p str,
-        tokens: &[(usize, &'p str)],
-    ) -> Option<Vec<(&'r str, &'p str)>> {
-        let mut params = Vec::new();
-        for (i, segment) in self.segments.iter().enumerate() {
-            let &(offset, token) = tokens.get(i)?;
-            match segment {
-                Segment::Static(text) => {
-                    if token != text {
-                        return None;
-                    }
-                }
-                Segment::Param(name) => {
-                    if token.is_empty() {
-                        return None;
-                    }
-                    params.push((name.as_str(), token));
-                }
-                Segment::Template(parts) => {
-                    if !match_parts(parts, token, &mut params) {
-                        return None;
-                    }
-                }
-                Segment::CatchAll(name) => {
-                    let rest = &path[offset..];
-                    if rest.is_empty() {
-                        return None;
-                    }
-                    params.push((name.as_str(), rest));
-                    return Some(params);
-                }
+        at: Option<usize>,
+        left: usize,
+        found: &mut u8,
+        scratch: &mut Vec<&'p str>,
+    ) {
+        if self.methods & !*found == 0 || !self.reaches(left) {
+            return;
+        }
+        let Some(at) = at else {
+            *found |= bits(&self.routes);
+            return;
+        };
+        let (token, next) = token(path, at);
+        let below = left - 1;
+        if let Ok(i) = self
+            .statics
+            .binary_search_by(|(t, _)| t.as_str().cmp(token))
+        {
+            self.statics[i].1.allowed(path, next, below, found, scratch);
+        }
+        for i in self.candidates(token) {
+            let template = &self.templates[i];
+            scratch.clear();
+            if template.node.reaches(below) && match_template(&template.rank.pieces, token, scratch)
+            {
+                template.node.allowed(path, next, below, found, scratch);
             }
         }
-        (tokens.len() == self.segments.len()).then_some(params)
+        if let Some(child) = &self.param
+            && !token.is_empty()
+        {
+            child.allowed(path, next, below, found, scratch);
+        }
+        if !path[at..].is_empty() {
+            *found |= bits(&self.catch_all);
+        }
     }
 }
 
-/// The `/`-separated tokens of `path` with their byte offsets; a leading
-/// `/` gives an empty first token, as in the route patterns.
-fn split(path: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0;
-    path.split('/').map(move |token| {
-        let start = offset;
-        offset += token.len() + 1;
-        (start, token)
-    })
+fn bits(routes: &[Option<usize>; 7]) -> u8 {
+    routes
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.is_some())
+        .fold(0, |acc, (i, _)| acc | (1 << i))
+}
+
+/// Whether `token` matches the template `pieces`, pushing its values onto
+/// `values` when it does (left as they were when it does not).
+///
+/// Each literal between parameters is placed at its first occurrence
+/// after at least one byte of value. That is also the first occurrence
+/// that lets the rest match: a later start leaves the rest less room, so if
+/// the rest cannot match after the first occurrence it cannot after any.
+/// A literal ending the template must end the token. Linear in the token
+/// length per piece.
+fn match_template<'p>(pieces: &[Piece], token: &'p str, values: &mut Vec<&'p str>) -> bool {
+    let mark = values.len();
+    let mut at = 0;
+    let mut i = 0;
+    if let Some(Piece::Lit(prefix)) = pieces.first() {
+        if !token.starts_with(prefix.as_str()) {
+            return false;
+        }
+        at = prefix.len();
+        i = 1;
+    }
+    while i < pieces.len() {
+        // `pieces[i]` is a parameter: `parse_segment` never puts two
+        // literals or two parameters in a row.
+        let rest = &token[at..];
+        let ok = match pieces.get(i + 1) {
+            None => {
+                values.push(rest);
+                !rest.is_empty()
+            }
+            Some(Piece::Lit(suffix)) if i + 2 == pieces.len() => {
+                match rest.strip_suffix(suffix.as_str()) {
+                    Some(value) if !value.is_empty() => {
+                        values.push(value);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Some(Piece::Lit(next)) => {
+                // At least one byte (one character) of value first.
+                let skip = rest.chars().next().map_or(0, char::len_utf8);
+                match rest.get(skip..).and_then(|r| r.find(next.as_str())) {
+                    Some(found) if skip > 0 => {
+                        let end = skip + found;
+                        values.push(&rest[..end]);
+                        at += end + next.len();
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Some(Piece::Param) => false,
+        };
+        if !ok {
+            values.truncate(mark);
+            return false;
+        }
+        i += 2;
+    }
+    true
 }
 
 /// One `/`-separated segment of a route pattern.
@@ -372,53 +748,24 @@ enum Part {
     Param(String),
 }
 
-/// A segment's precedence: lower sorts first and wins. Two segments with
-/// equal ranks match the same tokens.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Rank {
-    /// 0 static, 1 template, 2 parameter, 3 catch-all.
-    class: u8,
-    /// More literal text first.
-    literal: Reverse<usize>,
-    /// The literal text and parameter positions, names left out.
-    shape: Vec<Piece>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Piece {
-    Lit(String),
-    Param,
-}
-
-impl Segment {
-    fn rank(&self) -> Rank {
-        let (class, shape) = match self {
-            Segment::Static(text) => (0, vec![Piece::Lit(text.clone())]),
-            Segment::Template(parts) => (
-                1,
-                parts
-                    .iter()
-                    .map(|p| match p {
-                        Part::Lit(text) => Piece::Lit(text.clone()),
-                        Part::Param(_) => Piece::Param,
-                    })
-                    .collect(),
-            ),
-            Segment::Param(_) => (2, vec![Piece::Param]),
-            Segment::CatchAll(_) => (3, vec![Piece::Param]),
-        };
-        let literal = shape
-            .iter()
-            .map(|p| match p {
-                Piece::Lit(text) => text.len(),
-                Piece::Param => 0,
-            })
-            .sum();
-        Rank {
-            class,
-            literal: Reverse(literal),
-            shape,
-        }
+fn template_rank(parts: &[Part]) -> TemplateRank {
+    let pieces: Vec<Piece> = parts
+        .iter()
+        .map(|p| match p {
+            Part::Lit(text) => Piece::Lit(text.clone()),
+            Part::Param(_) => Piece::Param,
+        })
+        .collect();
+    let literal = parts
+        .iter()
+        .map(|p| match p {
+            Part::Lit(text) => text.len(),
+            Part::Param(_) => 0,
+        })
+        .sum();
+    TemplateRank {
+        literal: Reverse(literal),
+        pieces,
     }
 }
 
@@ -507,52 +854,6 @@ fn parse_segment(token: &str) -> Result<Segment, String> {
     })
 }
 
-/// Whether `token` matches the template `parts`, pushing its parameters
-/// onto `params` when it does (left as they were when it does not).
-fn match_parts<'r, 'p>(
-    parts: &'r [Part],
-    token: &'p str,
-    params: &mut Vec<(&'r str, &'p str)>,
-) -> bool {
-    match parts {
-        [] => token.is_empty(),
-        [Part::Lit(text), rest @ ..] => token
-            .strip_prefix(text.as_str())
-            .is_some_and(|token| match_parts(rest, token, params)),
-        [Part::Param(name)] => {
-            let matched = !token.is_empty();
-            if matched {
-                params.push((name.as_str(), token));
-            }
-            matched
-        }
-        // A trailing literal is matched at the end.
-        [Part::Param(name), Part::Lit(suffix)] => match token.strip_suffix(suffix.as_str()) {
-            Some(value) if !value.is_empty() => {
-                params.push((name.as_str(), value));
-                true
-            }
-            _ => false,
-        },
-        [Part::Param(name), Part::Lit(next), rest @ ..] => {
-            // Every occurrence after a non-empty value, overlapping ones too.
-            let mut from = token.chars().next().map_or(1, char::len_utf8);
-            while let Some(found) = token.get(from..).and_then(|t| t.find(next.as_str())) {
-                let at = from + found;
-                params.push((name.as_str(), &token[..at]));
-                if match_parts(rest, &token[at + next.len()..], params) {
-                    return true;
-                }
-                params.pop();
-                from = at + token[at..].chars().next().map_or(1, char::len_utf8);
-            }
-            false
-        }
-        // `parse_segment` never puts two parameters in a row.
-        [Part::Param(_), Part::Param(_), ..] => false,
-    }
-}
-
 /// `base` as a route prefix: without its trailing `/`s; `None` when it does
 /// not start with `/`, is the root, or contains a route pattern brace.
 fn base_path(base: &str) -> Option<&str> {
@@ -593,321 +894,4 @@ fn percent_decode(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A table of `routes` (method, path) whose operation ids are the
-    /// paths, built through the same code as a contract's.
-    fn table(routes: &[(HttpMethod, &str)]) -> RouteTable {
-        let mut by_method: HashMap<HttpMethod, Routes> = HashMap::new();
-        let mut skipped = Vec::new();
-        for (method, path) in routes {
-            if let Err(e) =
-                by_method
-                    .entry(*method)
-                    .or_default()
-                    .insert(normalize(path), path, path)
-            {
-                skipped.push(e.for_operation(path, *method, path));
-            }
-        }
-        RouteTable {
-            by_method,
-            prefixed: HashMap::new(),
-            skipped,
-        }
-    }
-
-    fn gets(paths: &[&str]) -> RouteTable {
-        let routes: Vec<_> = paths.iter().map(|p| (HttpMethod::Get, *p)).collect();
-        let t = table(&routes);
-        assert!(t.skipped().is_empty(), "{:?}", t.skipped());
-        t
-    }
-
-    /// The route (its path) and parameters `GET path` finds.
-    fn get(t: &RouteTable, path: &str) -> Option<(String, Vec<(String, String)>)> {
-        t.find(HttpMethod::Get, path).map(|(op, params)| {
-            let mut params: Vec<(String, String)> = params
-                .into_iter()
-                .map(|(k, v)| (k, v.as_str().unwrap_or_default().to_owned()))
-                .collect();
-            params.sort();
-            (op, params)
-        })
-    }
-
-    fn found(t: &RouteTable, path: &str) -> Option<String> {
-        get(t, path).map(|(op, _)| op)
-    }
-
-    fn p(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        let mut v: Vec<_> = pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect();
-        v.sort();
-        v
-    }
-
-    #[test]
-    fn normalizes_trailing_slash() {
-        assert_eq!(normalize("/"), "/");
-        assert_eq!(normalize("/orders/"), "/orders");
-        assert_eq!(normalize("/orders"), "/orders");
-    }
-
-    #[test]
-    fn decodes_percent_escapes() {
-        assert_eq!(percent_decode("o%201"), "o 1");
-        assert_eq!(percent_decode("a%2Fb"), "a/b");
-        assert_eq!(percent_decode("100%"), "100%");
-        assert_eq!(percent_decode("%zz"), "%zz");
-        assert_eq!(percent_decode("%+1"), "%+1");
-        assert_eq!(percent_decode("caf%C3%A9"), "café");
-    }
-
-    #[test]
-    fn odata_keys_with_sibling_collections() {
-        let t = gets(&[
-            "/companies",
-            "/companies({company_id})",
-            "/companies({company_id})/customers",
-            "/companies({company_id})/customers({customer_id})",
-            "/companies({company_id})/salesInvoices",
-            "/companies({company_id})/salesInvoices({sales_invoice_id})",
-        ]);
-        assert_eq!(
-            get(&t, "/companies(c1)/customers(k%201)"),
-            Some((
-                "/companies({company_id})/customers({customer_id})".into(),
-                p(&[("company_id", "c1"), ("customer_id", "k 1")])
-            ))
-        );
-        assert_eq!(
-            get(&t, "/companies(c1)/salesInvoices(s2)/"),
-            Some((
-                "/companies({company_id})/salesInvoices({sales_invoice_id})".into(),
-                p(&[("company_id", "c1"), ("sales_invoice_id", "s2")])
-            ))
-        );
-        assert_eq!(
-            found(&t, "/companies(c1)/customers").as_deref(),
-            Some("/companies({company_id})/customers")
-        );
-        assert_eq!(
-            found(&t, "/companies(c1)").as_deref(),
-            Some("/companies({company_id})")
-        );
-        assert_eq!(found(&t, "/companies()"), None, "a key is never empty");
-        assert_eq!(found(&t, "/companies(c1"), None);
-        assert_eq!(found(&t, "/companies(c1)x"), None);
-        assert_eq!(found(&t, "/companies(c1)/vendors(v1)"), None);
-    }
-
-    #[test]
-    fn several_parameters_in_one_segment() {
-        let t = gets(&[
-            "/pairs(left={a},right={b})",
-            "/files/{name}.{ext}",
-            "/v/{a}-{b}",
-        ]);
-        assert_eq!(
-            get(&t, "/pairs(left=1,right=2)"),
-            Some((
-                "/pairs(left={a},right={b})".into(),
-                p(&[("a", "1"), ("b", "2")])
-            ))
-        );
-        assert_eq!(found(&t, "/pairs(left=1,right=)"), None);
-        assert_eq!(found(&t, "/pairs(left=,right=2)"), None);
-        assert_eq!(
-            get(&t, "/files/a.tar.gz").map(|(_, p)| p),
-            Some(p(&[("name", "a"), ("ext", "tar.gz")]))
-        );
-        // The first separator that lets the rest match.
-        assert_eq!(
-            get(&t, "/v/1-2-3").map(|(_, p)| p),
-            Some(p(&[("a", "1"), ("b", "2-3")]))
-        );
-        assert_eq!(
-            get(&t, "/v/-1-2").map(|(_, p)| p),
-            Some(p(&[("a", "-1"), ("b", "2")]))
-        );
-        assert_eq!(found(&t, "/v/12"), None);
-    }
-
-    #[test]
-    fn suffixes_and_prefixes_within_a_segment() {
-        let t = gets(&[
-            "/files/{name}.json",
-            "/files/{name}.tar.gz",
-            "/files/{name}.gz",
-            "/files/{name}",
-            "/files/index.json",
-            "/items/{id}:archive",
-            "/items/{id}:restore",
-            "/items/{id}",
-            "/items/{id}/notes",
-            "/img/img-{id}.png",
-            "/a/pre{x}",
-            "/a/p{x}",
-            "/a/{y}",
-        ]);
-        let cases = [
-            ("/files/a.json", "/files/{name}.json", "a"),
-            ("/files/a.b.json", "/files/{name}.json", "a.b"),
-            ("/files/a.tar.gz", "/files/{name}.tar.gz", "a"),
-            ("/files/a.gz", "/files/{name}.gz", "a"),
-            ("/files/.json", "/files/{name}", ".json"),
-            ("/files/a", "/files/{name}", "a"),
-            ("/items/1:archive", "/items/{id}:archive", "1"),
-            ("/items/1:restore", "/items/{id}:restore", "1"),
-            ("/items/1", "/items/{id}", "1"),
-            ("/items/1:other", "/items/{id}", "1:other"),
-            ("/img/img-7.png", "/img/img-{id}.png", "7"),
-        ];
-        for (path, route, value) in cases {
-            let (op, params) = get(&t, path).unwrap();
-            assert_eq!(op, route, "{path}");
-            assert_eq!(params[0].1, value, "{path}");
-        }
-        assert_eq!(found(&t, "/img/img-7.jpg"), None);
-        assert_eq!(found(&t, "/img/img-.png"), None);
-        assert_eq!(
-            found(&t, "/files/index.json").as_deref(),
-            Some("/files/index.json")
-        );
-        assert_eq!(
-            found(&t, "/items/1/notes").as_deref(),
-            Some("/items/{id}/notes")
-        );
-        assert_eq!(found(&t, "/a/prez").as_deref(), Some("/a/pre{x}"));
-        assert_eq!(found(&t, "/a/pre").as_deref(), Some("/a/p{x}"));
-        assert_eq!(found(&t, "/a/q").as_deref(), Some("/a/{y}"));
-    }
-
-    #[test]
-    fn precedence_static_then_template_then_param_then_catch_all() {
-        let t = gets(&[
-            "/{*rest}",
-            "/a/{x}",
-            "/a/b",
-            "/a/{x}.json",
-            "/s/{*path}",
-            "/s/{x}/meta",
-        ]);
-        assert_eq!(found(&t, "/a/b").as_deref(), Some("/a/b"));
-        assert_eq!(found(&t, "/a/b.json").as_deref(), Some("/a/{x}.json"));
-        assert_eq!(found(&t, "/a/c").as_deref(), Some("/a/{x}"));
-        assert_eq!(
-            get(&t, "/a/c/d"),
-            Some(("/{*rest}".into(), p(&[("rest", "a/c/d")])))
-        );
-        assert_eq!(
-            found(&t, "/").as_deref(),
-            None,
-            "a catch-all is never empty"
-        );
-        assert_eq!(found(&t, "/s/1/meta").as_deref(), Some("/s/{x}/meta"));
-        assert_eq!(
-            get(&t, "/s/1/raw"),
-            Some(("/s/{*path}".into(), p(&[("path", "1/raw")])))
-        );
-    }
-
-    #[test]
-    fn the_first_differing_segment_decides_and_matching_backtracks() {
-        let t = gets(&["/a/b", "/a/{x}", "/a/b/c", "/a/{x}/d", "/a/b/{y}/e"]);
-        assert_eq!(found(&t, "/a/b/c").as_deref(), Some("/a/b/c"));
-        assert_eq!(found(&t, "/a/b/d").as_deref(), Some("/a/{x}/d"));
-        assert_eq!(found(&t, "/a/z/d").as_deref(), Some("/a/{x}/d"));
-        assert_eq!(found(&t, "/a/b/d/e").as_deref(), Some("/a/b/{y}/e"));
-        let t = gets(&["/u/{id}", "/u/{user_id}/posts", "/u/{id}/{tab}"]);
-        assert_eq!(
-            get(&t, "/u/1/posts"),
-            Some(("/u/{user_id}/posts".into(), p(&[("user_id", "1")])))
-        );
-        assert_eq!(found(&t, "/u/1/likes").as_deref(), Some("/u/{id}/{tab}"));
-    }
-
-    #[test]
-    fn escaped_braces_are_literal() {
-        let t = gets(&["/x/{{lit}}", "/x/{p}"]);
-        assert_eq!(found(&t, "/x/{lit}").as_deref(), Some("/x/{{lit}}"));
-        assert_eq!(found(&t, "/x/%7Blit%7D").as_deref(), Some("/x/{p}"));
-    }
-
-    #[test]
-    fn root_and_trailing_slashes() {
-        let t = gets(&["/", "/{x}"]);
-        assert_eq!(found(&t, "/").as_deref(), Some("/"));
-        assert_eq!(found(&t, "/q/").as_deref(), Some("/{x}"));
-        assert_eq!(found(&t, "/q//"), None, "an empty segment is no parameter");
-    }
-
-    #[test]
-    fn identical_shapes_conflict_and_the_rest_still_route() {
-        let t = table(&[
-            (HttpMethod::Get, "/a/{x}"),
-            (HttpMethod::Get, "/a/{y}"),
-            (HttpMethod::Get, "/b"),
-            (HttpMethod::Get, "/b/"),
-            (HttpMethod::Get, "/c({k})/d"),
-            (HttpMethod::Get, "/c({key})/d"),
-            (HttpMethod::Delete, "/a/{y}"),
-            (HttpMethod::Get, "/ok"),
-        ]);
-        let skipped: Vec<&str> = t.skipped().iter().map(RouteError::operation).collect();
-        assert_eq!(skipped, ["/a/{y}", "/b/", "/c({key})/d"]);
-        assert_eq!(
-            t.skipped()[0].to_string(),
-            "operation /a/{y}: cannot route GET /a/{y}: it matches the same requests as \
-             operation /a/{x} (GET /a/{x}), which takes them"
-        );
-        assert_eq!(found(&t, "/a/1").as_deref(), Some("/a/{x}"));
-        assert_eq!(found(&t, "/ok").as_deref(), Some("/ok"));
-        assert_eq!(
-            t.find(HttpMethod::Delete, "/a/1")
-                .map(|(op, _)| op)
-                .as_deref(),
-            Some("/a/{y}")
-        );
-    }
-
-    #[test]
-    fn invalid_patterns_are_skipped_with_a_reason() {
-        let cases = [
-            ("/a/{x", "unclosed `{` in `{x`"),
-            ("/a/x}", "unmatched `}` in `x}`"),
-            ("/a/{}", "empty parameter name in `{}`"),
-            ("/a/{*}", "empty parameter name in `{*}`"),
-            (
-                "/a/{x}{y}",
-                "two parameters in `{x}{y}` must be separated by literal text",
-            ),
-            (
-                "/a/{*rest}/b",
-                "the catch-all parameter in `{*rest}` must be the last segment",
-            ),
-            (
-                "/a/x{*rest}",
-                "the catch-all parameter in `x{*rest}` must be the whole segment",
-            ),
-        ];
-        for (path, reason) in cases {
-            let t = table(&[(HttpMethod::Get, path), (HttpMethod::Get, "/ok")]);
-            assert_eq!(
-                t.skipped(),
-                [RouteError::Invalid {
-                    op: path.into(),
-                    method: HttpMethod::Get,
-                    path: path.into(),
-                    reason: reason.into(),
-                }],
-                "{path}"
-            );
-            assert!(found(&t, "/ok").is_some());
-        }
-    }
-}
+mod tests;
