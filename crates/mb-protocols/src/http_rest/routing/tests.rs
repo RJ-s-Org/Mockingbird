@@ -404,6 +404,19 @@ fn allowed_lists_every_method_in_one_walk() {
     assert!(t.allowed("/").is_empty());
 }
 
+/// A subtree holding a method already found plus a new one: the walk
+/// must not stop at the found one.
+#[test]
+fn allowed_keeps_walking_a_subtree_with_a_found_method() {
+    let t = table(&[
+        (HttpMethod::Get, "/a/b"),
+        (HttpMethod::Get, "/a/{x}"),
+        (HttpMethod::Post, "/a/{x}"),
+    ]);
+    assert_eq!(t.allowed("/a/b"), [HttpMethod::Get, HttpMethod::Post]);
+    assert_eq!(t.allowed("/a/c"), [HttpMethod::Get, HttpMethod::Post]);
+}
+
 /// Fails when `f` takes longer than `limit` (generous: unoptimized CI).
 fn within(limit: std::time::Duration, what: &str, f: impl FnOnce()) {
     let start = std::time::Instant::now();

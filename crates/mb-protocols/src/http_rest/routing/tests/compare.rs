@@ -13,7 +13,7 @@
 use std::cmp::Reverse;
 
 use super::{get, table};
-use crate::http_rest::routing::{HttpMethod, RouteTable, Segment, normalize, parse};
+use crate::http_rest::routing::{HttpMethod, RouteError, RouteTable, Segment, normalize, parse};
 
 struct Lcg(u64);
 
@@ -180,7 +180,16 @@ fn matchit_router(routes: &[String]) -> Option<matchit::Router<String>> {
 
 /// `get`'s parameter values in the order the route names them.
 fn ordered_values(table: &RouteTable, path: &str) -> Option<(String, Vec<String>)> {
-    let (op, params) = table.find(HttpMethod::Get, path)?;
+    ordered_values_of(table, HttpMethod::Get, path)
+}
+
+/// [`ordered_values`] for `method`.
+fn ordered_values_of(
+    table: &RouteTable,
+    method: HttpMethod,
+    path: &str,
+) -> Option<(String, Vec<String>)> {
+    let (op, params) = table.find(method, path)?;
     let segments = parse(normalize(&op)).ok()?;
     let names = segments.iter().flat_map(|s| {
         use crate::http_rest::routing::Part;
@@ -214,6 +223,7 @@ struct Tally {
 
 fn fuzz(seed: u64, segments: &[&str], tokens: &[&str], rounds: usize, tally: &mut Tally) {
     let mut rng = Lcg(seed);
+    let mut methods_rng = Lcg(seed ^ 0x9e37_79b9);
     for _ in 0..rounds {
         let n = 2 + rng.next() % 6;
         let mut routes: Vec<String> = Vec::new();
@@ -237,14 +247,45 @@ fn fuzz(seed: u64, segments: &[&str], tokens: &[&str], rounds: usize, tally: &mu
             }
         }
         tally.sets += 1;
-        let pairs: Vec<(HttpMethod, &str)> = routes
-            .iter()
-            .map(|r| (HttpMethod::Get, r.as_str()))
-            .collect();
+        // Every route is a GET; some are also a POST or a DELETE (drawn
+        // from their own generator, so the GET sets stay the reviewer's),
+        // so `allowed()` meets subtrees mixing found and new methods.
+        let mut pairs: Vec<(HttpMethod, &str)> = Vec::new();
+        let mut by_method: Vec<(HttpMethod, Vec<String>)> = vec![
+            (HttpMethod::Get, Vec::new()),
+            (HttpMethod::Post, Vec::new()),
+            (HttpMethod::Delete, Vec::new()),
+        ];
+        for route in &routes {
+            for (i, (method, list)) in by_method.iter_mut().enumerate() {
+                if i == 0 || methods_rng.next().is_multiple_of(i + 1) {
+                    pairs.push((*method, route.as_str()));
+                    list.push(route.clone());
+                }
+            }
+        }
         let ours = table(&pairs);
-        let oracle = Oracle::new(&routes);
-        let skipped: Vec<&str> = ours.skipped().iter().map(|e| e.operation()).collect();
-        assert_eq!(skipped, oracle.skipped, "{routes:?}");
+        let oracles: Vec<(HttpMethod, Oracle)> = by_method
+            .iter()
+            .map(|(m, list)| (*m, Oracle::new(list)))
+            .collect();
+        let oracle = &oracles[0].1;
+        let mut skipped: Vec<(HttpMethod, &str)> = ours
+            .skipped()
+            .iter()
+            .map(|e| match e {
+                RouteError::Conflict { method, .. } | RouteError::Invalid { method, .. } => {
+                    (*method, e.operation())
+                }
+            })
+            .collect();
+        let mut expected: Vec<(HttpMethod, &str)> = oracles
+            .iter()
+            .flat_map(|(m, o)| o.skipped.iter().map(move |r| (*m, r.as_str())))
+            .collect();
+        skipped.sort_by_key(|(m, r)| (*m as u8, *r));
+        expected.sort_by_key(|(m, r)| (*m as u8, *r));
+        assert_eq!(skipped, expected, "{routes:?}");
         let theirs = matchit_router(&routes);
         if theirs.is_some() {
             tally.accepted += 1;
@@ -268,11 +309,23 @@ fn fuzz(seed: u64, segments: &[&str], tokens: &[&str], rounds: usize, tally: &mu
                 .find(&path)
                 .map(|(i, values)| (oracle.kept[i].0.clone(), values));
             assert_eq!(got, want, "{routes:?} GET {path}");
-            assert_eq!(
-                !ours.allowed(&path).is_empty(),
-                got.is_some(),
-                "{routes:?} allowed {path}"
-            );
+            let mut allowed = Vec::new();
+            for (method, o) in &oracles {
+                let want = o
+                    .find(&path)
+                    .map(|(i, values)| (o.kept[i].0.clone(), values));
+                if *method != HttpMethod::Get {
+                    assert_eq!(
+                        ordered_values_of(&ours, *method, &path),
+                        want,
+                        "{routes:?} {method} {path}"
+                    );
+                }
+                if want.is_some() {
+                    allowed.push(*method);
+                }
+            }
+            assert_eq!(ours.allowed(&path), allowed, "{routes:?} allowed {path}");
             let Some(theirs) = &theirs else { continue };
             let Ok(m) = theirs.at(normalize(&path)) else {
                 tally.matched_matchit_404 += usize::from(got.is_some());
