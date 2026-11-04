@@ -44,7 +44,7 @@ DOMAIN_STRATA = ["travel", "payments"]
 # repair round trip) since #142; earlier runs report both as "repaired".
 ENGINE_SOURCES = ("llm", "patched", "repaired", "fallback")
 VALID_SOURCES = ("llm", "patched", "repaired")
-ERROR_KINDS = ("http_4xx", "http_5xx", "stream_error", "empty")
+ERROR_KINDS = ("http_4xx", "http_5xx", "stream_error", "empty", "provider_unavailable")
 DEFAULT_KEYWORDS = {
     "format": ["format"],
     "enum": ["enum", "const"],
@@ -827,6 +827,10 @@ def ledger_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             r.get("response_format_type") for r in rows if r.get("response_format_type")).items()},
         "providers": provider_shares(rows),
         "providers_n": sum(1 for r in rows if r.get("provider")),
+        # The `provider.order` each call was sent with (the proxy's pin or the client's).
+        "provider_pins": sorted({",".join(map(str, r["provider_pin"])) for r in rows
+                                 if isinstance(r.get("provider_pin"), list) and r["provider_pin"]}),
+        "provider_unavailable": sum(1 for r in rows if r.get("error_kind") == "provider_unavailable"),
     }
 
     cost_engine = sum(num(r.get("cost_usd")) or 0.0 for r in engine)
@@ -1434,7 +1438,11 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
     lines.append("## 6. Reliability")
     lines.append("")
     lines.append("n = ledger rows for the model, budget-refused rows excluded. Provider shares are over "
-                 "calls with a served provider.")
+                 "calls with a served provider. Provider pin = the `provider.order` the calls were sent "
+                 "with (scripts/llm-bench/providers.json); pin unavailable = ledger rows the proxy failed "
+                 "with `provider_unavailable` (no pinned provider could serve the call, or another provider "
+                 "answered). Those rows count in errors and error rate. mb-llm retries a 503 once, so one "
+                 "mock call the pinned provider could not serve usually shows as two rows here.")
     lines.append("")
     rows = []
     for m, b in models.items():
@@ -1446,11 +1454,12 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
                      f"{fmt(b['engine'].get('engine_timeouts'), 'int')} ({fmt(b['engine'].get('engine_timeout_rate'), 'pct')})",
                      fmt(r["refusal_rate"], "pct"),
                      fmt(r["retry_rate"], "pct"), fmt(r["reasoning_rejected"]), fmt(r["response_format_rejected"]),
-                     rf_types, providers, fmt(r["providers_n"], "int")])
+                     rf_types, providers, fmt(r["providers_n"], "int"),
+                     " / ".join(r["provider_pins"]) or "—", fmt(r["provider_unavailable"], "int")])
     lines += md_table(["Model", "n", "errors", "error rate", "timeouts", "timeout rate",
                        "engine timeouts (of N)", "refusal rate",
                        "retry rate", "reasoning toggle rejected", "JSON mode rejected", "response_format sent",
-                       "served providers (share)", "n providers"], rows)
+                       "served providers (share)", "n providers", "provider pin", "pin unavailable"], rows)
     lines.append("")
 
     lines.append("## 7. Cost")

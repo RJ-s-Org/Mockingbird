@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import aggregate  # noqa: E402
 import grade  # noqa: E402
+import proxy  # noqa: E402
 import run  # noqa: E402
 import server_suites  # noqa: E402
 
@@ -1367,6 +1368,245 @@ class InfraFailureTest(unittest.TestCase):
         self.assertTrue(all(r["source"] == "skipped" and not r["ok"] for r in rows.values()))
         self.assertFalse(any(r["detail"].get("infra") for r in rows.values()), rows)
         self.assertIn("KeyError", rows["rest"]["detail"]["reason"])
+
+
+class FakeRouter(BaseHTTPRequestHandler):
+    """A fake OpenRouter chat endpoint: keeps each request body (never headers) and
+    answers with `error` (status, message) when set, else served by `served`, as SSE
+    when the request asks for a stream."""
+
+    protocol_version = "HTTP/1.1"
+    bodies = []
+    error = None
+    served = "Fireworks"
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        FakeRouter.bodies.append(body)
+        if FakeRouter.error:
+            status, msg = FakeRouter.error
+            doc = {"error": {"code": status, "message": msg}}
+        elif body.get("stream"):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(b": OPENROUTER PROCESSING\n\n")
+            for piece, finish in (("{", None), ("}", "stop")):
+                chunk = {"id": "gen-fake", "object": "chat.completion.chunk", "provider": FakeRouter.served,
+                         "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": finish}]}
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.close_connection = True
+            return
+        else:
+            status, doc = 200, {
+                "id": "gen-fake", "object": "chat.completion", "model": body.get("model"),
+                "provider": FakeRouter.served,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "{}"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1, "cost": 0.0},
+            }
+        raw = json.dumps(doc).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class ProviderPinTest(unittest.TestCase):
+    PIN = {"order": ["fireworks"], "allow_fallbacks": False}
+
+    def test_apply_adds_the_pin(self):
+        up = {"model": "nvidia/x", "messages": []}
+        self.assertEqual(proxy.apply_provider_pin(up, self.PIN), "proxy")
+        self.assertEqual(up["provider"], self.PIN)
+        up["provider"]["order"].append("other")  # a copy: the configured pin is untouched
+        self.assertEqual(self.PIN["order"], ["fireworks"])
+
+    def test_apply_keeps_the_clients_provider(self):
+        mine = {"order": ["deepinfra"], "allow_fallbacks": True}
+        up = {"model": "nvidia/x", "provider": dict(mine)}
+        self.assertEqual(proxy.apply_provider_pin(up, self.PIN), "client")
+        self.assertEqual(up["provider"], mine)
+
+    def test_apply_without_a_pin_changes_nothing(self):
+        up = {"model": "nvidia/x", "messages": [{"role": "user", "content": "hi"}]}
+        before = json.loads(json.dumps(up))
+        self.assertIsNone(proxy.apply_provider_pin(up, None))
+        self.assertEqual(up, before)
+
+    def test_the_bench_pins_its_three_models_without_fallbacks(self):
+        pins = proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS)
+        self.assertEqual(pins, {
+            "nvidia/nemotron-3.5-lightning": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": False},
+            "openai/gpt-6-luna": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False},
+            "deepseek/deepseek-v4.1-flash-1017": {"order": ["wafer/us"], "only": ["wafer/us"],
+                                                  "allow_fallbacks": False},
+        })
+
+    def test_preflight_records_the_pins_it_is_given(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        pins = os.path.join(d, "pins.json")
+        with open(pins, "w") as f:
+            json.dump({"pins": {"nvidia/x": {"provider": self.PIN}}}, f)
+        args = argparse.Namespace(out=d, models="nvidia/x@nojson,other/y", openrouter_api="http://unused",
+                                  no_key=True, strict=False, provider_pins=pins)
+        doc = {"data": [{"id": "nvidia/x", "pricing": {}}, {"id": "other/y", "pricing": {}}]}
+        with mock.patch.object(run, "get_json", return_value=doc), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.preflight(args), 0)
+        with open(os.path.join(d, "roster.json")) as f:
+            roster = {m["id"]: m["provider_pin"] for m in json.load(f)["models"]}
+        self.assertEqual(roster, {"nvidia/x@nojson": self.PIN, "other/y": None})
+        args.provider_pins = ""
+        with mock.patch.object(run, "get_json", return_value=doc), contextlib.redirect_stdout(io.StringIO()):
+            run.preflight(args)
+        with open(os.path.join(d, "roster.json")) as f:
+            self.assertFalse(any(m["provider_pin"] for m in json.load(f)["models"]))
+
+    def test_pin_allows_matches_display_names_and_slugs(self):
+        self.assertTrue(proxy.pin_allows({"order": ["io-net"]}, "Io Net"))
+        self.assertTrue(proxy.pin_allows({"order": ["deepinfra/bf16"]}, "DeepInfra"))
+        self.assertFalse(proxy.pin_allows({"order": ["fireworks"]}, "CoreWeave"))
+        self.assertTrue(proxy.pin_allows({"order": ["fireworks"]}, None))
+
+
+class ProviderPinProxyTest(unittest.TestCase):
+    """Calls through the proxy, against a fake OpenRouter (no key, no spend)."""
+
+    PIN = ProviderPinTest.PIN
+
+    def setUp(self):
+        FakeRouter.bodies, FakeRouter.error, FakeRouter.served = [], None, "Fireworks"
+        up = serve(FakeRouter, self)
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        pins = os.path.join(self.dir, "providers.json")
+        with open(pins, "w") as f:
+            json.dump({"pins": {"nvidia/x": {"provider": self.PIN, "basis": "test"}}}, f)
+        self.ledger = os.path.join(self.dir, "calls.jsonl")
+        with open(self.ledger, "w") as f:  # an earlier run's row: not this run's provider mix
+            f.write(json.dumps({"label": "nvidia__x~test", "provider": "CoreWeave", "cost_usd": 0.0}) + "\n")
+        args = argparse.Namespace(
+            upstream=f"{up.data}/api/v1/chat/completions",
+            no_stream_upgrade=True, dump=None, ledger=self.ledger, budget_usd=5.0, prior_ledger=[],
+            prices=None, provider_pins=pins, no_format_fallback=True)
+        env = mock.patch.dict(os.environ, {}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("OPENROUTER_API_KEY", None)  # the fake upstream never sees a key
+        px = proxy.Proxy(args)
+        self.addCleanup(px.ledger.fh.close)
+        handler = type("PinHandler", (proxy.Handler,), {"proxy": px})
+        self.px = px
+        self.base = serve(handler, self).data
+
+    def call(self, model, **extra):
+        body = dict({"model": model, "messages": [{"role": "user", "content": "hi"}]}, **extra)
+        req = urllib.request.Request(f"{self.base}/r/{model.replace('/', '__')}~test/api/v1/chat/completions",
+                                     data=json.dumps(body).encode(), headers={"content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read()
+                status, doc = r.status, (raw.decode() if extra.get("stream") else json.loads(raw))
+        except urllib.error.HTTPError as e:
+            with e:
+                status, doc = e.code, json.loads(e.read() or b"{}")
+        with open(self.ledger) as f:
+            rec = [json.loads(line) for line in f][-1]
+        return status, doc, rec
+
+    def test_a_pinned_model_is_sent_with_its_pin_and_its_provider_is_recorded(self):
+        status, doc, rec = self.call("nvidia/x")
+        self.assertEqual(status, 200)
+        self.assertEqual(FakeRouter.bodies[-1]["provider"], self.PIN)
+        self.assertEqual((rec["provider"], rec["provider_pin"], rec["provider_pin_by"]),
+                         ("Fireworks", ["fireworks"], "proxy"))
+        # A variant of a pinned model is pinned too.
+        self.call("nvidia/x@nojson")
+        self.assertEqual(FakeRouter.bodies[-1]["provider"], self.PIN)
+        self.assertEqual(self.px.ledger.stats()["per_label"]["nvidia__x~test"]["providers"], {"Fireworks": 1})
+
+    def test_the_clients_provider_field_is_not_overridden(self):
+        mine = {"order": ["deepinfra"], "allow_fallbacks": True}
+        FakeRouter.served = "DeepInfra"
+        status, _, rec = self.call("nvidia/x", provider=mine)
+        self.assertEqual(status, 200)  # the client's routing is the client's: not enforced
+        self.assertEqual(FakeRouter.bodies[-1]["provider"], mine)
+        self.assertEqual((rec["provider_pin"], rec["provider_pin_by"]), (["deepinfra"], "client"))
+
+    def test_an_unpinned_model_is_sent_unchanged(self):
+        status, _, rec = self.call("other/y")
+        self.assertEqual(status, 200)
+        self.assertNotIn("provider", FakeRouter.bodies[-1])
+        self.assertEqual((rec["provider_pin"], rec["provider_pin_by"]), (None, None))
+
+    def test_an_unavailable_pinned_provider_is_a_provider_failure(self):
+        FakeRouter.error = (404, "No allowed providers are available for the selected model.")
+        status, doc, rec = self.call("nvidia/x")
+        self.assertEqual(status, 503)
+        self.assertEqual(len(FakeRouter.bodies), 1)  # not retried elsewhere
+        self.assertEqual((rec["status"], rec["error_kind"]), (503, "provider_unavailable"))
+        self.assertIn("pinned provider fireworks unavailable", rec["error_excerpt"])
+        # Mockingbird reports it as `LLM returned HTTP 503: ...`: the bench's infra label.
+        last = {"source": "fallback", "fallback_reason": f"LLM returned HTTP 503: {doc['error']['message']}"}
+        self.assertIsNotNone(server_suites.infra_reason(last))
+        # Without a pin the same 404 stays the request's own error.
+        _, _, rec = self.call("other/y")
+        self.assertEqual((rec["status"], rec["error_kind"]), (404, "http_4xx"))
+        # OpenRouter's documented routing failure is a 503: a provider error as it is.
+        FakeRouter.error = (503, "There is no available model provider that meets your routing requirements")
+        status, _, rec = self.call("nvidia/x")
+        self.assertEqual((status, rec["error_kind"]), (503, "http_5xx"))
+
+    def test_ordinary_request_errors_on_a_pinned_model_stay_4xx(self):
+        # mb-llm steps down (schema, reasoning) on these, so they must reach it unchanged.
+        for status, msg in (
+            (400, "Provider returned error"),
+            (400, "This endpoint's maximum context length is 8192 tokens. However, you requested about 9000."),
+            (404, "No endpoints found that can handle the requested parameters."),
+            (404, "No endpoints found that support the provided 'response_format' parameter."),
+        ):
+            FakeRouter.error = (status, msg)
+            got, doc, rec = self.call("nvidia/x")
+            self.assertEqual((got, rec["status"], rec["error_kind"]), (status, status, "http_4xx"), msg)
+            self.assertEqual(doc["error"]["message"], msg)
+
+    def test_a_stream_from_another_provider_is_refused_before_anything_is_relayed(self):
+        FakeRouter.served = "CoreWeave"
+        status, doc, rec = self.call("nvidia/x", stream=True)
+        self.assertEqual(status, 503)  # a plain error answer: no 200 head, no chunk went out
+        self.assertIn("served by CoreWeave", doc["error"]["message"])
+        self.assertEqual((rec["status"], rec["error_kind"], rec.get("provider_pin_mismatch")),
+                         (503, "provider_unavailable", True))
+        FakeRouter.served = "Fireworks"
+        status, raw, rec = self.call("nvidia/x", stream=True)
+        self.assertEqual((status, rec["error_kind"], rec["provider"]), (200, None, "Fireworks"))
+        self.assertIn(": OPENROUTER PROCESSING", raw)  # held keep-alives are relayed once checked
+        self.assertIn("data: [DONE]", raw)
+
+    def test_an_answer_from_another_provider_is_refused(self):
+        FakeRouter.served = "CoreWeave"
+        status, _, rec = self.call("nvidia/x")
+        self.assertEqual(status, 503)
+        self.assertEqual((rec["error_kind"], rec["provider"], rec.get("provider_pin_mismatch")),
+                         ("provider_unavailable", "CoreWeave", True))
+
+    def test_the_run_summary_reports_the_provider_mix(self):
+        stats = {"per_label": {"nvidia__x~engine": {"providers": {"Fireworks": 3, "Io Net": 1}},
+                               "nvidia__x~journeys": {"providers": {"Fireworks": 4}},
+                               "other__y~engine": {"providers": {"OpenAI": 9}}}}
+        mix = run.model_providers(stats, "nvidia/x")
+        self.assertEqual(mix, {"Fireworks": 7, "Io Net": 1})
+        self.assertEqual(run.provider_mix(mix), "Fireworks 7 (87.5%), Io Net 1 (12.5%)")
+        self.assertEqual(run.provider_mix({}), "none recorded")
+        self.call("nvidia/x")
+        args = argparse.Namespace(model="nvidia/x", proxy_base=self.base)
+        self.assertEqual(server_suites.provider_mix(args, "test"), "Fireworks 1 (100.0%)")
 
 
 if __name__ == "__main__":
