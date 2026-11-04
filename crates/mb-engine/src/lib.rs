@@ -842,6 +842,9 @@ impl Engine {
                 let effects_envelope = guards::effects_envelope(op, status, &ctx, &validator);
                 let refusals =
                     guards::refusals(op, status, &ctx, call, &validator, effects_envelope);
+                // The refusals' shared error body, written by the model as well.
+                let refusal_error = guards::refusal_error_schema(op, &refusals)
+                    .map(|error| compact::response_prompt_schema(bundle, error));
                 // The effects envelope's root is an object already.
                 let items_envelope = !effects_envelope
                     && guards::items_envelope(provider.capabilities(), validator.schema());
@@ -851,8 +854,12 @@ impl Engine {
                         user.content
                             .push_str(&prompt::effects_note(op, status, &ctx));
                         if !refusals.is_empty() {
-                            user.content
-                                .push_str(&guards::refusal_note(op, &ctx, &refusals));
+                            user.content.push_str(&guards::refusal_note(
+                                op,
+                                &ctx,
+                                &refusals,
+                                refusal_error.is_some(),
+                            ));
                         }
                     } else if items_envelope {
                         user.content.push_str("\n\n");
@@ -863,7 +870,11 @@ impl Engine {
                 let format = ResponseFormat::JsonSchema {
                     name: format_name(&op.id),
                     schema: if effects_envelope {
-                        guards::with_refusal(guards::effects_schema(prompt_schema), &refusals)
+                        guards::with_refusal(
+                            guards::effects_schema(prompt_schema),
+                            &refusals,
+                            refusal_error,
+                        )
                     } else if items_envelope {
                         guards::items_schema(prompt_schema)
                     } else {
@@ -897,11 +908,18 @@ impl Engine {
                         effects:
                             guards::AnswerEffects {
                                 refused: Some(code),
+                                refusal_body,
                                 ..
                             },
                         ..
                     }) => {
-                        return Ok(self.refused(bundle, op, call, code, source, usage));
+                        let repeated = repeated_members(&ctx);
+                        let refusal = Refusal {
+                            code,
+                            repeated: &repeated,
+                            written: refusal_body,
+                        };
+                        return Ok(self.refused(bundle, op, call, refusal, (source, usage)));
                     }
                     Ok(answer) => GeneratedResponse {
                         status,
@@ -1256,7 +1274,7 @@ impl Engine {
                 ..GenerationContext::default()
             };
             let mut response = self.fallback(bundle, op, variant, 404, call, &ctx);
-            self.fill_contract_values(bundle, op, variant, &mut response);
+            self.fill_contract_values(bundle, op, variant, &mut response, &[]);
             response
         });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
@@ -1295,7 +1313,43 @@ impl Engine {
         answered: &GeneratedResponse,
     ) -> Option<GeneratedResponse> {
         let code = guards::refusal_codes(op).first().copied()?;
-        Some(self.refused(bundle, op, call, code, answered.source, answered.usage))
+        let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+        let repeated = [field.to_string()];
+        let refusal = Refusal {
+            code,
+            repeated: &repeated,
+            written: None,
+        };
+        Some(self.refused(bundle, op, call, refusal, (answered.source, answered.usage)))
+    }
+
+    /// The refusal `code` of a create that repeats the value of request member `member`
+    /// a stored record holds, decided by the caller from what the contract says of it:
+    /// `op`'s response declared for `code` by that very status, rendered as an LLM's
+    /// refusal is, its body taking what the contract says of that repeat (see
+    /// [`contract_values`]), with `answered`'s source and usage. `None` when `op`
+    /// declares no response for `code` itself.
+    #[must_use]
+    pub fn refuse_repeated_value(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        (code, member): (u16, &str),
+        answered: &GeneratedResponse,
+    ) -> Option<GeneratedResponse> {
+        let repeated = [member.to_string()];
+        op.outputs
+            .iter()
+            .any(|o| o.status == StatusSelector::Code(code))
+            .then(|| {
+                let refusal = Refusal {
+                    code,
+                    repeated: &repeated,
+                    written: None,
+                };
+                self.refused(bundle, op, call, refusal, (answered.source, answered.usage))
+            })
     }
 
     /// A write's refusal decided from state alone, before any LLM call (a stale
@@ -1313,31 +1367,42 @@ impl Engine {
         op.outputs
             .iter()
             .any(|o| o.status == StatusSelector::Code(code))
-            .then(|| self.refused(bundle, op, call, code, Source::State, Usage::default()))
+            .then(|| {
+                let refusal = Refusal {
+                    code,
+                    repeated: &[],
+                    written: None,
+                };
+                self.refused(bundle, op, call, refusal, (Source::State, Usage::default()))
+            })
     }
 
-    /// The declared error `code` an LLM refused a call with (see [`guards::refusals`]),
+    /// The declared error status an LLM refused a call with (see [`guards::refusals`]),
     /// rendered as a forced status's is offline: the contract's response for that
-    /// status, faker-filled. Tagged with the LLM's `source`, as the LLM chose it, and
-    /// with no effects; a body the faker could not make valid is tagged `Fallback`, with
-    /// its reason.
+    /// status, the body the LLM wrote for it when it is valid against that response's
+    /// schema, else faker-filled, then holding what the contract names for its members
+    /// (see [`contract_values`]). Tagged with the LLM's `source`, as the LLM chose it,
+    /// and with no effects; a body the faker could not make valid is tagged `Fallback`,
+    /// with its reason.
     fn refused(
         &self,
         bundle: &Bundle,
         op: &Operation,
         call: &OperationCall,
-        code: u16,
-        source: Source,
-        usage: Usage,
+        refusal: Refusal<'_>,
+        (source, usage): (Source, Usage),
     ) -> GeneratedResponse {
+        let code = refusal.code;
         let ctx = GenerationContext {
             forced_status: Some(code),
             ..GenerationContext::default()
         };
         let mut response = match op.output_for_status(code) {
             Some(variant) => {
-                let mut response = self.fallback(bundle, op, variant, code, call, &ctx);
-                self.fill_contract_values(bundle, op, variant, &mut response);
+                let mut response = self
+                    .written_refusal(bundle, op, variant, code, refusal.written)
+                    .unwrap_or_else(|| self.fallback(bundle, op, variant, code, call, &ctx));
+                self.fill_contract_values(bundle, op, variant, &mut response, refusal.repeated);
                 response
             }
             // Not offered: a refusal names only a status the operation declares.
@@ -1366,14 +1431,52 @@ impl Engine {
         response
     }
 
+    /// The error body an LLM wrote for its refusal with `code`, as the response
+    /// `variant` declares it: `None` unless it is JSON valid against the response's
+    /// schema, declared by that status itself.
+    fn written_refusal(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        variant: &OutputVariant,
+        code: u16,
+        written: Option<Value>,
+    ) -> Option<GeneratedResponse> {
+        let body = written?;
+        if variant.status != StatusSelector::Code(code) || media::is_non_json(op, variant) {
+            return None;
+        }
+        let schema = variant.schema.as_ref()?;
+        let validator = self.validator(bundle, op, code, schema).ok()?;
+        if !validator.is_valid(&body) {
+            tracing::info!(operation = %op.id, status = code, "a refusal's error body is not valid: the faker's is served");
+            return None;
+        }
+        Some(GeneratedResponse {
+            status: code,
+            content_type: variant.content_type.clone(),
+            body: Some(body),
+            source: Source::Llm,
+            usage: Usage::default(),
+            fallback_reason: None,
+            effects: Vec::new(),
+            effect_outcomes: Vec::new(),
+            dropped_effects: 0,
+            new_record: false,
+            patched: None,
+        })
+    }
+
     /// The members of `response`, a body the mock built itself for `variant`, that the
-    /// contract names a value for, holding it (see [`contract_values`]).
+    /// contract names a value for, holding it (see [`contract_values`]); `repeated`
+    /// names the request members whose repeated value it refuses, if any.
     fn fill_contract_values(
         &self,
         bundle: &Bundle,
         op: &Operation,
         variant: &OutputVariant,
         response: &mut GeneratedResponse,
+        repeated: &[String],
     ) {
         if media::is_non_json(op, variant) {
             return;
@@ -1386,7 +1489,12 @@ impl Engine {
                 bundle,
                 &validator,
                 (schema, response.status),
-                variant.description.as_deref(),
+                contract_values::Prose {
+                    description: variant.description.as_deref(),
+                    info: bundle.description.as_deref(),
+                    repeated,
+                    resource: op.resource_type.as_deref(),
+                },
                 body,
             ),
             Err(_) => body,
@@ -2072,6 +2180,28 @@ struct LlmAnswer {
     effects: guards::AnswerEffects,
     /// For a `Patched` answer, what its patch touched (see [`PatchedMembers`]).
     patched: Option<PatchedMembers>,
+}
+
+/// A refusal the engine renders (see [`Engine::refused`]).
+struct Refusal<'a> {
+    /// The declared error status.
+    code: u16,
+    /// The request members whose repeated value it refuses, if any.
+    repeated: &'a [String],
+    /// The error body the LLM wrote for it, when it did: not checked yet.
+    written: Option<Value>,
+}
+
+/// The members `ctx` shows a create repeating a stored record's value of (see
+/// [`GenerationContext::same_values`]), each once.
+fn repeated_members(ctx: &GenerationContext<'_>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, _, member) in ctx.same_values {
+        if !out.contains(member) {
+            out.push(member.clone());
+        }
+    }
+    out
 }
 
 /// An LLM reply: its text, and, when the provider stopped it at

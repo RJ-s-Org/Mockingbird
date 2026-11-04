@@ -10,13 +10,26 @@
 //! 1. its schema's `const`, or its `enum` when that holds one value;
 //! 2. a value this status's response description names in code position (between
 //!    backticks, or in `<code>`), when the description ties it to the member: the
-//!    member's `enum` holds it and no other value the description names, or the
+//!    member's `enum` holds it and no other value the description names (a member
+//!    with no `enum` whose own schema description lists values in code position, "Such
+//!    as `ConcurrentModification` or `ResourceNotFound`", counts those as its enum), or the
 //!    description names the member itself in code position (its name, or its dotted
-//!    path such as `error.code`) and, after it in the same sentence, one value only:
+//!    path such as `error.code`) and, after it in the same sentence and before the next
+//!    member it names, one value only:
 //!    `` `code` is `version_conflict` or `edit_conflict` `` names two, and is no guess.
 //!    A text that is the name of a member of the body is no value (`` The `code` and
-//!    `message` members `` names two members, not a code);
-//! 3. its schema's example (`example`, else the first of `examples`, not a boolean's),
+//!    `message` members `` names two members, not a code). The member may also be named as a plain word of the prose (`the code`, `Code`,
+//!    whatever its case), and a member typed only as a number also takes a plain
+//!    number of the prose (`code 1001`), never the response's own status;
+//! 3. when the body refuses a create for repeating a value of a member (a taken `sku`),
+//!    a value the contract's API-level description (`info.description`) names as in
+//!    (2), within one of its sentences that holds this response's status as a number
+//!    and names that repeated member and the type the call makes, singular or plural
+//!    ("A product's `sku` is unique: a create with an SKU another product has is
+//!    refused with 400 and the code `product_invalid_sku`").
+//!    A sentence of another status, or of no member the refusal repeats, names nothing
+//!    for this body, and a body that refuses no repeat takes nothing from it;
+//! 4. its schema's example (`example`, else the first of `examples`, not a boolean's),
 //!    only where no other status's response uses that schema: an example of a shared
 //!    `Error` says nothing of this status.
 //!
@@ -40,29 +53,56 @@ const MAX_DEPTH: usize = 8;
 const MAX_SPAN_CHARS: usize = 128;
 /// Values a description names that are looked at, at most.
 const MAX_SPANS: usize = 32;
+/// Words of prose looked at, at most.
+const MAX_WORDS: usize = 4096;
 /// Definitions followed from one schema, at most.
 const MAX_DEFS: usize = 256;
 
+/// What the contract says around a body the mock builds (see the module's
+/// documentation).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Prose<'a> {
+    /// The description of the response for the body's status.
+    pub description: Option<&'a str>,
+    /// The contract's API-level description.
+    pub info: Option<&'a str>,
+    /// The request members whose repeated value the body refuses (source 3), if any.
+    pub repeated: &'a [String],
+    /// The type of resource the refused call makes.
+    pub resource: Option<&'a str>,
+}
+
 /// `body`, valid against `validator`, with each scalar member the contract names a
-/// value for (see the module's documentation) holding that value. `schema` and
-/// `description` are those of the response for `status`. A body that is not valid to
-/// begin with is left as it is.
+/// value for (see the module's documentation) holding that value. `schema` is that of
+/// the response for `status`, and `prose` what the contract says around it. A body
+/// that is not valid to begin with is left as it is.
 pub(crate) fn fill(
     bundle: &Bundle,
     validator: &SchemaValidator,
     (schema, status): (&Value, u16),
-    description: Option<&str>,
+    prose: Prose<'_>,
     body: Value,
 ) -> Value {
     if !validator.is_valid(&body) {
         return body;
     }
-    let spans = description.map(sentenced_spans).unwrap_or_default();
+    let said = prose.description.map(sentenced_tokens).unwrap_or_default();
+    let info = prose
+        .info
+        .map(|text| {
+            stating(
+                sentenced_tokens(text),
+                status,
+                (prose.repeated, prose.resource),
+            )
+        })
+        .unwrap_or_default();
     let mut names = HashSet::new();
     property_names(bundle, schema, 0, &mut HashSet::new(), &mut names);
     let mut walk = Walk {
         bundle,
-        spans: &spans,
+        said: [Said::new(said), Said::new(info)],
+        repeated: prose.repeated,
         names: &names,
         status,
         shared: None,
@@ -88,58 +128,158 @@ pub(crate) fn fill(
 /// backticks, and inside `<code>`, trimmed, when it is short and not empty.
 #[must_use]
 pub fn code_spans(text: &str) -> Vec<String> {
-    sentenced_spans(text)
+    sentenced_tokens(text)
         .into_iter()
-        .map(|(span, _)| span)
+        .filter_map(|(token, _)| match token {
+            Token::Code(span) => Some(span),
+            Token::Word(_) => None,
+        })
         .collect()
 }
 
-/// [`code_spans`], each with the number of the sentence it stands in: a `.`, `!` or `?`
-/// outside code, followed by a space or the end, ends one.
-fn sentenced_spans(text: &str) -> Vec<(String, usize)> {
+/// A piece of a description: what it names in code position, or a word of its prose
+/// (a run of letters, digits and `_`).
+#[derive(Clone, Debug, PartialEq)]
+enum Token {
+    Code(String),
+    Word(String),
+}
+
+/// What a description says, each piece with the number of its sentence, and its code
+/// spans alone.
+#[derive(Default)]
+struct Said {
+    tokens: Vec<(Token, usize)>,
+    spans: Vec<(String, usize)>,
+}
+
+impl Said {
+    fn new(tokens: Vec<(Token, usize)>) -> Self {
+        let spans = tokens
+            .iter()
+            .filter_map(|(token, sentence)| match token {
+                Token::Code(span) => Some((span.clone(), *sentence)),
+                Token::Word(_) => None,
+            })
+            .collect();
+        Self { tokens, spans }
+    }
+}
+
+/// The next text in code position of `rest`: where it starts, what it holds, and what
+/// follows it. `None` when there is none, or it is not closed.
+fn next_code(rest: &str) -> Option<(usize, &str, &str)> {
+    let tick = rest.find('`');
+    let tag = rest.find("<code>");
+    match (tick, tag) {
+        (Some(t), g) if g.is_none_or(|g| t < g) => {
+            let open = rest[t..].bytes().take_while(|b| *b == b'`').count();
+            let fence = "`".repeat(open);
+            let body = &rest[t + open..];
+            let end = body.find(&fence)?;
+            Some((t, &body[..end], &body[end + open..]))
+        }
+        (_, Some(g)) => {
+            let body = &rest[g + "<code>".len()..];
+            let end = body.find("</code>")?;
+            Some((g, &body[..end], &body[end + "</code>".len()..]))
+        }
+        _ => None,
+    }
+}
+
+/// What `text` names in code position and the words of its prose, in order, each with
+/// the number of the sentence it stands in: a `.`, `!` or `?` outside code, followed
+/// by a space or the end, ends one. Text after a code span left open is read as prose.
+fn sentenced_tokens(text: &str) -> Vec<(Token, usize)> {
     let mut out = Vec::new();
     let mut rest = text;
     let mut sentence = 0;
-    while out.len() < MAX_SPANS {
-        let tick = rest.find('`');
-        let tag = rest.find("<code>");
-        let (start, inner, after) = match (tick, tag) {
-            (Some(t), g) if g.is_none_or(|g| t < g) => {
-                let open = rest[t..].bytes().take_while(|b| *b == b'`').count();
-                let fence = "`".repeat(open);
-                let body = &rest[t + open..];
-                let Some(end) = body.find(&fence) else { break };
-                (t, &body[..end], &body[end + open..])
-            }
-            (_, Some(g)) => {
-                let body = &rest[g + "<code>".len()..];
-                let Some(end) = body.find("</code>") else {
-                    break;
-                };
-                (g, &body[..end], &body[end + "</code>".len()..])
-            }
-            _ => break,
+    let mut spans = 0;
+    loop {
+        let found = next_code(rest).filter(|_| spans < MAX_SPANS);
+        let prose = found.map_or(rest, |(start, _, _)| &rest[..start]);
+        sentence = prose_words(prose, sentence, &mut out);
+        let Some((_, inner, after)) = found else {
+            break;
         };
-        sentence += sentence_ends(&rest[..start]);
         let inner = inner.trim();
         if !inner.is_empty() && inner.chars().count() <= MAX_SPAN_CHARS {
-            out.push((inner.to_string(), sentence));
+            out.push((Token::Code(inner.to_string()), sentence));
+            spans += 1;
         }
         rest = after;
     }
     out
 }
 
-/// How many sentences `prose` ends.
-fn sentence_ends(prose: &str) -> usize {
+/// Pushes the words of `prose` onto `out`, from sentence `sentence` on: the number of
+/// the sentence it ends in.
+fn prose_words(prose: &str, mut sentence: usize, out: &mut Vec<(Token, usize)>) -> usize {
     let chars: Vec<char> = prose.chars().collect();
-    chars
-        .iter()
-        .enumerate()
-        .filter(|(i, c)| {
-            matches!(c, '.' | '!' | '?') && chars.get(i + 1).is_none_or(|n| n.is_whitespace())
+    let mut word = String::new();
+    for (i, c) in chars.iter().enumerate() {
+        if c.is_alphanumeric() || *c == '_' {
+            word.push(*c);
+            continue;
+        }
+        if !word.is_empty() && out.len() < MAX_WORDS {
+            out.push((Token::Word(std::mem::take(&mut word)), sentence));
+        }
+        word.clear();
+        if matches!(c, '.' | '!' | '?') && chars.get(i + 1).is_none_or(|n| n.is_whitespace()) {
+            sentence += 1;
+        }
+    }
+    if !word.is_empty() && out.len() < MAX_WORDS {
+        out.push((Token::Word(word), sentence));
+    }
+    sentence
+}
+
+/// Whether `token` names `member`: in code position as it is, or as a word of the prose
+/// whatever its case.
+fn names_member(token: &Token, member: &str) -> bool {
+    match token {
+        Token::Code(span) => span == member,
+        Token::Word(word) => word.eq_ignore_ascii_case(member),
+    }
+}
+
+/// The pieces of the sentences of `said` that hold `status` as a word and name one of
+/// `repeated` and the type `resource` (source 3 of the module's documentation), as
+/// [`crate::guards::refusal_tied_to`] reads them; none without a repeat or a type.
+fn stating(
+    said: Vec<(Token, usize)>,
+    status: u16,
+    (repeated, resource): (&[String], Option<&str>),
+) -> Vec<(Token, usize)> {
+    let Some(resource) = resource.filter(|_| !repeated.is_empty()) else {
+        return Vec::new();
+    };
+    let mut texts: HashMap<usize, String> = HashMap::new();
+    for (token, sentence) in &said {
+        let text = texts.entry(*sentence).or_default();
+        text.push(' ');
+        text.push_str(match token {
+            Token::Code(span) | Token::Word(span) => span,
+        });
+    }
+    let status = status.to_string();
+    let stated: HashSet<usize> = texts
+        .into_iter()
+        .filter(|(_, text)| {
+            crate::guards::names_phrase(text, &status)
+                && crate::guards::names_phrase(text, resource)
+                && repeated
+                    .iter()
+                    .any(|m| crate::guards::names_phrase(text, m))
         })
-        .count()
+        .map(|(sentence, _)| sentence)
+        .collect();
+    said.into_iter()
+        .filter(|(_, s)| stated.contains(s))
+        .collect()
 }
 
 /// Every member name `schema` declares, at any depth, through `$ref`s and compositions.
@@ -243,8 +383,12 @@ fn statuses_by_def(bundle: &Bundle) -> HashMap<String, HashSet<Option<u16>>> {
 
 struct Walk<'a> {
     bundle: &'a Bundle,
-    /// What the description names in code position, with its sentence.
-    spans: &'a [(String, usize)],
+    /// What the status's description says (source 2), then what the sentences of the
+    /// API-level description that state this refusal say (source 3).
+    said: [Said; 2],
+    /// The request members whose repeated value the body refuses: where the prose names
+    /// one, it speaks of the request, not of a member of the body of that name.
+    repeated: &'a [String],
     /// Every member name the body's schema declares.
     names: &'a HashSet<String>,
     /// The response's HTTP status.
@@ -365,8 +509,37 @@ impl Walk<'_> {
         if let Some([only]) = values.map(Vec::as_slice) {
             return scalar(only);
         }
-        if let Some(described) = self.described(node, values, (name, dotted)) {
-            return Some(described);
+        // The values the member's own description lists in code position, when it has
+        // no `enum`: as an enum's, the one the status's prose names is its value.
+        let listed: Option<Vec<Value>> = values.is_none().then(|| {
+            let own = node
+                .get("description")
+                .or_else(|| schema.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut out: Vec<Value> = Vec::new();
+            for span in code_spans(own) {
+                if self.names.contains(&span) {
+                    continue;
+                }
+                if let Some(value) = typed(node, &span)
+                    && !out.contains(&value)
+                {
+                    out.push(value);
+                }
+            }
+            out
+        });
+        let listed = listed.filter(|l| !l.is_empty());
+        for said in &self.said {
+            if let Some(listed) = listed.as_ref()
+                && let Some(one) = self.described(said, node, Some(listed), (name, dotted))
+            {
+                return Some(one);
+            }
+            if let Some(described) = self.described(said, node, values, (name, dotted)) {
+                return Some(described);
+            }
         }
         if alone && let Some(example) = example_value(self.bundle, node) {
             return scalar(&example);
@@ -374,42 +547,80 @@ impl Walk<'_> {
         None
     }
 
-    /// What the description names for the member (source 2 of the module's
+    /// Whether `token` names a member of the body: its name in code position, alone or
+    /// ending a dotted path, or as a word of the prose whatever its case.
+    fn is_member(&self, token: &Token) -> bool {
+        match token {
+            Token::Code(span) => {
+                self.names.contains(span)
+                    || span
+                        .rsplit_once('.')
+                        .is_some_and(|(_, last)| self.names.contains(last))
+            }
+            Token::Word(word) => self.names.iter().any(|n| n.eq_ignore_ascii_case(word)),
+        }
+    }
+
+    /// What `said` names for the member (sources 2 and 3 of the module's
     /// documentation): one value, or none.
     fn described(
         &self,
+        said: &Said,
         node: &Value,
         values: Option<&Vec<Value>>,
         (name, dotted): (&str, &str),
     ) -> Option<Value> {
-        if self.spans.is_empty() || name.is_empty() {
+        if said.tokens.is_empty() || name.is_empty() {
             return None;
         }
         if let Some(values) = values {
             let mut named = values
                 .iter()
-                .filter(|v| self.spans.iter().any(|(s, _)| matches_span(v, s)));
+                .filter(|v| said.spans.iter().any(|(s, _)| matches_span(v, s)));
             return match (named.next(), named.next()) {
                 (Some(one), None) => scalar(one),
                 _ => None,
             };
         }
+        let numeric = numeric(node);
+        let status = self.status.to_string();
         let mut found: Vec<Value> = Vec::new();
-        // Every value after the member's name, to the end of its sentence.
-        for (at, (span, sentence)) in self.spans.iter().enumerate() {
-            if span != name && span != dotted {
+        // Every value after the member's name, to the end of its sentence or the next
+        // member named: a value belongs to the member named nearest before it.
+        let mut owner: Option<(bool, usize)> = None;
+        for (token, sentence) in &said.tokens {
+            if owner.is_some_and(|(_, s)| s != *sentence) {
+                owner = None;
+            }
+            if self.repeated.iter().any(|m| names_member(token, m)) {
+                owner = Some((false, *sentence));
                 continue;
             }
-            let after = self.spans[at + 1..]
-                .iter()
-                .take_while(|(_, s)| s == sentence)
-                .filter(|(value, _)| !self.names.contains(value));
-            for (value, _) in after {
-                if let Some(value) = typed(node, value)
-                    && !found.contains(&value)
+            let ours = match token {
+                Token::Code(span) => span == name || span == dotted,
+                Token::Word(_) => names_member(token, name),
+            };
+            if ours || self.is_member(token) {
+                owner = Some((ours, *sentence));
+                continue;
+            }
+            if owner.is_none_or(|(ours, _)| !ours) {
+                continue;
+            }
+            let value = match token {
+                Token::Code(value) => typed(node, value),
+                // A plain number of the prose, for a number, other than the status.
+                Token::Word(word)
+                    if numeric && *word != status && word.bytes().all(|b| b.is_ascii_digit()) =>
                 {
-                    found.push(value);
+                    typed(node, word)
                 }
+                Token::Word(_) => None,
+            };
+            if let Some(value) = value
+                && !found.contains(&value)
+            {
+                found.push(value);
             }
         }
         match found.as_slice() {
@@ -433,18 +644,22 @@ fn matches_span(value: &Value, span: &str) -> bool {
     }
 }
 
-/// The text `span` as a value of `node`'s type: a number for a member typed only as a
-/// number or an integer, otherwise the text.
-fn typed(node: &Value, span: &str) -> Option<Value> {
+/// Whether `node` is typed only as a number or an integer.
+fn numeric(node: &Value) -> bool {
     let types: Vec<&str> = match node.get("type") {
         Some(Value::String(t)) => vec![t.as_str()],
         Some(Value::Array(ts)) => ts.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
-    let numeric = !types.is_empty()
+    !types.is_empty()
         && !types.contains(&"string")
-        && types.iter().any(|t| matches!(*t, "integer" | "number"));
-    if numeric {
+        && types.iter().any(|t| matches!(*t, "integer" | "number"))
+}
+
+/// The text `span` as a value of `node`'s type: a number for a member typed only as a
+/// number or an integer, otherwise the text.
+fn typed(node: &Value, span: &str) -> Option<Value> {
+    if numeric(node) {
         let parsed: Value = serde_json::from_str(span).ok()?;
         return parsed.is_number().then_some(parsed);
     }

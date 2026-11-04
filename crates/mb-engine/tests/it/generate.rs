@@ -2867,6 +2867,63 @@ async fn a_create_declaring_only_a_400_is_offered_it() {
     );
 }
 
+/// A refusal offered with its declared error body's schema may be written with that
+/// body: served when it is valid against the response's schema, the faker's otherwise.
+#[tokio::test]
+async fn a_refusal_is_answered_with_the_error_body_the_model_wrote_when_valid() {
+    let bundle = inline(TEAMS);
+    let op = bundle.operation("createTeam").unwrap();
+    let written = json!({"detail": "A team with the slug core already exists."});
+    let refuse = |body: Value| {
+        Ok(
+            json!({"effects": [], "response": null, "refusal": 409, "refusal_body": body})
+                .to_string(),
+        )
+    };
+    let (provider, engine) = scripted(vec![refuse(written.clone()), refuse(json!({"message": 3}))]);
+    let c = OperationCall {
+        operation_id: "createTeam".into(),
+        path_params: Map::from_iter([("org".to_string(), json!("acme"))]),
+        body: Some(json!({"slug": "core"})),
+        ..OperationCall::default()
+    };
+    let related = [StoredResource {
+        resource_type: "orgs".into(),
+        id: "acme".into(),
+        data: json!({"id": "acme"}),
+    }];
+    let ctx = || GenerationContext {
+        related: &related,
+        ..ctx()
+    };
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    assert_eq!((out.status, out.body.as_ref()), (409, Some(&written)));
+    let schema = asked_schema(&provider, 0);
+    assert_eq!(
+        schema["properties"]["refusal_body"],
+        json!({"$ref": "#/$defs/Error"}),
+        "{schema}"
+    );
+    assert_eq!(
+        schema["$defs"]["Error"]["required"],
+        json!(["detail"]),
+        "{schema}"
+    );
+    let user = provider.requests()[0].messages[1].content.clone();
+    assert!(user.contains("\"refusal_body\""), "{user}");
+    // The envelope's schema still reads as the answer's.
+    let inner = mb_engine::without_effects_schema(&schema);
+    assert_eq!(inner["$ref"], "#/$defs/Team", "{inner}");
+
+    let out = engine.generate(&bundle, op, &c, ctx()).await.unwrap();
+    let body = out.body.unwrap();
+    assert_eq!(out.status, 409);
+    assert!(
+        body["detail"].is_string() && body.get("message").is_none(),
+        "{body}"
+    );
+}
+
 /// The id a create's body asks for under its identity field is its asked identity, a
 /// string or a number, when the request's body schema declares that member writable (at
 /// its top level or in an `allOf` part); nothing else is, and no other operation has one.
