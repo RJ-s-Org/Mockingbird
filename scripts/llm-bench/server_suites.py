@@ -62,6 +62,11 @@ Suites (contracts are in-repo, so the bench is reproducible):
   `scripts/llm-bench/contracts/blind7/`: Linear issues (GraphQL), Mollie payments,
   Chargebee customers and credits, Bitbucket pull requests and Cloudflare DNS
   records. Not in the default suites. Same rule; no check gates the rest.
+- journeys_blind8: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind8/`: Business Central customers and invoices
+  (OData), Azure DevOps work items (JSON Patch), commercetools carts, eBay Trading
+  listings (SOAP) and Meilisearch documents. Not in the default suites. Same rule;
+  no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -107,10 +112,12 @@ import urllib.request
 import uuid
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
+from xml.etree import ElementTree
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
-          "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7")
+          "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
+          "journeys_blind8")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -1043,14 +1050,18 @@ class Journey:
         self.done = set()
         self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
         self.last_infra = None  # the infra reason the latest check failed on, if any
+        self.raw = b""  # the raw body of the latest answer
 
-    def call(self, method, path, query=None, body=None, form=None):
-        """The JSON body of the response, or {} when it is not a JSON object."""
+    def call(self, method, path, query=None, body=None, form=None, data=None):
+        """The JSON body of the response, or {} when it is not a JSON object. `data` is a
+        raw body, sent with the content-type in `self.headers`; `self.raw` keeps the raw
+        body of the response, for answers that are not JSON."""
         url = f"{self.srv.data}/{self.name}{path}"
         if query:
             url += "?" + urllib.parse.urlencode(query)
-        ms, status, hdrs, parsed, raw = request(url, method, self.headers, json_body=body, form=form,
+        ms, status, hdrs, parsed, raw = request(url, method, self.headers, json_body=body, form=form, data=data,
                                                 timeout=self.args.timeout)
+        self.raw = raw
         self.last = {"status": status, "source": source_of(hdrs), "ms": ms,
                      "fallback_reason": fallback_reason(hdrs)}
         if status >= 400 or status == 0:
@@ -4700,6 +4711,668 @@ def run_journeys_blind7(srv, sink, args):
     run_journey_table(BLIND7_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- eighth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind8/). They were picked for
+# API styles: OData v4 with keys in parentheses, $filter/$top/$skip/$count, server-driven
+# paging by @odata.nextLink, @odata.etag with If-Match and a bound action (Business
+# Central), JSON Patch documents with a test operation on the revision, WIQL queries in
+# POST bodies and a batch read (Azure DevOps), update-action lists guarded by a version
+# in the body, money in cent amounts and carts addressed by key (commercetools), SOAP
+# envelopes with errors as Ack Failure and money in a currencyID attribute (eBay
+# Trading), and asynchronous writes answered with tasks to poll, search in POST bodies
+# and batches of documents (Meilisearch). No check gates the rest: a journey goes on
+# with an id of its own when a call gave none. A check asserts only what its contract
+# promises a client. Do not edit a check to suit results.
+BLIND8_CHECKS = {
+    "businesscentral": [
+        "customer keeps its fields and answers an etag", "read by key matches the created customer",
+        "patch with the current etag changes the phone and the etag", "a stale etag is refused",
+        "a refused patch changes nothing", "$filter finds only the customer",
+        "$top 1 answers one customer and the count", "$skip 1 reaches the other customer",
+        "maxpagesize 1 answers a nextLink", "nextLink reaches the other customer",
+        "a new invoice is a draft for its customer", "invoice totals its line", "posted invoice reads as open",
+        "deleted customer is not found",
+    ],
+    "azuredevops": [
+        "create applies each patch operation", "a new work item is rev 1 in its project",
+        "read matches the created work item", "a passing test lets the replace through",
+        "a failed test refuses the document", "a refused document changes nothing", "remove takes the field away",
+        "child links to its parent", "wiql finds the tagged work items", "wiql $top 1 answers one of them",
+        "batch answers the fields asked for", "comment keeps its text and work item", "comment list holds the comment",
+        "deleted work item is not found",
+    ],
+    "commercetools": [
+        "cart keeps its key, currency and email", "a new cart is version 1 and active",
+        "read by key matches the created cart", "a custom line item totals the cart",
+        "an update answers the next version", "a stale version is refused", "a refused update changes nothing",
+        "two actions apply in one update", "where finds only the cart", "limit 1 answers one cart and the total",
+        "offset 1 reaches the other cart", "an order takes the cart's total", "an ordered cart reads as ordered",
+        "deleted cart is not found",
+    ],
+    "ebay": [
+        "a listing answers Success and an ItemID", "listing fees are in the site's currency",
+        "read matches the listed item", "a new listing is active", "read by SKU finds the item",
+        "a taken SKU is refused", "revise changes the price and keeps the ItemID", "revise keeps what it was not sent",
+        "a second listing takes another ItemID", "the active list counts both listings",
+        "page 2 reaches the other listing", "ending answers the end time", "an ended listing reads as completed",
+        "the active list leaves out the ended listing",
+    ],
+    "meilisearch": [
+        "index creation answers an enqueued task", "the index task succeeds", "settings read back after their task",
+        "a batch addition indexes every document", "a document reads by its primary key",
+        "the document list counts every document", "offset reaches the last document",
+        "a query finds the matching document", "a filter narrows the hits", "sort orders the hits by year",
+        "limit and offset page the hits", "a filter on an unfilterable attribute is refused",
+        "a partial update keeps the other attributes", "a deleted document is not found",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND8_CHECKS)
+BLIND8_DIR = "scripts/llm-bench/contracts/blind8"
+BLIND8_CONTRACTS = {"ebay": "ebay-trading.wsdl"}
+# Contracts alone: no persona.
+BLIND8_MOCKS = {name: (f"{BLIND8_DIR}/{BLIND8_CONTRACTS.get(name, f'{name}.openapi.yaml')}", f"/{name}", None)
+                for name in BLIND8_CHECKS}
+
+
+@contextlib.contextmanager
+def sent_headers(j, extra):
+    """`extra` added to the journey's headers for the calls inside the block."""
+    saved = {k: j.headers.get(k) for k in extra}
+    j.headers.update(extra)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                j.headers.pop(k, None)
+            else:
+                j.headers[k] = v
+
+
+def made_guid(j):
+    return str(uuid.UUID(int=j.rng.getrandbits(128), version=4))
+
+
+def businesscentral_steps(j):
+    # OData keys in parentheses. The two customers share a postal code made for this run,
+    # so a filter on it matches only them. PATCH and DELETE send the etag last answered;
+    # the stale one is the etag from before the first patch.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_guid(j)
+
+    def etag(thing):
+        value = obj(thing).get("@odata.etag")
+        return value if isinstance(value, str) and value else None
+
+    company = own(head(obj(j.call("GET", "/companies")).get("value")).get("id"))
+    base = f"/companies({company})"
+
+    def customer(cid):
+        return obj(j.call("GET", f"{base}/customers({cid})"))
+
+    def patch(cid, if_match, body):
+        with sent_headers(j, {"If-Match": if_match}):
+            return obj(j.call("PATCH", f"{base}/customers({cid})", body=body))
+
+    def listed(query, prefer=None):
+        with sent_headers(j, {"Prefer": prefer} if prefer else {}):
+            page = obj(j.call("GET", f"{base}/customers", query=query))
+        return ids_of(page.get("value")), page
+
+    postal = f"{tag}"
+    sent = {"displayName": f"Atlas Bikes {tag}", "type": "Company", "addressLine1": "Rua Augusta 100",
+            "city": "Lisbon", "country": "PT", "postalCode": postal, "email": f"orders.{tag}@atlasbikes.example",
+            "phoneNumber": "+351 21 000 0001"}
+    made = obj(j.call("POST", f"{base}/customers", body=sent))
+    first_tag = etag(made)
+    j.check("customer keeps its fields and answers an etag",
+            j.last["status"] == 201 and same(made, sent, "displayName", "city", "postalCode", "email")
+            and first_tag is not None,
+            displayName=made.get("displayName"), postalCode=made.get("postalCode"), etag=first_tag)
+    c1 = own(made.get("id"))
+    read = customer(c1)
+    j.check("read by key matches the created customer",
+            eq(read.get("id"), c1)
+            and same(read, sent, "displayName", "addressLine1", "city", "country", "postalCode", "email"),
+            id=read.get("id"), displayName=read.get("displayName"))
+    current = etag(read) or first_tag
+    phone = "+351 21 000 0002"
+    patched = patch(c1, current or "*", {"phoneNumber": phone})
+    second_tag = etag(patched)
+    j.check("patch with the current etag changes the phone and the etag",
+            j.last["status"] == 200 and eq(patched.get("phoneNumber"), phone)
+            and same(patched, sent, "displayName", "email") and second_tag is not None and second_tag != current,
+            phoneNumber=patched.get("phoneNumber"), etag_before=current, etag_after=second_tag)
+    refused = patch(c1, current or 'W/"JzQ0O2JlbmNoOzEn"', {"phoneNumber": "+351 21 000 0003"})
+    j.check("a stale etag is refused",
+            j.last["status"] == 409 and eq(obj(refused.get("error")).get("code"), "Request_EntityChanged"),
+            error=refused.get("error"))
+    now = customer(c1).get("phoneNumber")
+    j.check("a refused patch changes nothing", eq(now, phone), phoneNumber=now)
+    c2 = own(obj(j.call("POST", f"{base}/customers", body={
+        "displayName": f"Atlas Cycles {tag}", "type": "Company", "city": "Porto", "country": "PT",
+        "postalCode": postal, "email": f"hello.{tag}@atlascycles.example"})).get("id"))
+    rows, _ = listed({"$filter": f"displayName eq 'Atlas Bikes {tag}'"})
+    j.check("$filter finds only the customer", rows == [c1], listed=rows)
+    by_postal = f"postalCode eq '{postal}'"
+    first, page = listed({"$filter": by_postal, "$top": 1, "$count": "true"})
+    j.check("$top 1 answers one customer and the count",
+            len(first) == 1 and first[0] in (c1, c2) and eq(page.get("@odata.count"), 2),
+            listed=first, count=page.get("@odata.count"))
+    rest, _ = listed({"$filter": by_postal, "$top": 1, "$skip": 1})
+    j.check("$skip 1 reaches the other customer", len(rest) == 1 and same_items(first + rest, [c1, c2]),
+            first=first, listed=rest)
+    first, page = listed({"$filter": by_postal}, prefer="odata.maxpagesize=1")
+    nxt = page.get("@odata.nextLink")
+    j.check("maxpagesize 1 answers a nextLink",
+            len(first) == 1 and query_value(nxt, "$skiptoken") is not None, listed=first, next_link=nxt)
+    follow = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(nxt).query)) if query_value(nxt, "$skiptoken") else {
+        "$filter": by_postal, "$skiptoken": made_up(j, "", 12)}
+    rest, page = listed(follow, prefer="odata.maxpagesize=1")
+    j.check("nextLink reaches the other customer",
+            len(rest) == 1 and same_items(first + rest, [c1, c2]) and not page.get("@odata.nextLink"),
+            first=first, listed=rest, next_link=page.get("@odata.nextLink"))
+    item = own(obj(j.call("POST", f"{base}/items", body={
+        "number": f"BK-{tag}", "displayName": "Commuter helmet", "type": "Inventory", "unitPrice": 12.5,
+        "baseUnitOfMeasureCode": "PCS"})).get("id"))
+    invoice = obj(j.call("POST", f"{base}/salesInvoices", body={"customerId": c1, "externalDocumentNumber": f"PO-{tag}"}))
+    j.check("a new invoice is a draft for its customer",
+            j.last["status"] == 201 and eq(invoice.get("status"), "Draft") and eq(invoice.get("customerId"), c1),
+            invoice_status=invoice.get("status"), customerId=invoice.get("customerId"))
+    inv = own(invoice.get("id"))
+    j.call("POST", f"{base}/salesInvoices({inv})/salesInvoiceLines",
+           body={"lineType": "Item", "itemId": item, "quantity": 3, "unitPrice": 12.5})
+    total = obj(j.call("GET", f"{base}/salesInvoices({inv})")).get("totalAmountExcludingTax")
+    j.check("invoice totals its line", near(total, 37.5, 0.005), totalAmountExcludingTax=total)
+    j.call("POST", f"{base}/salesInvoices({inv})/Microsoft.NAV.post")
+    posted = j.last["status"]
+    read = obj(j.call("GET", f"{base}/salesInvoices({inv})"))
+    j.check("posted invoice reads as open", eq(read.get("id"), inv) and eq(read.get("status"), "Open"),
+            post_status=posted, invoice_status=read.get("status"))
+    with sent_headers(j, {"If-Match": etag(customer(c2)) or "*"}):
+        j.call("DELETE", f"{base}/customers({c2})")
+    deleted = j.last["status"]
+    j.call("GET", f"{base}/customers({c2})")
+    j.check("deleted customer is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def azuredevops_steps(j):
+    # Writes are JSON Patch documents. The project is named for this run and every work
+    # item made here carries its tag, so a WIQL query on the tag finds the two made here.
+    j.headers["authorization"] = "Basic " + base64.b64encode(b":bench-placeholder-pat").decode()
+    tag = j.rng.randrange(10**5, 10**6)
+    project = f"Ledger{tag}"
+    root = f"/bench-org/{project}/_apis/wit"
+    version = {"api-version": "7.1"}
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**4, 10**6)
+
+    def patch_doc(method, path, ops, **query):
+        with sent_headers(j, {"content-type": "application/json-patch+json"}):
+            return obj(j.call(method, path, query=dict(version, **query), data=json.dumps(ops).encode()))
+
+    def fields(item):
+        return obj(obj(item).get("fields"))
+
+    def work_item(n, **query):
+        return obj(j.call("GET", f"{root}/workitems/{n}", query=dict(version, **query)))
+
+    def wiql(**query):
+        answer = obj(j.call("POST", f"{root}/wiql", query=dict(version, **query), body={"query": (
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project "
+            f"AND [System.Tags] CONTAINS '{label}'")}))
+        return ids_of(answer.get("workItems"))
+
+    label = f"bench-{tag}"
+    title = f"Invoice totals round wrong {tag}"
+    description = "<div>Totals are off by one cent on multi-line invoices.</div>"
+    made = patch_doc("POST", f"{root}/workitems/$Task", [
+        {"op": "add", "path": "/fields/System.Title", "value": title},
+        {"op": "add", "path": "/fields/System.Description", "value": description},
+        {"op": "add", "path": "/fields/Microsoft.VSTS.Common.Priority", "value": 2},
+        {"op": "add", "path": "/fields/System.Tags", "value": label}])
+    f = fields(made)
+    j.check("create applies each patch operation",
+            j.last["status"] == 200 and eq(f.get("System.Title"), title) and eq(f.get("System.Description"), description)
+            and eq(f.get("Microsoft.VSTS.Common.Priority"), 2) and eq(f.get("System.Tags"), label)
+            and eq(f.get("System.WorkItemType"), "Task"),
+            title=f.get("System.Title"), priority=f.get("Microsoft.VSTS.Common.Priority"),
+            tags=f.get("System.Tags"), work_item_type=f.get("System.WorkItemType"))
+    j.check("a new work item is rev 1 in its project",
+            eq(made.get("rev"), 1) and eq(f.get("System.TeamProject"), project),
+            rev=made.get("rev"), team_project=f.get("System.TeamProject"))
+    i1 = own(made.get("id"))
+    read = work_item(i1)
+    f = fields(read)
+    j.check("read matches the created work item",
+            eq(read.get("id"), i1) and eq(f.get("System.Title"), title) and eq(f.get("System.Description"), description)
+            and eq(f.get("Microsoft.VSTS.Common.Priority"), 2),
+            id=read.get("id"), title=f.get("System.Title"))
+    rev = read.get("rev") if is_int(read.get("rev")) else 1
+    renamed = f"Invoice totals round once, not per line {tag}"
+    answer = patch_doc("PATCH", f"{root}/workitems/{i1}", [
+        {"op": "test", "path": "/rev", "value": rev},
+        {"op": "replace", "path": "/fields/System.Title", "value": renamed}])
+    j.check("a passing test lets the replace through",
+            j.last["status"] == 200 and eq(fields(answer).get("System.Title"), renamed) and eq(answer.get("rev"), rev + 1),
+            title=fields(answer).get("System.Title"), rev_before=rev, rev_after=answer.get("rev"))
+    patch_doc("PATCH", f"{root}/workitems/{i1}", [
+        {"op": "test", "path": "/rev", "value": rev},
+        {"op": "replace", "path": "/fields/System.Title", "value": f"Someone else's title {tag}"}])
+    j.check("a failed test refuses the document", j.last["status"] == 412)
+    read = work_item(i1)
+    j.check("a refused document changes nothing",
+            eq(fields(read).get("System.Title"), renamed) and eq(read.get("rev"), rev + 1),
+            title=fields(read).get("System.Title"), rev=read.get("rev"))
+    patch_doc("PATCH", f"{root}/workitems/{i1}", [{"op": "remove", "path": "/fields/System.Description"}])
+    removed = j.last["status"]
+    read = work_item(i1)
+    j.check("remove takes the field away",
+            bool(fields(read)) and "System.Description" not in fields(read) and eq(fields(read).get("System.Title"), renamed),
+            remove_status=removed, fields=sorted(fields(read)))
+    parent_url = given(made.get("url"), f"https://dev.azure.com/bench-org/_apis/wit/workItems/{i1}")
+    child = patch_doc("POST", f"{root}/workitems/$Task", [
+        {"op": "add", "path": "/fields/System.Title", "value": f"Add a test for 0.335 {tag}"},
+        {"op": "add", "path": "/fields/System.Tags", "value": label},
+        {"op": "add", "path": "/relations/-", "value": {
+            "rel": "System.LinkTypes.Hierarchy-Reverse", "url": parent_url, "attributes": {"comment": "split out"}}}])
+    i2 = own(child.get("id"))
+    relations = dicts(work_item(i2, **{"$expand": "relations"}).get("relations"))
+    parents = [r.get("url") for r in relations if r.get("rel") == "System.LinkTypes.Hierarchy-Reverse"]
+    j.check("child links to its parent",
+            len(parents) == 1 and isinstance(parents[0], str) and parents[0].lower().endswith(f"/workitems/{i1}"),
+            parents=parents)
+    rows = wiql()
+    j.check("wiql finds the tagged work items", same_items(rows, [i1, i2]), listed=rows)
+    rows = wiql(**{"$top": 1})
+    j.check("wiql $top 1 answers one of them", len(rows) == 1 and rows[0] in (i1, i2), listed=rows)
+    batch = obj(j.call("POST", f"{root}/workitemsbatch", query=version,
+                       body={"ids": [i1, i2], "fields": ["System.Id", "System.Title"]}))
+    titles = {v.get("id"): fields(v).get("System.Title") for v in dicts(batch.get("value"))}
+    j.check("batch answers the fields asked for",
+            eq(batch.get("count"), 2) and titles == {i1: renamed, i2: f"Add a test for 0.335 {tag}"}
+            and all(set(fields(v)) <= {"System.Id", "System.Title"} for v in dicts(batch.get("value"))),
+            count=batch.get("count"), titles=list(titles.values()))
+    comments = f"{root}/workItems/{i1}/comments"
+    text = f"Reproduced on invoice INV-{tag}: 3 lines at 0.335 each."
+    note = obj(j.call("POST", comments, query={"api-version": "7.1-preview.4"}, body={"text": text}))
+    j.check("comment keeps its text and work item",
+            j.last["status"] == 200 and eq(note.get("text"), text) and eq(note.get("workItemId"), i1),
+            text=note.get("text"), workItemId=note.get("workItemId"))
+    nid = own(note.get("id"))
+    page = obj(j.call("GET", comments, query={"api-version": "7.1-preview.4"}))
+    j.check("comment list holds the comment",
+            eq(page.get("totalCount"), 1) and eq(by_id(page.get("comments"), nid).get("text"), text),
+            totalCount=page.get("totalCount"), listed=ids_of(page.get("comments")))
+    j.call("DELETE", f"{root}/workitems/{i2}", query=version)
+    deleted = j.last["status"]
+    work_item(i2)
+    j.check("deleted work item is not found", j.last["status"] == 404, delete_status=deleted)
+
+
+def commercetools_steps(j):
+    # Every update sends the version last answered; when an answer gave none the journey
+    # goes on with the version the contract says it must be. Both carts share an
+    # anonymousId made for this run, so a predicate on it matches only them.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    p = f"/bench-shop-{tag}"
+    key, email, anon = f"cart-{tag}", f"ana.{tag}@example.org", f"anon-{tag}"
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_guid(j)
+
+    def version(thing, fallback):
+        value = obj(thing).get("version")
+        return value if is_int(value) else fallback
+
+    def total(thing):
+        return obj(obj(thing).get("totalPrice"))
+
+    def euros(money, cents):
+        return eq(money.get("currencyCode"), "EUR") and eq(money.get("centAmount"), cents)
+
+    def update(cid, ver, *actions):
+        return obj(j.call("POST", f"{p}/carts/{cid}", body={"version": ver, "actions": list(actions)}))
+
+    def error(value):
+        return head(obj(value).get("errors"))
+
+    def query(**params):
+        page = obj(j.call("GET", f"{p}/carts", query=params))
+        return ids_of(page.get("results")), page
+
+    draft = {"currency": "EUR", "key": key, "customerEmail": email, "anonymousId": anon, "country": "PT",
+             "taxMode": "Disabled"}
+    made = obj(j.call("POST", f"{p}/carts", body=draft))
+    j.check("cart keeps its key, currency and email",
+            j.last["status"] == 201 and same(made, draft, "key", "customerEmail")
+            and eq(total(made).get("currencyCode"), "EUR"),
+            key=made.get("key"), customerEmail=made.get("customerEmail"), totalPrice=made.get("totalPrice"))
+    j.check("a new cart is version 1 and active", eq(made.get("version"), 1) and eq(made.get("cartState"), "Active"),
+            version=made.get("version"), cartState=made.get("cartState"))
+    c1 = own(made.get("id"))
+    v1 = version(made, 1)
+    read = obj(j.call("GET", f"{p}/carts/key={key}"))
+    j.check("read by key matches the created cart",
+            eq(read.get("id"), c1) and same(read, draft, "key", "customerEmail", "anonymousId"),
+            id=read.get("id"), key=read.get("key"))
+    added = update(c1, v1, {"action": "addCustomLineItem", "name": {"en": "Gift wrap"}, "quantity": 2,
+                            "money": {"currencyCode": "EUR", "centAmount": 1250}, "slug": f"gift-wrap-{tag}"})
+    line = head(added.get("customLineItems"))
+    j.check("a custom line item totals the cart",
+            euros(total(added), 2500) and euros(obj(line.get("totalPrice")), 2500) and eq(line.get("quantity"), 2),
+            totalPrice=added.get("totalPrice"), line_total=line.get("totalPrice"))
+    j.check("an update answers the next version", eq(added.get("version"), v1 + 1), version=added.get("version"))
+    v2 = version(added, v1 + 1)
+    stale = update(c1, v1, {"action": "setCustomerEmail", "email": f"rui.{tag}@example.org"})
+    j.check("a stale version is refused",
+            j.last["status"] == 409 and eq(error(stale).get("code"), "ConcurrentModification")
+            and eq(error(stale).get("currentVersion"), v2),
+            error=error(stale))
+    read = obj(j.call("GET", f"{p}/carts/{c1}"))
+    j.check("a refused update changes nothing",
+            eq(read.get("customerEmail"), email) and eq(read.get("version"), v2),
+            customerEmail=read.get("customerEmail"), version=read.get("version"))
+    both = update(c1, v2,
+                  {"action": "changeCustomLineItemQuantity", "customLineItemId": given(line.get("id"), made_guid(j)),
+                   "quantity": 3},
+                  {"action": "setShippingAddress", "address": {"country": "PT", "city": "Lisbon", "postalCode": "1100-148",
+                                                               "streetName": "Rua Augusta", "streetNumber": "100"}})
+    j.check("two actions apply in one update",
+            euros(total(both), 3750) and eq(obj(both.get("shippingAddress")).get("city"), "Lisbon")
+            and eq(both.get("version"), v2 + 1),
+            totalPrice=both.get("totalPrice"), shippingAddress=both.get("shippingAddress"), version=both.get("version"))
+    v3 = version(both, v2 + 1)
+    other = obj(j.call("POST", f"{p}/carts", body={"currency": "EUR", "key": f"cart-{tag}-b",
+                                                   "customerEmail": f"rui.{tag}@example.org", "anonymousId": anon,
+                                                   "taxMode": "Disabled"}))
+    c2 = own(other.get("id"))
+    rows, _ = query(where=f'customerEmail = "{email}"')
+    j.check("where finds only the cart", rows == [c1], listed=rows)
+    first, page = query(where=f'anonymousId = "{anon}"', limit=1)
+    j.check("limit 1 answers one cart and the total",
+            len(first) == 1 and first[0] in (c1, c2) and eq(page.get("count"), 1) and eq(page.get("total"), 2),
+            listed=first, count=page.get("count"), total=page.get("total"))
+    rest, _ = query(where=f'anonymousId = "{anon}"', limit=1, offset=1)
+    j.check("offset 1 reaches the other cart", len(rest) == 1 and same_items(first + rest, [c1, c2]),
+            first=first, listed=rest)
+    order = obj(j.call("POST", f"{p}/orders", body={"cart": {"typeId": "cart", "id": c1}, "version": v3}))
+    j.check("an order takes the cart's total",
+            j.last["status"] == 201 and eq(order.get("orderState"), "Open") and euros(total(order), 3750)
+            and eq(obj(order.get("cart")).get("id"), c1),
+            orderState=order.get("orderState"), totalPrice=order.get("totalPrice"), cart=order.get("cart"))
+    state = obj(j.call("GET", f"{p}/carts/{c1}")).get("cartState")
+    j.check("an ordered cart reads as ordered", eq(state, "Ordered"), cartState=state)
+    j.call("DELETE", f"{p}/carts/{c2}", query={"version": version(other, 1)})
+    deleted = j.last["status"]
+    gone = obj(j.call("GET", f"{p}/carts/{c2}"))
+    j.check("deleted cart is not found", j.last["status"] == 404 and eq(error(gone).get("code"), "ResourceNotFound"),
+            delete_status=deleted, error=error(gone))
+
+
+EBAY_NS = "urn:ebay:apis:eBLBaseComponents"
+
+
+def xml_element(name, value):
+    """XML for `value` as element `name`: a dict's `@x` keys are attributes and `#text`
+    its text, other keys child elements in order; a list repeats the element."""
+    if isinstance(value, list):
+        return "".join(xml_element(name, v) for v in value)
+    if isinstance(value, dict):
+        attrs = "".join(f' {k[1:]}="{xml_escape(str(v))}"' for k, v in value.items() if k.startswith("@"))
+        if "#text" in value:
+            inner = xml_escape(str(value["#text"]))
+        else:
+            inner = "".join(xml_element(k, v) for k, v in value.items() if not k.startswith(("@", "#")))
+        return f"<{name}{attrs}>{inner}</{name}>"
+    if isinstance(value, bool):
+        value = "true" if value else "false"
+    return f"<{name}>{xml_escape(str(value))}</{name}>"
+
+
+def xml_escape(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def xml_all(element, path):
+    """The elements at `path` (local names joined by `/`) under `element`, any namespace."""
+    found = [element] if element is not None else []
+    for step in path.split("/"):
+        found = [c for e in found for c in e if local_name(c.tag) == step]
+    return found
+
+
+def xml_one(element, path):
+    found = xml_all(element, path)
+    return found[0] if found else None
+
+
+def xml_text(element, path):
+    found = xml_one(element, path)
+    return found.text.strip() if found is not None and isinstance(found.text, str) else None
+
+
+def soap_answer(raw, name):
+    """The SOAP Body's `name` element in `raw`, or an empty element when there is none."""
+    try:
+        root = ElementTree.fromstring(raw)
+    except (ElementTree.ParseError, TypeError, ValueError):
+        return ElementTree.Element("none")
+    body = next((c for c in root if local_name(c.tag) == "Body"), None)
+    return next((c for c in (body if body is not None else []) if local_name(c.tag) == name), ElementTree.Element("none"))
+
+
+def decimal_of(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def ebay_steps(j):
+    # SOAP 1.1 envelopes with the token in RequesterCredentials. The seller's listings are
+    # the two made here; the second is ended, which takes it out of the active list.
+    tag = j.rng.randrange(10**5, 10**6)
+
+    def soap(op, **body):
+        envelope = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+            f'<soapenv:Header><RequesterCredentials xmlns="{EBAY_NS}"><eBayAuthToken>bench-placeholder-token'
+            '</eBayAuthToken></RequesterCredentials></soapenv:Header><soapenv:Body>'
+            + xml_element(f"{op}Request", dict({"@xmlns": EBAY_NS, "Version": "1311"}, **body))
+            + "</soapenv:Body></soapenv:Envelope>")
+        with sent_headers(j, {"content-type": "text/xml; charset=utf-8", "SOAPAction": '""'}):
+            j.call("POST", "/wsapi", data=envelope.encode())
+        return soap_answer(j.raw, f"{op}Response")
+
+    def own(value):
+        return value if matches("[0-9]+", value) else str(j.rng.randrange(10**11, 10**12))
+
+    def get_item(**which):
+        return xml_one(soap("GetItem", **which), "Item")
+
+    def active(per_page, page):
+        answer = soap("GetMyeBaySelling", ActiveList={"Include": True,
+                                                      "Pagination": {"EntriesPerPage": per_page, "PageNumber": page}})
+        items = [xml_text(i, "ItemID") for i in xml_all(answer, "ActiveList/ItemArray/Item")]
+        return items, xml_text(answer, "ActiveList/PaginationResult/TotalNumberOfEntries")
+
+    def price(item, path="StartPrice"):
+        found = xml_one(item, path)
+        return (decimal_of(found.text) if found is not None else None), (found.get("currencyID") if found is not None else None)
+
+    sku = f"HLM-{tag}"
+    title = f"Commuter bike helmet {tag}"
+
+    def listing(sku_, title_):
+        return {"Country": "US", "Currency": "USD", "Description": "Commuter helmet, size M, matte black.",
+                "DispatchTimeMax": 3, "ListingDuration": "GTC", "ListingType": "FixedPriceItem",
+                "Location": "San Jose, CA", "PrimaryCategory": {"CategoryID": "177831"}, "Quantity": 5,
+                "StartPrice": {"@currencyID": "USD", "#text": "19.99"}, "Title": title_, "SKU": sku_,
+                "PostalCode": "95125", "ConditionID": 1000, "InventoryTrackingMethod": "SKU"}
+
+    added = soap("AddFixedPriceItem", Item=listing(sku, title))
+    ack, item_id = xml_text(added, "Ack"), xml_text(added, "ItemID")
+    j.check("a listing answers Success and an ItemID", ack == "Success" and matches("[0-9]+", item_id),
+            ack=ack, item_id=item_id)
+    fees = xml_all(added, "Fees/Fee")
+    currencies = [f.get("currencyID") for f in xml_all(added, "Fees/Fee/Fee")]
+    j.check("listing fees are in the site's currency",
+            "ListingFee" in [xml_text(f, "Name") for f in fees] and bool(currencies)
+            and all(c == "USD" for c in currencies),
+            fee_names=[xml_text(f, "Name") for f in fees], currencies=currencies)
+    i1 = own(item_id)
+    item = get_item(ItemID=i1)
+    j.check("read matches the listed item",
+            xml_text(item, "ItemID") == i1 and xml_text(item, "Title") == title and xml_text(item, "SKU") == sku
+            and xml_text(item, "Quantity") == "5" and price(item) == (19.99, "USD"),
+            item_id=xml_text(item, "ItemID"), title=xml_text(item, "Title"), start_price=price(item))
+    status = xml_text(item, "SellingStatus/ListingStatus")
+    j.check("a new listing is active", status == "Active", listing_status=status)
+    found = xml_text(get_item(SKU=sku), "ItemID")
+    j.check("read by SKU finds the item", found == i1, item_id=found)
+    taken = soap("AddFixedPriceItem", Item=listing(sku, f"Commuter bike helmet, again {tag}"))
+    severities = [xml_text(e, "SeverityCode") for e in xml_all(taken, "Errors")]
+    j.check("a taken SKU is refused", xml_text(taken, "Ack") == "Failure" and "Error" in severities,
+            ack=xml_text(taken, "Ack"), severities=severities)
+    revised = soap("ReviseFixedPriceItem", Item={"ItemID": i1, "StartPrice": {"@currencyID": "USD", "#text": "24.99"}})
+    revised_ack, revised_id = xml_text(revised, "Ack"), xml_text(revised, "ItemID")
+    item = get_item(ItemID=i1)
+    j.check("revise changes the price and keeps the ItemID",
+            revised_ack == "Success" and revised_id == i1 and price(item) == (24.99, "USD"),
+            ack=revised_ack, item_id=revised_id, start_price=price(item))
+    j.check("revise keeps what it was not sent",
+            xml_text(item, "Title") == title and xml_text(item, "SKU") == sku and xml_text(item, "Quantity") == "5",
+            title=xml_text(item, "Title"), sku=xml_text(item, "SKU"), quantity=xml_text(item, "Quantity"))
+    second = soap("AddFixedPriceItem", Item=listing(f"HLM-{tag}-K", f"Kids bike helmet {tag}"))
+    second_id = xml_text(second, "ItemID")
+    j.check("a second listing takes another ItemID",
+            xml_text(second, "Ack") == "Success" and matches("[0-9]+", second_id) and second_id != i1,
+            ack=xml_text(second, "Ack"), item_id=second_id)
+    i2 = second_id if matches("[0-9]+", second_id) and second_id != i1 else own(None)
+    first, entries = active(1, 1)
+    j.check("the active list counts both listings", len(first) == 1 and first[0] in (i1, i2) and entries == "2",
+            listed=first, total_entries=entries)
+    rest, _ = active(1, 2)
+    j.check("page 2 reaches the other listing", len(rest) == 1 and same_items(first + rest, [i1, i2]),
+            first=first, listed=rest)
+    ended = soap("EndFixedPriceItem", ItemID=i2, EndingReason="NotAvailable")
+    j.check("ending answers the end time",
+            xml_text(ended, "Ack") == "Success" and instant(xml_text(ended, "EndTime")) is not None,
+            ack=xml_text(ended, "Ack"), end_time=xml_text(ended, "EndTime"))
+    status = xml_text(get_item(ItemID=i2), "SellingStatus/ListingStatus")
+    j.check("an ended listing reads as completed", status in ("Completed", "Ended"), listing_status=status)
+    rows, entries = active(10, 1)
+    j.check("the active list leaves out the ended listing", rows == [i1] and entries == "1",
+            listed=rows, total_entries=entries)
+
+
+def meilisearch_steps(j):
+    # Writes answer tasks; the journey polls each until it has finished (or gives up
+    # after a few reads) and goes on either way. The index is new, so its documents are
+    # the three added here.
+    j.headers["authorization"] = "Bearer bench-placeholder-master-key"
+    tag = j.rng.randrange(10**5, 10**6)
+    index = f"/indexes/books_{tag}"
+    finished = ("succeeded", "failed", "canceled")
+
+    def settle(answer, polls=4):
+        uid, task = obj(answer).get("taskUid"), {}
+        for _ in range(polls if is_int(uid) else 0):
+            task = obj(j.call("GET", f"/tasks/{uid}"))
+            if task.get("status") in finished:
+                break
+        return task
+
+    def search(**body):
+        answer = obj(j.call("POST", f"{index}/search", body=body))
+        return ids_of(answer.get("hits"), "isbn"), answer
+
+    def code(value):
+        return obj(value).get("code")
+
+    books = [{"isbn": f"978{tag}01", "title": "Dune", "author": "Frank Herbert", "genre": "scifi", "year": 1965},
+             {"isbn": f"978{tag}02", "title": "Emma", "author": "Jane Austen", "genre": "classic", "year": 1815},
+             {"isbn": f"978{tag}03", "title": "Neuromancer", "author": "William Gibson", "genre": "scifi", "year": 1984}]
+    d1, d2, d3 = (b["isbn"] for b in books)
+    created = obj(j.call("POST", "/indexes", body={"uid": f"books_{tag}", "primaryKey": "isbn"}))
+    j.check("index creation answers an enqueued task",
+            j.last["status"] == 202 and is_int(created.get("taskUid")) and eq(created.get("status"), "enqueued")
+            and eq(created.get("type"), "indexCreation") and eq(created.get("indexUid"), f"books_{tag}"),
+            taskUid=created.get("taskUid"), task_status=created.get("status"), type=created.get("type"))
+    task = settle(created)
+    j.check("the index task succeeds", eq(task.get("status"), "succeeded") and eq(task.get("uid"), created.get("taskUid")),
+            task_status=task.get("status"), uid=task.get("uid"))
+    settle(obj(j.call("PATCH", f"{index}/settings",
+                      body={"filterableAttributes": ["genre", "year"], "sortableAttributes": ["year"]})))
+    settings = obj(j.call("GET", f"{index}/settings"))
+    j.check("settings read back after their task",
+            same_items(settings.get("filterableAttributes"), ["genre", "year"])
+            and settings.get("sortableAttributes") == ["year"],
+            filterable=settings.get("filterableAttributes"), sortable=settings.get("sortableAttributes"))
+    added = obj(j.call("POST", f"{index}/documents", body=books))
+    queued = j.last["status"] == 202 and eq(added.get("type"), "documentAdditionOrUpdate")
+    task = settle(added)
+    details = obj(task.get("details"))
+    j.check("a batch addition indexes every document",
+            queued and eq(task.get("status"), "succeeded") and eq(details.get("receivedDocuments"), 3)
+            and eq(details.get("indexedDocuments"), 3),
+            task_status=task.get("status"), details=details)
+    doc = obj(j.call("GET", f"{index}/documents/{d1}"))
+    j.check("a document reads by its primary key", same(doc, books[0], "isbn", "title", "author", "genre", "year"),
+            document=doc)
+    page = obj(j.call("GET", f"{index}/documents", query={"limit": 2}))
+    first = ids_of(page.get("results"), "isbn")
+    j.check("the document list counts every document", len(first) == 2 and eq(page.get("total"), 3),
+            listed=first, total=page.get("total"))
+    rest = ids_of(obj(j.call("GET", f"{index}/documents", query={"limit": 2, "offset": 2})).get("results"), "isbn")
+    j.check("offset reaches the last document", len(rest) == 1 and same_items(first + rest, [d1, d2, d3]),
+            first=first, listed=rest)
+    hits, _ = search(q="neuromancer")
+    j.check("a query finds the matching document", hits == [d3], hits=hits)
+    hits, _ = search(q="", filter="genre = scifi")
+    j.check("a filter narrows the hits", same_items(hits, [d1, d3]), hits=hits)
+    hits, _ = search(q="", sort=["year:asc"])
+    j.check("sort orders the hits by year", hits == [d2, d1, d3], hits=hits)
+    hits, answer = search(q="", sort=["year:asc"], limit=1, offset=1)
+    j.check("limit and offset page the hits",
+            hits == [d1] and eq(answer.get("limit"), 1) and eq(answer.get("offset"), 1)
+            and eq(answer.get("estimatedTotalHits"), 3),
+            hits=hits, limit=answer.get("limit"), offset=answer.get("offset"),
+            estimatedTotalHits=answer.get("estimatedTotalHits"))
+    _, answer = search(q="", filter="author = 'Jane Austen'")
+    j.check("a filter on an unfilterable attribute is refused",
+            j.last["status"] == 400 and eq(code(answer), "invalid_search_filter"), code=code(answer))
+    settle(obj(j.call("PUT", f"{index}/documents", body=[{"isbn": d1, "year": 1966}])))
+    doc = obj(j.call("GET", f"{index}/documents/{d1}"))
+    j.check("a partial update keeps the other attributes",
+            eq(doc.get("year"), 1966) and same(doc, books[0], "title", "author", "genre"), document=doc)
+    settle(obj(j.call("DELETE", f"{index}/documents/{d2}")))
+    gone = obj(j.call("GET", f"{index}/documents/{d2}"))
+    j.check("a deleted document is not found", j.last["status"] == 404 and eq(code(gone), "document_not_found"),
+            code=code(gone))
+
+
+BLIND8_JOURNEYS = {"businesscentral": businesscentral_steps, "azuredevops": azuredevops_steps,
+                   "commercetools": commercetools_steps, "ebay": ebay_steps, "meilisearch": meilisearch_steps}
+
+
+def run_journeys_blind8(srv, sink, args):
+    run_journey_table(BLIND8_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -4715,6 +5388,7 @@ RUNNERS = {
     "journeys_blind5": (BLIND5_MOCKS, run_journeys_blind5),
     "journeys_blind6": (BLIND6_MOCKS, run_journeys_blind6),
     "journeys_blind7": (BLIND7_MOCKS, run_journeys_blind7),
+    "journeys_blind8": (BLIND8_MOCKS, run_journeys_blind8),
 }
 
 

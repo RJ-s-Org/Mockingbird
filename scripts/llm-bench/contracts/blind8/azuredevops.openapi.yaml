@@ -1,0 +1,500 @@
+openapi: 3.0.3
+info:
+  title: Azure DevOps Services REST API 7.1 (work item tracking)
+  version: "7.1"
+  description: |
+    A subset of the Azure DevOps work item tracking API, written from its public
+    documentation. Every call names the organization and project in its path and
+    carries `api-version` in its query (`7.1`, or `7.1-preview.4` for comments).
+
+    A work item is `{id, rev, fields, relations, url, _links}`. `fields` maps a field's
+    reference name to its value: `System.Title`, `System.Description`,
+    `System.WorkItemType`, `System.TeamProject`, `System.State`, `System.Tags`,
+    `Microsoft.VSTS.Common.Priority` and so on. `id` is an integer unique in the
+    organization; `rev` counts the revisions: 1 once created, and one more for each
+    update that changes the work item.
+
+    Work items are created and updated with JSON Patch (RFC 6902) documents sent as
+    `application/json-patch+json`: an array of operations applied in order. `add` and
+    `replace` set the field at `/fields/<reference name>`, `remove` takes it away, and
+    `add` at `/relations/-` appends a link `{rel, url, attributes}`. A `test` operation
+    compares a value, typically `{"op": "test", "path": "/rev", "value": 3}`: when the
+    value differs, the whole document is refused with 412 and nothing changes, which is
+    how a client avoids overwriting someone else's change. The answer to a create or
+    update is the work item after the operations. `relations` are answered when the
+    read asks for `$expand=relations` (or `all`). A parent link is a relation with `rel`
+    `System.LinkTypes.Hierarchy-Reverse` whose `url` is the parent's work item URL
+    (`.../_apis/wit/workItems/{id}`).
+
+    WIQL queries are `POST` bodies `{"query": "..."}` in the Work Item Query Language,
+    such as `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND
+    [System.Tags] CONTAINS 'billing'`; the answer lists the matching work items as
+    references `{id, url}` in `workItems`, at most `$top` of them. The batch endpoint
+    answers the work items whose `ids` it is sent, with only the `fields` asked for.
+
+    Comments are their own resources under a work item: `{id, workItemId, version, text,
+    createdBy, createdDate}`; the list answers `totalCount`, `count` and `comments`.
+
+    `DELETE` moves a work item to the recycle bin; afterwards it answers 404, as an
+    unknown id does. Errors are `{message, typeKey, errorCode, eventId}`.
+servers:
+  - url: https://dev.azure.com
+security:
+  - basic: []
+  - oauth2: []
+tags:
+  - name: Work Items
+  - name: Wiql
+  - name: Comments
+paths:
+  /{organization}/{project}/_apis/wit/workitems/${type}:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+      - name: type
+        in: path
+        required: true
+        description: "The work item type, such as `Task`, `Bug` or `User Story`."
+        schema: {type: string}
+      - $ref: "#/components/parameters/apiVersion"
+    post:
+      tags: [Work Items]
+      operationId: workItems_create
+      summary: Create a work item
+      description: Applies the JSON Patch document to a new work item of the type; it answers at rev 1.
+      parameters:
+        - $ref: "#/components/parameters/validateOnly"
+        - $ref: "#/components/parameters/expand"
+      requestBody:
+        required: true
+        content:
+          application/json-patch+json:
+            schema: {$ref: "#/components/schemas/JsonPatchDocument"}
+      responses:
+        "200":
+          description: The created work item.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkItem"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /{organization}/{project}/_apis/wit/workitems/{id}:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+      - $ref: "#/components/parameters/id"
+      - $ref: "#/components/parameters/apiVersion"
+    get:
+      tags: [Work Items]
+      operationId: workItems_get
+      summary: Get a work item
+      parameters:
+        - name: fields
+          in: query
+          description: Comma-separated field reference names to answer; all fields by default.
+          schema: {type: string}
+        - $ref: "#/components/parameters/expand"
+      responses:
+        "200":
+          description: The work item at its latest revision.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkItem"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Work Items]
+      operationId: workItems_update
+      summary: Update a work item
+      description: |
+        Applies the JSON Patch document in order. A failed `test` operation refuses the
+        whole document with 412 and changes nothing; otherwise the work item answers
+        with `rev` one higher.
+      parameters:
+        - $ref: "#/components/parameters/validateOnly"
+        - $ref: "#/components/parameters/expand"
+      requestBody:
+        required: true
+        content:
+          application/json-patch+json:
+            schema: {$ref: "#/components/schemas/JsonPatchDocument"}
+      responses:
+        "200":
+          description: The updated work item.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkItem"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
+    delete:
+      tags: [Work Items]
+      operationId: workItems_delete
+      summary: Delete a work item
+      description: "Moves the work item to the recycle bin (with `destroy=true`, deletes it for good). It answers 404 afterwards."
+      parameters:
+        - name: destroy
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The deleted work item's record.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkItemDelete"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /{organization}/{project}/_apis/wit/wiql:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+      - $ref: "#/components/parameters/apiVersion"
+    post:
+      tags: [Wiql]
+      operationId: wiql_queryByWiql
+      summary: Query work items with WIQL
+      description: "`@project` in the query is the project of the path."
+      parameters:
+        - name: $top
+          in: query
+          description: The most work items to answer.
+          schema: {type: integer, minimum: 1}
+        - name: timePrecision
+          in: query
+          schema: {type: boolean}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: {type: string, description: "A WIQL statement, such as `SELECT [System.Id] FROM WorkItems WHERE [System.State] = 'To Do'`."}
+      responses:
+        "200":
+          description: References to the matching work items.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkItemQueryResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /{organization}/{project}/_apis/wit/workitemsbatch:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+      - $ref: "#/components/parameters/apiVersion"
+    post:
+      tags: [Work Items]
+      operationId: workItems_getWorkItemsBatch
+      summary: Get work items in a batch
+      description: Answers the work items whose ids are sent (at most 200), each with only the fields asked for.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  maxItems: 200
+                  items: {type: integer}
+                fields:
+                  type: array
+                  items: {type: string}
+                $expand: {type: string, enum: [none, relations, fields, links, all]}
+                asOf: {type: string, format: date-time}
+                errorPolicy: {type: string, enum: [fail, omit]}
+      responses:
+        "200":
+          description: The work items asked for.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, value]
+                properties:
+                  count: {type: integer}
+                  value:
+                    type: array
+                    items: {$ref: "#/components/schemas/WorkItem"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /{organization}/{project}/_apis/wit/workItems/{workItemId}/comments:
+    parameters:
+      - $ref: "#/components/parameters/organization"
+      - $ref: "#/components/parameters/project"
+      - name: workItemId
+        in: path
+        required: true
+        schema: {type: integer}
+      - $ref: "#/components/parameters/apiVersion"
+    get:
+      tags: [Comments]
+      operationId: comments_getComments
+      summary: List a work item's comments
+      parameters:
+        - name: $top
+          in: query
+          schema: {type: integer}
+        - name: continuationToken
+          in: query
+          schema: {type: string}
+        - name: order
+          in: query
+          schema: {type: string, enum: [asc, desc]}
+      responses:
+        "200":
+          description: The comments, newest first by default.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CommentList"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Comments]
+      operationId: comments_addComment
+      summary: Add a comment to a work item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: {type: string}
+      responses:
+        "200":
+          description: The new comment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Comment"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+      description: A personal access token as the password, with an empty user name.
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://app.vssps.visualstudio.com/oauth2/authorize
+          tokenUrl: https://app.vssps.visualstudio.com/oauth2/token
+          scopes:
+            vso.work_write: Read, create and update work items and queries.
+  parameters:
+    organization:
+      name: organization
+      in: path
+      required: true
+      schema: {type: string}
+    project:
+      name: project
+      in: path
+      required: true
+      description: The project's id or name.
+      schema: {type: string}
+    id:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer}
+    apiVersion:
+      name: api-version
+      in: query
+      required: true
+      description: "`7.1`; comments take `7.1-preview.4`."
+      schema: {type: string}
+    validateOnly:
+      name: validateOnly
+      in: query
+      description: With true, the document is checked and nothing is saved.
+      schema: {type: boolean}
+    expand:
+      name: $expand
+      in: query
+      description: "`relations` (or `all`) adds the work item's relations to the answer."
+      schema: {type: string, enum: [none, relations, fields, links, all]}
+  responses:
+    BadRequest:
+      description: The document, query or a field value is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: No valid credential.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No work item has the id, or it was deleted (TF401232).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    PreconditionFailed:
+      description: A `test` operation did not match, so no operation was applied.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        $id: {type: string}
+        innerException: {type: object, nullable: true}
+        message: {type: string, example: "TF401232: Work item 299 does not exist, or you do not have permissions to read it."}
+        typeName: {type: string}
+        typeKey: {type: string, example: WorkItemUnauthorizedAccessException}
+        errorCode: {type: integer}
+        eventId: {type: integer}
+    JsonPatchOperation:
+      type: object
+      required: [op, path]
+      properties:
+        op: {type: string, enum: [add, remove, replace, move, copy, test]}
+        path: {type: string, description: "Such as `/fields/System.Title`, `/relations/-` or `/rev`."}
+        from: {type: string, description: The source path of a move or copy.}
+        value: {description: The value to set or to test against.}
+    JsonPatchDocument:
+      type: array
+      items: {$ref: "#/components/schemas/JsonPatchOperation"}
+    Link:
+      type: object
+      properties:
+        href: {type: string, format: uri}
+    WorkItemRelation:
+      type: object
+      required: [rel, url]
+      properties:
+        rel: {type: string, description: "Such as `System.LinkTypes.Hierarchy-Reverse` (the parent) or `System.LinkTypes.Related`."}
+        url: {type: string, format: uri}
+        attributes:
+          type: object
+          additionalProperties: true
+          properties:
+            isLocked: {type: boolean}
+            comment: {type: string}
+            name: {type: string}
+    IdentityRef:
+      type: object
+      properties:
+        id: {type: string}
+        displayName: {type: string}
+        uniqueName: {type: string}
+        url: {type: string, format: uri}
+    WorkItemFields:
+      type: object
+      description: Field values by reference name.
+      additionalProperties: true
+      properties:
+        System.Id: {type: integer}
+        System.Rev: {type: integer}
+        System.TeamProject: {type: string}
+        System.AreaPath: {type: string}
+        System.IterationPath: {type: string}
+        System.WorkItemType: {type: string}
+        System.State: {type: string}
+        System.Reason: {type: string}
+        System.Title: {type: string}
+        System.Description: {type: string, description: HTML.}
+        System.Tags: {type: string, description: Tags separated by `; `.}
+        System.AssignedTo: {$ref: "#/components/schemas/IdentityRef"}
+        System.CreatedBy: {$ref: "#/components/schemas/IdentityRef"}
+        System.CreatedDate: {type: string, format: date-time}
+        System.ChangedDate: {type: string, format: date-time}
+        System.CommentCount: {type: integer}
+        Microsoft.VSTS.Common.Priority: {type: integer, minimum: 1, maximum: 4}
+        Microsoft.VSTS.Scheduling.RemainingWork: {type: number}
+    WorkItem:
+      type: object
+      required: [id, rev, fields, url]
+      properties:
+        id: {type: integer}
+        rev: {type: integer, description: 1 when created; one more for each change.}
+        fields: {$ref: "#/components/schemas/WorkItemFields"}
+        relations:
+          type: array
+          description: "Answered with `$expand=relations` or `all`."
+          items: {$ref: "#/components/schemas/WorkItemRelation"}
+        commentVersionRef:
+          type: object
+          properties:
+            commentId: {type: integer}
+            version: {type: integer}
+            url: {type: string, format: uri}
+        url: {type: string, format: uri, description: "`https://dev.azure.com/{organization}/{projectId}/_apis/wit/workItems/{id}`."}
+        _links:
+          type: object
+          additionalProperties: {$ref: "#/components/schemas/Link"}
+    WorkItemDelete:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        code: {type: integer}
+        deletedBy: {type: string}
+        deletedDate: {type: string, format: date-time}
+        name: {type: string}
+        project: {type: string}
+        type: {type: string}
+        url: {type: string, format: uri}
+    WorkItemReference:
+      type: object
+      required: [id, url]
+      properties:
+        id: {type: integer}
+        url: {type: string, format: uri}
+    WorkItemQueryResult:
+      type: object
+      required: [queryType, workItems]
+      properties:
+        queryType: {type: string, enum: [flat, tree, oneHop]}
+        queryResultType: {type: string, enum: [workItem, workItemLink]}
+        asOf: {type: string, format: date-time}
+        columns:
+          type: array
+          items:
+            type: object
+            properties:
+              referenceName: {type: string}
+              name: {type: string}
+              url: {type: string, format: uri}
+        workItems:
+          type: array
+          items: {$ref: "#/components/schemas/WorkItemReference"}
+    Comment:
+      type: object
+      required: [id, workItemId, version, text]
+      properties:
+        id: {type: integer}
+        workItemId: {type: integer}
+        version: {type: integer}
+        text: {type: string}
+        createdBy: {$ref: "#/components/schemas/IdentityRef"}
+        createdDate: {type: string, format: date-time}
+        modifiedDate: {type: string, format: date-time}
+        isDeleted: {type: boolean}
+        url: {type: string, format: uri}
+    CommentList:
+      type: object
+      required: [totalCount, count, comments]
+      properties:
+        totalCount: {type: integer, description: The work item's comments in all pages.}
+        count: {type: integer, description: The comments on this page.}
+        comments:
+          type: array
+          items: {$ref: "#/components/schemas/Comment"}
+        continuationToken: {type: string, nullable: true}
+        nextPage: {type: string, format: uri, nullable: true}
+        url: {type: string, format: uri}

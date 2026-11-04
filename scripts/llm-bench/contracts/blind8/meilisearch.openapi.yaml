@@ -1,0 +1,552 @@
+openapi: 3.0.3
+info:
+  title: Meilisearch API (indexes, documents, settings, search and tasks)
+  version: "1.11"
+  description: |
+    A subset of the Meilisearch HTTP API, written from its public documentation.
+    Writes are asynchronous. Creating an index, adding, updating or deleting documents
+    and changing settings each answer 202 with a summarized task
+    `{taskUid, indexUid, status, type, enqueuedAt}`, `status` `enqueued`; the change is
+    made when the task runs. `GET /tasks/{taskUid}` answers the task, whose `status`
+    moves from `enqueued` to `processing` to `succeeded` or `failed` (with `error`
+    set); a client polls it until it is `succeeded` or `failed`. Tasks run in the
+    order they were enqueued. Once a task has succeeded its change is visible to every
+    read and search.
+
+    An index has a `uid` and a `primaryKey`, the document attribute whose value
+    identifies a document. `POST /indexes/{index_uid}/documents` adds documents or
+    replaces those whose primary key is taken; `PUT` adds or updates them, keeping
+    the attributes of an existing document that it is not sent. The task of an addition
+    reports `details.receivedDocuments` and, once it has succeeded,
+    `details.indexedDocuments`.
+
+    `POST /indexes/{index_uid}/search` takes the query in its body. `q` matches the
+    words of the searchable attributes (all of them by default); an empty or missing
+    `q` matches every document. `filter` takes an expression over attributes listed in
+    `filterableAttributes` (`genre = scifi`, `year > 1970`, joined with `AND`/`OR`), and
+    a filter on any other attribute is refused with 400 `invalid_search_filter`. `sort`
+    takes `attribute:asc` or `attribute:desc` over `sortableAttributes`. `offset` and
+    `limit` (default 20) page the hits; the answer echoes them and counts all matches in
+    `estimatedTotalHits`. Hits are the documents themselves.
+
+    `GET /indexes/{index_uid}/documents` pages the documents with `offset` and `limit`
+    and answers `total`. A document that does not exist, or was deleted, answers 404
+    `document_not_found`; an unknown index answers 404 `index_not_found`. Errors are
+    `{message, code, type, link}`.
+servers:
+  - url: http://localhost:7700
+security:
+  - bearer: []
+tags:
+  - name: Indexes
+  - name: Documents
+  - name: Search
+  - name: Settings
+  - name: Tasks
+paths:
+  /indexes:
+    get:
+      tags: [Indexes]
+      operationId: listIndexes
+      summary: List indexes
+      parameters:
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: A page of indexes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, offset, limit, total]
+                properties:
+                  results:
+                    type: array
+                    items: {$ref: "#/components/schemas/Index"}
+                  offset: {type: integer}
+                  limit: {type: integer}
+                  total: {type: integer}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [Indexes]
+      operationId: createIndex
+      summary: Create an index
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [uid]
+              properties:
+                uid: {type: string, pattern: "^[A-Za-z0-9_-]{1,400}$"}
+                primaryKey: {type: string, nullable: true}
+      responses:
+        "202":
+          description: The enqueued indexCreation task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /indexes/{index_uid}:
+    parameters:
+      - $ref: "#/components/parameters/indexUid"
+    get:
+      tags: [Indexes]
+      operationId: getIndex
+      summary: Get an index
+      responses:
+        "200":
+          description: The index.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Index"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Indexes]
+      operationId: deleteIndex
+      summary: Delete an index
+      responses:
+        "202":
+          description: The enqueued indexDeletion task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /indexes/{index_uid}/documents:
+    parameters:
+      - $ref: "#/components/parameters/indexUid"
+    get:
+      tags: [Documents]
+      operationId: getDocuments
+      summary: List documents
+      parameters:
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/limit"
+        - name: fields
+          in: query
+          description: Comma-separated attributes to answer; all by default.
+          schema: {type: string}
+        - name: filter
+          in: query
+          description: A filter expression over filterable attributes.
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of documents.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, offset, limit, total]
+                properties:
+                  results:
+                    type: array
+                    items: {$ref: "#/components/schemas/Document"}
+                  offset: {type: integer}
+                  limit: {type: integer}
+                  total: {type: integer, description: Every document of the index (that matches the filter).}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Documents]
+      operationId: addOrReplaceDocuments
+      summary: Add or replace documents
+      description: A document whose primary key is taken replaces the existing one whole.
+      parameters:
+        - $ref: "#/components/parameters/primaryKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: {$ref: "#/components/schemas/Document"}
+      responses:
+        "202":
+          description: The enqueued documentAdditionOrUpdate task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    put:
+      tags: [Documents]
+      operationId: addOrUpdateDocuments
+      summary: Add or update documents
+      description: A document whose primary key is taken is merged into the existing one; attributes not sent keep their values.
+      parameters:
+        - $ref: "#/components/parameters/primaryKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: {$ref: "#/components/schemas/Document"}
+      responses:
+        "202":
+          description: The enqueued documentAdditionOrUpdate task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    delete:
+      tags: [Documents]
+      operationId: deleteAllDocuments
+      summary: Delete every document
+      responses:
+        "202":
+          description: The enqueued documentDeletion task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /indexes/{index_uid}/documents/delete-batch:
+    parameters:
+      - $ref: "#/components/parameters/indexUid"
+    post:
+      tags: [Documents]
+      operationId: deleteDocumentsByBatch
+      summary: Delete documents by primary key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                oneOf:
+                  - type: string
+                  - type: integer
+      responses:
+        "202":
+          description: The enqueued documentDeletion task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /indexes/{index_uid}/documents/{document_id}:
+    parameters:
+      - $ref: "#/components/parameters/indexUid"
+      - name: document_id
+        in: path
+        required: true
+        description: The document's primary key value.
+        schema: {type: string}
+    get:
+      tags: [Documents]
+      operationId: getDocument
+      summary: Get a document
+      parameters:
+        - name: fields
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: The document.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Document"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [Documents]
+      operationId: deleteDocument
+      summary: Delete a document
+      responses:
+        "202":
+          description: The enqueued documentDeletion task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /indexes/{index_uid}/search:
+    parameters:
+      - $ref: "#/components/parameters/indexUid"
+    post:
+      tags: [Search]
+      operationId: searchWithPost
+      summary: Search an index
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SearchQuery"}
+      responses:
+        "200":
+          description: The hits for the query.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SearchResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /indexes/{index_uid}/settings:
+    parameters:
+      - $ref: "#/components/parameters/indexUid"
+    get:
+      tags: [Settings]
+      operationId: getSettings
+      summary: Get an index's settings
+      responses:
+        "200":
+          description: The settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Settings]
+      operationId: updateSettings
+      summary: Update an index's settings
+      description: Changes only the settings sent; a list sent replaces the list it names.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Settings"}
+      responses:
+        "202":
+          description: The enqueued settingsUpdate task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SummarizedTask"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /tasks:
+    get:
+      tags: [Tasks]
+      operationId: getTasks
+      summary: List tasks
+      parameters:
+        - name: indexUids
+          in: query
+          description: Comma-separated index uids.
+          schema: {type: string}
+        - name: statuses
+          in: query
+          description: Comma-separated statuses.
+          schema: {type: string}
+        - name: types
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, default: 20}
+        - name: from
+          in: query
+          description: The uid of the first task of the page, as `next` gives it.
+          schema: {type: integer}
+      responses:
+        "200":
+          description: Tasks, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, total, limit, from, next]
+                properties:
+                  results:
+                    type: array
+                    items: {$ref: "#/components/schemas/Task"}
+                  total: {type: integer}
+                  limit: {type: integer}
+                  from: {type: integer, nullable: true}
+                  next: {type: integer, nullable: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /tasks/{task_uid}:
+    parameters:
+      - name: task_uid
+        in: path
+        required: true
+        schema: {type: integer}
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Get a task
+      responses:
+        "200":
+          description: The task, with its current status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Task"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: The master key or an API key.
+  parameters:
+    indexUid:
+      name: index_uid
+      in: path
+      required: true
+      schema: {type: string}
+    offset:
+      name: offset
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
+    limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 0, default: 20}
+    primaryKey:
+      name: primaryKey
+      in: query
+      description: The primary key, when the index has none yet.
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: The request is not valid; `code` says why (`invalid_search_filter`, `invalid_search_sort`, `invalid_document_id`, ...).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: A key is missing or not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: "`index_not_found`, `document_not_found` or `task_not_found`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [message, code, type, link]
+      properties:
+        message: {type: string}
+        code: {type: string, example: invalid_search_filter}
+        type: {type: string, enum: [invalid_request, internal, auth, system]}
+        link: {type: string, format: uri}
+    Index:
+      type: object
+      required: [uid, primaryKey, createdAt, updatedAt]
+      properties:
+        uid: {type: string}
+        primaryKey: {type: string, nullable: true}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Document:
+      type: object
+      description: A document's attributes; the primary key attribute identifies it.
+      additionalProperties: true
+    TaskStatus:
+      type: string
+      enum: [enqueued, processing, succeeded, failed, canceled]
+    TaskType:
+      type: string
+      enum: [indexCreation, indexUpdate, indexDeletion, indexSwap, documentAdditionOrUpdate, documentDeletion,
+             settingsUpdate, dumpCreation, taskCancelation, taskDeletion, snapshotCreation]
+    SummarizedTask:
+      type: object
+      required: [taskUid, indexUid, status, type, enqueuedAt]
+      properties:
+        taskUid: {type: integer}
+        indexUid: {type: string, nullable: true}
+        status: {$ref: "#/components/schemas/TaskStatus"}
+        type: {$ref: "#/components/schemas/TaskType"}
+        enqueuedAt: {type: string, format: date-time}
+    Task:
+      type: object
+      required: [uid, indexUid, status, type, details, error, enqueuedAt]
+      properties:
+        uid: {type: integer}
+        batchUid: {type: integer, nullable: true}
+        indexUid: {type: string, nullable: true}
+        status: {$ref: "#/components/schemas/TaskStatus"}
+        type: {$ref: "#/components/schemas/TaskType"}
+        canceledBy: {type: integer, nullable: true}
+        details:
+          type: object
+          nullable: true
+          description: "By type: `receivedDocuments` and `indexedDocuments` for documentAdditionOrUpdate; `providedIds` and `deletedDocuments` for documentDeletion; `primaryKey` for indexCreation; the settings sent for settingsUpdate."
+          additionalProperties: true
+          properties:
+            receivedDocuments: {type: integer}
+            indexedDocuments: {type: integer, nullable: true, description: Null until the task has run.}
+            providedIds: {type: integer}
+            deletedDocuments: {type: integer, nullable: true}
+            primaryKey: {type: string, nullable: true}
+        error:
+          allOf:
+            - $ref: "#/components/schemas/Error"
+          nullable: true
+          description: Set when the task failed.
+        duration: {type: string, nullable: true, description: "An ISO 8601 duration, such as `PT0.012S`."}
+        enqueuedAt: {type: string, format: date-time}
+        startedAt: {type: string, format: date-time, nullable: true}
+        finishedAt: {type: string, format: date-time, nullable: true}
+    Settings:
+      type: object
+      properties:
+        displayedAttributes:
+          type: array
+          items: {type: string}
+        searchableAttributes:
+          type: array
+          items: {type: string}
+        filterableAttributes:
+          type: array
+          items: {type: string}
+        sortableAttributes:
+          type: array
+          items: {type: string}
+        rankingRules:
+          type: array
+          items: {type: string}
+        stopWords:
+          type: array
+          items: {type: string}
+        synonyms:
+          type: object
+          additionalProperties:
+            type: array
+            items: {type: string}
+        distinctAttribute: {type: string, nullable: true}
+    SearchQuery:
+      type: object
+      properties:
+        q: {type: string, nullable: true}
+        offset: {type: integer, minimum: 0, default: 0}
+        limit: {type: integer, minimum: 0, default: 20}
+        filter:
+          description: "A filter expression over filterable attributes, such as `genre = scifi AND year > 1970`, or an array of them."
+          oneOf:
+            - type: string
+            - type: array
+              items: {}
+        sort:
+          type: array
+          items: {type: string, description: "`attribute:asc` or `attribute:desc`."}
+        attributesToRetrieve:
+          type: array
+          items: {type: string}
+        attributesToHighlight:
+          type: array
+          items: {type: string}
+        showRankingScore: {type: boolean}
+    SearchResult:
+      type: object
+      required: [hits, query, processingTimeMs, offset, limit, estimatedTotalHits]
+      properties:
+        hits:
+          type: array
+          items: {$ref: "#/components/schemas/Document"}
+        query: {type: string}
+        processingTimeMs: {type: integer}
+        offset: {type: integer}
+        limit: {type: integer}
+        estimatedTotalHits: {type: integer, description: Every match of the query and filter.}
