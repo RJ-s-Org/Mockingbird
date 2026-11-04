@@ -19,6 +19,7 @@
 #![warn(missing_debug_implementations, missing_docs)]
 
 pub mod credentials;
+pub mod world;
 
 use std::fmt;
 use std::time::Duration;

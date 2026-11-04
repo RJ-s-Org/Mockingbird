@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "types": {
+    "folder": {
+      "identity": { "member": "name", "pattern": "folders/{id}" },
+      "parent": { "type": "folder", "member": "parent", "pattern": "folders/{id}" },
+      "lifecycle": {
+        "member": "state",
+        "initial": "ACTIVE",
+        "soft_delete": {
+          "state": "DELETE_REQUESTED",
+          "listed_with": { "param": "showDeleted", "value": true }
+        }
+      },
+      "unique": [{ "members": ["displayName"], "scope": "parent", "conflict": 409 }],
+      "concurrency": { "member": "etag", "header": "If-Match", "conflict": 412 }
+    }
+  },
+  "operations": {
+    "CreateFolder": {
+      "kind": "create",
+      "type": "folder",
+      "answer": { "long_running": { "done": "done", "result": "response" } }
+    },
+    "MoveFolder": {
+      "kind": "action",
+      "type": "folder",
+      "target": { "path_param": "name" },
+      "changes": { "parent": { "from_request": "/destinationParent" } }
+    },
+    "DeleteFolder": {
+      "kind": "action",
+      "type": "folder",
+      "transition": { "state": "DELETE_REQUESTED" }
+    },
+    "ListFolders": {
+      "kind": "list",
+      "type": "folder",
+      "scope": { "param": "parent", "member": "parent" },
+      "order": { "member": "displayName" },
+      "paging": { "style": "cursor", "request": "pageToken", "response": "nextPageToken", "size": "pageSize" },
+      "filters": [{ "param": "showDeleted", "kind": "flag" }]
+    },
+    "PutContacts": {
+      "kind": "create",
+      "type": "contact",
+      "request": { "records": "/Contacts" },
+      "answer": { "records": "/Contacts" }
+    }
+  }
+}

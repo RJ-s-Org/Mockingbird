@@ -3830,6 +3830,7 @@ name = "mockingbird-mcm"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "jsonschema",
  "serde",
  "serde_json",
 ]
