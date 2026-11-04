@@ -889,7 +889,8 @@ fn wrapped_by_path(
 /// of the answer (`{count, page: {id}}`), so the member must be corroborated: named
 /// with the stem of the route's type (`invoice` on `invoices`), or answered under the
 /// same member with the same schema by two or more of the type's routes, one of them a
-/// `GET` by path. A route ending in a path parameter then goes by what
+/// `GET` by path. Where the type's writes send a request body, it must also set
+/// members of the object and none of the envelope's own. A route ending in a path parameter then goes by what
 /// [`wrapped_by_path`] finds. One with none goes by the key the type's routes by path
 /// read the same schema under the same member by; when they find none, or disagree,
 /// it has none either. With no such route, the record's `id`, else its [`owned_key`].
@@ -904,6 +905,44 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
         let (member, inner, record) = answer(op).and_then(|a| wrapped_member(a, defs))?;
         let param = trailing_param(path).map(str::to_owned);
         Some(((t, member, inner.to_string()), param, record))
+    };
+    // The members each type's writes send in their request bodies.
+    let mut sent: HashMap<String, HashSet<String>> = HashMap::new();
+    for op in operations.iter().filter(|op| {
+        !is_stream(op)
+            && http_path(op).is_some()
+            && matches!(
+                op.kind,
+                OperationKind::Command(Effect::Create | Effect::Update)
+            )
+    }) {
+        let (Some(t), Some(body)) = (
+            op.resource_type.clone(),
+            schema_properties(op.input.body.as_ref(), defs),
+        ) else {
+            continue;
+        };
+        sent.entry(t).or_default().extend(body.keys().cloned());
+    }
+    // Where the type's writes send members, they say what its record is: the
+    // wrapped object when they set its members and none of the envelope's own
+    // (`{name, owner_id}` beside `{success, data: {name, owner_id}}`), not when they
+    // set the envelope's (`{order_number}` beside `{order_number, customer: {...}}`).
+    let written = |op: &Operation, (t, member, _): &Wrapped, record: &Map<String, Value>| {
+        let Some(sent) = sent.get(t) else {
+            return true;
+        };
+        let own = answer(op)
+            .and_then(|a| schema_properties(Some(a), defs))
+            .map(|props| {
+                props
+                    .keys()
+                    .filter(|k| *k != member && sent.contains(*k))
+                    .count()
+            })
+            .unwrap_or_default();
+        let held = record.keys().filter(|k| sent.contains(*k)).count();
+        own == 0 && held > own
     };
     // How many of each type's routes answer each envelope, and whether a `GET` by
     // path is one of them.
@@ -939,7 +978,7 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
         let Some((key, Some(param), record)) = wrapped(op) else {
             continue;
         };
-        if !corroborated(&key) {
+        if !corroborated(&key) || !written(op, &key, &record) {
             continue;
         }
         let (t, member, _) = &key;
@@ -957,7 +996,7 @@ fn apply_wrapped_records(operations: &mut [Operation], defs: &Map<String, Value>
         let Some((key, param, record)) = wrapped(op) else {
             continue;
         };
-        if !corroborated(&key) {
+        if !corroborated(&key) || !written(op, &key, &record) {
             continue;
         }
         let (t, member, _) = &key;
@@ -2457,5 +2496,69 @@ mod tests {
             identity_of(&bundle, "create"),
             wrapped(None, "id", "widget")
         );
+    }
+
+    /// `answering(id, schema)` with a JSON request body of `body`.
+    fn sending(id: &str, body: &Value, schema: &Value) -> Value {
+        let mut op = answering(id, schema);
+        op["requestBody"] = json!({"content": {"application/json": {"schema": body}}});
+        op
+    }
+
+    #[test]
+    fn what_the_writes_send_tells_the_record_from_a_related_object() {
+        // The writes set the envelope's own members: it is the record, and the
+        // object beside them a related one, though two routes answer it.
+        let order = obj(json!({
+            "order_number": {"type": "string"},
+            "status": {"type": "string"},
+            "customer": obj(json!({"id": {"type": "string"}, "name": {"type": "string"}})),
+        }));
+        let bundle = compiled(
+            &json!({"/orders/{id}": {
+                "parameters": path_param("id"),
+                "get": answering("read", &order),
+                "put": sending("update", &obj(json!({"order_number": {"type": "string"}, "status": {"type": "string"}})), &order),
+            }}),
+            &json!({}),
+        );
+        unknown(&bundle, &["read", "update"]);
+        // A body setting members of both says nothing either way.
+        let both = obj(json!({"status": {"type": "string"}, "name": {"type": "string"}}));
+        let bundle = compiled(
+            &json!({"/orders/{id}": {
+                "parameters": path_param("id"),
+                "get": answering("read", &order),
+                "put": sending("update", &both, &order),
+            }}),
+            &json!({}),
+        );
+        unknown(&bundle, &["read", "update"]);
+        // The writes set the object's members and none of the envelope's: it is
+        // the record.
+        let envelope = obj(json!({
+            "success": {"type": "boolean"},
+            "data": obj(json!({"id": {"type": "integer"}, "name": {"type": "string"}, "owner_id": {"type": "integer"}})),
+        }));
+        let body = obj(json!({"name": {"type": "string"}, "owner_id": {"type": "integer"}}));
+        let bundle = compiled(
+            &json!({
+                "/accounts": {"post": sending("create", &body, &envelope)},
+                "/accounts/{id}": {
+                    "parameters": path_param("id"),
+                    "get": answering("read", &envelope),
+                    "patch": sending("update", &body, &envelope),
+                },
+            }),
+            &json!({}),
+        );
+        assert_eq!(identity_of(&bundle, "create"), wrapped(None, "id", "data"));
+        for id in ["read", "update"] {
+            assert_eq!(
+                identity_of(&bundle, id),
+                wrapped(Some("id"), "id", "data"),
+                "{id}"
+            );
+        }
     }
 }
