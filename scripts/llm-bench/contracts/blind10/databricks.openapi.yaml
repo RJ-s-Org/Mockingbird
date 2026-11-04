@@ -1,0 +1,409 @@
+openapi: 3.0.3
+info:
+  title: Databricks workspace SCIM API (users and groups)
+  version: "2.0"
+  description: |
+    A subset of the Databricks workspace SCIM 2.0 API, written from its public reference
+    (docs.databricks.com/api/workspace/users and .../groups), which follows SCIM 2.0
+    (RFC 7643 for the resources and RFC 7644 for the protocol, whose error and list
+    formats it answers). Bodies are JSON; `application/scim+json` is accepted too.
+
+    Users. `userName` is the user's email address; it is unique in the workspace, ignoring
+    case, and cannot be changed. A create whose `userName` is taken is refused with 409
+    (`scimType` `uniqueness`). A new user is `active` unless sent `active: false`. A
+    user's `groups` lists the groups that hold the user as a member (`value` the group
+    id, `display` its name); it is read-only and changes as group memberships change.
+
+    Groups. A group's `displayName` is unique in the workspace: a create whose
+    `displayName` is taken is refused with 409 (`scimType` `uniqueness`). `members` lists
+    the users in the group (`value` the user id, `display` the user's display name).
+
+    Ids are numeric strings the service assigns. Every resource answers `schemas`
+    (`urn:ietf:params:scim:schemas:core:2.0:User` or `...:Group`) and `id`.
+
+    Partial updates. `PATCH /Users/{id}` and `PATCH /Groups/{id}` take
+    `{schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], Operations: [...]}`,
+    each operation an `op` (`add`, `remove` or `replace`), a `path` and a `value`.
+    `replace` sets the attribute at `path` (`active`, `displayName`, `name.givenName`,
+    `entitlements`); without a `path`, `value` is an object of attributes to set. `add`
+    with path `members` and a list of `{value}` adds those users to a group and keeps
+    the members it had. `remove` with a filtered path such as `members[value eq "123"]`
+    removes just that member. The operations apply in order, all or none. PATCH, PUT and
+    DELETE answer 200 with an empty object `{}`; a read afterwards shows the change. A
+    deleted user is removed from every group that held it, and reads of it answer 404.
+
+    Lists (`GET /Users`, `GET /Groups`) answer a ListResponse:
+    `{schemas: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], totalResults,
+    startIndex, itemsPerPage, Resources}`. `filter` is a SCIM filter: an attribute, an
+    operator (`eq`, `ne`, `co` contains, `sw` starts with) and a quoted value, such as
+    `userName eq "ana@example.com"` or `displayName sw "Data"`, with `and` and `or`
+    (`active eq false` takes a bare boolean). String comparisons ignore case. `sortBy`
+    names an attribute and `sortOrder` is `ascending` (the default) or `descending`.
+    `startIndex` is 1-based (the first result is 1) and `count` caps the page (at most
+    100); `totalResults` counts every match, whatever the page. `attributes` (a
+    comma-separated list) answers only those attributes of each resource, along with
+    `id` and `schemas`; `excludedAttributes` leaves the ones it lists out.
+
+    Errors answer `{schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"], status,
+    scimType?, detail}`, with `status` the HTTP status as a string: 400 (`invalidFilter`,
+    `invalidValue`, `invalidPath`, `noTarget`), 404 for an id the workspace does not hold,
+    and 409 (`uniqueness`).
+servers:
+  - url: https://dbc-a1b2c3d4-e5f6.cloud.databricks.com
+security:
+  - bearer: []
+tags:
+  - name: Users
+  - name: Groups
+paths:
+  /api/2.0/preview/scim/v2/Users:
+    get:
+      tags: [Users]
+      operationId: users.list
+      summary: List users
+      parameters:
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/attributes"
+        - $ref: "#/components/parameters/excludedAttributes"
+        - $ref: "#/components/parameters/sortBy"
+        - $ref: "#/components/parameters/sortOrder"
+        - $ref: "#/components/parameters/startIndex"
+        - $ref: "#/components/parameters/count"
+      responses:
+        "200":
+          description: A ListResponse of users.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UserList"}
+        "400": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Users]
+      operationId: users.create
+      summary: Create a user
+      description: "A `userName` already in the workspace (ignoring case) is refused with 409 uniqueness."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/User"}
+          application/scim+json:
+            schema: {$ref: "#/components/schemas/User"}
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "400": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /api/2.0/preview/scim/v2/Users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Users]
+      operationId: users.get
+      summary: Get a user
+      parameters:
+        - $ref: "#/components/parameters/attributes"
+        - $ref: "#/components/parameters/excludedAttributes"
+      responses:
+        "200":
+          description: The user, with the groups that hold it.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/User"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Users]
+      operationId: users.update
+      summary: Replace a user
+      description: "Replaces the user's attributes; `userName` cannot change."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/User"}
+      responses:
+        "200":
+          description: Replaced; the body is `{}`.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Users]
+      operationId: users.patch
+      summary: Partially update a user
+      description: "Applies the PatchOp operations in order, all or none."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PatchOp"}
+          application/scim+json:
+            schema: {$ref: "#/components/schemas/PatchOp"}
+      responses:
+        "200":
+          description: Updated; the body is `{}`.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Users]
+      operationId: users.delete
+      summary: Delete a user
+      description: "Removes the user from every group; later reads answer 404."
+      responses:
+        "200":
+          description: Deleted; the body is `{}`.
+          content:
+            application/json:
+              schema: {type: object}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/2.0/preview/scim/v2/Groups:
+    get:
+      tags: [Groups]
+      operationId: groups.list
+      summary: List groups
+      parameters:
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/attributes"
+        - $ref: "#/components/parameters/excludedAttributes"
+        - $ref: "#/components/parameters/sortBy"
+        - $ref: "#/components/parameters/sortOrder"
+        - $ref: "#/components/parameters/startIndex"
+        - $ref: "#/components/parameters/count"
+      responses:
+        "200":
+          description: A ListResponse of groups.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/GroupList"}
+        "400": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Groups]
+      operationId: groups.create
+      summary: Create a group
+      description: "A `displayName` already in the workspace is refused with 409 uniqueness. `members` may name users at once."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Group"}
+          application/scim+json:
+            schema: {$ref: "#/components/schemas/Group"}
+      responses:
+        "201":
+          description: The created group.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Group"}
+        "400": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /api/2.0/preview/scim/v2/Groups/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Groups]
+      operationId: groups.get
+      summary: Get a group
+      responses:
+        "200":
+          description: The group with its members.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Group"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Groups]
+      operationId: groups.patch
+      summary: Partially update a group
+      description: |
+        `add` with path `members` adds users and keeps the other members; `remove` with
+        `members[value eq "{user id}"]` removes that member; `replace` with path
+        `displayName` renames the group.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PatchOp"}
+          application/scim+json:
+            schema: {$ref: "#/components/schemas/PatchOp"}
+      responses:
+        "200":
+          description: Updated; the body is `{}`.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Groups]
+      operationId: groups.delete
+      summary: Delete a group
+      responses:
+        "200":
+          description: Deleted; the body is `{}`.
+          content:
+            application/json:
+              schema: {type: object}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      description: The numeric id the service assigned.
+      schema: {type: string, example: "7311927162382546"}
+    filter:
+      name: filter
+      in: query
+      description: "A SCIM filter: `userName eq \"ana@example.com\"`, `displayName sw \"Data\"`, `active eq false`, joined with `and` or `or`. Operators eq, ne, co and sw; strings compare ignoring case."
+      schema: {type: string}
+    attributes:
+      name: attributes
+      in: query
+      description: "Comma-separated attributes to answer, besides id and schemas."
+      schema: {type: string, example: "userName,displayName"}
+    excludedAttributes:
+      name: excludedAttributes
+      in: query
+      description: Comma-separated attributes to leave out.
+      schema: {type: string}
+    sortBy:
+      name: sortBy
+      in: query
+      description: The attribute to sort on.
+      schema: {type: string, example: userName}
+    sortOrder:
+      name: sortOrder
+      in: query
+      schema: {type: string, enum: [ascending, descending], default: ascending}
+    startIndex:
+      name: startIndex
+      in: query
+      description: The 1-based index of the first result.
+      schema: {type: integer, minimum: 1, default: 1}
+    count:
+      name: count
+      in: query
+      description: Results per page, at most 100.
+      schema: {type: integer, minimum: 0, maximum: 100}
+  responses:
+    Error:
+      description: A SCIM error.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    MultiValue:
+      type: object
+      properties:
+        value: {type: string}
+        display: {type: string}
+        primary: {type: boolean}
+        type: {type: string}
+        $ref: {type: string}
+    User:
+      type: object
+      properties:
+        schemas:
+          type: array
+          items: {type: string, example: "urn:ietf:params:scim:schemas:core:2.0:User"}
+        id: {type: string, readOnly: true}
+        userName: {type: string, description: "The user's email; unique ignoring case; cannot change."}
+        displayName: {type: string}
+        name:
+          type: object
+          properties:
+            givenName: {type: string}
+            familyName: {type: string}
+        active: {type: boolean, default: true}
+        emails:
+          type: array
+          items: {$ref: "#/components/schemas/MultiValue"}
+        entitlements:
+          type: array
+          items: {$ref: "#/components/schemas/MultiValue"}
+        groups:
+          type: array
+          readOnly: true
+          description: "The groups that hold this user (`value` the group id, `display` its name)."
+          items: {$ref: "#/components/schemas/MultiValue"}
+        externalId: {type: string, maxLength: 64}
+    Group:
+      type: object
+      properties:
+        schemas:
+          type: array
+          items: {type: string, example: "urn:ietf:params:scim:schemas:core:2.0:Group"}
+        id: {type: string, readOnly: true}
+        displayName: {type: string, description: Unique in the workspace.}
+        members:
+          type: array
+          description: "The users in the group (`value` the user id, `display` its display name)."
+          items: {$ref: "#/components/schemas/MultiValue"}
+        entitlements:
+          type: array
+          items: {$ref: "#/components/schemas/MultiValue"}
+        externalId: {type: string, maxLength: 64}
+    ListMeta:
+      type: object
+      required: [schemas, totalResults, startIndex, itemsPerPage]
+      properties:
+        schemas:
+          type: array
+          items: {type: string, enum: ["urn:ietf:params:scim:api:messages:2.0:ListResponse"]}
+        totalResults: {type: integer, description: "Every match, whatever the page."}
+        startIndex: {type: integer, description: 1-based.}
+        itemsPerPage: {type: integer, description: The number of Resources on this page.}
+    UserList:
+      allOf:
+        - $ref: "#/components/schemas/ListMeta"
+        - type: object
+          properties:
+            Resources:
+              type: array
+              items: {$ref: "#/components/schemas/User"}
+    GroupList:
+      allOf:
+        - $ref: "#/components/schemas/ListMeta"
+        - type: object
+          properties:
+            Resources:
+              type: array
+              items: {$ref: "#/components/schemas/Group"}
+    PatchOp:
+      type: object
+      required: [schemas, Operations]
+      properties:
+        schemas:
+          type: array
+          items: {type: string, enum: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"]}
+        Operations:
+          type: array
+          items:
+            type: object
+            required: [op]
+            properties:
+              op: {type: string, enum: [add, remove, replace]}
+              path: {type: string, example: "members[value eq \"7311927162382546\"]"}
+              value: {description: "The value to add or set: a scalar, an object or a list."}
+    Error:
+      type: object
+      required: [schemas, status]
+      properties:
+        schemas:
+          type: array
+          items: {type: string, enum: ["urn:ietf:params:scim:api:messages:2.0:Error"]}
+        status: {type: string, description: "The HTTP status as a string, such as \"409\"."}
+        scimType: {type: string, enum: [uniqueness, invalidFilter, invalidValue, invalidPath, noTarget, mutability]}
+        detail: {type: string}

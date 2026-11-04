@@ -73,6 +73,12 @@ Suites (contracts are in-repo, so the bench is reproducible):
   (multipart uploads), Modern Treasury ledgers (idempotency keys, header cursors) and
   Xero contacts (a tenant header). Not in the default suites. Same rule; no check
   gates the rest.
+- journeys_blind10: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind10/`: Databricks SCIM users and groups (PatchOp
+  operations), Google Calendar events (etags, sync tokens), Heroku apps (natural keys,
+  Range header paging), Kubernetes config maps (label selectors, resourceVersion
+  conflicts, merge patches) and PagerDuty incidents (a From header, de-duplication
+  keys, include[]). Not in the default suites. Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -125,7 +131,7 @@ from xml.etree import ElementTree
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
           "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
-          "journeys_blind8", "journeys_blind9")
+          "journeys_blind8", "journeys_blind9", "journeys_blind10")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -6049,6 +6055,692 @@ def run_journeys_blind9(srv, sink, args):
     run_journey_table(BLIND9_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- tenth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind10/). They were picked for
+# API styles: SCIM 2.0 provisioning with PatchOp operations, filtered member paths,
+# 1-based `startIndex` pages and `attributes` (Databricks), etags read back in
+# `If-None-Match` (304) and `If-Match` (412), sync tokens that answer only the changes
+# since, deleted events as `cancelled`, and time windows (Google Calendar), natural keys
+# in the path (an app by id or name, a release by version), `Range` header paging with
+# 206 and `Next-Range`, config vars removed by null, releases and a rollback (Heroku),
+# namespaced objects named by namespace and name, label selectors, `limit`/`continue`
+# pages, `resourceVersion` conflicts, JSON merge patches and immutable objects
+# (Kubernetes), and a required `From` header, wrapped bodies, routing through an
+# escalation policy, de-duplication keys, a status machine, bracketed array filters,
+# `offset`/`limit`/`more`/`total` and `include[]` side-loading (PagerDuty). No check gates
+# the rest: a journey goes on with an id of its own when a call gave none. A check
+# asserts only what its contract promises a client. Do not edit a check to suit results.
+BLIND10_CHECKS = {
+    "databricks": [
+        "a created user keeps its userName and is active", "read by id matches the created user",
+        "a taken userName is refused for uniqueness, ignoring case", "an eq filter finds the user",
+        "a sorted page answers one user and the total", "startIndex 2 reaches the next user",
+        "attributes answers only the attributes asked for", "a replace patch changes only its path",
+        "a deactivated user lists under active eq false", "a group is created with its members",
+        "a taken group name is refused for uniqueness", "an add patch adds a member and keeps the others",
+        "a filtered remove takes out only that member", "a deleted user is not found and leaves its group",
+    ],
+    "googlecalendar": [
+        "a created calendar keeps its summary and time zone", "an event keeps its id, times and summary",
+        "a taken event id is refused as duplicate", "read matches the event and its ETag header",
+        "If-None-Match with the current etag answers 304", "a patch changes only the fields sent and the etag",
+        "If-None-Match with an old etag answers the changed event", "a stale If-Match is refused with 412",
+        "timeMin and timeMax keep the events in the window", "q finds the event by its description",
+        "maxResults 1 by start time answers one event and a page token",
+        "the page token reaches the next event by start time",
+        "a deleted event is listed only with showDeleted, as cancelled",
+        "a sync token answers only the changes since",
+    ],
+    "heroku": [
+        "a created app keeps its name, region and stack", "the app reads the same by id and by name",
+        "a taken name is refused as invalid_params", "config vars set the vars sent",
+        "null removes a var and keeps the rest", "each config change adds the current release",
+        "a release reads by its version", "a rollback restores that release's config vars",
+        "Range max 1 answers 206 and a Next-Range", "Next-Range reaches the next app",
+        "order desc reverses the range", "a custom domain is added and listed",
+        "a renamed app keeps its id and frees the old name", "a deleted app is not found by id or name",
+    ],
+    "kubernetes": [
+        "a namespace is created active", "a created config map keeps its data and labels",
+        "read by namespace and name matches the created config map", "a taken name is refused as AlreadyExists",
+        "the same name is free in another namespace", "generateName names the config map from the prefix",
+        "an equality selector keeps the namespace's matches", "a set selector keeps the matching tiers",
+        "limit answers a page and a continue token", "continue reaches the rest of the list",
+        "a put with the read resourceVersion replaces the data", "a stale resourceVersion is refused as a Conflict",
+        "a merge patch sets, removes and keeps keys", "an immutable config map refuses a data change",
+    ],
+    "pagerduty": [
+        "a created user keeps its name, email and role", "an escalation policy targets the user",
+        "a service names its escalation policy", "a new incident is triggered on its service",
+        "the incident is assigned to the policy's first target", "an open incident's key is refused",
+        "a second incident is numbered after the first", "acknowledging records the acknowledger",
+        "a note keeps its content and the From user", "statuses[] filters the service's incidents",
+        "limit 1 answers one incident, more and the total", "offset 1 reaches the other incident",
+        "include services side-loads the service", "a resolved incident frees its key",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND10_CHECKS)
+BLIND10_DIR = "scripts/llm-bench/contracts/blind10"
+# Contracts alone: no persona.
+BLIND10_MOCKS = {name: (f"{BLIND10_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND10_CHECKS}
+SCIM_USER = "urn:ietf:params:scim:schemas:core:2.0:User"
+SCIM_GROUP = "urn:ietf:params:scim:schemas:core:2.0:Group"
+SCIM_PATCH = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+SCIM_ERROR = "urn:ietf:params:scim:api:messages:2.0:Error"
+
+
+def databricks_steps(j):
+    # The users' names hold a tag made for this run, and every list filters on it, so the
+    # lists hold only the users made here.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    root = "/api/2.0/preview/scim/v2"
+    scope = f".{tag}@bench.example"
+    ana, ben = f"ana{scope}", f"ben{scope}"
+    team = f"Data Eng {tag}"
+
+    def own(value):
+        return value if isinstance(value, str) and value else str(j.rng.randrange(10**15, 10**16))
+
+    def user(uid, **query):
+        return obj(j.call("GET", f"{root}/Users/{uid}", query=query or None))
+
+    def users(**query):
+        page = obj(j.call("GET", f"{root}/Users", query=query))
+        return ids_of(page.get("Resources")), page
+
+    def group(gid):
+        return obj(j.call("GET", f"{root}/Groups/{gid}"))
+
+    def patch(kind, rid, *operations):
+        j.call("PATCH", f"{root}/{kind}/{rid}", body={"schemas": [SCIM_PATCH], "Operations": list(operations)})
+        return j.last["status"]
+
+    def values(items):
+        return [m.get("value") for m in dicts(items)]
+
+    def refused(answer, status):
+        answer = obj(answer)
+        return (j.last["status"] == status and SCIM_ERROR in (answer.get("schemas") or [])
+                and eq(str(answer.get("status")), str(status)))
+
+    new = {"schemas": [SCIM_USER], "userName": ana, "displayName": "Ana Silva",
+           "name": {"givenName": "Ana", "familyName": "Silva"},
+           "emails": [{"value": ana, "type": "work", "primary": True}]}
+    made = obj(j.call("POST", f"{root}/Users", body=new))
+    j.check("a created user keeps its userName and is active",
+            j.last["status"] == 201 and eq(made.get("userName"), ana) and eq(made.get("displayName"), "Ana Silva")
+            and made.get("active") is True and given(made.get("id"), None) is not None
+            and SCIM_USER in (made.get("schemas") or []),
+            id=made.get("id"), userName=made.get("userName"), active=made.get("active"), schemas=made.get("schemas"))
+    u1 = own(made.get("id"))
+    read = user(u1)
+    j.check("read by id matches the created user",
+            eq(read.get("id"), u1) and eq(read.get("userName"), ana) and eq(read.get("displayName"), "Ana Silva")
+            and obj(read.get("name")) == new["name"],
+            id=read.get("id"), userName=read.get("userName"), user_name=read.get("name"))
+    taken = j.call("POST", f"{root}/Users", body={"schemas": [SCIM_USER], "userName": ana.upper(),
+                                                  "displayName": "Ana again"})
+    j.check("a taken userName is refused for uniqueness, ignoring case",
+            refused(taken, 409) and eq(obj(taken).get("scimType"), "uniqueness"), error=taken)
+    u2 = own(obj(j.call("POST", f"{root}/Users", body={
+        "schemas": [SCIM_USER], "userName": ben, "displayName": "Ben Okafor",
+        "name": {"givenName": "Ben", "familyName": "Okafor"}})).get("id"))
+    rows, page = users(filter=f'userName eq "{ana}"')
+    j.check("an eq filter finds the user", rows == [u1] and eq(page.get("totalResults"), 1),
+            listed=rows, totalResults=page.get("totalResults"))
+    # Sorted by userName: "ana..." comes before "ben...".
+    paged = {"filter": f'userName co "{scope}"', "sortBy": "userName", "count": 1}
+    rows, page = users(startIndex=1, **paged)
+    j.check("a sorted page answers one user and the total",
+            rows == [u1] and eq(page.get("totalResults"), 2) and eq(page.get("itemsPerPage"), 1)
+            and eq(page.get("startIndex"), 1),
+            listed=rows, totalResults=page.get("totalResults"), itemsPerPage=page.get("itemsPerPage"),
+            startIndex=page.get("startIndex"))
+    rows, page = users(startIndex=2, **paged)
+    j.check("startIndex 2 reaches the next user",
+            rows == [u2] and eq(page.get("startIndex"), 2) and eq(page.get("totalResults"), 2),
+            listed=rows, startIndex=page.get("startIndex"), totalResults=page.get("totalResults"))
+    part = user(u1, attributes="userName")
+    j.check("attributes answers only the attributes asked for",
+            eq(part.get("id"), u1) and eq(part.get("userName"), ana) and set(part) <= {"id", "schemas", "userName"},
+            answer=part)
+    patched = patch("Users", u1, {"op": "replace", "path": "displayName", "value": "Ana Costa"})
+    read = user(u1)
+    j.check("a replace patch changes only its path",
+            eq(read.get("displayName"), "Ana Costa") and eq(read.get("userName"), ana)
+            and obj(read.get("name")) == new["name"] and read.get("active") is True,
+            patch_status=patched, displayName=read.get("displayName"), user_name=read.get("name"))
+    patch("Users", u2, {"op": "replace", "path": "active", "value": False})
+    state = user(u2).get("active")
+    rows, _ = users(filter=f'active eq false and userName co "{scope}"')
+    j.check("a deactivated user lists under active eq false", state is False and rows == [u2],
+            active=state, listed=rows)
+    made = obj(j.call("POST", f"{root}/Groups", body={"schemas": [SCIM_GROUP], "displayName": team,
+                                                      "members": [{"value": u1}]}))
+    j.check("a group is created with its members",
+            j.last["status"] == 201 and eq(made.get("displayName"), team) and values(made.get("members")) == [u1]
+            and given(made.get("id"), None) is not None,
+            id=made.get("id"), displayName=made.get("displayName"), members=values(made.get("members")))
+    gid = own(made.get("id"))
+    taken = j.call("POST", f"{root}/Groups", body={"schemas": [SCIM_GROUP], "displayName": team})
+    j.check("a taken group name is refused for uniqueness",
+            refused(taken, 409) and eq(obj(taken).get("scimType"), "uniqueness"), error=taken)
+    patch("Groups", gid, {"op": "add", "path": "members", "value": [{"value": u2}]})
+    held = values(group(gid).get("members"))
+    joined = values(user(u2).get("groups"))
+    j.check("an add patch adds a member and keeps the others", same_items(held, [u1, u2]) and gid in joined,
+            members=held, user_groups=joined)
+    patch("Groups", gid, {"op": "remove", "path": f'members[value eq "{u1}"]'})
+    held = values(group(gid).get("members"))
+    left = user(u1)
+    j.check("a filtered remove takes out only that member",
+            held == [u2] and eq(left.get("id"), u1) and gid not in values(left.get("groups")),
+            members=held, user_groups=values(left.get("groups")))
+    j.call("DELETE", f"{root}/Users/{u2}")
+    deleted = j.last["status"]
+    gone = user(u2)
+    missing = refused(gone, 404)
+    after = group(gid)
+    j.check("a deleted user is not found and leaves its group",
+            missing and eq(after.get("id"), gid) and values(after.get("members")) == [],
+            delete_status=deleted, read=gone, members=values(after.get("members")))
+
+
+BASE32HEX = "abcdefghijklmnopqrstuv0123456789"
+
+
+def googlecalendar_steps(j):
+    # The calendar is new, so its events are the three made here. Event ids are made by
+    # the client, in base32hex.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    created = obj(j.call("POST", "/calendar/v3/calendars", body={"summary": f"Team {tag}",
+                                                                 "timeZone": "Europe/Zurich"}))
+    j.check("a created calendar keeps its summary and time zone",
+            j.last["status"] == 200 and eq(created.get("summary"), f"Team {tag}")
+            and eq(created.get("timeZone"), "Europe/Zurich") and given(created.get("id"), None) is not None,
+            id=created.get("id"), summary=created.get("summary"), timeZone=created.get("timeZone"))
+    cal = given(created.get("id"), f"c_{made_up(j, '', 16, LOWER_ALNUM)}@group.calendar.google.com")
+    events = f"/calendar/v3/calendars/{urllib.parse.quote(cal, safe='@')}/events"
+    a, b, c = (made_up(j, "", 20, BASE32HEX) for _ in range(3))
+
+    def at(text):
+        return {"dateTime": text}
+
+    def when(slot):
+        return instant(obj(slot).get("dateTime"))
+
+    def listed(**query):
+        page = obj(j.call("GET", events, query=query or None))
+        return ids_of(page.get("items")), page
+
+    def reason(answer):
+        return head(obj(obj(answer).get("error")).get("errors")).get("reason")
+
+    planning = {"id": a, "summary": "Sprint planning", "location": "Room 4", "description": f"Plan sprint {tag}",
+                "start": at("2026-12-01T09:00:00Z"), "end": at("2026-12-01T10:00:00Z")}
+    made = obj(j.call("POST", events, body=planning))
+    j.check("an event keeps its id, times and summary",
+            j.last["status"] == 200 and eq(made.get("id"), a) and eq(made.get("summary"), "Sprint planning")
+            and eq(when(made.get("start")), instant("2026-12-01T09:00:00Z"))
+            and eq(when(made.get("end")), instant("2026-12-01T10:00:00Z"))
+            and eq(made.get("status"), "confirmed") and given(made.get("etag"), None) is not None,
+            id=made.get("id"), start=made.get("start"), end=made.get("end"), event_status=made.get("status"),
+            etag=made.get("etag"))
+    taken = j.call("POST", events, body=dict(planning, summary="Another planning"))
+    j.check("a taken event id is refused as duplicate", j.last["status"] == 409 and eq(reason(taken), "duplicate"),
+            reason=reason(taken))
+    j.call("POST", events, body={"id": b, "summary": "Design review", "description": "Review the dashboard mockups",
+                                 "start": at("2026-12-02T14:00:00Z"), "end": at("2026-12-02T15:00:00Z")})
+    j.call("POST", events, body={"id": c, "summary": "Retro", "start": at("2026-12-05T11:00:00Z"),
+                                 "end": at("2026-12-05T11:30:00Z")})
+    read = obj(j.call("GET", f"{events}/{a}"))
+    header = j.answer_headers.get("ETag")
+    first = given(read.get("etag"), None)
+    j.check("read matches the event and its ETag header",
+            eq(read.get("id"), a) and eq(read.get("summary"), "Sprint planning") and eq(read.get("location"), "Room 4")
+            and first is not None and eq(header, first)
+            and (eq(first, made.get("etag")) if given(made.get("etag"), None) else True),
+            id=read.get("id"), etag=first, etag_header=header, created_etag=made.get("etag"))
+    old = first or made_up(j, '"', 16, "0123456789") + '"'
+    with sent_headers(j, {"If-None-Match": old}):
+        j.call("GET", f"{events}/{a}")
+    j.check("If-None-Match with the current etag answers 304", j.last["status"] == 304)
+    # The sync token comes from a full list made before any change.
+    _, page = listed()
+    for _ in range(3):
+        if given(page.get("nextSyncToken"), None) or not given(page.get("nextPageToken"), None):
+            break
+        _, page = listed(pageToken=page.get("nextPageToken"))
+    sync = given(page.get("nextSyncToken"), made_up(j, "", 24))
+    moved = obj(j.call("PATCH", f"{events}/{a}", body={"summary": "Sprint planning (moved)"}))
+    j.check("a patch changes only the fields sent and the etag",
+            eq(moved.get("summary"), "Sprint planning (moved)") and eq(moved.get("location"), "Room 4")
+            and eq(moved.get("description"), f"Plan sprint {tag}")
+            and given(moved.get("etag"), None) is not None and moved.get("etag") != old,
+            summary=moved.get("summary"), location=moved.get("location"), etag=moved.get("etag"), old_etag=old)
+    with sent_headers(j, {"If-None-Match": old}):
+        fresh = obj(j.call("GET", f"{events}/{a}"))
+    j.check("If-None-Match with an old etag answers the changed event",
+            j.last["status"] == 200 and eq(fresh.get("summary"), "Sprint planning (moved)")
+            and given(fresh.get("etag"), None) is not None and fresh.get("etag") != old,
+            summary=fresh.get("summary"), etag=fresh.get("etag"))
+    with sent_headers(j, {"If-Match": old}):
+        stale = j.call("PATCH", f"{events}/{a}", body={"summary": "Stale planning"})
+    refused = j.last["status"]
+    kept = obj(j.call("GET", f"{events}/{a}")).get("summary")
+    j.check("a stale If-Match is refused with 412",
+            refused == 412 and eq(reason(stale), "conditionNotMet") and eq(kept, "Sprint planning (moved)"),
+            patch_status=refused, reason=reason(stale), summary=kept)
+    # The planning ends before the window opens and the retro starts after it closes.
+    rows, _ = listed(timeMin="2026-12-01T12:00:00Z", timeMax="2026-12-04T00:00:00Z")
+    j.check("timeMin and timeMax keep the events in the window", rows == [b], listed=rows)
+    rows, _ = listed(q="mockups")
+    j.check("q finds the event by its description", rows == [b], listed=rows)
+    ordered = {"singleEvents": "true", "orderBy": "startTime", "maxResults": 1}
+    rows, page = listed(**ordered)
+    token = given(page.get("nextPageToken"), None)
+    j.check("maxResults 1 by start time answers one event and a page token", rows == [a] and token is not None,
+            listed=rows, next_page_token=token)
+    rest, _ = listed(pageToken=token or made_up(j, "", 24), **ordered)
+    j.check("the page token reaches the next event by start time", rest == [b], first=rows, listed=rest)
+    j.call("DELETE", f"{events}/{c}")
+    deleted = j.last["status"]
+    rows, _ = listed()
+    shown, page = listed(showDeleted="true")
+    state = by_id(page.get("items"), c).get("status")
+    j.check("a deleted event is listed only with showDeleted, as cancelled",
+            same_items(rows, [a, b]) and same_items(shown, [a, b, c]) and eq(state, "cancelled"),
+            delete_status=deleted, listed=rows, with_deleted=shown, deleted_status=state)
+    rows, page = listed(syncToken=sync)
+    changes = page.get("items")
+    j.check("a sync token answers only the changes since",
+            same_items(rows, [a, c]) and eq(by_id(changes, a).get("summary"), "Sprint planning (moved)")
+            and eq(by_id(changes, c).get("status"), "cancelled")
+            and given(page.get("nextSyncToken"), None) is not None,
+            listed=rows, next_sync_token=page.get("nextSyncToken"))
+
+
+def heroku_steps(j):
+    # App names hold a tag made for this run, and app lists are ranged over those names,
+    # so they hold only the apps made here.
+    j.headers.update({"accept": "application/vnd.heroku+json; version=3",
+                      "authorization": "Bearer bench-placeholder"})
+    tag = j.rng.randrange(10**5, 10**6)
+    alpha, beta, gamma, delta = (f"bench-{tag}-{n}" for n in ("alpha", "beta", "gamma", "delta"))
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_guid(j)
+
+    def rows(answer):
+        return dicts(answer) if isinstance(answer, list) else []
+
+    def ranged(path, value):
+        with sent_headers(j, {"Range": value}):
+            answer = j.call("GET", path)
+        return rows(answer), j.answer_headers.get("Next-Range")
+
+    def config():
+        return obj(j.call("GET", f"/apps/{app}/config-vars"))
+
+    def releases():
+        found, _ = ranged(f"/apps/{app}/releases", "version ..; max=1000")
+        return found
+
+    def versions(found):
+        return [r.get("version") for r in found]
+
+    def not_found(answer):
+        return j.last["status"] == 404 and eq(obj(answer).get("id"), "not_found")
+
+    made = obj(j.call("POST", "/apps", body={"name": alpha, "region": "eu", "stack": "heroku-24"}))
+    j.check("a created app keeps its name, region and stack",
+            j.last["status"] == 201 and eq(made.get("name"), alpha) and eq(obj(made.get("region")).get("name"), "eu")
+            and eq(obj(made.get("stack")).get("name"), "heroku-24") and given(made.get("id"), None) is not None,
+            id=made.get("id"), app_name=made.get("name"), region=made.get("region"), stack=made.get("stack"))
+    app = own(made.get("id"))
+    by_id_ = obj(j.call("GET", f"/apps/{app}"))
+    by_name = obj(j.call("GET", f"/apps/{alpha}"))
+    j.check("the app reads the same by id and by name",
+            eq(by_id_.get("id"), app) and eq(by_name.get("id"), app)
+            and eq(by_id_.get("name"), alpha) and eq(by_name.get("name"), alpha),
+            by_id=[by_id_.get("id"), by_id_.get("name")], by_name=[by_name.get("id"), by_name.get("name")])
+    taken = obj(j.call("POST", "/apps", body={"name": alpha}))
+    j.check("a taken name is refused as invalid_params",
+            j.last["status"] == 422 and eq(taken.get("id"), "invalid_params"), error=taken)
+    before = releases()
+    latest = max([v for v in versions(before) if is_int(v)], default=0)
+    first = obj(j.call("PATCH", f"/apps/{app}/config-vars", body={"DATABASE_POOL": "5", "LOG_LEVEL": "info"}))
+    read = config()
+    j.check("config vars set the vars sent",
+            eq(first.get("DATABASE_POOL"), "5") and eq(first.get("LOG_LEVEL"), "info") and read == first,
+            answered=first, read=read)
+    second = obj(j.call("PATCH", f"/apps/{app}/config-vars", body={"LOG_LEVEL": None, "FEATURE_X": "on"}))
+    read = config()
+    j.check("null removes a var and keeps the rest",
+            "LOG_LEVEL" not in second and eq(second.get("DATABASE_POOL"), "5") and eq(second.get("FEATURE_X"), "on")
+            and read == second,
+            answered=second, read=read)
+    after = releases()
+    newest = after[-2:] if len(after) >= 2 else []
+    j.check("each config change adds the current release",
+            versions(after) == versions(before) + [latest + 1, latest + 2]
+            and [r.get("current") for r in newest] == [False, True]
+            and sum(1 for r in after if r.get("current") is True) == 1,
+            before=versions(before), after=versions(after), current=[r.get("current") for r in after])
+    set_release = by_key(after, "version", latest + 1)
+    one = obj(j.call("GET", f"/apps/{app}/releases/{latest + 1}"))
+    j.check("a release reads by its version",
+            eq(one.get("version"), latest + 1) and given(one.get("id"), None) is not None
+            and (eq(one.get("id"), set_release.get("id")) if set_release else True),
+            version=one.get("version"), id=one.get("id"), listed_id=set_release.get("id"))
+    target = own(given(set_release.get("id"), one.get("id")))
+    back = obj(j.call("POST", f"/apps/{app}/releases", body={"release": target}))
+    rolled = j.last["status"]
+    read = config()
+    j.check("a rollback restores that release's config vars",
+            rolled == 201 and eq(back.get("version"), latest + 3) and back.get("current") is True
+            and eq(back.get("description"), f"Rollback to v{latest + 1}") and bool(first) and read == first,
+            status_code=rolled, version=back.get("version"), description=back.get("description"), config=read)
+    ids = {alpha: app}
+    for name in (beta, gamma):
+        ids[name] = own(obj(j.call("POST", "/apps", body={"name": name, "region": "us"})).get("id"))
+    # Sorted by name: alpha, beta, gamma. The range is bounded by this run's names.
+    span = f"name {alpha}..{gamma}"
+    found, next_range = ranged("/apps", f"{span}; max=1")
+    page_status = j.last["status"]
+    j.check("Range max 1 answers 206 and a Next-Range",
+            page_status == 206 and [a.get("name") for a in found] == [alpha] and given(next_range, None) is not None,
+            status_code=page_status, listed=[a.get("name") for a in found], next_range=next_range)
+    more, _ = ranged("/apps", given(next_range, f"name ]{alpha}..{gamma}; max=1"))
+    j.check("Next-Range reaches the next app", [a.get("name") for a in more] == [beta],
+            first=[a.get("name") for a in found], listed=[a.get("name") for a in more])
+    found, _ = ranged("/apps", f"{span}; max=10, order=desc")
+    j.check("order desc reverses the range",
+            j.last["status"] == 200 and [a.get("name") for a in found] == [gamma, beta, alpha],
+            listed=[a.get("name") for a in found])
+    host = f"www.bench{tag}.example.com"
+    domain = obj(j.call("POST", f"/apps/{app}/domains", body={"hostname": host, "sni_endpoint": None}))
+    added = j.last["status"]
+    listed = rows(j.call("GET", f"/apps/{app}/domains"))
+    j.check("a custom domain is added and listed",
+            added == 201 and eq(domain.get("hostname"), host) and eq(domain.get("kind"), "custom")
+            and given(domain.get("cname"), None) is not None
+            and eq(by_key(listed, "hostname", host).get("kind"), "custom"),
+            status_code=added, domain={k: domain.get(k) for k in ("hostname", "kind", "cname")},
+            listed=[d.get("hostname") for d in listed])
+    renamed = obj(j.call("PATCH", f"/apps/{beta}", body={"name": delta}))
+    old = j.call("GET", f"/apps/{beta}")
+    j.check("a renamed app keeps its id and frees the old name",
+            eq(renamed.get("id"), ids[beta]) and eq(renamed.get("name"), delta) and not_found(old),
+            id=renamed.get("id"), app_name=renamed.get("name"), old_name=old)
+    gone = obj(j.call("DELETE", f"/apps/{gamma}"))
+    deleted = j.last["status"]
+    by_name = j.call("GET", f"/apps/{gamma}")
+    name_gone = not_found(by_name)
+    by_id_ = j.call("GET", f"/apps/{ids[gamma]}")
+    j.check("a deleted app is not found by id or name",
+            deleted == 200 and eq(gone.get("name"), gamma) and name_gone and not_found(by_id_),
+            delete_status=deleted, by_name=by_name, by_id=by_id_)
+
+
+def kubernetes_steps(j):
+    # The namespaces are new and named for this run, so their config maps are the ones
+    # made here.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    ns, other = f"shop-{tag}", f"lab-{tag}"
+    base = "/api/v1/namespaces"
+
+    def meta(thing):
+        return obj(obj(thing).get("metadata"))
+
+    def config_map(namespace, name, data, labels, **extra):
+        body = dict({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name, "labels": labels},
+                     "data": data}, **extra)
+        return obj(j.call("POST", f"{base}/{namespace}/configmaps", body=body))
+
+    def read(name, namespace=ns):
+        return obj(j.call("GET", f"{base}/{namespace}/configmaps/{name}"))
+
+    def names(**query):
+        page = obj(j.call("GET", f"{base}/{ns}/configmaps", query=query or None))
+        return [meta(i).get("name") for i in dicts(page.get("items"))], page
+
+    def failure(answer, status, reason):
+        answer = obj(answer)
+        return (j.last["status"] == status and eq(answer.get("kind"), "Status") and eq(answer.get("reason"), reason)
+                and eq(answer.get("code"), status))
+
+    def merge_patch(name, patch):
+        with sent_headers(j, {"content-type": "application/merge-patch+json"}):
+            return obj(j.call("PATCH", f"{base}/{ns}/configmaps/{name}", data=json.dumps(patch).encode()))
+
+    made = obj(j.call("POST", base, body={"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns}}))
+    j.check("a namespace is created active",
+            j.last["status"] == 201 and eq(made.get("kind"), "Namespace") and eq(meta(made).get("name"), ns)
+            and eq(obj(made.get("status")).get("phase"), "Active"),
+            namespace=meta(made).get("name"), phase=obj(made.get("status")).get("phase"))
+    j.call("POST", base, body={"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": other}})
+    web = {"LOG_LEVEL": "info", "THEME": "dark"}
+    web_labels = {"app": "web", "tier": "frontend"}
+    made = config_map(ns, "web-settings", web, web_labels)
+    uid = meta(made).get("uid")
+    j.check("a created config map keeps its data and labels",
+            j.last["status"] == 201 and eq(made.get("kind"), "ConfigMap") and eq(meta(made).get("name"), "web-settings")
+            and eq(meta(made).get("namespace"), ns) and meta(made).get("labels") == web_labels
+            and made.get("data") == web and given(uid, None) is not None
+            and given(meta(made).get("resourceVersion"), None) is not None,
+            metadata=meta(made), data=made.get("data"))
+    got = read("web-settings")
+    j.check("read by namespace and name matches the created config map",
+            eq(meta(got).get("name"), "web-settings") and eq(meta(got).get("namespace"), ns)
+            and (eq(meta(got).get("uid"), uid) if given(uid, None) else True)
+            and got.get("data") == web and meta(got).get("labels") == web_labels,
+            metadata=meta(got), data=got.get("data"))
+    taken = config_map(ns, "web-settings", {"LOG_LEVEL": "warn"}, web_labels)
+    j.check("a taken name is refused as AlreadyExists",
+            failure(taken, 409, "AlreadyExists") and eq(obj(taken.get("details")).get("name"), "web-settings"),
+            status=taken)
+    twin = config_map(other, "web-settings", {"LOG_LEVEL": "debug"}, web_labels)
+    j.check("the same name is free in another namespace",
+            j.last["status"] == 201 and eq(meta(twin).get("name"), "web-settings")
+            and eq(meta(twin).get("namespace"), other) and twin.get("data") == {"LOG_LEVEL": "debug"}
+            and given(meta(twin).get("uid"), None) is not None and meta(twin).get("uid") != uid,
+            metadata=meta(twin))
+    job = obj(j.call("POST", f"{base}/{ns}/configmaps", body={
+        "apiVersion": "v1", "kind": "ConfigMap", "metadata": {"generateName": "job-",
+                                                              "labels": {"app": "worker", "tier": "cache"}},
+        "data": {"QUEUE": "default"}}))
+    generated = meta(job).get("name")
+    j.check("generateName names the config map from the prefix",
+            j.last["status"] == 201 and matches("job-[a-z0-9]{5}", generated) and eq(meta(job).get("namespace"), ns),
+            generated=generated)
+    generated = generated if matches("job-[a-z0-9]{5}", generated) else f"job-{made_up(j, '', 5, LOWER_ALNUM)}"
+    config_map(ns, "cache-settings", {"MODE": "lru", "SIZE": "512"}, {"app": "web", "tier": "cache"})
+    config_map(ns, "db-settings", {"POOL": "10"}, {"app": "api", "tier": "db"})
+    everything = ["web-settings", generated, "cache-settings", "db-settings"]
+    # The other namespace's web-settings carries app=web too; it must not show here.
+    rows, _ = names(labelSelector="app=web")
+    j.check("an equality selector keeps the namespace's matches", same_items(rows, ["web-settings", "cache-settings"]),
+            listed=rows)
+    rows, _ = names(labelSelector="tier in (cache,db),app!=worker")
+    j.check("a set selector keeps the matching tiers", same_items(rows, ["cache-settings", "db-settings"]), listed=rows)
+    first, page = names(limit=3)
+    token = given(meta(page).get("continue"), None)
+    j.check("limit answers a page and a continue token",
+            len(first) == 3 and set(first) <= set(everything) and token is not None
+            and eq(meta(page).get("remainingItemCount"), 1),
+            listed=first, continue_token=token, remainingItemCount=meta(page).get("remainingItemCount"))
+    rest, page = names(limit=3, **{"continue": token or made_up(j, "", 32)})
+    j.check("continue reaches the rest of the list",
+            len(rest) == 1 and same_items(first + rest, everything) and not meta(page).get("continue"),
+            first=first, listed=rest, continue_token=meta(page).get("continue"))
+    current = read("web-settings")
+    version = given(meta(current).get("resourceVersion"), made_up(j, "", 6, "0123456789"))
+    replacement = {"apiVersion": "v1", "kind": "ConfigMap",
+                   "metadata": {"name": "web-settings", "labels": web_labels, "resourceVersion": version},
+                   "data": {"LOG_LEVEL": "debug"}}
+    put = obj(j.call("PUT", f"{base}/{ns}/configmaps/web-settings", body=replacement))
+    j.check("a put with the read resourceVersion replaces the data",
+            j.last["status"] == 200 and put.get("data") == {"LOG_LEVEL": "debug"}
+            and given(meta(put).get("resourceVersion"), None) is not None
+            and meta(put).get("resourceVersion") != version,
+            data=put.get("data"), resourceVersion=meta(put).get("resourceVersion"), sent=version)
+    stale = obj(j.call("PUT", f"{base}/{ns}/configmaps/web-settings",
+                       body=dict(replacement, data={"LOG_LEVEL": "error"})))
+    conflict = failure(stale, 409, "Conflict")
+    kept = read("web-settings").get("data")
+    j.check("a stale resourceVersion is refused as a Conflict", conflict and kept == {"LOG_LEVEL": "debug"},
+            status=stale, data=kept)
+    patched = merge_patch("cache-settings", {"data": {"TTL": "60", "MODE": None}})
+    kept = read("cache-settings").get("data")
+    j.check("a merge patch sets, removes and keeps keys",
+            patched.get("data") == {"SIZE": "512", "TTL": "60"} and kept == {"SIZE": "512", "TTL": "60"},
+            answered=patched.get("data"), data=kept)
+    config_map(ns, "frozen-settings", {"REGION": "eu"}, {"app": "web", "tier": "frontend"}, immutable=True)
+    frozen = merge_patch("frozen-settings", {"data": {"REGION": "us"}})
+    invalid = failure(frozen, 422, "Invalid")
+    kept = read("frozen-settings").get("data")
+    j.check("an immutable config map refuses a data change", invalid and kept == {"REGION": "eu"},
+            status=frozen, data=kept)
+
+
+PAGERDUTY_ID = UPPER + "0123456789"
+
+
+def pagerduty_steps(j):
+    # The service is new, and every incident list filters on it, so the lists hold only
+    # the incidents made here.
+    tag = j.rng.randrange(10**5, 10**6)
+    email = f"oncall.{tag}@bench.example"
+    j.headers.update({"authorization": "Token token=bench-placeholder", "From": email,
+                      "accept": "application/vnd.pagerduty+json;version=2"})
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_up(j, "P", 6, PAGERDUTY_ID)
+
+    def ref(rid, kind):
+        return {"id": rid, "type": kind}
+
+    def incident(answer):
+        return obj(obj(answer).get("incident"))
+
+    def trigger(title, key, urgency):
+        return incident(j.call("POST", "/incidents", body={"incident": {
+            "type": "incident", "title": title, "service": ref(service, "service_reference"), "urgency": urgency,
+            "incident_key": key, "body": {"type": "incident_body", "details": f"{title} ({tag})"}}}))
+
+    def move(iid, status):
+        return incident(j.call("PUT", f"/incidents/{iid}",
+                               body={"incident": {"type": "incident_reference", "status": status}}))
+
+    def listed(*pairs):
+        page = obj(j.call("GET", "/incidents", query=[("service_ids[]", service)] + list(pairs)))
+        return ids_of(page.get("incidents")), page
+
+    def code(answer):
+        return obj(obj(answer).get("error")).get("code")
+
+    made = obj(obj(j.call("POST", "/users", body={"user": {
+        "type": "user", "name": "Ana Silva", "email": email, "role": "user", "time_zone": "Europe/Lisbon"}})).get("user"))
+    j.check("a created user keeps its name, email and role",
+            j.last["status"] == 201 and eq(made.get("name"), "Ana Silva") and eq(made.get("email"), email)
+            and eq(made.get("role"), "user") and given(made.get("id"), None) is not None,
+            user={k: made.get(k) for k in ("id", "name", "email", "role")})
+    user = own(made.get("id"))
+    policy = obj(obj(j.call("POST", "/escalation_policies", body={"escalation_policy": {
+        "type": "escalation_policy", "name": f"Bench policy {tag}",
+        "escalation_rules": [{"escalation_delay_in_minutes": 30, "targets": [ref(user, "user_reference")]}]}})
+                     ).get("escalation_policy"))
+    targets = ids_of(head(policy.get("escalation_rules")).get("targets"))
+    j.check("an escalation policy targets the user",
+            j.last["status"] == 201 and eq(policy.get("name"), f"Bench policy {tag}") and targets == [user],
+            policy_name=policy.get("name"), targets=targets)
+    pid = own(policy.get("id"))
+    svc = obj(obj(j.call("POST", "/services", body={"service": {
+        "type": "service", "name": f"Checkout {tag}", "description": "Checkout API",
+        "escalation_policy": ref(pid, "escalation_policy_reference")}})).get("service"))
+    j.check("a service names its escalation policy",
+            j.last["status"] == 201 and eq(svc.get("name"), f"Checkout {tag}")
+            and eq(obj(svc.get("escalation_policy")).get("id"), pid) and eq(svc.get("status"), "active"),
+            service_name=svc.get("name"), escalation_policy=svc.get("escalation_policy"), service_status=svc.get("status"))
+    service = own(svc.get("id"))
+    key1, key2 = f"checkout-latency-{tag}", f"webhook-errors-{tag}"
+    first = trigger("Checkout latency above 2s", key1, "high")
+    j.check("a new incident is triggered on its service",
+            j.last["status"] == 201 and eq(first.get("status"), "triggered")
+            and eq(first.get("title"), "Checkout latency above 2s") and eq(obj(first.get("service")).get("id"), service)
+            and eq(first.get("incident_key"), key1) and eq(first.get("urgency"), "high")
+            and is_int(first.get("incident_number")),
+            incident={k: first.get(k) for k in ("id", "status", "incident_key", "urgency", "incident_number")},
+            service=first.get("service"))
+    assignees = [obj(a.get("assignee")).get("id") for a in dicts(first.get("assignments"))]
+    j.check("the incident is assigned to the policy's first target", assignees == [user], assignees=assignees)
+    i1 = own(first.get("id"))
+    again = j.call("POST", "/incidents", body={"incident": {
+        "type": "incident", "title": "Checkout latency, again", "service": ref(service, "service_reference"),
+        "incident_key": key1}})
+    j.check("an open incident's key is refused", j.last["status"] == 400 and eq(code(again), 2001),
+            error=obj(again).get("error"))
+    second = trigger("Payment webhook errors", key2, "low")
+    number = first.get("incident_number")
+    j.check("a second incident is numbered after the first",
+            j.last["status"] == 201 and is_int(number) and eq(second.get("incident_number"), number + 1)
+            and eq(second.get("urgency"), "low"),
+            first=number, second=second.get("incident_number"))
+    i2 = own(second.get("id"))
+    acked = move(i1, "acknowledged")
+    by = [obj(a.get("acknowledger")).get("id") for a in dicts(acked.get("acknowledgements"))]
+    state = incident(j.call("GET", f"/incidents/{i1}")).get("status")
+    j.check("acknowledging records the acknowledger",
+            eq(acked.get("status"), "acknowledged") and by == [user] and eq(state, "acknowledged"),
+            answered=acked.get("status"), acknowledgers=by, read=state)
+    text = f"Rolled back the {tag} deploy."
+    note = obj(obj(j.call("POST", f"/incidents/{i1}/notes", body={"note": {"content": text}})).get("note"))
+    added = j.last["status"]
+    notes = [n.get("content") for n in dicts(obj(j.call("GET", f"/incidents/{i1}/notes")).get("notes"))]
+    j.check("a note keeps its content and the From user",
+            added == 201 and eq(note.get("content"), text) and eq(obj(note.get("user")).get("id"), user)
+            and notes == [text],
+            status_code=added, note_user=note.get("user"), notes=notes)
+    triggered, _ = listed(("statuses[]", "triggered"))
+    acknowledged, _ = listed(("statuses[]", "acknowledged"))
+    j.check("statuses[] filters the service's incidents", triggered == [i2] and acknowledged == [i1],
+            triggered=triggered, acknowledged=acknowledged)
+    # Oldest first: the first incident was made before the second.
+    paged = [("sort_by", "created_at:asc"), ("limit", 1), ("total", "true")]
+    rows, page = listed(*paged)
+    j.check("limit 1 answers one incident, more and the total",
+            rows == [i1] and page.get("more") is True and eq(page.get("total"), 2),
+            listed=rows, more=page.get("more"), total=page.get("total"))
+    rows, page = listed(*paged, ("offset", 1))
+    j.check("offset 1 reaches the other incident", rows == [i2] and page.get("more") is False,
+            listed=rows, more=page.get("more"))
+    full = obj(incident(j.call("GET", f"/incidents/{i1}", query={"include[]": "services"})).get("service"))
+    j.check("include services side-loads the service",
+            eq(full.get("id"), service) and eq(full.get("type"), "service") and eq(full.get("name"), f"Checkout {tag}"),
+            service=full)
+    done = move(i1, "resolved")
+    reused = trigger("Checkout latency above 2s, later", key1, "high")
+    j.check("a resolved incident frees its key",
+            eq(done.get("status"), "resolved") and instant(done.get("resolved_at")) is not None
+            and j.last["status"] == 201 and eq(reused.get("status"), "triggered")
+            and given(reused.get("id"), None) is not None and reused.get("id") != i1,
+            resolved=done.get("status"), resolved_at=done.get("resolved_at"), reused=reused.get("id"))
+
+
+BLIND10_JOURNEYS = {"databricks": databricks_steps, "googlecalendar": googlecalendar_steps, "heroku": heroku_steps,
+                    "kubernetes": kubernetes_steps, "pagerduty": pagerduty_steps}
+
+
+def run_journeys_blind10(srv, sink, args):
+    run_journey_table(BLIND10_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -6066,6 +6758,7 @@ RUNNERS = {
     "journeys_blind7": (BLIND7_MOCKS, run_journeys_blind7),
     "journeys_blind8": (BLIND8_MOCKS, run_journeys_blind8),
     "journeys_blind9": (BLIND9_MOCKS, run_journeys_blind9),
+    "journeys_blind10": (BLIND10_MOCKS, run_journeys_blind10),
 }
 
 
