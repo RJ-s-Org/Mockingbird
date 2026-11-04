@@ -1,17 +1,22 @@
 {
-  "about": "Per-model OpenRouter provider pins. proxy.py adds `provider` = the pin's `provider` object to a call for that model, unless the client sent its own `provider`. Keys are model ids without a bench variant suffix (`@nojson`). Each pin is the provider that served most of the model's calls in full6 (2026-11-04, scratchpad full6/server/calls.jsonl); `basis` records that share. full6 recorded only the provider's display name, not the endpoint variant (quantization, region, service tier), so a pin names the variant chosen from the model's endpoint list (GET /api/v1/models/<id>/endpoints, `tag`). A full tag (`wafer/us`) matches only that endpoint; a base slug (`fireworks`) matches all of that provider's endpoints except service-tier ones (`openai/fast`, `openai/flex`). `only` repeats `order` so no other endpoint is eligible. Change a pin here, not in code.",
+  "about": "Per-model OpenRouter provider pins. proxy.py adds `provider` = the pin's `provider` object to a call for that model, unless the client sent its own `provider`. Keys are model ids without a bench variant suffix (`@nojson`). A pin is one endpoint, or a short ordered list of endpoints held equivalent for comparability: the same model, each reporting a known precision at least the first's, and `allow_fallbacks: false`, so OpenRouter tries them in `order` and fails rather than going elsewhere. `only` repeats `order` so no other endpoint is eligible. `quantizations` is OpenRouter's filter (int4, int8, fp4, mxfp4, nvfp4, fp6, fp8, mxfp8, fp16, bf16, fp32, unknown; fp4 covers mxfp4 and nvfp4, fp8 covers mxfp8). A pin lists the exact values its endpoints report, never `unknown` or an umbrella value, so OpenRouter refuses an endpoint whose reported precision changes. A pin names the variant from the model's endpoint list (GET /api/v1/models/<id>/endpoints, `tag`): a full tag (`wafer/us`) matches only that endpoint; a base slug (`fireworks`) matches all of that provider's endpoints except service-tier ones (`openai/fast`, `openai/flex`). `basis` records why each endpoint was picked. Change a pin here, not in code.",
   "pins": {
     "nvidia/nemotron-3.5-lightning": {
       "provider": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": false},
-      "basis": "full6: Fireworks served 2089 of 2114 calls (98.8%). Fireworks lists one endpoint for this model (`fireworks`). full6 did not record endpoint variants."
+      "basis": "full6: Fireworks served 2089 of 2114 calls (98.8%). Fireworks lists one endpoint for this model (`fireworks`). full6 did not record endpoint variants. full8 (pinned): Fireworks looped. Of its 2708 calls (engine and server ledgers), 271 stopped at max_tokens (finish_reason `length`, 10.0%; 258 of 2542 server calls) and 96 timed out, against 8 `length` in 2245 Fireworks calls in full6 (0.4%) and 7 in 486 in full7 (1.4%). Kept pinned: in full7 CoreWeave (26 `length` in 896), DeepInfra (42 in 705) and Io Net (7 in 328, median 21 s) did worse, and Darkbloom (0 in 293) took a median of 4.8 s."
     },
     "openai/gpt-6-luna": {
       "provider": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": false},
       "basis": "full6: OpenAI served 1913 of 2108 calls (90.7%). `openai` is the standard endpoint; the base slug does not select the `openai/flex` or `openai/fast` service tiers. full6 did not record which OpenAI endpoint served each call."
     },
     "deepseek/deepseek-v4.1-flash-1017": {
-      "provider": {"order": ["wafer/us"], "only": ["wafer/us"], "allow_fallbacks": false},
-      "basis": "full6: Wafer served 378 of 2090 calls (18.1%); about 25 providers served the rest. Pinned to `wafer/us`, not `wafer/mxfp4` (a lower-precision quantization). full6 did not record which Wafer endpoint served each call."
+      "provider": {
+        "order": ["wafer/us"],
+        "only": ["wafer/us"],
+        "allow_fallbacks": false,
+        "quantizations": ["mxfp4"]
+      },
+      "basis": "full6: Wafer served 378 of 2090 calls (18.1%); about 25 providers served the rest. Endpoint list on 2026-11-04: `wafer/us` reports `mxfp4`, the same as `wafer/mxfp4`, so `quantizations` is exactly `mxfp4`. full8 (pinned): 94 of 2648 calls got a 429 (`temporarily rate-limited upstream`) under the parallel load. Those fallbacks are labelled `detail.infra` and the checks after them `detail.infra_cascade`; no row is dropped. A second endpoint was looked for and none qualifies: it must report a known precision that is at least `mxfp4` and have no bad call (non-200, error, or finish_reason `length`) in full6 or full7. Together (63 and 87 calls, no bad call) reports `unknown`. ModelRun (65 and 130, no bad call, median 2704 and 1691 ms against Wafer's 1191 and 1425) reports `fp4`, which covers both mxfp4 and nvfp4 and so is not known to be mxfp4. StepFun (`fp8`) had 3 `length` in 173 calls in full6. Mistral, Nebius, Venice and SiliconFlow report `fp8` with no bad call, but served 14, 7, 7 and 3 calls across both runs, too few to show they are clean."
     }
   }
 }

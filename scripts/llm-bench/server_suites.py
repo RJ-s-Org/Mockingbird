@@ -452,7 +452,8 @@ def fallback_reason(hdrs):
 
 
 # A fallback answer the provider caused, not the model: the provider answered 5xx or
-# 429 ("no capacity", rate limited), or the connection to it failed. Anchored, so a
+# 429 ("no capacity", rate limited), answered any other status with a structured
+# rate-limit signal (`RATE_LIMITED`), or the connection to it failed. Anchored, so a
 # reason that starts with the model's own failure (`LLM output truncated: ...; not
 # salvaged: LLM returned HTTP 503`) is not one. An LLM timeout is not one either: it is
 # often the model being slow (aggregate.py counts timeouts on their own). The bench
@@ -462,13 +463,22 @@ def fallback_reason(hdrs):
 # as a bare `LLM returned HTTP 503` and cannot be told apart, so it is labelled infra.
 # That is why the label never changes a row and never causes a re-run.
 INFRA_REASON = re.compile(r"^LLM returned HTTP (5\d\d|429)\b|^LLM transport error")
+# A rate limit under another status counts only on a structured signal: an error
+# `"code":429` in the body, or OpenRouter's exact phrase "temporarily rate-limited
+# upstream". Free text that merely mentions a rate limit (a `rate_limit` field, "Too
+# Many Requests") does not. Only for a reason that is itself an HTTP error from the LLM,
+# so the model's own failure that merely ends in one (`LLM output truncated: ...; not
+# salvaged: ...`) stays the model's.
+RATE_LIMITED = re.compile(r'^LLM returned HTTP \d{3}\b.*("code"\s*:\s*429\b|temporarily rate-limited upstream)',
+                          re.S)
 
 
 def infra_reason(last):
     """The fallback reason of `last` (a `Journey.last`) when the mock's answer was a
     fallback forced by a clear provider error, else None."""
     reason = str(last.get("fallback_reason") or "")
-    if last.get("source") == "fallback" and INFRA_REASON.search(reason) and "kept rejecting" not in reason:
+    provider = INFRA_REASON.search(reason) or RATE_LIMITED.search(reason)
+    if last.get("source") == "fallback" and provider and "kept rejecting" not in reason:
         return reason
     return None
 
@@ -1048,7 +1058,13 @@ class Journey:
     A failed check judged on a call the provider failed (`infra_reason`) carries
     `detail.infra` true. That is a label only: the row, its `ok` and every other row
     are what they would be without it, and no run is repeated or dropped. The label
-    goes by the latest call, which is the call a check judges in all but a few steps."""
+    goes by the latest call, which is the call a check judges in all but a few steps.
+
+    A failed check without that label, when any earlier call of the same run fell back
+    on a provider failure, carries `detail.infra_cascade` true instead, whatever its own
+    call returned (a timeout too). It is coarse: the session may hold the earlier
+    fallback's made-up state, or the model may simply have failed. It is a label only,
+    not a discount: the row stays the model's in every score."""
 
     def __init__(self, name, srv, sink, args, rep):
         self.name, self.srv, self.sink, self.args, self.rep = name, srv, sink, args, rep
@@ -1058,6 +1074,8 @@ class Journey:
         self.done = set()
         self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
         self.last_infra = None  # the infra reason the latest check failed on, if any
+        self.last_call_infra = False  # the latest call fell back on a provider failure
+        self.earlier_infra = False  # a call before the latest one did
         self.raw = b""  # the raw body of the latest answer
         self.answer_headers = {}  # the headers of the latest answer
 
@@ -1073,8 +1091,10 @@ class Journey:
                                                 timeout=self.args.timeout)
         self.raw = raw
         self.answer_headers = hdrs or {}
+        self.earlier_infra = self.earlier_infra or self.last_call_infra
         self.last = {"status": status, "source": source_of(hdrs), "ms": ms,
                      "fallback_reason": fallback_reason(hdrs)}
+        self.last_call_infra = bool(infra_reason(self.last))
         if status >= 400 or status == 0:
             self.last["error"] = excerpt(raw)
         return parsed if isinstance(parsed, (dict, list)) else {}
@@ -1088,6 +1108,8 @@ class Journey:
         self.last_infra = infra if infra and not ok else None
         if self.last_infra:
             detail["infra"] = True
+        elif not ok and self.earlier_infra:
+            detail["infra_cascade"] = True
         journey_check(self.sink, self.name, self.rep, name, bool(ok), detail,
                       self.last["source"], self.last["ms"])
 
@@ -1111,6 +1133,8 @@ def run_one_journey(name, steps, srv, sink, args, rep):
         ended_on_infra = j.last_infra
     except Exception as e:  # noqa: BLE001 - a journey that breaks is recorded, not raised
         reason = f"{type(e).__name__}: {e}"[:300]
+    # A skipped check has no call of its own: every call the run made is an earlier one.
+    j.earlier_infra = j.earlier_infra or j.last_call_infra
     for check in JOURNEY_CHECKS[name]:
         if check not in j.done:
             j.last = {"status": None, "source": "skipped", "ms": None, "fallback_reason": None}
@@ -6106,7 +6130,10 @@ def run_suite(suite, args):
         sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
     n_ok = sum(1 for r in sink.rows if r["ok"])
     n_infra = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra"))
+    n_cascade = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra_cascade"))
     infra = f", {n_infra} failed on provider errors" if n_infra else ""
+    if n_cascade:
+        infra += f", {n_cascade} failed after a provider failure earlier in the journey"
     print(f"  {suite}: {n_ok}/{len(sink.rows)} ok{infra}", file=sys.stderr)
     mix = provider_mix(args, suite)
     if mix:
