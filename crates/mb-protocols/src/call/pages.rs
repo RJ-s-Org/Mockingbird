@@ -58,6 +58,38 @@
 //! the first page's by the token, so the response cache never answers it with the
 //! first page; it is not cached itself, as the token already serves it.
 //!
+//! A contract with no such member may have one for the next page's URL instead, on an
+//! HTTP route of a list not paged by number or offset ([`runs::starts`]): one text
+//! member with a URL's `format` (`uri`, `uri-reference`, `url`, `iri`, `iri-reference`)
+//! or described as a URL or URI, beside the list or in objects beside it, at most
+//! [`MAX_URL_DEPTH`] names deep, with a name on its path that is `next` or whose first
+//! word is (after any dotted prefix): HAL's `_links.next.href`, a bare `next` beside
+//! `values`, JSON:API's `links.next`, `next_page_url`, `@odata.nextLink`. `self`, `prev`
+//! and `next` share a schema, so only the link relation's name tells them apart. Its
+//! parameter is one [`slot`] could pair with a token (not carried, no page size, naming
+//! no member of the items) that no `format` or `pattern` shapes (`since`, a date-time),
+//! found by, in this order: a link of this very request the model wrote outside the list
+//! (of the route, showing every value of the request's query: its `self`) carrying it
+//! empty, as a first page's cursor is (a filter it carries with a value, `status=open`,
+//! is none), the one of those, or of several the one below; the one parameter of several
+//! words sharing its first word with a page size of several words (`page[cursor]` beside
+//! `page[size]`, not a bare `page`); the one whose description names the `next` member
+//! as code (`` `next` ``, `` `_links.next` ``), or that the `next` member's own
+//! description (not a shared link schema's) names as code or as a query key (`from=`).
+//! Prose never ties one (`q`, "sent again with the next request"). None, two, or two
+//! such members, are no place. A URL the model wrote there to another page of the route by anything but the
+//! cursor (`page=2`) stays as it is: there is no place. One carrying the cursor is its
+//! token, and stays too: no cut serves it. The token is written as the URL of its page:
+//! the mock's own, as the request reached it ([`CallPlan::page_url`]: the scheme and
+//! host [`crate::base_url::of`] gives, the mount prefix, and the request's path as sent,
+//! its values encoded as they came), never a host the model wrote, with the request's
+//! query and the token under the parameter. A link object the model left `null` is
+//! written as a copy of a link object beside it, one of the request's own route first
+//! (HAL's `self`, for its `type`). A request following the URL carries the token under
+//! the parameter and the request's other values, so it is served as above; the last
+//! page's link object is `null` or left out, or else the URL member, where the answer
+//! allows (never empty).
+//!
 //! A list paged by number or offset has no place for a token: its first page is kept
 //! as a run instead, and its later pages served from it ([`runs`]).
 //!
@@ -93,13 +125,470 @@ static MINTED: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Slot {
     pub(super) path: Vec<String>,
     param: String,
+    /// For a member holding the next page's URL, not the token itself, the URL the
+    /// first page's call reached ([`CallPlan::page_url`]): the next page's is it with the
+    /// call's query and the token under `param`.
+    url: Option<String>,
+}
+
+impl Slot {
+    /// The token the model gave at this place of `body`: the text there, or, for a URL,
+    /// what its query holds under the parameter. `None` when absent or empty.
+    pub(super) fn given(&self, body: &Value) -> Option<String> {
+        let text = self
+            .path
+            .iter()
+            .try_fold(body, |at, name| at.get(name))
+            .and_then(Value::as_str)?;
+        let token = match self.url.as_deref() {
+            Some(base) => query_value(text, &url::Url::parse(base).ok()?, &self.param)?,
+            None => text.to_string(),
+        };
+        (!token.trim().is_empty()).then_some(token)
+    }
 }
 
 /// Whether member `name` is, or ends with the words of, parameter `param`.
 fn names_param(name: &str, param: &str) -> bool {
-    let wanted = mb_mcm::joined_name(param);
-    let words = mb_mcm::words(name);
-    (0..words.len()).any(|from| mb_mcm::joined_name(&words[from..].concat()) == wanted)
+    mb_mcm::ends_with_words(name, param)
+}
+
+/// The `format`s of a member holding a URL.
+const URL_FORMATS: [&str; 5] = ["uri", "uri-reference", "url", "iri", "iri-reference"];
+
+/// Names deep a URL member is looked for, the list's envelope aside: HAL's
+/// `_links.next.href` is three.
+const MAX_URL_DEPTH: usize = 3;
+
+/// `text` as a URL: an absolute one, else one relative to `base`.
+fn parse_url(text: &str, base: &url::Url) -> Option<url::Url> {
+    url::Url::parse(text).or_else(|_| base.join(text)).ok()
+}
+
+/// The value `url`'s query holds under `param`, a relative URL read against `base`.
+fn query_value(url: &str, base: &url::Url, param: &str) -> Option<String> {
+    parse_url(url, base)?
+        .query_pairs()
+        .find(|(name, _)| name == param)
+        .map(|(_, value)| value.into_owned())
+}
+
+/// The query of `url` as sorted pairs, but those under `param`.
+fn query_without(url: &url::Url, param: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(name, _)| name != param)
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// Whether `url` is of the route `own` is, which `op`'s path template has `segments`
+/// segments of: the last that many segments of their paths are the same (a server's
+/// base path or a mount prefix aside).
+fn same_route(url: &url::Url, own: &url::Url, segments: usize) -> bool {
+    let tail = |url: &url::Url| -> Vec<String> {
+        let all: Vec<String> = url
+            .path()
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        all[all.len().saturating_sub(segments)..].to_vec()
+    };
+    segments > 0 && tail(url) == tail(own)
+}
+
+/// The segments of `op`'s path template.
+fn template_segments(op: &Operation) -> usize {
+    match &op.binding {
+        Binding::Http { path, .. } => path.split('/').filter(|s| !s.is_empty()).count(),
+        _ => 0,
+    }
+}
+
+/// The URLs `value` holds, depth first, but in member `skip` of the top, each read
+/// against `base`.
+fn urls_in(
+    value: &Value,
+    skip: Option<&str>,
+    base: &url::Url,
+    depth: usize,
+    out: &mut Vec<url::Url>,
+) {
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Value::String(text) if text.contains('/') || text.contains('?') => {
+            out.extend(parse_url(text, base));
+        }
+        Value::Array(items) => {
+            for item in items {
+                urls_in(item, None, base, depth + 1, out);
+            }
+        }
+        Value::Object(members) => {
+            for (_, member) in members
+                .iter()
+                .filter(|(name, _)| Some(name.as_str()) != skip)
+            {
+                urls_in(member, None, base, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The descriptions of `schema`'s parts.
+fn descriptions<'a>(bundle: &'a mb_mcm::Bundle, schema: Option<&'a Value>) -> Vec<&'a str> {
+    let (parts, _) = schema_parts(bundle, schema);
+    parts
+        .iter()
+        .filter_map(|p| p.get("description").and_then(Value::as_str))
+        .collect()
+}
+
+/// Whether `url` shows every value of `call`'s query: a link of this very request.
+fn shows_request(url: &url::Url, call: &OperationCall) -> bool {
+    let shown = query_without(url, "");
+    call_pairs(call, "").is_some_and(|asked| asked.iter().all(|pair| shown.contains(pair)))
+}
+
+/// Whether `text` holds `name` as code: in backticks (`` `from` ``).
+fn quotes(text: &str, name: &str) -> bool {
+    text.contains(&format!("`{name}`"))
+}
+
+/// Whether `text` holds `name` set off as a query key: `?from=`, `&from=`, or `from=`
+/// not inside a longer name.
+fn names_as_key(text: &str, name: &str) -> bool {
+    let key = format!("{name}=");
+    text.match_indices(&key).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '[' || c == '.'))
+    })
+}
+
+/// The description `schema` holds itself, not one of a schema it refers to (a shared
+/// link schema's).
+fn own_description(schema: &Value) -> Option<&str> {
+    schema.get("description").and_then(Value::as_str)
+}
+
+/// Whether `schema` holds a URL: free text (see [`is_free_text`]) whose `format` is a
+/// URL's, or that its description calls a URL or URI.
+fn is_url(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
+    if !is_free_text(bundle, schema) {
+        return false;
+    }
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    parts.iter().any(|part| {
+        part.get("format")
+            .and_then(Value::as_str)
+            .is_some_and(|format| URL_FORMATS.contains(&format))
+            || part
+                .get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    text.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                        ["url", "uri", "urls", "uris"].contains(&word.to_ascii_lowercase().as_str())
+                    })
+                })
+    })
+}
+
+/// Whether member name `name` names the next page, as the link relation does: `next`
+/// itself, or a name whose first word is `next` (`nextLink`, `next_page_url`), after
+/// any dotted prefix (`@odata.nextLink`).
+fn names_next(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    mb_mcm::words(last)
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("next"))
+}
+
+/// The members of object `schema` on the path to a URL member that [`names_next`]
+/// names (itself, or an object holding it), at most [`MAX_URL_DEPTH`] names deep,
+/// leaving out member `skip` of the top (the list), each with the schemas on its path.
+fn next_urls<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    schema: &'a Value,
+    skip: &str,
+    path: &mut Vec<(String, &'a Value)>,
+    out: &mut Vec<Vec<(String, &'a Value)>>,
+) {
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    for (name, member) in parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flatten()
+    {
+        if path.is_empty() && name == skip {
+            continue;
+        }
+        path.push((name.clone(), member));
+        if is_url(bundle, member) {
+            let named = path.iter().any(|(name, _)| names_next(name));
+            if named && !out.iter().any(|seen| same_path(seen, path)) {
+                out.push(path.clone());
+            }
+        } else if path.len() < MAX_URL_DEPTH {
+            next_urls(bundle, member, skip, path, out);
+        }
+        path.pop();
+    }
+}
+
+fn same_path(a: &[(String, &Value)], b: &[(String, &Value)]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|((x, _), (y, _))| x == y)
+}
+
+/// The one of `params` of several words that shares its first word with a page size of
+/// several words (`page[cursor]` beside `page[size]`, where `filter`, or a bare `page`,
+/// is another). Two such, or none, is none.
+fn sharing_size<'a>(params: &[&'a str], size_param: &str) -> Option<&'a str> {
+    let size_words = mb_mcm::words(size_param);
+    let [lead, _, ..] = size_words.as_slice() else {
+        return None;
+    };
+    let lead = mb_mcm::joined_name(lead);
+    let mut sharing = params.iter().filter(|param| {
+        let words = mb_mcm::words(param);
+        words.len() > 1 && mb_mcm::joined_name(words[0]) == lead
+    });
+    let first = sharing.next()?;
+    sharing.next().is_none().then_some(*first)
+}
+
+/// The cursor of `params`: the one there, else the one [`sharing_size`] picks.
+fn cursor_param<'a>(params: &[&'a str], size_param: &str) -> Option<&'a str> {
+    match params {
+        [one] => Some(one),
+        _ => sharing_size(params, size_param),
+    }
+}
+
+/// The one place answer `body` to `call`, which reached `page_url` (of schema `schema`,
+/// its list `list`), has for the URL of its next page, when it has none for a token (see
+/// the module's doc). `params` are the parameters [`slot`] could pair with a token, with
+/// their schemas.
+fn url_slot(
+    bundle: &mb_mcm::Bundle,
+    (op, call, page_url): (&Operation, &OperationCall, &str),
+    (schema, list): (&Value, &str),
+    body: &Value,
+    (params, size_param): (&[(&str, &Value)], &str),
+) -> Option<Slot> {
+    let own = url::Url::parse(page_url).ok()?;
+    let segments = template_segments(op);
+    let mut found = Vec::new();
+    next_urls(bundle, schema, list, &mut Vec::new(), &mut found);
+    let [path] = found.as_slice() else {
+        return None;
+    };
+    let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
+    let at = names.iter().position(|name| names_next(name))?;
+    let next_name = &names[at];
+    // The `next` member as its own parent declares it, not a shared schema it refers to.
+    let next_own = own_description(path[at].1);
+    // The URLs of this very request the model wrote outside the list (its `self`), but
+    // the `next` member itself: a next link is another page's, whatever it carries.
+    let without_next = placed(body, &names[..=at], None)?;
+    let mut shown = Vec::new();
+    urls_in(&without_next, Some(list), &own, 0, &mut shown);
+    shown.retain(|url| same_route(url, &own, segments) && shows_request(url, call));
+    let declared = op.input.query.as_ref().and_then(|q| q.get("properties"));
+    // No format or pattern shapes a cursor (`since`, a date-time).
+    let candidates: Vec<&str> = params
+        .iter()
+        .filter(|(_, schema)| {
+            let (parts, _) = schema_parts(bundle, Some(schema));
+            !parts
+                .iter()
+                .any(|p| p.get("format").is_some() || p.get("pattern").is_some())
+        })
+        .map(|(name, _)| *name)
+        .collect();
+    // Carried empty by a link of this request: a first page's cursor, which a filter
+    // the request did not send (`status=open`) is not.
+    let carried: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|name| {
+            shown.iter().any(|url| {
+                url.query_pairs()
+                    .any(|(key, value)| key == *name && value.trim().is_empty())
+            })
+        })
+        .collect();
+    // Named as code: the parameter's description names the `next` member (`` `next` ``,
+    // `_links.next`), or the `next` member's own description names the parameter
+    // (`` `from` ``, `from=`).
+    let full = names[..=at].join(".");
+    let told: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|name| {
+            descriptions(bundle, declared.and_then(|d| d.get(*name)))
+                .iter()
+                .any(|text| quotes(text, next_name) || (at > 0 && quotes(text, &full)))
+                || next_own.is_some_and(|text| quotes(text, name) || names_as_key(text, name))
+        })
+        .collect();
+    // What a link of the request carries, then the page size's first word, then what
+    // the contract's descriptions say.
+    let param = cursor_param(&carried, size_param)
+        .or_else(|| sharing_size(&candidates, size_param))
+        .or(match told.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        })?;
+
+    // A URL the model wrote there, of this route, to another page by anything but the
+    // cursor (`page=2`) stays as it is: the page it names is the model's.
+    let given = names
+        .iter()
+        .try_fold(body, |at, name| at.get(name))
+        .and_then(Value::as_str)
+        .and_then(|text| parse_url(text, &own));
+    if let Some(given) = given
+        && same_route(&given, &own, segments)
+        && call_pairs(call, param).is_none_or(|asked| query_without(&given, param) != asked)
+    {
+        return None;
+    }
+    Some(Slot {
+        path: names,
+        param: param.to_string(),
+        url: Some(page_url.to_string()),
+    })
+}
+
+/// The query of `call` as sorted text pairs, but those under `param`; `None` when a
+/// value is an object.
+fn call_pairs(call: &OperationCall, param: &str) -> Option<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    for (name, value) in call.query.iter().filter(|(name, _)| name.as_str() != param) {
+        let values = match value {
+            Value::Array(values) => values.iter().collect(),
+            other => vec![other],
+        };
+        for value in values {
+            match value {
+                Value::Null => {}
+                Value::Object(_) => return None,
+                Value::String(text) => pairs.push((name.clone(), text.clone())),
+                other => pairs.push((name.clone(), other.to_string())),
+            }
+        }
+    }
+    pairs.sort();
+    Some(pairs)
+}
+
+/// The URL of the page of `call` that carries `token` under `param`: `page_url` (the
+/// URL the call reached, see [`CallPlan::page_url`]), with the call's query, `token`
+/// for what it held under `param`. `None` for a query value that is an object.
+fn page_url(page_url: &str, call: &OperationCall, param: &str, token: &str) -> Option<String> {
+    let mut url = url::Url::parse(page_url).ok()?;
+    let mut pairs = call_pairs(call, param)?;
+    pairs.push((param.to_string(), token.to_string()));
+    url.query_pairs_mut().clear().extend_pairs(
+        pairs
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    );
+    Some(url.into())
+}
+
+/// The answers `body` to `call` may be with `token` at `slot`, in the order tried: the
+/// token there, or, for a URL, the page's URL (see [`page_url`]) there, else in a copy
+/// of an object beside the one holding it that holds the same member (HAL's
+/// `_links.self` for a `_links.next` that is `null`, as a link has other members), one
+/// whose URL is of the request's own route first.
+fn filled(
+    body: &Value,
+    slot: &Slot,
+    (op, call): (&Operation, &OperationCall),
+    token: &str,
+) -> Vec<Value> {
+    let Some(base) = slot.url.as_deref() else {
+        return placed(body, &slot.path, Some(Value::String(token.to_string())))
+            .into_iter()
+            .collect();
+    };
+    let (Some(url), Ok(own)) = (
+        page_url(base, call, &slot.param, token),
+        url::Url::parse(base),
+    ) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Value> = placed(body, &slot.path, Some(Value::String(url.clone())))
+        .into_iter()
+        .collect();
+    if let Some((leaf, link)) = slot.path.split_last()
+        && let Some((own_name, holder)) = link.split_last()
+        && !holder.is_empty()
+    {
+        let siblings = holder
+            .iter()
+            .try_fold(body, |at, name| at.get(name))
+            .and_then(Value::as_object);
+        let segments = template_segments(op);
+        let mut siblings: Vec<(&String, &Value)> = siblings
+            .into_iter()
+            .flatten()
+            .filter(|(name, sibling)| {
+                *name != own_name && sibling.get(leaf).is_some_and(Value::is_string)
+            })
+            .collect();
+        // Of the request's own route first: `self`, not `documentation`.
+        siblings.sort_by_key(|(_, sibling)| {
+            !sibling
+                .get(leaf)
+                .and_then(Value::as_str)
+                .and_then(|text| parse_url(text, &own))
+                .is_some_and(|at| same_route(&at, &own, segments))
+        });
+        for (_, sibling) in siblings {
+            let mut copy = sibling.clone();
+            if let Some(members) = copy.as_object_mut() {
+                members.insert(leaf.clone(), Value::String(url.clone()));
+            }
+            out.extend(placed(body, link, Some(copy)));
+        }
+    }
+    out
+}
+
+/// The ends `body` may have at `slot` on the last page, in the order tried: `null`,
+/// nothing or empty text there. For a URL, no empty text, and when it sits in a link
+/// object of its own (HAL's `_links.next.href`), that object `null` or left out first.
+fn ended(body: &Value, slot: &Slot) -> Vec<Value> {
+    let mut out = Vec::new();
+    if slot.url.is_some() && slot.path.len() > 2 {
+        let link = &slot.path[..slot.path.len() - 1];
+        out.extend(
+            [Some(Value::Null), None]
+                .into_iter()
+                .filter_map(|end| placed(body, link, end)),
+        );
+    }
+    let empty = slot
+        .url
+        .is_none()
+        .then(|| Some(Value::String(String::new())));
+    out.extend(
+        [Some(Value::Null), None]
+            .into_iter()
+            .chain(empty)
+            .filter_map(|end| placed(body, &slot.path, end)),
+    );
+    out
 }
 
 /// Whether `schema` is text only, with no `const` or `enum`.
@@ -226,7 +715,7 @@ fn parents_of(slot: &[String]) -> &[String] {
 /// The one place answer `body` to `call` has for a token (see the module's doc).
 pub(super) fn slot(
     bundle: &mb_mcm::Bundle,
-    (op, call): (&Operation, &OperationCall),
+    (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
     body: &Value,
     size_param: &str,
 ) -> Option<Slot> {
@@ -235,7 +724,7 @@ pub(super) fn slot(
     let mut held = None;
     let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
     let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
-    let params: Vec<&str> = declared
+    let candidates: Vec<(&str, &Value)> = declared
         .iter()
         .filter(|(name, schema)| {
             name.as_str() != size_param
@@ -244,8 +733,9 @@ pub(super) fn slot(
                 && lists::named_member(bundle, &item_parts, name).is_none()
                 && is_free_text(bundle, schema)
         })
-        .map(|(name, _)| name.as_str())
+        .map(|(name, schema)| (name.as_str(), schema))
         .collect();
+    let params: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
     let echoed = request_values(call);
     let param_of = |name: &str, generated: Option<&Value>| -> Option<String> {
         if generated
@@ -270,6 +760,7 @@ pub(super) fn slot(
                     found.push(Slot {
                         path: vec![name.clone()],
                         param,
+                        url: None,
                     });
                 }
                 continue;
@@ -287,13 +778,25 @@ pub(super) fn slot(
                     found.push(Slot {
                         path: vec![name.clone(), inner_name.clone()],
                         param,
+                        url: None,
                     });
                 }
             }
         }
     }
-    let first = found.pop()?;
-    found.is_empty().then_some(first)
+    match found.pop() {
+        Some(first) => found.is_empty().then_some(first),
+        // No place for the token itself: a place for the next page's URL, if any, unless
+        // the list is paged by number or offset.
+        None if runs::starts(bundle, (op, call), size_param) => None,
+        None => url_slot(
+            bundle,
+            (op, call, page_url?),
+            (schema, list),
+            body,
+            (&candidates, size_param),
+        ),
+    }
 }
 
 /// `body` with `value` at `path`, an object made for it where its parent is missing or
@@ -383,8 +886,7 @@ struct Cut {
     op: String,
     path: Value,
     query: Value,
-    slot: Vec<String>,
-    param: String,
+    slot: Slot,
     size: usize,
     size_param: String,
     /// The page as answered, with its token.
@@ -399,8 +901,9 @@ impl Cut {
             "op": self.op,
             "path": self.path,
             "query": self.query,
-            "slot": self.slot,
-            "param": self.param,
+            "slot": self.slot.path,
+            "param": self.slot.param,
+            "url": self.slot.url,
             "size": self.size,
             "size_param": self.size_param,
             "page": self.page,
@@ -419,13 +922,16 @@ impl Cut {
             op: text(&value, "op")?,
             path: value.get("path")?.clone(),
             query: value.get("query")?.clone(),
-            slot: value
-                .get("slot")?
-                .as_array()?
-                .iter()
-                .map(|s| s.as_str().map(str::to_string))
-                .collect::<Option<_>>()?,
-            param: text(&value, "param")?,
+            slot: Slot {
+                path: value
+                    .get("slot")?
+                    .as_array()?
+                    .iter()
+                    .map(|s| s.as_str().map(str::to_string))
+                    .collect::<Option<_>>()?,
+                param: text(&value, "param")?,
+                url: text(&value, "url"),
+            },
             size: usize::try_from(value.get("size")?.as_u64()?).ok()?,
             size_param: text(&value, "size_param")?,
             page: value.get_mut("page")?.take(),
@@ -463,7 +969,14 @@ pub(super) async fn mint(
     let Some(body) = generated.body.as_ref() else {
         return false;
     };
-    let slot = slot(rt.bundle(), (op, call), body, &cut.size_param);
+    let slot = slot(
+        rt.bundle(),
+        (op, call, plan.page_url.as_deref()),
+        body,
+        &cut.size_param,
+    )
+    // A URL the model gave to its own next page stays: no cut serves it.
+    .filter(|slot| slot.url.is_none() || slot.given(body).is_none());
     if slot.is_none() && !runs::starts(rt.bundle(), (op, call), &cut.size_param) {
         return false;
     }
@@ -568,7 +1081,7 @@ fn tokened(
     let page = counted
         .iter()
         .chain(std::iter::once(body))
-        .filter_map(|base| placed(base, &slot.path, Some(Value::String(first.clone()))))
+        .flat_map(|base| filled(base, &slot, (op, call), &first))
         .find_map(|page| {
             // More to come, where the answer allows saying so.
             flag.as_deref()
@@ -581,8 +1094,7 @@ fn tokened(
         op: op.id.clone(),
         path: path_of(call),
         query: bound_query(call, &slot.param, &size_param),
-        slot: slot.path,
-        param: slot.param,
+        slot,
         size,
         size_param,
         page: page.clone(),
@@ -621,9 +1133,9 @@ pub(super) async fn serve(
         if let Some(cut) = Cut::of(doc.data)
             && cut.nonce == nonce
             && cut.op == op.id
-            && cut.param == *param
+            && cut.slot.param == *param
             && cut.path == path_of(call)
-            && cut.query == bound_query(call, &cut.param, &cut.size_param)
+            && cut.query == bound_query(call, &cut.slot.param, &cut.size_param)
             && offset <= cut.rest.len()
         {
             found = Some((cut, place, offset));
@@ -654,28 +1166,22 @@ pub(super) async fn serve(
     let _ = lists::narrow(rt, plan, call, &mut body);
     let valid = |candidate: &Value| plan.engine.serve_stored(rt.bundle(), op, candidate, None);
     let mut served = if next < cut.rest.len() {
-        let more = placed(
-            &body,
-            &cut.slot,
-            Some(Value::String(token(&cut.nonce, place, next))),
-        )?;
-        valid(&more)?
+        let token = token(&cut.nonce, place, next);
+        filled(&body, &cut.slot, (op, call), &token)
+            .iter()
+            .find_map(valid)?
     } else {
         // The last page: no token, as the answer allows.
-        let flag = more_flag(rt.bundle(), op, &cut.slot);
-        let ends = [Some(Value::Null), None, Some(Value::String(String::new()))];
-        let end = ends
-            .into_iter()
-            .filter_map(|end| placed(&body, &cut.slot, end))
-            .find_map(|candidate| {
-                // No more, as the first page said there was, where the answer allows.
-                flag.as_deref()
-                    .and_then(|flag| {
-                        without_more(&candidate, &cut.page, parents_of(&cut.slot), flag)
-                    })
-                    .and_then(|done| valid(&done))
-                    .or_else(|| valid(&candidate))
-            });
+        let flag = more_flag(rt.bundle(), op, &cut.slot.path);
+        let end = ended(&body, &cut.slot).into_iter().find_map(|candidate| {
+            // No more, as the first page said there was, where the answer allows.
+            flag.as_deref()
+                .and_then(|flag| {
+                    without_more(&candidate, &cut.page, parents_of(&cut.slot.path), flag)
+                })
+                .and_then(|done| valid(&done))
+                .or_else(|| valid(&candidate))
+        });
         if end.is_none() {
             tracing::debug!(
                 mock = %rt.name,

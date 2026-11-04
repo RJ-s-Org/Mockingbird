@@ -173,6 +173,7 @@ async fn generate(
                     earlier_answers: &[],
                     earlier_writes: &[],
                     earlier_origins: &[],
+                    served_cursors: &[],
                     created_since: &[],
                     alongside: &[],
                     same_values: &[],

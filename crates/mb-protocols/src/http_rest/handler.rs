@@ -202,6 +202,7 @@ pub(crate) async fn handle(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: Body,
 ) -> Response {
     let rt = &st.rt;
@@ -217,7 +218,10 @@ pub(crate) async fn handle(
     let mut log = CallLog::new(rt.recorder.is_some());
     let (resp, raw_body) = match read_body(&headers, body, rt.limits.max_request_bytes).await {
         Ok(raw_body) => {
-            let resp = serve(&st, &method, &uri, &headers, &raw_body, &mut log)
+            let prefix = extensions
+                .get::<crate::MountPrefix>()
+                .map_or("", |p| p.0.as_str());
+            let resp = serve(&st, (&method, &uri, prefix), &headers, &raw_body, &mut log)
                 .instrument(span.clone())
                 .await;
             (resp, raw_body)
@@ -297,8 +301,7 @@ async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Byte
 
 async fn serve(
     st: &RestState,
-    method: &Method,
-    uri: &Uri,
+    (method, uri, prefix): (&Method, &Uri, &str),
     headers: &HeaderMap,
     raw_body: &[u8],
     log: &mut CallLog,
@@ -404,7 +407,13 @@ async fn serve(
         admitted: None,
     };
     let plan = match call::plan(rt, op, headers, presented).await {
-        Ok(plan) => plan,
+        Ok(mut plan) => {
+            plan.page_url = Some(format!(
+                "{}{path}",
+                crate::base_url::of(rt, headers, prefix)
+            ));
+            plan
+        }
         Err(PlanFailure {
             error,
             tenancy,

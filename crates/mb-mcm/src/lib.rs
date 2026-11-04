@@ -734,6 +734,15 @@ pub fn joined_name(name: &str) -> String {
         .collect()
 }
 
+/// Whether `name` is, or ends with the [`words`] of, `tail`, separators and case aside:
+/// `next_page_token` ends with `page_token` and `pageToken`, not with `token_id`.
+#[must_use]
+pub fn ends_with_words(name: &str, tail: &str) -> bool {
+    let wanted = joined_name(tail);
+    let words = words(name);
+    (0..words.len()).any(|from| joined_name(&words[from..].concat()) == wanted)
+}
+
 /// Whether a run of `name`'s [`words`] names `member`, separators and case aside:
 /// `issueIdOrKey` names `id`, `key` and `id_or_key`; `issue_iid` names `iid`, not `id`.
 #[must_use]
