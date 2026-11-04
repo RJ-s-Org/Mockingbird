@@ -10,8 +10,111 @@ use mb_mcm::{
 };
 use serde_json::{Map, Value};
 
+/// The segments of `path` as the heuristics read them: each `/`-separated
+/// segment, except that a segment with a resource's key inside it
+/// ([`key_segment`]) reads as the segments a whole-segment parameter would make
+/// it, so `/companies({company_id})/customers({customer_id})` reads as
+/// `/companies/{company_id}/customers/{customer_id}` and `/carts/key={key}` as
+/// `/carts/{key}`. Every piece is a slice of `path`.
 fn segments(path: &str) -> Vec<&str> {
-    path.split('/').filter(|s| !s.is_empty()).collect()
+    let mut out = Vec::new();
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        match key_segment(seg) {
+            Some(KeySegment { stem, params }) => {
+                out.extend(stem);
+                out.extend(params);
+            }
+            None => out.push(seg),
+        }
+    }
+    out
+}
+
+/// A path segment with literal text before its parameters that says they key a
+/// resource ([`key_segment`]).
+#[derive(Debug, PartialEq)]
+struct KeySegment<'a> {
+    /// The resource type the segment names: `customers` of
+    /// `customers({customer_id})`. `None` for `key={key}`, a key of the
+    /// collection before it.
+    stem: Option<&'a str>,
+    /// Each parameter that keys it, as its whole-segment text:
+    /// `{customer_id}`. None for a composite key or a call.
+    params: Vec<&'a str>,
+}
+
+/// The literal text of a segment before its first parameter, each parameter as
+/// its `{name}` text, and the literal text after its last; `None` when the
+/// segment has no parameter or is not a template the router reads as one (an
+/// unclosed `{`, an empty name, a `{{` or `}}` literal brace).
+fn template(seg: &str) -> Option<(&str, Vec<&str>, &str)> {
+    if seg.contains("{{") || seg.contains("}}") {
+        return None;
+    }
+    let first = seg.find('{')?;
+    let mut params = Vec::new();
+    let mut at = 0;
+    while let Some(open) = seg[at..].find('{').map(|i| at + i) {
+        let close = open + seg[open..].find('}')?;
+        if seg[at..open].contains('}') || close == open + 1 || seg[open + 1..close].contains('{') {
+            return None;
+        }
+        params.push(&seg[open..=close]);
+        at = close + 1;
+    }
+    if seg[at..].contains('}') {
+        return None;
+    }
+    Some((&seg[..first], params, &seg[at..]))
+}
+
+/// The resource a segment's literal text keys by the parameters inside it:
+///
+/// - an OData key, `customers({customer_id})` or `customers('{id}')`: the type
+///   before the `(`, keyed by the one parameter inside as
+///   `/customers/{customer_id}` would be;
+/// - a composite OData key or a function call, `lines(doc={d},seq={s})` or
+///   `NS.getBalance(asOf={date})`: the name before the `(` alone, as if it had
+///   no parameters. A [`mb_mcm::Identity`] names one parameter, and no one part
+///   of a composite key, nor an argument of a call, identifies a record, so it
+///   gives none; a call after a keyed record (`/customers({id})/NS.post(x={x})`)
+///   reads as the action `/customers/{id}/NS.post`;
+/// - a named key, `key={key}`: the parameter alone, an alternate key of the
+///   collection the segment before names, as `/carts/{key}` would be.
+///
+/// Any other segment stays one segment: a whole-segment parameter (`{id}`,
+/// `{Sid}.json`), a parameter with only a suffix (`{id}:archive`), and other
+/// text around one (`v{version}`), which says nothing of what it keys.
+fn key_segment(seg: &str) -> Option<KeySegment<'_>> {
+    let (prefix, params, suffix) = template(seg)?;
+    let name_like = |s: &str| {
+        s.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
+    let formatted = |s: &str| s.is_empty() || FORMAT_SUFFIXES.contains(&s);
+    if let Some((stem, args)) = prefix.split_once('(') {
+        let closed = suffix
+            .trim_start_matches(['\'', '"'])
+            .strip_prefix(')')
+            .is_some_and(formatted);
+        if !name_like(stem) || !closed {
+            return None;
+        }
+        // One parameter, unnamed: a key. Named or several: no key.
+        let keyed = params.len() == 1 && args.trim_matches(['\'', '"']).is_empty();
+        let stem = Some(stem).filter(|s| !s.is_empty());
+        return match (keyed, stem) {
+            (true, _) => Some(KeySegment { stem, params }),
+            (false, Some(_)) => Some(KeySegment {
+                stem,
+                params: Vec::new(),
+            }),
+            (false, None) => None,
+        };
+    }
+    let name = prefix.strip_suffix('=')?;
+    let named = !name.is_empty() && name_like(name);
+    (named && formatted(suffix) && params.len() == 1).then_some(KeySegment { stem: None, params })
 }
 
 /// Format suffixes some APIs put on every path (Twilio's `Messages.json`,
@@ -2162,6 +2265,263 @@ mod tests {
         ] {
             assert_eq!(parent_target(path), None, "{path}");
         }
+    }
+
+    #[test]
+    fn a_key_inside_a_segment_reads_as_whole_segment_parameters() {
+        for (path, expected) in [
+            (
+                "/companies({company_id})/customers({customer_id})",
+                &["companies", "{company_id}", "customers", "{customer_id}"][..],
+            ),
+            ("/customers('{id}')", &["customers", "{id}"]),
+            ("/entity(k1={a},k2={b})/x", &["entity", "x"]),
+            ("/lines({doc},{seq})", &["lines"]),
+            ("/customers(id={id})", &["customers"]),
+            (
+                "/customers({id})/NS.getBalance(asOf={date})",
+                &["customers", "{id}", "NS.getBalance"],
+            ),
+            (
+                "/me/calendarView(startDateTime={s},endDateTime={e})",
+                &["me", "calendarView"],
+            ),
+            ("/(a={a})", &["(a={a})"]),
+            ("/carts/key={key}", &["carts", "{key}"]),
+            ("/carts/key={key}.json", &["carts", "{key}"]),
+            ("/({id})", &["{id}"]),
+            // One segment, as before: a whole-segment parameter with or
+            // without a format, a parameter with only a suffix, text that
+            // says nothing of a key, and what is not a template.
+            ("/files/{name}.json", &["files", "{name}.json"]),
+            ("/items/{id}:archive", &["items", "{id}:archive"]),
+            ("/pairs/{a}-{b}", &["pairs", "{a}-{b}"]),
+            ("/api/v{version}/items", &["api", "v{version}", "items"]),
+            ("/c({id}", &["c({id}"]),
+            ("/c({id})x", &["c({id})x"]),
+            ("/k=({id})", &["k=({id})"]),
+            ("/a b={id}", &["a b={id}"]),
+            ("/k={a},{b}", &["k={a},{b}"]),
+            ("/c({{id}})", &["c({{id}})"]),
+            ("/c({})", &["c({})"]),
+            ("/c(}{id})", &["c(}{id})"]),
+        ] {
+            assert_eq!(segments(path), expected, "{path}");
+        }
+    }
+
+    /// What every operation of a compiled contract is, by id.
+    fn shapes(bundle: &mb_mcm::Bundle) -> Vec<(String, String, Option<String>, Option<Identity>)> {
+        let mut shapes: Vec<_> = bundle
+            .operations
+            .iter()
+            .map(|op| {
+                (
+                    op.id.clone(),
+                    serde_json::to_string(&op.kind).unwrap(),
+                    op.resource_type.clone(),
+                    op.identity.clone(),
+                )
+            })
+            .collect();
+        shapes.sort_by(|a, b| a.0.cmp(&b.0));
+        shapes
+    }
+
+    /// A contract whose keyed routes are `keyed(collection, param)`.
+    fn keyed_contract(keyed: impl Fn(&str, &str) -> String) -> mb_mcm::Bundle {
+        let record = |id: &str| json!({"$ref": format!("#/components/schemas/{id}")});
+        let answers = |id: &str, schema: &str| answering(id, &record(schema));
+        let mut paths = serde_json::Map::new();
+        let company = keyed("companies", "company_id");
+        let customers = format!("{company}/customers");
+        let customer = keyed(&customers, "customer_id");
+        paths.insert(company.clone(), json!({"parameters": path_param("company_id"), "get": answers("getCompany", "Company")}));
+        let mut create = answers("createCustomer", "Customer");
+        create["requestBody"] =
+            json!({"content": {"application/json": {"schema": record("Customer")}}});
+        paths.insert(
+            customers,
+            json!({"parameters": path_param("company_id"), "post": create}),
+        );
+        let both = json!([path_param("company_id")[0], path_param("customer_id")[0]]);
+        paths.insert(
+            customer.clone(),
+            json!({
+                "parameters": both,
+                "get": answers("getCustomer", "Customer"),
+                "patch": answers("updateCustomer", "Customer"),
+                "delete": {"operationId": "deleteCustomer", "responses": {"204": {"description": "gone"}}},
+            }),
+        );
+        paths.insert(
+            format!("{customer}/NS.block"),
+            json!({"parameters": both, "post": {"operationId": "blockCustomer", "responses": {"204": {"description": "done"}}}}),
+        );
+        paths.insert(
+            keyed(&format!("{company}/vendors"), "vendor_id"),
+            json!({"parameters": json!([path_param("company_id")[0], path_param("vendor_id")[0]]), "get": answers("getVendor", "Vendor")}),
+        );
+        compiled(
+            &Value::Object(paths),
+            &json!({
+                "Company": {"type": "object", "properties": {"id": {"type": "string"}}},
+                "Customer": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}},
+                "Vendor": {"type": "object", "properties": {"vendor_id": {"type": "string"}}},
+            }),
+        )
+    }
+
+    #[test]
+    fn an_odata_key_compiles_as_a_whole_segment_parameter_does() {
+        let odata = keyed_contract(|collection, param| format!("{collection}({{{param}}})"));
+        let whole = keyed_contract(|collection, param| format!("{collection}/{{{param}}}"));
+        assert_eq!(shapes(&odata), shapes(&whole));
+        let op = |id: &str| odata.operations.iter().find(|op| op.id == id).unwrap();
+        for id in ["getCustomer", "updateCustomer", "blockCustomer"] {
+            assert_eq!(op(id).resource_type.as_deref(), Some("customers"), "{id}");
+            let identity = op(id).identity.clone().unwrap();
+            assert_eq!(identity.path_param.as_deref(), Some("customer_id"), "{id}");
+            assert_eq!(identity.field, "id", "{id}");
+        }
+        assert_eq!(
+            op("deleteCustomer").resource_type.as_deref(),
+            Some("customers")
+        );
+        assert_eq!(
+            op("blockCustomer").kind,
+            OperationKind::Command(Effect::Other)
+        );
+        assert!(op("blockCustomer").is_action());
+        assert_eq!(op("getVendor").resource_type.as_deref(), Some("vendors"));
+        assert_eq!(
+            op("getVendor").identity.as_ref().map(|i| i.field.as_str()),
+            Some("vendor_id")
+        );
+    }
+
+    #[test]
+    fn a_named_key_is_an_alternate_key_of_the_collection_before_it() {
+        let bundle = compiled(
+            &json!({
+                "/carts/{id}": {"parameters": path_param("id"), "get": answering("getCart", &json!({"$ref": "#/components/schemas/Cart"}))},
+                "/carts/key={key}": {"parameters": path_param("key"), "get": answering("getCartByKey", &json!({"$ref": "#/components/schemas/Cart"}))},
+                "/files/{name}.json": {"parameters": path_param("name"), "get": answering("getFile", &json!({"$ref": "#/components/schemas/File"}))},
+            }),
+            &json!({
+                "Cart": {"type": "object", "properties": {"id": {"type": "string"}, "key": {"type": "string"}}},
+                "File": {"type": "object", "properties": {"name": {"type": "string"}}},
+            }),
+        );
+        let op = |id: &str| bundle.operations.iter().find(|op| op.id == id).unwrap();
+        assert_eq!(op("getCartByKey").resource_type.as_deref(), Some("carts"));
+        assert_eq!(
+            op("getCartByKey").identity,
+            Some(Identity {
+                path_param: Some("key".into()),
+                field: "id".into(),
+                input_field: None,
+                path_field: Some("key".into()),
+                record: None,
+            })
+        );
+        assert_eq!(op("getFile").resource_type.as_deref(), Some("files"));
+        assert_eq!(
+            op("getFile").identity.clone().and_then(|i| i.path_param),
+            Some("name".into())
+        );
+    }
+
+    #[test]
+    fn a_composite_key_or_a_call_names_no_identity() {
+        let line = json!({"$ref": "#/components/schemas/Line"});
+        let customer = json!({"$ref": "#/components/schemas/Customer"});
+        let both = json!([path_param("documentId")[0], path_param("sequence")[0]]);
+        let bundle = compiled(
+            &json!({
+                "/lines": {"post": answering("createLine", &line)},
+                "/lines(documentId={documentId},sequence={sequence})": {
+                    "parameters": both,
+                    "get": answering("getLine", &line),
+                    "patch": answering("updateLine", &line),
+                    "delete": {"operationId": "deleteLine", "responses": {"204": {"description": "gone"}}},
+                },
+                "/customers({id})": {"parameters": path_param("id"), "get": answering("getCustomer", &customer)},
+                "/customers({id})/NS.getBalance(asOf={date})": {
+                    "parameters": [path_param("id")[0], path_param("date")[0]],
+                    "get": answering("getBalance", &json!({"type": "object", "properties": {"balance": {"type": "number"}}})),
+                },
+                "/customers({id})/NS.post(on={date})": {
+                    "parameters": [path_param("id")[0], path_param("date")[0]],
+                    "post": {"operationId": "postCustomer", "responses": {"204": {"description": "done"}}},
+                },
+                "/me/calendarView(startDateTime={s},endDateTime={e})": {
+                    "parameters": [path_param("s")[0], path_param("e")[0]],
+                    "get": answering("calendarView", &json!({"type": "object", "properties": {"id": {"type": "string"}, "e": {"type": "string"}}})),
+                },
+            }),
+            &json!({
+                "Line": {"type": "object", "properties": {"documentId": {"type": "string"}, "sequence": {"type": "integer"}, "amount": {"type": "number"}}},
+                "Customer": {"type": "object", "properties": {"id": {"type": "string"}}},
+            }),
+        );
+        let op = |id: &str| bundle.operations.iter().find(|op| op.id == id).unwrap();
+        for id in ["createLine", "getLine", "updateLine", "deleteLine"] {
+            assert_eq!(op(id).resource_type.as_deref(), Some("lines"), "{id}");
+            assert!(
+                op(id)
+                    .identity
+                    .as_ref()
+                    .is_none_or(|i| i.path_param.is_none()
+                        && i.field != "sequence"
+                        && i.field != "documentId"),
+                "{id}: {:?}",
+                op(id).identity
+            );
+        }
+        // A call keys nothing by its arguments.
+        for id in ["getBalance", "calendarView"] {
+            assert!(
+                op(id)
+                    .identity
+                    .as_ref()
+                    .is_none_or(|i| i.path_param.is_none()),
+                "{id}: {:?}",
+                op(id).identity
+            );
+        }
+        assert_eq!(
+            op("calendarView").resource_type.as_deref(),
+            Some("calendarView")
+        );
+        // A call after a keyed record acts on it, as one with no arguments does.
+        let post = op("postCustomer");
+        assert_eq!(post.resource_type.as_deref(), Some("customers"));
+        assert_eq!(post.kind, OperationKind::Command(Effect::Other));
+        assert_eq!(
+            post.identity.as_ref().and_then(|i| i.path_param.as_deref()),
+            Some("id")
+        );
+        assert!(post.is_action());
+    }
+
+    #[test]
+    fn a_suffix_after_a_parameter_keeps_the_route_it_had() {
+        let item = json!({"$ref": "#/components/schemas/Item"});
+        let bundle = compiled(
+            &json!({
+                "/items/{id}": {"parameters": path_param("id"), "get": answering("getItem", &item)},
+                "/items/{id}:archive": {"parameters": path_param("id"), "post": answering("archiveItem", &item)},
+            }),
+            &json!({"Item": {"type": "object", "properties": {"id": {"type": "string"}}}}),
+        );
+        let archive = bundle
+            .operations
+            .iter()
+            .find(|op| op.id == "archiveItem")
+            .unwrap();
+        assert_eq!(archive.resource_type.as_deref(), Some("items"));
+        assert_eq!(archive.kind, OperationKind::Command(Effect::Create));
     }
 
     #[test]
