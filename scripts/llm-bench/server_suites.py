@@ -1898,10 +1898,14 @@ def auth0_steps(j):
     j.call("POST", f"{path}/roles", body={"roles": [role["id"]]})
     assigned = j.last["status"]
     after = obj(j.call("GET", f"{path}/roles", query={"include_totals": "true"}))
+    # The contract does not say a new user holds no roles, so other roles may be held
+    # before; this one is not held before the assignment, is held after it, and the
+    # count goes up by one.
+    before = held.get("total")
     j.check("user holds the assigned role",
-            eq(held.get("total"), 0) and assigned == 204 and eq(after.get("total"), 1)
-            and same(by_id(after.get("roles"), role["id"]), role, "id", "name"),
-            before=held.get("total"), after=after.get("total"), assign_status=assigned)
+            isinstance(before, int) and not by_id(held.get("roles"), role["id"]) and assigned == 204
+            and eq(after.get("total"), before + 1) and same(by_id(after.get("roles"), role["id"]), role, "id", "name"),
+            before=before, after=after.get("total"), assign_status=assigned)
     j.call("DELETE", path)
     deleted = j.last["status"]
     j.call("GET", path)
@@ -2867,7 +2871,7 @@ BLIND4_CHECKS = {
         "meeting has a numeric id", "meeting is hosted by the caller", "meeting keeps topic, start and duration",
         "meeting keeps its settings", "read matches the created meeting", "patch answers no content",
         "patch changes the topic", "patch keeps what it was not sent", "scheduled list holds both meetings",
-        "page_size 1 returns one meeting and a token", "next page holds another meeting",
+        "page_size 1 returns one meeting", "next page token reaches another meeting",
         "registration names the meeting", "approved registrants list the registrant", "deleted meeting is gone",
     ],
     "sentry": [
@@ -3018,13 +3022,17 @@ def zoom_steps(j):
     page = obj(j.call("GET", "/v2/users/me/meetings", query={"type": "scheduled", "page_size": 1}))
     first = ids_of(page.get("meetings"))
     token = page.get("next_page_token")
-    j.check("page_size 1 returns one meeting and a token", len(first) == 1 and isinstance(token, str) and bool(token),
-            listed=first, next_page_token=token)
-    query = {"type": "scheduled", "page_size": 1}
+    # One check judges the page size and the next judges the token, so a page 1 without
+    # a token is one miss. With no token there is nothing to follow: page 1 is not asked
+    # for again (a cached repeat of it would be judged as the next page).
+    j.check("page_size 1 returns one meeting", len(first) == 1, listed=first)
     if isinstance(token, str) and token:
-        query["next_page_token"] = token
-    nxt = ids_of(obj(j.call("GET", "/v2/users/me/meetings", query=query)).get("meetings"))
-    j.check("next page holds another meeting", len(nxt) == 1 and nxt[0] not in first, first=first, listed=nxt)
+        nxt = ids_of(obj(j.call("GET", "/v2/users/me/meetings",
+                                query={"type": "scheduled", "page_size": 1, "next_page_token": token})).get("meetings"))
+        j.check("next page token reaches another meeting", len(nxt) == 1 and nxt[0] not in first, first=first, listed=nxt)
+    else:
+        j.check("next page token reaches another meeting", False, first=first, next_page_token=token,
+                reason="page 1 gave no next_page_token")
     reg = obj(j.call("POST", f"/v2/meetings/{mid}/registrants",
                      body={"email": f"ana.{tag}@example.org", "first_name": "Ana", "last_name": "Silva"}))
     j.check("registration names the meeting", j.last["status"] == 201 and eq(reg.get("id"), mid) and eq(reg.get("topic"), topic),
@@ -3508,6 +3516,9 @@ def box_steps(j):
     nxt = ids_of(items(c, offset=1, limit=1).get("entries"))
     j.check("offset 1 reaches the other item", len(nxt) == 1 and same_items(first + nxt, [l1, l2]),
             first=first, listed=nxt)
+    # Adding the web links may have changed the folder ("every change to a folder gives
+    # it a new etag"), so the etag sent is the one the folder reads with now.
+    etag = given(call("GET", f"/2.0/folders/{c}").get("etag"), etag)
     renamed = f"Drafts {tag}"
     answer = call("PUT", f"/2.0/folders/{c}", if_match=etag, body={"name": renamed})
     j.check("a matching etag renames the folder", j.last["status"] == 200 and eq(answer.get("name"), renamed),
@@ -3721,7 +3732,7 @@ BLIND6_CHECKS = {
         "profile keeps its email and names", "profile links to itself", "a taken email names the profile that has it",
         "read matches the created profile", "patch changes the attribute sent",
         "patch keeps the attributes it was not sent", "email filter finds only the profile",
-        "page size 1 answers one profile and a next link", "next link reaches the other profile",
+        "page size 1 answers one profile", "next link reaches the other profile",
         "list keeps its name", "list profiles hold the added profiles", "profile's lists hold the list",
         "a removed profile leaves the list", "deleted list is not found",
     ],
@@ -3901,14 +3912,16 @@ def klaviyo_steps(j):
     both = f'any(email,["{e1}","{e2}"])'
     page = obj(j.call("GET", "/api/profiles", query={"filter": both, "page[size]": 1}))
     first, cur = rows_of(page), cursor(page.get("links"))
-    j.check("page size 1 answers one profile and a next link", len(first) == 1 and bool(cur),
-            listed=ids_of(first), next=obj(page.get("links")).get("next"))
-    query = {"filter": both, "page[size]": 1}
+    # As in Zoom: the page size and the next link are judged apart, and with no next
+    # link page 1 is not asked for again.
+    j.check("page size 1 answers one profile", len(first) == 1, listed=ids_of(first))
     if cur:
-        query["page[cursor]"] = cur
-    rest = rows_of(j.call("GET", "/api/profiles", query=query))
-    j.check("next link reaches the other profile", len(rest) == 1 and same_items(ids_of(first + rest), [p1, p2]),
-            first=ids_of(first), listed=ids_of(rest))
+        rest = rows_of(j.call("GET", "/api/profiles", query={"filter": both, "page[size]": 1, "page[cursor]": cur}))
+        j.check("next link reaches the other profile", len(rest) == 1 and same_items(ids_of(first + rest), [p1, p2]),
+                first=ids_of(first), listed=ids_of(rest))
+    else:
+        j.check("next link reaches the other profile", False, first=ids_of(first),
+                next=obj(page.get("links")).get("next"), reason="page 1 gave no next link with a page[cursor]")
     name = f"VIP customers {tag}"
     lst = data(j.call("POST", "/api/lists", body={"data": {"type": "list", "attributes": {"name": name}}}))
     j.check("list keeps its name",
