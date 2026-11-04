@@ -7,7 +7,8 @@
 //! `spotify:track:<id>`), by a short id in an object named after its type (Jira's
 //! `transition: {id: "21"}`), or by a member value only that record holds (a ticket
 //! created with its requester's `email`). Each record this runtime stores is indexed, per
-//! session, by its identity and by the plain string members its read declares. A
+//! session, by its identity and, with a store only this process writes to, by the string
+//! members its read declares that identify it ([`Kind::Identifying`]). A
 //! request's values, at any depth of its body, query or path, are matched against it:
 //!
 //! - a whole value of an id's shape (see [`id_like`]) matches the one record it is the
