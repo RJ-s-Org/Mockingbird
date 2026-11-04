@@ -2519,15 +2519,16 @@ async fn a_capture_and_its_refund(h: &Harness) {
     assert!(h.memory().await.is_empty());
 }
 
-/// Updating or deleting a child costs its parent nothing.
+/// Updating a child costs its parent nothing; deleting one tells it, naming what went.
 #[tokio::test]
-async fn a_nested_put_or_delete_does_not_tell_the_parent() {
+async fn a_nested_put_does_not_tell_the_parent_and_a_delete_does() {
     let capture = json!({"id": "cap1", "amount": 100, "status": "COMPLETED"});
     let h = things(vec![
         capture.clone(),
         json!({"id": "ref1", "amount": 100}),
         capture.clone(),
         json!({"id": "ref1", "amount": 50}),
+        capture.clone(),
     ]);
     a_capture_and_its_refund(&h).await;
     let before = h.calls();
@@ -2539,10 +2540,14 @@ async fn a_nested_put_or_delete_does_not_tell_the_parent() {
     .await;
     let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
     assert_eq!(source, "state", "a PUT with its own answer");
-    h.call("DELETE", "/captures/cap1/refunds/ref1", None).await;
-    let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
-    assert_eq!(source, "state", "a DELETE");
     assert_eq!(h.calls(), before + 1, "only the PUT's own generation");
+    h.call("DELETE", "/captures/cap1/refunds/ref1", None).await;
+    assert_eq!(h.calls(), before + 1, "the delete makes no call");
+    let (_, source, _) = h.call("GET", "/captures/cap1", None).await;
+    assert_eq!(source, "llm", "the delete told the capture");
+    let told = block(&h.prompt(h.calls() - 1)).unwrap().to_string();
+    assert!(told.contains("ref1"), "{told}");
+    assert!(h.memory().await.is_empty());
 }
 
 /// A body-less action on a child does tell its parent: nothing else will.

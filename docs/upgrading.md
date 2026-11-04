@@ -30,6 +30,14 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Sibling-route writes reach a parent's lists, and bodyless writes get effects
+
+No migration or configuration.
+
+- **One more LLM call for some writes**: a 2xx write whose declared answer has no body (a `204`) now makes one LLM call, for its effects only, when its prompt shows records besides its target. Before, it made none. A delete, and such a write shown nothing else, still make none. A failed call answers the write as before, changing nothing.
+- **Parent reads catch up after a child's delete**: deleting a record under a parent the session holds (`DELETE /posts/{id}/comments/{comment_id}`) now tells that parent, so its next read generates (one LLM call) instead of answering from state.
+- **Longer list prompts**: a list read one level under a write's parent may now be told that write in `<earlier_writes>`, so a recording of such a read may not replay.
+
 ### Next pages given as URLs, and served page cursors in prompts
 
 No migration or configuration.

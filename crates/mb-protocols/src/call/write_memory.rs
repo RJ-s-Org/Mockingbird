@@ -4,7 +4,7 @@
 //! copy that does not hold what the request asked. A 204 update's members that the
 //! read's schema declares go into the copy at once; what could not be applied is
 //! remembered for the resource the write targets, and for the parent its path names
-//! when the write is a create or an action answering nothing, under a reserved type
+//! when the write is a create, a delete or an action answering nothing, under a reserved type
 //! of the state store ([`mb_state::INTERNAL_TYPE`]). So Redis, SQL and memory all
 //! keep it, sessions, TTLs and resets clear it, and it is no resource (not exported,
 //! counted or seeded, and on no change feed). A remembered action publishes a change
@@ -41,7 +41,9 @@
 //! read is not forced and nothing stands over its answer. Its query is never kept, and of
 //! its body only what the contract declares of the write's request or the list's items,
 //! past the wider checks of [`for_context`], as the rest may be anything. The memory goes with the path's parent, and a write goes
-//! with the child it named.
+//! with the child it named. A write is kept the same way for the list reads one level
+//! under its path's parent that its route or a member of its body names (see
+//! [`tell_siblings`]): `POST /lists/{id}/relationships/profiles` for `/lists/{id}/profiles`.
 //!
 //! HTTP-bound operations only: GraphQL stores what its answers hold under their
 //! own types, and gRPC and SOAP are not remembered for, so their prompts and their
@@ -1020,18 +1022,18 @@ pub(super) fn declared_plainly(
     }
 }
 
-/// What a list read is told of a write's `body`: an object as one of its items, or a list
-/// of those or of what the request's schema declares, by [`declared_plainly`]. Nothing
-/// else, however it reads.
+/// What a list read is told of a write's `body`, of the `request` schema: an object as
+/// one of its items, or a list of those or of what the request's schema declares, by
+/// [`declared_plainly`]. Nothing else, however it reads.
 fn told_to_list(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     list: &WrittenList,
     body: &Value,
+    request: Option<&Value>,
 ) -> Option<Value> {
     let t = list.resource_type.as_str();
     let items = Some(&list.items);
-    let request = plan.op.input.body.as_ref();
     let told = |one: &Value, schema: Option<&Value>| for_context(rt, plan, t, one, schema, items);
     match body {
         Value::Array(list) => {
@@ -1289,8 +1291,9 @@ struct Tell {
 /// it is not remembered for the target.
 ///
 /// The parent is told of a create, even with no body, the path being all there is
-/// (`POST /captures/{id}/refund`), and of an action answering nothing: an answer
-/// about a child says nothing to it. An update or a delete of a child does not
+/// (`POST /captures/{id}/refund`), of a delete, naming the stored record it removed
+/// (what counts or lists its children no longer holds it), and of an action answering
+/// nothing: an answer about a child says nothing to it. An update of a child does not
 /// tell it, or every nested write would cost it a regeneration. Telling it changes
 /// nothing it holds, so it publishes nothing: its read looks in the shared store
 /// before it serves, on any node.
@@ -1431,8 +1434,8 @@ pub(super) async fn after_write(
             _ => clear_own(state, session, key).await,
         }
     }
-    let tells_parent =
-        effect == Effect::Create || (effect == Effect::Other && generated.body.is_none());
+    let tells_parent = matches!(effect, Effect::Create | Effect::Delete)
+        || (effect == Effect::Other && generated.body.is_none());
     let parent = if tells_parent {
         let own = match effect {
             Effect::Create => target.as_ref().map(|tell| tell.id.as_str()),
@@ -1489,8 +1492,17 @@ pub(super) async fn after_write(
             state.upsert(session, held.clone()).await;
         }
     }
-    // Told as a child is to what it is made under: last write wins.
+    // Told as a child is to what it is made under: last write wins. A delete names the
+    // stored record it removed, which its path's template does not.
     let mut entry = memory_entry(op, told, created);
+    if effect == Effect::Delete
+        && let (Some(held), Value::Object(members)) = (w.held, &mut entry)
+    {
+        members.insert(
+            DELETED.to_string(),
+            serde_json::json!({"type": held.resource_type, "id": held.id}),
+        );
+    }
     if let Some(parent) = &parent {
         let key = memory_key(&parent.resource_type, &parent.id, true);
         remember(state, session, &key, &entry, None).await;
@@ -1516,6 +1528,10 @@ const REFERENCED: &str = "referenced";
 
 /// The member of a kept request naming the record it created, as `{type, id}`.
 const CREATED: &str = "created";
+
+/// The member of a kept delete naming the stored record it removed, as `{type, id}`:
+/// told, as what the parent it is kept for no longer holds.
+const DELETED: &str = "deleted";
 
 /// One remembered request, as a prompt is told it but for what is [`UNTOLD`]: with
 /// `created`, the record it created, which the read it is told to is shown as new.
@@ -1545,7 +1561,10 @@ fn route_memory_key(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> O
     let Binding::Http { path, .. } = &op.binding else {
         return None;
     };
-    rt.index().written_lists.get(path)?;
+    let index = rt.index();
+    if !index.written_lists.contains_key(path) && !index.told_lists.contains(path) {
+        return None;
+    }
     let filled = fill_path(call, &path_segments(path))?;
     Some(memory_key("#route", &filled.path, false))
 }
@@ -1617,7 +1636,7 @@ pub(super) async fn created_since(
 
 /// Whether two path templates' segments are the same route: parameters may be named
 /// differently, as the same position is the same value.
-fn same_route(one: &[&str], other: &[&str]) -> bool {
+pub(super) fn same_route(one: &[&str], other: &[&str]) -> bool {
     one.len() == other.len()
         && one
             .iter()
@@ -1651,7 +1670,8 @@ async fn forget_deleted_route(
     let Some(filled) = fill_path(call, &segments).map(|f| f.path) else {
         return;
     };
-    for list in rt.index().written_lists.keys() {
+    let index = rt.index();
+    for list in index.written_lists.keys().chain(index.told_lists.iter()) {
         let below = path_segments(list);
         if below.len() > segments.len() && same_route(&segments, &below[..segments.len()]) {
             let rest = &below[segments.len()..];
@@ -1711,6 +1731,7 @@ pub(super) async fn after_route_write(
     if op.kind == OperationKind::Command(Effect::Delete) {
         forget_deleted_route(state, plan, call).await;
     }
+    tell_siblings(state, plan, call, generated).await;
     let (Some(key), Some(list)) = (
         route_memory_key(rt, op, call),
         rt.index().written_lists.get(&route(op)),
@@ -1725,9 +1746,118 @@ pub(super) async fn after_route_write(
     let body = call
         .body
         .as_ref()
-        .and_then(|body| told_to_list(rt, plan, list, body));
+        .and_then(|body| told_to_list(rt, plan, list, body, op.input.body.as_ref()));
     let entry = memory_entry(op, body, None);
     remember(state, &plan.session, &key, &entry, None).await;
+}
+
+/// How deep a write's body is looked into for a member naming a sibling list: the
+/// body's own members and theirs (`{"ticket": {"comment": ...}}`).
+const SIBLING_MEMBER_DEPTH: usize = 2;
+
+/// Keeps a 2xx write for the list reads one level under its path's parent (see
+/// [`SiblingList`]), each by its own path's key, so that its read is told it as a write
+/// to its own route is. Told to a list:
+///
+/// - whose path ends in the segment the write's route ends in
+///   (`POST /lists/{id}/relationships/profiles` to `/lists/{id}/profiles`): with what
+///   the request says, as a write to the list's own route;
+/// - else, whose last segment or item type a member of the body names by its stem
+///   (`PUT /tickets/{id}` with `ticket.comment`, to `/tickets/{id}/comments`): that
+///   member's value alone, by the schema the request declares it with.
+///
+/// Not when it stored a record of the list's type, which the read shows. Only told,
+/// past the checks a write to the list's own route has: nothing is forced or changed.
+async fn tell_siblings(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) {
+    let rt = state.rt;
+    let op = plan.op;
+    let path = route(op);
+    let Some(siblings) = rt.index().sibling_lists.get(&path) else {
+        return;
+    };
+    let segments = path_segments(&path);
+    let stored = generated.body.as_ref().or(call.body.as_ref());
+    let created = stored.is_some_and(|stored| created_id(op, stored).is_some());
+    let request = op.input.body.as_ref();
+    for sibling in siblings {
+        if created && op.resource_type.as_deref() == Some(sibling.list.resource_type.as_str()) {
+            continue;
+        }
+        let body = if sibling.by_route {
+            call.body
+                .as_ref()
+                .and_then(|body| told_to_list(rt, plan, &sibling.list, body, request))
+        } else {
+            let names = [
+                sibling.rest.last().map(String::as_str),
+                Some(sibling.list.resource_type.as_str()),
+            ];
+            let stems: Vec<String> = names.into_iter().flatten().map(type_stem).collect();
+            let Some((member, schema)) = call
+                .body
+                .as_ref()
+                .and_then(|body| member_named(rt, body, request, &stems, 0))
+            else {
+                continue;
+            };
+            let Some(told) = told_to_list(rt, plan, &sibling.list, member, schema.as_ref()) else {
+                continue;
+            };
+            Some(told)
+        };
+        let Some(parent) = fill_path(call, &segments[..sibling.prefix]) else {
+            continue;
+        };
+        let filled = format!("{}/{}", parent.path, sibling.rest.join("/"));
+        let key = memory_key("#route", &filled, false);
+        remember(
+            state,
+            &plan.session,
+            &key,
+            &memory_entry(op, body, None),
+            None,
+        )
+        .await;
+    }
+}
+
+/// The first member of `body`, at most [`SIBLING_MEMBER_DEPTH`] deep, whose name has
+/// one of `stems` (see [`type_stem`]), with the schema `schema` declares it by. In the
+/// order the body holds its members, the shallower first.
+fn member_named<'a>(
+    rt: &MockRuntime,
+    body: &'a Value,
+    schema: Option<&Value>,
+    stems: &[String],
+    depth: usize,
+) -> Option<(&'a Value, Option<Value>)> {
+    let Value::Object(members) = body else {
+        return None;
+    };
+    let bundle = rt.bundle();
+    let (parts, _) = schema_parts(bundle, schema);
+    let declared = |key: &str| {
+        parts
+            .iter()
+            .find_map(|p| p.get("properties")?.get(key).cloned())
+    };
+    if let Some((key, member)) = members
+        .iter()
+        .find(|(key, member)| !member.is_null() && stems.contains(&type_stem(key)))
+    {
+        return Some((member, declared(key)));
+    }
+    if depth + 1 >= SIBLING_MEMBER_DEPTH {
+        return None;
+    }
+    members.iter().find_map(|(key, member)| {
+        member_named(rt, member, declared(key).as_ref(), stems, depth + 1)
+    })
 }
 
 /// What an update answering nothing leaves to tell its target, having merged what

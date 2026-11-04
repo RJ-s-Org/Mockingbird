@@ -775,21 +775,29 @@ impl Engine {
             .filter(|_| (200..300).contains(&status) && variant.schema.is_some());
         let Some(schema) = narrowed.or(variant.schema.as_ref()) else {
             // Nothing to generate: the contract decides the answer. Offline,
-            // it is labelled the faker's, like every other offline answer.
+            // it is labelled the faker's, like every other offline answer. A write
+            // shown records besides its target is still asked what it changes there.
             let (source, fallback_reason) = match self.provider {
                 Some(_) => (Source::Llm, None),
                 None => (Source::Fallback, Some(OFFLINE_REASON.to_string())),
+            };
+            let (effects, usage) = match &self.provider {
+                Some(provider) if prompt::asks_bodyless_effects(op, status, &ctx) => {
+                    self.bodyless_effects(provider.as_ref(), bundle, (op, status), call, &ctx)
+                        .await
+                }
+                _ => Default::default(),
             };
             return Ok(GeneratedResponse {
                 status,
                 content_type: variant.content_type.clone(),
                 body: None,
                 source,
-                usage: Usage::default(),
+                usage,
                 fallback_reason,
-                effects: Vec::new(),
+                effects: effects.kept,
                 effect_outcomes: Vec::new(),
-                dropped_effects: 0,
+                dropped_effects: effects.dropped,
                 new_record: false,
                 patched: None,
             });
@@ -1883,6 +1891,70 @@ impl Engine {
         }
         self.fake_setups.insert(key, Arc::clone(&setup));
         setup
+    }
+
+    /// The effects of a 2xx write whose answer has no body, on the records its prompt
+    /// shows (see [`prompt::asks_bodyless_effects`]): one call, asked for
+    /// `{"effects": [...], "response": null}`. No body is asked for or kept, there is no
+    /// repair round, and an answer that fails, is cut short or holds no list of effects
+    /// changes nothing. The runtime applies what it lists under the guards every
+    /// answer's effects pass. With what the call spent.
+    async fn bodyless_effects(
+        &self,
+        provider: &dyn Provider,
+        bundle: &Bundle,
+        (op, status): (&Operation, u16),
+        call: &OperationCall,
+        ctx: &GenerationContext<'_>,
+    ) -> (guards::AnswerEffects, Usage) {
+        let mut usage = Usage::default();
+        let none = serde_json::json!({"type": "null"});
+        let mut messages = tracing::info_span!("mb.prompt").in_scope(|| {
+            build_messages(
+                bundle,
+                op,
+                status,
+                &none,
+                call,
+                ctx,
+                self.config.persona.as_deref(),
+            )
+        });
+        if let Some(user) = messages.last_mut() {
+            user.content.push_str("\n\n");
+            user.content
+                .push_str(&prompt::effects_note(op, status, ctx));
+            user.content.push('\n');
+            user.content.push_str(guards::BODYLESS_NOTE);
+        }
+        let format = ResponseFormat::JsonSchema {
+            name: format_name(&op.id),
+            schema: guards::effects_schema(none),
+        };
+        let limit = provider.total_timeout(self.config.timeout);
+        let deadline = Instant::now() + limit;
+        let reply = match self.admit(deadline).await {
+            Ok(_permit) => {
+                self.complete(provider, &messages, &format, &mut usage, deadline)
+                    .await
+            }
+            Err(reason) => Err(reason),
+        };
+        let effects = match reply {
+            Ok(Reply {
+                text,
+                truncated: None,
+            }) => self.effects_only(&text),
+            Ok(Reply {
+                truncated: Some(reason),
+                ..
+            })
+            | Err(reason) => {
+                tracing::warn!(operation = %op.id, %reason, "no effects for a write answering no body");
+                guards::AnswerEffects::default()
+            }
+        };
+        (effects, usage)
     }
 
     /// Ask the LLM, repairing once, under the guards: the budget and a
