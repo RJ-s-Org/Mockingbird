@@ -34,6 +34,7 @@ mod envelopes;
 mod lists;
 mod minted;
 mod pages;
+mod projection;
 mod runs;
 mod tokens;
 mod value_index;
@@ -884,7 +885,7 @@ pub(crate) async fn prepare<'a>(
         && target
             .as_ref()
             .is_none_or(|found| Some(found.id.as_str()) != named_id.as_deref())
-        && state.tracks_deleted
+        && (state.tracks_deleted || deleted::marks_by_id(rt, plan))
         && let (Some(t), Some(id)) = (resource_type, named_id.as_deref())
         && deleted::is_deleted(
             &mut state,
@@ -933,10 +934,15 @@ pub(crate) async fn prepare<'a>(
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
+        // Cut to what a declared projection parameter asks for, when that still fits.
+        && let shown = projection::cut(rt, op, call, stored)
         // What the schema alone tells of the envelope costs no read; what the session's
         // answers said of it ([`envelopes`]) is read only for an answer that stands.
         && let (bare, enveloped) = (
-            serve_held(rt, op, stored, None, response_schema),
+            shown
+                .as_ref()
+                .and_then(|shown| serve_held(rt, op, shown, None, response_schema))
+                .or_else(|| serve_held(rt, op, stored, None, response_schema)),
             envelopes::applies(rt, op),
         )
         && (bare.is_some() || enveloped)
@@ -962,7 +968,12 @@ pub(crate) async fn prepare<'a>(
                 false => None,
             };
             let served = kept
-                .and_then(|kept| serve_held(rt, op, stored, Some(&kept), response_schema))
+                .and_then(|kept| {
+                    shown
+                        .as_ref()
+                        .and_then(|shown| serve_held(rt, op, shown, Some(&kept), response_schema))
+                        .or_else(|| serve_held(rt, op, stored, Some(&kept), response_schema))
+                })
                 .or(bare);
             if let Some(mut served) = served {
                 write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
@@ -2771,13 +2782,36 @@ async fn taken_id(
     if requested.as_deref() == Some(id.as_str()) {
         return None;
     }
+    let body = generated.body.as_ref()?;
     if state.get(session, resource_type, &id).await.is_some()
         || (request_values(op, call).contains(&id)
+            && !keyed_apart(resource_type, field, body)
             && world::held_elsewhere(state, session, resource_type, &id).await)
     {
         return Some(id);
     }
     None
+}
+
+/// Whether `answer` also holds, beside its identity `field`, the one scalar member
+/// named for its own type `t` (`seat_id` of a `seats` record): then the identity
+/// member may well hold another record's id (the showing booked), as the answer's
+/// shape says, and its naming a held record of another type is no collision.
+fn keyed_apart(t: &str, field: &str, answer: &Value) -> bool {
+    let Value::Object(members) = answer else {
+        return false;
+    };
+    let own = mb_mcm::stem(t);
+    let mut keys = members.iter().filter(|(member, value)| {
+        let lower = member.to_ascii_lowercase();
+        let named = lower
+            .strip_suffix("_id")
+            .or_else(|| lower.strip_suffix("id"))
+            .filter(|name| !name.is_empty())
+            .is_some_and(|name| mb_mcm::stem(name) == own);
+        member.as_str() != field && named && (value.is_string() || value.is_number())
+    });
+    keys.next().is_some() && keys.next().is_none()
 }
 
 /// A different identity for `record`, the record a create's answer holds (in
@@ -5430,8 +5464,78 @@ fn relative_path_ending(text: &str, name: &str) -> bool {
 
 /// How a member relates to parameter `param`: named for it, or for its id.
 /// `org` also means `organization`, but `org_ref` and `owner_previous` are
-/// other things.
+/// other things. A compound parameter (`organization_id_or_slug`) is tied to
+/// what any of its alternatives is (see [`param_alternatives`]).
 fn tied_to_param(member: &str, param: &str) -> bool {
+    param_alternatives(param)
+        .iter()
+        .any(|alternative| tied_to_one_param(member, alternative))
+}
+
+/// The names a path parameter stands for. A compound one, whose name joins
+/// alternatives with `_or_` (`organization_id_or_slug`), names one thing by any
+/// of them: the first alternative's own name (`organization_id`), the thing it
+/// is of (its stem before the last `_`, `organization`), and each later
+/// alternative as a member of that thing (`slug` as `organization_slug`). Any
+/// other name stands for itself, as does a compound whose first alternative has
+/// no stem (`id_or_name`). `_or_` is the one separator read.
+fn param_alternatives(param: &str) -> Vec<String> {
+    let lower = param.to_lowercase();
+    let mut parts = lower.split("_or_").filter(|p| !p.is_empty());
+    let (Some(first), Some(second)) = (parts.next(), parts.next()) else {
+        return vec![param.to_string()];
+    };
+    // With no stem (`id_or_name`) the alternatives are bare keys of a thing the
+    // name does not name: no member of another record is named for them.
+    let Some((stem, _)) = first.rsplit_once('_').filter(|(stem, _)| !stem.is_empty()) else {
+        return vec![param.to_string()];
+    };
+    let mut out = vec![first.to_string(), stem.to_string()];
+    for later in std::iter::once(second).chain(parts) {
+        if later.starts_with(stem) {
+            out.push(later.to_string());
+        } else {
+            out.push(format!("{stem}_{later}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod compound_param_tests {
+    use super::{param_alternatives, tied_to_param};
+
+    #[test]
+    fn a_compound_parameter_stands_for_each_alternative() {
+        assert_eq!(
+            param_alternatives("organization_id_or_slug"),
+            ["organization_id", "organization", "organization_slug"]
+        );
+        assert_eq!(param_alternatives("organization"), ["organization"]);
+        assert_eq!(param_alternatives("vendor"), ["vendor"]);
+        assert_eq!(param_alternatives("id_or_name"), ["id_or_name"]);
+    }
+
+    #[test]
+    fn a_member_ties_to_a_compound_parameter_by_its_alternatives() {
+        for member in [
+            "organization",
+            "organization_id",
+            "organizationId",
+            "organization_slug",
+        ] {
+            assert!(tied_to_param(member, "organization_id_or_slug"), "{member}");
+        }
+        // The record's own `slug` is not its owner's, and `_or_` is the only separator.
+        assert!(!tied_to_param("slug", "organization_id_or_slug"));
+        assert!(!tied_to_param("team", "organization_id_or_slug"));
+        assert!(!tied_to_param("organization", "organizationIdOrSlug"));
+        assert!(!tied_to_param("organization", "organization_id"));
+    }
+}
+
+/// [`tied_to_param`] for one parameter name.
+fn tied_to_one_param(member: &str, param: &str) -> bool {
     let (member, param) = (member.to_lowercase(), param.to_lowercase());
     member == param
         || member == format!("{param}_id")
@@ -5923,14 +6027,25 @@ pub(crate) async fn stored(
         .await
 }
 
-/// Removes `gone`, a resource the session holds, from it. Keeps the
-/// session alive.
+/// Removes `gone`, a resource the session holds, from it, as `op`'s delete
+/// `call` asked, and leaves the marker a REST delete leaves (see [`deleted`]),
+/// so that a later read of it is not generated back. Keeps the session alive.
 #[cfg(feature = "graphql")]
-pub(crate) async fn delete_resource(rt: &MockRuntime, session: &SessionKey, gone: StoredResource) {
+pub(crate) async fn delete_resource(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    gone: StoredResource,
+) {
+    let session = &plan.session;
     let mut state = StateAccess::new(rt);
     async {
         if state.delete(session, &gone.resource_type, &gone.id).await {
             rt.collections().forget(session, &gone);
+        }
+        if deleted::marks_by_id(rt, plan) {
+            let (t, id) = (gone.resource_type.as_str(), gone.id.as_str());
+            deleted::mark(&mut state, session, (plan.op, call), t, id, Some(&gone)).await;
         }
         state.touch(session).await;
     }

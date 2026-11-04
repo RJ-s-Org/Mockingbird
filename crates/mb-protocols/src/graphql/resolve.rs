@@ -470,6 +470,16 @@ async fn generate_in(
                         }
                     };
                     let generated = match generated {
+                        // A read of what the session deleted: no record, but an error.
+                        Ok(gone) if gone.status == 404 && gone.source == Source::State => {
+                            let detail = gone
+                                .body
+                                .as_ref()
+                                .and_then(|b| b.get("detail"))
+                                .and_then(Value::as_str)
+                                .map_or_else(|| forced_message(404), str::to_string);
+                            Err(Failure::new(404, detail))
+                        }
                         Ok(mut generated) => {
                             reconcile_money(rt, &plan, &call, &mut generated).await;
                             store_answer(rt, &plan, op, selection, &call, &generated).await;
@@ -615,7 +625,7 @@ async fn write_by_id(
         return;
     };
     if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
-        call::delete_resource(rt, &plan.session, held).await;
+        call::delete_resource(rt, plan, call, held).await;
         return;
     }
     let update = super::state::update_of(&rt.bundle, &held, args);

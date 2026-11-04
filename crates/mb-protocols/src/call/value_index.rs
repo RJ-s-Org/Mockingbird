@@ -7,8 +7,8 @@
 //! `spotify:track:<id>`), by a short id in an object named after its type (Jira's
 //! `transition: {id: "21"}`), or by a member value only that record holds (a ticket
 //! created with its requester's `email`). Each record this runtime stores is indexed, per
-//! session, by its identity and, with a store only this process writes to, by the string
-//! members its read declares that identify it ([`Kind::Identifying`]). A
+//! session, by its identity and by the string members its read declares that identify
+//! it ([`Kind::Identifying`]), whatever the store. A
 //! request's values, at any depth of its body, query or path, are matched against it:
 //!
 //! - a whole value of an id's shape (see [`id_like`]) matches the one record it is the
@@ -65,11 +65,16 @@
 //! recently written of more than [`MAX_SESSIONS`] sessions is dropped whole.
 //!
 //! An identity is unique by construction, so matching identities is safe whatever the
-//! store. A member value's uniqueness is known only where this process sees every write:
-//! with a store other nodes write to (SQL, Redis, a bus to other nodes; see
-//! [`mb_state::StateStore::local_only`]), members are not indexed and only identities
-//! match. A single node's store, the in-memory one or a private in-memory SQLite
-//! database behind a local bus, is local only.
+//! store. A member value's uniqueness the index alone knows only where this process
+//! sees every write: a single node's store, the in-memory one or a private in-memory
+//! SQLite database behind a local bus ([`mb_state::StateStore::local_only`]). With a
+//! store other processes may write to (a SQLite file, Postgres, Redis, a bus to other
+//! nodes), a member match the index finds also asks the store ([`held_once`]): the
+//! session's records of the holder's type, and of each type whose read declares the
+//! member, must show no other holder, in listings within [`MAX_SCAN`] and the
+//! request's [`MAX_READS`]. A listing cut short, or a type left unread, is no match.
+//! Records are keyed by session (workspace, mock and session), on the index and in the
+//! store, so neither another tenant's nor another session's records ever match.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -463,9 +468,8 @@ fn member_kind(rt: &MockRuntime, parts: &[&Value], name: &str, text: &str) -> Op
     }
 }
 
-/// What `record` is indexed under: its identity and, with a store only this process
-/// writes to, up to [`MAX_MEMBERS`] of its string members that identify it
-/// ([`Kind::Identifying`]), other than its identity.
+/// What `record` is indexed under: its identity and up to [`MAX_MEMBERS`] of its
+/// string members that identify it ([`Kind::Identifying`]), other than its identity.
 fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue> {
     let mut out = Vec::new();
     let id = record.id.as_str();
@@ -477,9 +481,6 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
             member: None,
             value: id.to_string(),
         });
-    }
-    if !rt.state.local_only() {
-        return out;
     }
     let (Value::Object(members), Some(schema)) = (
         &record.data,
@@ -756,6 +757,20 @@ pub(super) async fn matched(
         let Some(hit) = live.pop() else {
             continue;
         };
+        // A member value on a store others write to: the store must show it unique.
+        let member = holders
+            .iter()
+            .find(|h| h.is(&hit.resource_type, &hit.id))
+            .and_then(|h| h.member.as_deref());
+        if let Some(member) = member
+            && !rt.state.local_only()
+        {
+            match held_once(state, session, (&hit, member), &value, &mut reads).await {
+                Some(true) => {}
+                Some(false) => continue,
+                None => break 'values,
+            }
+        }
         if known(&hit.resource_type, &hit.id)
             || out
                 .iter()
@@ -770,6 +785,57 @@ pub(super) async fn matched(
         }
     }
     out
+}
+
+/// Whether `value`, which `hit` holds under `member`, is held by no other record the
+/// store shows: of `hit`'s type, then of each other type whose read declares
+/// `member`, in one listing of at most [`MAX_SCAN`] each, newest first. `Some(false)`
+/// when another holds it, or a listing was cut short or is past [`MAX_READS`] (the
+/// value cannot be told unique); `None` when the store failed or the breaker held it
+/// off, which decides nothing more this call. On a store other processes write to,
+/// they may have stored the same value, so what the index found is checked so; on a
+/// store only this process writes to, the index sees every write and needs no listing.
+async fn held_once(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (hit, member): (&StoredResource, &str),
+    value: &str,
+    reads: &mut usize,
+) -> Option<bool> {
+    let rt = state.rt;
+    let mut types = vec![hit.resource_type.clone()];
+    for t in &rt.index().effect_types {
+        let declares = write_memory::read_schema(rt, t).is_some_and(|schema| {
+            schema_parts(rt.bundle(), Some(schema))
+                .0
+                .iter()
+                .any(|part| part.get("properties").and_then(|p| p.get(member)).is_some())
+        });
+        if declares && !types.contains(t) {
+            types.push(t.clone());
+        }
+    }
+    for t in types {
+        if *reads >= MAX_READS {
+            return Some(false);
+        }
+        *reads += 1;
+        let listed = state.list(session, &t, MAX_SCAN).await;
+        if !state.available() {
+            return None;
+        }
+        if listed.len() >= MAX_SCAN {
+            return Some(false);
+        }
+        let others = listed.iter().any(|r| {
+            !(r.resource_type == hit.resource_type && r.id == hit.id)
+                && r.data.get(member).and_then(Value::as_str) == Some(value)
+        });
+        if others {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 /// Whether `asked`, what a request sets, agrees with `held`, what a stored record holds

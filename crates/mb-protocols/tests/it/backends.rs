@@ -113,12 +113,22 @@ fn harness(store: Arc<dyn StateStore>, script: Vec<Value>) -> Harness {
 
 /// [`harness`] in `ws`: another node of the same mock, over its own store client.
 fn harness_in(store: Arc<dyn StateStore>, script: Vec<Value>, ws: &str) -> Harness {
+    harness_of(ITEMS, store, script, ws)
+}
+
+/// [`harness_in`] serving `contract`.
+fn harness_of(
+    contract: &str,
+    store: Arc<dyn StateStore>,
+    script: Vec<Value>,
+    ws: &str,
+) -> Harness {
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
     let state = CachingStateStore::wrap(store, LONG_TTL, mb_state::DEFAULT_CACHE_ENTRIES);
     let mut rt = MockRuntime::new(
         "m",
-        Arc::new(compile(ITEMS.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -307,6 +317,120 @@ async fn answers_reach_another_node(one: Arc<dyn StateStore>, other: Arc<dyn Sta
     assert!(a.kept().await.is_empty());
 }
 
+const CONTACTS: &str = r##"
+openapi: 3.0.0
+info: {title: Contacts, version: "1"}
+paths:
+  /contacts:
+    post:
+      operationId: createContact
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+  /contacts/{contact_id}:
+    get:
+      operationId: getContact
+      parameters: [{name: contact_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}
+components:
+  schemas:
+    Contact:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}, email: {type: string}}
+    Ticket:
+      type: object
+      required: [id, subject]
+      properties: {id: {type: string}, subject: {type: string}}
+"##;
+
+/// `harness`'s POST of `body` to `uri` in session `session`.
+async fn post_in(h: &Harness, session: &str, uri: &str, body: Value) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-mockingbird-session", session)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    h.router.clone().oneshot(req).await.unwrap().status()
+}
+
+/// The records a prompt shows as related, empty when it shows none.
+fn related_of(prompt: &str) -> &str {
+    let Some(start) = prompt.find("<related_resources>") else {
+        return "";
+    };
+    let end = prompt[start..].find("</related_resources>").map_or(prompt.len(), |e| start + e);
+    &prompt[start..end]
+}
+
+/// A ticket created with a contact's email is shown that contact, on any store: the
+/// value index holds member values whatever the backend. Neither another session nor
+/// another workspace sees it, and on a store another node writes to, a second contact
+/// that node stored with the same email makes the value name neither.
+async fn member_values_name_their_record(one: Arc<dyn StateStore>, other: Arc<dyn StateStore>) {
+    let ws = workspace();
+    let shared = !one.local_only();
+    let ticket = |id: &str| json!({"effects": [], "response": {"id": id, "subject": "Help"}});
+    let a = harness_of(
+        CONTACTS,
+        Arc::clone(&one),
+        vec![
+            json!({"id": "ct-000101", "name": "Jane Roe", "email": "jane.roe@example.com"}),
+            ticket("tk-000001"),
+            ticket("tk-000002"),
+            ticket("tk-000003"),
+        ],
+        &ws,
+    );
+    let asks = json!({"subject": "Help", "email": "jane.roe@example.com"});
+    let contact = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
+    assert_eq!(post_in(&a, "s1", "/contacts", contact).await, StatusCode::CREATED);
+    assert_eq!(post_in(&a, "s1", "/tickets", asks.clone()).await, StatusCode::CREATED);
+    assert!(related_of(&a.prompt(1)).contains("ct-000101"), "{}", a.prompt(1));
+    assert_eq!(post_in(&a, "s2", "/tickets", asks.clone()).await, StatusCode::CREATED);
+    assert!(!related_of(&a.prompt(2)).contains("ct-000101"), "{}", a.prompt(2));
+    let elsewhere = harness_of(CONTACTS, Arc::clone(&one), vec![ticket("tk-000009")], &workspace());
+    post_in(&elsewhere, "s1", "/tickets", asks.clone()).await;
+    assert!(!related_of(&elsewhere.prompt(0)).contains("ct-000101"));
+    if shared {
+        let theirs = SessionKey {
+            workspace: ws.clone(),
+            mock: "m".into(),
+            session: "s1".into(),
+        };
+        let twin = json!({"id": "ct-000202", "name": "J. Roe", "email": "jane.roe@example.com"});
+        other
+            .upsert(
+                &theirs,
+                mb_state::StoredResource {
+                    resource_type: "contacts".into(),
+                    id: "ct-000202".into(),
+                    data: twin,
+                },
+            )
+            .await
+            .unwrap();
+        post_in(&a, "s1", "/tickets", asks).await;
+        let prompt = a.prompt(3);
+        let related = related_of(&prompt);
+        assert!(!related.contains("ct-000101"), "{}", a.prompt(3));
+        assert!(!related.contains("ct-000202"), "{}", a.prompt(3));
+    }
+}
+
 /// Each check on a fresh client of `url`; with `shared`, two clients of one store stand
 /// for two nodes (an in-memory store cannot be reached twice).
 async fn run_all(url: &str, shared: bool) {
@@ -324,7 +448,8 @@ async fn run_all(url: &str, shared: bool) {
     } else {
         mb_state::connect(url, LONG_TTL).await.expect("connect")
     };
-    answers_reach_another_node(one, other).await;
+    answers_reach_another_node(Arc::clone(&one), Arc::clone(&other)).await;
+    member_values_name_their_record(one, other).await;
 }
 
 #[tokio::test]
@@ -353,4 +478,12 @@ async fn redis_keeps_what_a_mock_keeps_for_itself() {
 #[tokio::test]
 async fn sqlite_keeps_what_a_mock_keeps_for_itself() {
     run_all("sqlite::memory:", true).await;
+}
+
+/// A SQLite file, which two processes may open: two clients of it stand for two nodes.
+#[tokio::test]
+async fn a_sqlite_file_keeps_what_a_mock_keeps_for_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("state.db").display());
+    run_all(&url, false).await;
 }

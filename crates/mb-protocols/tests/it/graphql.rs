@@ -2441,15 +2441,16 @@ async fn an_update_by_id_keeps_its_input_over_the_answer() {
     assert_eq!(read.body["data"]["issue"]["priority"], 1);
 }
 
-/// `commentDelete(id:) { success }` removes the stored comment: a later
-/// read is no longer served from state.
+/// `commentDelete(id:) { success }` removes the stored comment and leaves a
+/// delete marker, as a REST delete does: a later read answers `null` and an
+/// error, and is not generated back.
 #[tokio::test]
 async fn a_noun_first_delete_removes_the_stored_record() {
     let (provider, rt) = noun_first(scripted(vec![
         json!({"__typename": "CommentPayload", "success": true,
                "comment": {"__typename": "Comment", "id": "c-1", "body": "Hi"}}),
         json!({"__typename": "DeletePayload", "success": true, "entityId": "c-1"}),
-        Value::Null,
+        json!({"__typename": "Comment", "id": "c-1", "body": "Made up"}),
     ]));
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
@@ -2475,12 +2476,13 @@ async fn a_noun_first_delete_removes_the_stored_record() {
     )
     .await;
     assert!(deleted.body.get("errors").is_none(), "{}", deleted.body);
-    let after = post(&base, read_comment, &session).await;
-    assert_ne!(
-        after.headers["x-mockingbird-source"], "state",
-        "{}",
-        after.body
-    );
+    let after = post(&base, read_comment.clone(), &session).await;
+    assert_eq!(after.body["data"]["comment"], Value::Null, "{}", after.body);
+    assert!(after.body["errors"][0]["message"].is_string(), "{}", after.body);
+    assert_eq!(provider.requests().len(), 2);
+    // Another session never deleted it: its read is generated.
+    let other = post(&base, read_comment, &[("x-mockingbird-session", "s2")]).await;
+    assert_eq!(other.body["data"]["comment"]["body"], "Made up", "{}", other.body);
     assert_eq!(provider.requests().len(), 3);
 }
 

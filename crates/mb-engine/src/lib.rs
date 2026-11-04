@@ -1241,8 +1241,9 @@ impl Engine {
     }
 
     /// A `404` for a resource the session does not hold: the operation's
-    /// declared `404` response, faker-filled, else a problem+json body with
-    /// `detail`. Always tagged `State`.
+    /// declared `404` response (or its `default`), faker-filled; else the one
+    /// declared status standing for "not here" ([`missing_status`]), rendered
+    /// so; else a problem+json `404` body with `detail`. Always tagged `State`.
     pub fn not_found(
         &self,
         bundle: &Bundle,
@@ -1250,15 +1251,22 @@ impl Engine {
         call: &OperationCall,
         detail: &str,
     ) -> GeneratedResponse {
-        let declared = op.output_for_status(404).map(|variant| {
-            let ctx = GenerationContext {
-                forced_status: Some(404),
-                ..GenerationContext::default()
-            };
-            let mut response = self.fallback(bundle, op, variant, 404, call, &ctx);
-            self.fill_contract_values(bundle, op, variant, &mut response);
-            response
-        });
+        let declared = op
+            .output_for_status(404)
+            .map(|variant| (404, variant))
+            .or_else(|| {
+                let code = missing_status(op)?;
+                Some((code, op.output_for_status(code)?))
+            })
+            .map(|(code, variant)| {
+                let ctx = GenerationContext {
+                    forced_status: Some(code),
+                    ..GenerationContext::default()
+                };
+                let mut response = self.fallback(bundle, op, variant, code, call, &ctx);
+                self.fill_contract_values(bundle, op, variant, &mut response);
+                response
+            });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
             status: 404,
             content_type: Some("application/problem+json".into()),
@@ -3172,6 +3180,108 @@ fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generate
         target.data.clone()
     } else {
         generated
+    }
+}
+
+/// The status `op` declares for a read of what is not there when it declares no
+/// `404` and no `default`: of `410` and `403`, the statuses HTTP lets stand for a
+/// resource that is gone or not to be shown, the one `op` declares that fits a
+/// missing resource. A `410` fits by its status; a `403` fits when its description
+/// names what the route reads, as a whole word: the operation's resource type or a
+/// literal segment of its path, by [`mb_mcm::stem`] (`the item does not exist` on
+/// `/items/products/{id}`). A `403` saying nothing of what it guards (`the token
+/// lacks a scope`) is about permission, not existence. Two that fit, or none:
+/// `None`, and the caller keeps its `404`. Structure only, no word lists.
+fn missing_status(op: &Operation) -> Option<u16> {
+    if op.output_for_status(404).is_some() {
+        return None;
+    }
+    let mut names: HashSet<String> = HashSet::new();
+    if let Some(t) = op.resource_type.as_deref() {
+        names.insert(mb_mcm::stem(t));
+    }
+    if let Binding::Http { path, .. } = &op.binding {
+        for segment in path.split('/') {
+            if !segment.is_empty() && !segment.contains('{') {
+                names.insert(mb_mcm::stem(segment));
+            }
+        }
+    }
+    names.retain(|name| name.len() >= 3);
+    let fits = |code: u16| -> bool {
+        let Some(variant) = op
+            .outputs
+            .iter()
+            .find(|o| o.status == StatusSelector::Code(code))
+        else {
+            return false;
+        };
+        code == 410
+            || variant.description.as_deref().is_some_and(|text| {
+                text.split(|c: char| !c.is_alphanumeric())
+                    .filter(|word| !word.is_empty())
+                    .any(|word| names.contains(&mb_mcm::stem(word)))
+            })
+    };
+    let mut fitting = [410, 403].into_iter().filter(|code| fits(*code));
+    match (fitting.next(), fitting.next()) {
+        (Some(code), None) => Some(code),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod missing_status_tests {
+    use super::missing_status;
+
+    fn op_of(responses: &str) -> mb_mcm::Operation {
+        let contract = format!(
+            r#"
+openapi: 3.0.0
+info: {{title: t, version: "1"}}
+paths:
+  /items/products/{{id}}:
+    get:
+      operationId: readProduct
+      parameters: [{{name: id, in: path, required: true, schema: {{type: string}}}}]
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string}}}}}}}}}}}}
+{responses}
+"#
+        );
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        bundle
+            .operations
+            .into_iter()
+            .find(|o| o.id == "readProduct")
+            .unwrap()
+    }
+
+    #[test]
+    fn a_declared_status_naming_the_missing_resource_stands_for_404() {
+        let fits = r#"        "400": {description: "Bad query."}
+        "401": {description: "No token."}
+        "403": {description: "FORBIDDEN: the item does not exist, or the token may not access it."}"#;
+        assert_eq!(missing_status(&op_of(fits)), Some(403));
+        let gone = r#"        "410": {description: "Gone."}"#;
+        assert_eq!(missing_status(&op_of(gone)), Some(410));
+    }
+
+    #[test]
+    fn otherwise_the_404_stays() {
+        // A 403 about permission alone, a declared 404, a default, or two that fit.
+        let permission = r#"        "403": {description: "The token lacks the scope."}"#;
+        assert_eq!(missing_status(&op_of(permission)), None);
+        let declared = r#"        "403": {description: "No such product."}
+        "404": {description: "Not found."}"#;
+        assert_eq!(missing_status(&op_of(declared)), None);
+        let default = r#"        "403": {description: "No such product."}
+        default: {description: "An error."}"#;
+        assert_eq!(missing_status(&op_of(default)), None);
+        let both = r#"        "403": {description: "No such product."}
+        "410": {description: "Gone."}"#;
+        assert_eq!(missing_status(&op_of(both)), None);
+        assert_eq!(missing_status(&op_of("")), None);
     }
 }
 
