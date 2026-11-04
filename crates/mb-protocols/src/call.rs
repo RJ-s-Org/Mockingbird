@@ -603,10 +603,22 @@ pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> 
         .and_then(id_string)
 }
 
+/// The last parameter of a route template, when it alone names something:
+/// the one parameter of its segment (`{id}`, `{Sid}.json`, `customers({id})`,
+/// `key={key}`). A part of a composite key (`lines(doc={d},seq={s})`) or a
+/// call's argument (`NS.getBalance(asOf={date})`) names no record by itself,
+/// so it gives none.
 fn last_path_param(template: &str) -> Option<String> {
     let start = template.rfind('{')?;
     let end = start + template[start..].find('}')?;
-    Some(template[start + 1..end].to_string())
+    let seg_start = template[..start].rfind('/').map_or(0, |i| i + 1);
+    let seg_end = template[end..]
+        .find('/')
+        .map_or(template.len(), |i| end + i);
+    let before = &template[seg_start..start];
+    let argument = before.contains('(') && before.ends_with('=');
+    let alone = template[seg_start..seg_end].matches('{').count() == 1;
+    (alone && !argument).then(|| template[start + 1..end].to_string())
 }
 
 fn id_string(v: &Value) -> Option<String> {
@@ -6583,6 +6595,14 @@ mod tests {
         assert_eq!(reference_prefix("id"), None);
         assert_eq!(last_path_param("/a/{x}/b/{y}"), Some("y".into()));
         assert_eq!(last_path_param("/a"), None);
+        assert_eq!(last_path_param("/a/{x}/b"), Some("x".into()));
+        assert_eq!(last_path_param("/m/{Sid}.json"), Some("Sid".into()));
+        assert_eq!(last_path_param("/c({id})"), Some("id".into()));
+        assert_eq!(last_path_param("/c('{id}')/x"), Some("id".into()));
+        assert_eq!(last_path_param("/carts/key={key}"), Some("key".into()));
+        assert_eq!(last_path_param("/lines(doc={d},seq={s})"), None);
+        assert_eq!(last_path_param("/lines({d},{s})"), None);
+        assert_eq!(last_path_param("/c({id})/NS.f(asOf={date})"), None);
     }
 
     const STREAM_CONTRACT: &str = r#"

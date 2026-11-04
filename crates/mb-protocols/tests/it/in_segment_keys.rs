@@ -473,7 +473,7 @@ components:
 "##;
 
 /// No one part of a composite key identifies a record: two lines sharing a
-/// sequence stay apart, and neither answers or is written for the other.
+/// sequence stay apart, and no write or read by one is of the other.
 #[tokio::test]
 async fn records_sharing_a_part_of_a_composite_key_do_not_collide() {
     let line =
@@ -483,9 +483,11 @@ async fn records_sharing_a_part_of_a_composite_key_do_not_collide() {
         vec![
             line("A", 1.0),
             line("B", 2.0),
-            line("B", 2.0),
             line("A", 5.0),
-            line("B", 2.0),
+            line("B", 7.0),
+            line("A", 5.0),
+            line("B", 7.0),
+            line("A", 5.0),
         ],
     );
     for (doc, amount) in [("A", 1.0), ("B", 2.0)] {
@@ -500,20 +502,32 @@ async fn records_sharing_a_part_of_a_composite_key_do_not_collide() {
 
     let a = "/salesOrderLines(documentId=A,sequence=10000)";
     let b = "/salesOrderLines(documentId=B,sequence=10000)";
-    let (status, _, read) = h.call("GET", b, None).await;
-    assert_eq!(status, StatusCode::OK, "{read}");
-    assert_eq!(read["documentId"], "B", "{read}");
-    let (status, _, patched) = h.call("PATCH", a, Some(json!({"amount": 5.0}))).await;
-    assert_eq!(status, StatusCode::OK, "{patched}");
-    assert_eq!(patched["documentId"], "A", "{patched}");
-    let (status, _, _) = h.call("DELETE", a, None).await;
+    for (path, doc, amount) in [(a, "A", 5.0), (b, "B", 7.0)] {
+        let (status, _, patched) = h.call("PATCH", path, Some(json!({"amount": amount}))).await;
+        assert_eq!(status, StatusCode::OK, "{patched}");
+        assert_eq!(patched["documentId"], doc, "{patched}");
+        // Nothing is stored under the sequence alone.
+        assert_eq!(h.exported().await, stored, "{path}");
+    }
+    // B's update was not shown A's line as its target.
+    let shown = format!("{:?}", h.provider.requests()[3]);
+    assert!(!shown.contains("5.0") && !shown.contains(":5,"), "{shown}");
+    for (path, doc, amount) in [(a, "A", 5.0), (b, "B", 7.0)] {
+        let (status, _, read) = h.call("GET", path, None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(
+            (&read["documentId"], &read["amount"]),
+            (&json!(doc), &json!(amount))
+        );
+    }
+    let (status, _, _) = h.call("DELETE", b, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _, read) = h.call("GET", b, None).await;
-    assert_eq!(status, StatusCode::OK, "{read}");
-    assert_eq!(read["documentId"], "B", "{read}");
     assert_eq!(
         h.exported().await,
         stored,
-        "nothing written by a part of a key"
+        "B's delete removed nothing of A's"
     );
+    let (status, _, read) = h.call("GET", a, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["documentId"], "A", "{read}");
 }
