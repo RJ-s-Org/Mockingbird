@@ -1,0 +1,448 @@
+openapi: 3.0.3
+info:
+  title: Cloudinary Upload and Admin APIs (images)
+  version: "1.1"
+  description: |
+    A subset of Cloudinary's Upload API and Admin API for image assets, written from
+    their public documentation. Every path starts with `/v1_1/{cloud_name}`.
+
+    Upload API calls (`/image/upload`, `/image/rename`) are signed: the body carries
+    `api_key`, `timestamp` (Unix seconds) and `signature`, the hex SHA-1 of the other
+    parameters sorted by name and joined as `name=value&...`, followed by the API
+    secret (`file`, `api_key`, `resource_type` and `cloud_name` are not signed).
+    `POST /image/upload` takes `multipart/form-data` with the image as the `file` part
+    and the asset's metadata as text parts: `public_id` (the asset's name; without it
+    a random one is made), `tags` (comma-separated), `context` (`key=value` pairs
+    joined by `|`, as in `alt=Red bike|caption=Front view`), `asset_folder` and
+    `overwrite`. The answer describes the stored asset: its `public_id`, an `asset_id`
+    unique to the asset, `version` (Unix seconds of the upload), `format` (the file's
+    format, `png` for a PNG), `original_filename` (the uploaded file's name without
+    its extension), `tags` as an array, `context` as `{custom: {key: value}}`, and its
+    `url` and `secure_url`. Uploading to a `public_id` that is taken replaces the asset,
+    unless `overwrite` is `false`: then nothing is uploaded, and the answer describes
+    the asset already stored (its `asset_id`, `version` and `tags`) with `existing`
+    `true`.
+
+    Admin API calls use HTTP Basic authentication with the API key and secret.
+    `GET /resources/image/upload/{public_id}` answers an asset's details, with its
+    `tags` and `context`. `GET /resources/image/tags/{tag}` lists the assets that carry
+    a tag, sorted by `created_at`, newest first by default (`direction=asc` for oldest
+    first); `tags=true` and `context=true` include those fields. Lists answer at most
+    `max_results` assets (default 10, at most 500) and, when more follow, a
+    `next_cursor` that the next request sends as `next_cursor`; the last page answers
+    none. `POST /resources/image/upload/{public_id}` updates an asset: `tags` replaces
+    its tags and `context` its contextual metadata. `POST /resources/search` takes an
+    `expression` over asset fields (`tags=shoe`, `public_id:bike*`, `format=png`,
+    `context.alt="Red bike"`, joined with `AND`, `OR` and `NOT`) and answers
+    `total_count`, the matching `resources` and a `next_cursor`.
+
+    `POST /image/rename` changes an asset's `public_id` from `from_public_id` to
+    `to_public_id`, keeping its tags and context; afterwards the old public id is not
+    found. `DELETE /resources/image/upload?public_ids[]=a&public_ids[]=b` deletes up to
+    100 assets and answers `deleted`, mapping each public id asked for to `deleted` or
+    `not_found`. With backups enabled, `POST /resources/image/upload/restore` with
+    `public_ids` restores deleted assets from their latest backup, answering each one
+    restored under its public id; afterwards they read and list as before the delete.
+
+    An asset that does not exist answers 404 with
+    `{error: {message: "Resource not found - <public_id>"}}`. Other errors are
+    `{error: {message}}` with 400 (a bad parameter), 401 (bad credentials or signature)
+    or 420 (rate limited).
+servers:
+  - url: https://api.cloudinary.com
+tags:
+  - name: Upload
+  - name: Admin
+paths:
+  /v1_1/{cloud_name}/image/upload:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+    post:
+      tags: [Upload]
+      operationId: uploadImage
+      summary: Upload an image
+      description: "A signed multipart upload. With `overwrite=false` and a taken `public_id`, nothing is uploaded and the stored asset is answered with `existing: true`."
+      security: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, api_key, timestamp, signature]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The image file, or a remote URL or data URI of one.
+                public_id: {type: string, description: "The asset's name, such as `bike_red`. Random when absent."}
+                tags: {type: string, description: "Comma-separated tags, such as `catalog,bikes`."}
+                context: {type: string, description: "`key=value` pairs joined by `|`, such as `alt=Red bike|caption=Front view`."}
+                asset_folder: {type: string, description: The folder the asset is shown in.}
+                overwrite: {type: boolean, default: true, description: "When false, a taken public_id is left as it is."}
+                api_key: {type: string}
+                timestamp: {type: integer, description: Unix seconds.}
+                signature: {type: string, description: The hex SHA-1 of the sorted signed parameters followed by the API secret.}
+      responses:
+        "200":
+          description: The stored asset.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UploadResult"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+  /v1_1/{cloud_name}/image/rename:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+    post:
+      tags: [Upload]
+      operationId: renameImage
+      summary: Rename an asset
+      description: "Changes the asset's public_id, keeping its tags and context; the old public_id is then not found."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [from_public_id, to_public_id, api_key, timestamp, signature]
+              properties:
+                from_public_id: {type: string}
+                to_public_id: {type: string}
+                overwrite: {type: boolean, default: false, description: Replace an asset that already has to_public_id.}
+                api_key: {type: string}
+                timestamp: {type: integer}
+                signature: {type: string}
+      responses:
+        "200":
+          description: The renamed asset.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Resource"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v1_1/{cloud_name}/resources/image/upload:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+    delete:
+      tags: [Admin]
+      operationId: deleteResources
+      summary: Delete assets by public id
+      parameters:
+        - name: public_ids[]
+          in: query
+          required: true
+          description: The public ids to delete, up to 100, repeated.
+          schema:
+            type: array
+            maxItems: 100
+            items: {type: string}
+          style: form
+          explode: true
+        - name: invalidate
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: "What happened to each public id asked for."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, partial]
+                properties:
+                  deleted:
+                    type: object
+                    description: "Each public id asked for, mapped to `deleted` or `not_found`."
+                    additionalProperties:
+                      type: string
+                      enum: [deleted, not_found]
+                  deleted_counts:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        original: {type: integer}
+                        derived: {type: integer}
+                  partial: {type: boolean, description: True when more remain to delete.}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+  /v1_1/{cloud_name}/resources/image/upload/restore:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+    post:
+      tags: [Admin]
+      operationId: restoreResources
+      summary: Restore deleted assets from backup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_ids]
+              properties:
+                public_ids:
+                  type: array
+                  maxItems: 100
+                  items: {type: string}
+                versions:
+                  type: array
+                  items: {type: string}
+                  description: The backup version to restore for each public id; the latest by default.
+      responses:
+        "200":
+          description: "Each public id asked for, mapped to the restored asset, or to `{error: {message}}` when it had no backup."
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  oneOf:
+                    - $ref: "#/components/schemas/Resource"
+                    - $ref: "#/components/schemas/Error"
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+  /v1_1/{cloud_name}/resources/image/upload/{public_id}:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+      - $ref: "#/components/parameters/publicId"
+    get:
+      tags: [Admin]
+      operationId: getResource
+      summary: Get an asset's details
+      responses:
+        "200":
+          description: The asset, with its tags and context.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Resource"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Admin]
+      operationId: updateResource
+      summary: Update an asset
+      description: "`tags` replaces the asset's tags; `context` replaces its contextual metadata."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tags: {type: string, description: "Comma-separated tags that replace the asset's tags."}
+                context: {type: string, description: "`key=value` pairs joined by `|`."}
+                display_name: {type: string}
+      responses:
+        "200":
+          description: The updated asset.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Resource"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v1_1/{cloud_name}/resources/image/tags/{tag}:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+      - name: tag
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Admin]
+      operationId: listResourcesByTag
+      summary: List the assets with a tag
+      description: "Sorted by `created_at`, newest first unless `direction=asc`."
+      parameters:
+        - $ref: "#/components/parameters/maxResults"
+        - $ref: "#/components/parameters/nextCursor"
+        - name: direction
+          in: query
+          schema:
+            type: string
+            enum: [desc, asc]
+            default: desc
+        - name: tags
+          in: query
+          description: Include each asset's tags.
+          schema: {type: boolean, default: false}
+        - name: context
+          in: query
+          description: Include each asset's context.
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: A page of assets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resources]
+                properties:
+                  resources:
+                    type: array
+                    items: {$ref: "#/components/schemas/Resource"}
+                  next_cursor: {type: string, description: Absent on the last page.}
+        "401": {$ref: "#/components/responses/Error"}
+  /v1_1/{cloud_name}/resources/search:
+    parameters:
+      - $ref: "#/components/parameters/cloudName"
+    post:
+      tags: [Admin]
+      operationId: searchResources
+      summary: Search assets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expression:
+                  type: string
+                  description: "Field conditions joined with AND, OR and NOT, such as `tags=shoe AND format=png` or `context.alt=\"Red bike\"`."
+                sort_by:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties:
+                      type: string
+                      enum: [asc, desc]
+                  description: "Such as `[{created_at: desc}]`."
+                max_results: {type: integer, maximum: 500, default: 50}
+                next_cursor: {type: string}
+                with_field:
+                  type: array
+                  items:
+                    type: string
+                    enum: [tags, context, metadata, image_metadata]
+      responses:
+        "200":
+          description: The matching assets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_count, resources]
+                properties:
+                  total_count: {type: integer, description: Every match.}
+                  time: {type: integer}
+                  resources:
+                    type: array
+                    items: {$ref: "#/components/schemas/Resource"}
+                  next_cursor: {type: string}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+      description: The API key as the user name and the API secret as the password.
+  parameters:
+    cloudName:
+      name: cloud_name
+      in: path
+      required: true
+      description: The product environment's cloud name.
+      schema: {type: string, example: demo}
+    publicId:
+      name: public_id
+      in: path
+      required: true
+      description: "The asset's public id, such as `bike_red`."
+      schema: {type: string}
+    maxResults:
+      name: max_results
+      in: query
+      description: At most this many assets (default 10, at most 500).
+      schema: {type: integer, minimum: 1, maximum: 500, default: 10}
+    nextCursor:
+      name: next_cursor
+      in: query
+      description: The next_cursor of the previous page.
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{error: {message}}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: "`{error: {message: \"Resource not found - <public_id>\"}}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message]
+          properties:
+            message: {type: string, example: Resource not found - bike_red}
+    Context:
+      type: object
+      description: "Contextual metadata: `{custom: {key: value}}`."
+      properties:
+        custom:
+          type: object
+          additionalProperties: {type: string}
+    UploadResult:
+      type: object
+      required: [public_id, asset_id, version, format, resource_type, type, url, secure_url]
+      properties:
+        asset_id: {type: string, description: Unique to the asset; kept across renames.}
+        public_id: {type: string}
+        version: {type: integer, description: Unix seconds of the upload.}
+        version_id: {type: string}
+        signature: {type: string}
+        width: {type: integer}
+        height: {type: integer}
+        format: {type: string, example: png}
+        resource_type: {type: string, enum: [image]}
+        created_at: {type: string, format: date-time}
+        tags:
+          type: array
+          items: {type: string}
+        context: {$ref: "#/components/schemas/Context"}
+        bytes: {type: integer}
+        type: {type: string, enum: [upload, private, authenticated]}
+        etag: {type: string}
+        placeholder: {type: boolean}
+        url: {type: string, format: uri}
+        secure_url: {type: string, format: uri}
+        asset_folder: {type: string}
+        display_name: {type: string}
+        original_filename: {type: string, description: "The uploaded file's name without its extension."}
+        existing: {type: boolean, description: "True when overwrite was false and the public_id was taken: nothing was uploaded."}
+    Resource:
+      type: object
+      required: [public_id, asset_id, format, resource_type, type]
+      properties:
+        asset_id: {type: string}
+        public_id: {type: string}
+        format: {type: string}
+        version: {type: integer}
+        resource_type: {type: string, enum: [image]}
+        type: {type: string, enum: [upload, private, authenticated]}
+        created_at: {type: string, format: date-time}
+        bytes: {type: integer}
+        width: {type: integer}
+        height: {type: integer}
+        asset_folder: {type: string}
+        display_name: {type: string}
+        url: {type: string, format: uri}
+        secure_url: {type: string, format: uri}
+        tags:
+          type: array
+          items: {type: string}
+        context: {$ref: "#/components/schemas/Context"}
+security:
+  - basic: []

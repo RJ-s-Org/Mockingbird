@@ -1,0 +1,455 @@
+openapi: 3.0.3
+info:
+  title: Xero Accounting API (contacts and contact groups)
+  version: "2.0"
+  description: |
+    A subset of the Xero Accounting API, written from its public documentation. Every
+    request names the organisation it acts on in the `Xero-tenant-id` header, a tenant
+    id the connection was granted. Each organisation's data is its own: a contact made
+    in one organisation is never read, listed or changed through another's tenant id.
+
+    Answers are wrapped: a call about contacts answers
+    `{Id, Status, ProviderName, DateTimeUTC, Contacts: [...]}`, even for one contact, and
+    a call about contact groups answers `{..., ContactGroups: [...]}`. Requests are
+    wrapped the same way (`{Contacts: [{...}]}`). Field names are PascalCase. Dates
+    are .NET JSON dates, `/Date(1573755038314+0000)/`: milliseconds since the Unix epoch
+    and the offset.
+
+    `PUT /Contacts` creates contacts. `POST /Contacts/{ContactID}` updates one, changing
+    only the fields it is sent. A contact's `Name` must be unique among the
+    organisation's active contacts: a create or update that would repeat one is refused
+    with 400 and a `ValidationException` (`ErrorNumber` 10), whose `Elements` list the
+    contacts sent with their `ValidationErrors`; nothing is saved.
+
+    Contacts are never deleted; they are archived. Sending `ContactStatus` `ARCHIVED`
+    archives a contact and `ACTIVE` restores it. An archived contact still reads by its
+    `ContactID`, but `GET /Contacts` leaves it out unless `includeArchived=true`.
+
+    `GET /Contacts` takes `where`, a filter in Xero's expression syntax over contact
+    fields (`Name=="ABC Limited"`, `ContactStatus=="ACTIVE"`,
+    `EmailAddress!=null&&EmailAddress.StartsWith("boom")`, `Name.Contains("Ltd")`),
+    `order` (a field and `ASC` or `DESC`, as `Name DESC`), and `page` with `pageSize`
+    (default 100, at most 1000). A paged answer also holds
+    `pagination: {page, pageSize, pageCount, itemCount}`, `itemCount` counting every
+    contact that matches.
+
+    Contact groups collect contacts: `PUT /ContactGroups/{ContactGroupID}/Contacts`
+    adds the contacts it is sent, `DELETE .../Contacts/{ContactID}` removes one, and
+    `GET /ContactGroups/{ContactGroupID}` answers the group with its `Contacts`
+    (`ContactID` and `Name` each).
+
+    A `ContactID` or `ContactGroupID` the organisation does not hold answers 404 with
+    `{Title: "Not Found", Status: 404, Detail}`. A missing or unknown `Xero-tenant-id`
+    answers 403 `AuthorizationUnsuccessful`.
+servers:
+  - url: https://api.xero.com/api.xro/2.0
+security:
+  - oauth2: [accounting.contacts]
+tags:
+  - name: Contacts
+  - name: ContactGroups
+paths:
+  /Contacts:
+    get:
+      tags: [Contacts]
+      operationId: getContacts
+      summary: List contacts
+      description: "Active contacts that match `where`, in `order`; archived ones too with `includeArchived=true`."
+      parameters:
+        - $ref: "#/components/parameters/tenant"
+        - name: where
+          in: query
+          description: |
+            A filter in Xero's expression syntax, such as `Name=="ABC Limited"`,
+            `AccountNumber.StartsWith("AB")` or `ContactStatus=="ACTIVE"&&IsCustomer==true`.
+          schema: {type: string}
+        - name: order
+          in: query
+          description: "A field and a direction, such as `Name ASC` or `UpdatedDateUTC DESC`."
+          schema: {type: string}
+        - name: IDs
+          in: query
+          description: Comma-separated ContactIDs.
+          schema: {type: string}
+        - name: page
+          in: query
+          description: A 1-based page of pageSize contacts.
+          schema: {type: integer, minimum: 1}
+        - name: pageSize
+          in: query
+          description: Contacts per page (default 100, at most 1000).
+          schema: {type: integer, minimum: 1, maximum: 1000}
+        - name: includeArchived
+          in: query
+          description: Also list archived contacts.
+          schema: {type: boolean, default: false}
+        - name: searchTerm
+          in: query
+          description: Matches Name, FirstName, LastName, ContactNumber and EmailAddress, ignoring case.
+          schema: {type: string}
+      responses:
+        "200":
+          description: The contacts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contacts"}
+        "400": {$ref: "#/components/responses/Validation"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+    put:
+      tags: [Contacts]
+      operationId: createContacts
+      summary: Create contacts
+      description: "A Name already used by an active contact is refused with 400 ValidationException."
+      parameters:
+        - $ref: "#/components/parameters/tenant"
+        - name: summarizeErrors
+          in: query
+          description: "When false, each contact is saved or refused on its own and carries its own ValidationErrors."
+          schema: {type: boolean, default: true}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Contacts]
+              properties:
+                Contacts:
+                  type: array
+                  items: {$ref: "#/components/schemas/Contact"}
+      responses:
+        "200":
+          description: The created contacts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contacts"}
+        "400": {$ref: "#/components/responses/Validation"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /Contacts/{ContactID}:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+      - $ref: "#/components/parameters/contactId"
+    get:
+      tags: [Contacts]
+      operationId: getContact
+      summary: Get a contact
+      description: Answers the contact whether active or archived.
+      responses:
+        "200":
+          description: The contact, alone in Contacts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contacts"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Contacts]
+      operationId: updateContact
+      summary: Update a contact
+      description: "Changes only the fields sent. `ContactStatus` `ARCHIVED` archives the contact; `ACTIVE` restores it."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Contacts]
+              properties:
+                Contacts:
+                  type: array
+                  maxItems: 1
+                  items: {$ref: "#/components/schemas/Contact"}
+      responses:
+        "200":
+          description: The updated contact.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contacts"}
+        "400": {$ref: "#/components/responses/Validation"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /ContactGroups:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+    get:
+      tags: [ContactGroups]
+      operationId: getContactGroups
+      summary: List contact groups
+      parameters:
+        - name: where
+          in: query
+          schema: {type: string}
+        - name: order
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: The contact groups, without their contacts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContactGroups"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+    put:
+      tags: [ContactGroups]
+      operationId: createContactGroup
+      summary: Create a contact group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ContactGroups]
+              properties:
+                ContactGroups:
+                  type: array
+                  items: {$ref: "#/components/schemas/ContactGroup"}
+      responses:
+        "200":
+          description: The created contact group, with no contacts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContactGroups"}
+        "400": {$ref: "#/components/responses/Validation"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /ContactGroups/{ContactGroupID}:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+      - $ref: "#/components/parameters/contactGroupId"
+    get:
+      tags: [ContactGroups]
+      operationId: getContactGroup
+      summary: Get a contact group with its contacts
+      responses:
+        "200":
+          description: The group, alone in ContactGroups, with its Contacts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContactGroups"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /ContactGroups/{ContactGroupID}/Contacts:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+      - $ref: "#/components/parameters/contactGroupId"
+    put:
+      tags: [ContactGroups]
+      operationId: createContactGroupContacts
+      summary: Add contacts to a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [Contacts]
+              properties:
+                Contacts:
+                  type: array
+                  items:
+                    type: object
+                    required: [ContactID]
+                    properties:
+                      ContactID: {type: string, format: uuid}
+      responses:
+        "200":
+          description: The contacts added.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Contacts"}
+        "400": {$ref: "#/components/responses/Validation"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /ContactGroups/{ContactGroupID}/Contacts/{ContactID}:
+    parameters:
+      - $ref: "#/components/parameters/tenant"
+      - $ref: "#/components/parameters/contactGroupId"
+      - $ref: "#/components/parameters/contactId"
+    delete:
+      tags: [ContactGroups]
+      operationId: deleteContactGroupContact
+      summary: Remove a contact from a group
+      responses:
+        "204":
+          description: Removed; the contact itself is unchanged.
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://login.xero.com/identity/connect/authorize
+          tokenUrl: https://identity.xero.com/connect/token
+          scopes:
+            accounting.contacts: Read and write contacts and contact groups.
+  parameters:
+    tenant:
+      name: Xero-tenant-id
+      in: header
+      required: true
+      description: The organisation to act on. Data never crosses organisations.
+      schema: {type: string, format: uuid}
+    contactId:
+      name: ContactID
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    contactGroupId:
+      name: ContactGroupID
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  responses:
+    Validation:
+      description: "A ValidationException: `{ErrorNumber: 10, Type: \"ValidationException\", Message, Elements}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ValidationException"}
+    NotFound:
+      description: The organisation holds no such id.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Problem"}
+    Forbidden:
+      description: "A missing or unknown Xero-tenant-id: `{Type: \"AuthorizationUnsuccessful\", Title, Status: 403, Detail}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Problem"}
+  schemas:
+    XeroDate:
+      type: string
+      pattern: "^/Date\\(-?[0-9]+([+-][0-9]{4})?\\)/$"
+      description: "A .NET JSON date: milliseconds since the Unix epoch and the offset, such as `/Date(1573755038314+0000)/`."
+    Envelope:
+      type: object
+      required: [Id, Status, ProviderName, DateTimeUTC]
+      properties:
+        Id: {type: string, format: uuid}
+        Status: {type: string, example: OK}
+        ProviderName: {type: string}
+        DateTimeUTC: {$ref: "#/components/schemas/XeroDate"}
+    Pagination:
+      type: object
+      required: [page, pageSize, pageCount, itemCount]
+      properties:
+        page: {type: integer}
+        pageSize: {type: integer}
+        pageCount: {type: integer}
+        itemCount: {type: integer, description: Every contact that matches.}
+    Contacts:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [Contacts]
+          properties:
+            Contacts:
+              type: array
+              items: {$ref: "#/components/schemas/Contact"}
+            pagination: {$ref: "#/components/schemas/Pagination"}
+    ContactGroups:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [ContactGroups]
+          properties:
+            ContactGroups:
+              type: array
+              items: {$ref: "#/components/schemas/ContactGroup"}
+    Phone:
+      type: object
+      properties:
+        PhoneType: {type: string, enum: [DEFAULT, DDI, MOBILE, FAX]}
+        PhoneNumber: {type: string}
+        PhoneAreaCode: {type: string}
+        PhoneCountryCode: {type: string}
+    Address:
+      type: object
+      properties:
+        AddressType: {type: string, enum: [POBOX, STREET]}
+        AddressLine1: {type: string}
+        City: {type: string}
+        Region: {type: string}
+        PostalCode: {type: string}
+        Country: {type: string}
+    Contact:
+      type: object
+      properties:
+        ContactID: {type: string, format: uuid, readOnly: true}
+        ContactNumber: {type: string}
+        AccountNumber: {type: string, description: "A user-defined number, such as `AB-0001`."}
+        ContactStatus: {type: string, enum: [ACTIVE, ARCHIVED, GDPRREQUEST]}
+        Name: {type: string, maxLength: 255, description: Unique among the organisation's active contacts.}
+        FirstName: {type: string}
+        LastName: {type: string}
+        EmailAddress: {type: string}
+        TaxNumber: {type: string}
+        DefaultCurrency: {type: string, example: NZD}
+        Addresses:
+          type: array
+          items: {$ref: "#/components/schemas/Address"}
+        Phones:
+          type: array
+          items: {$ref: "#/components/schemas/Phone"}
+        IsSupplier: {type: boolean, readOnly: true}
+        IsCustomer: {type: boolean, readOnly: true}
+        ContactGroups:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            properties:
+              ContactGroupID: {type: string, format: uuid}
+              Name: {type: string}
+        UpdatedDateUTC:
+          allOf:
+            - $ref: "#/components/schemas/XeroDate"
+          readOnly: true
+        HasValidationErrors: {type: boolean}
+        ValidationErrors:
+          type: array
+          items: {$ref: "#/components/schemas/ValidationError"}
+    ContactGroup:
+      type: object
+      properties:
+        ContactGroupID: {type: string, format: uuid, readOnly: true}
+        Name: {type: string}
+        Status: {type: string, enum: [ACTIVE, DELETED]}
+        Contacts:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            properties:
+              ContactID: {type: string, format: uuid}
+              Name: {type: string}
+    ValidationError:
+      type: object
+      properties:
+        Message: {type: string, example: The contact name Atlas Bikes is already assigned to another contact. The contact name must be unique across all active contacts.}
+    ValidationException:
+      type: object
+      required: [ErrorNumber, Type, Message]
+      properties:
+        ErrorNumber: {type: integer, enum: [10]}
+        Type: {type: string, enum: [ValidationException]}
+        Message: {type: string, example: A validation exception occurred}
+        Elements:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              ValidationErrors:
+                type: array
+                items: {$ref: "#/components/schemas/ValidationError"}
+    Problem:
+      type: object
+      required: [Title, Status]
+      properties:
+        Type: {type: string, nullable: true}
+        Title: {type: string, example: Not Found}
+        Status: {type: integer}
+        Detail: {type: string}
+        Instance: {type: string, nullable: true}

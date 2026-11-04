@@ -337,6 +337,27 @@ class HeldOutJourneyTest(unittest.TestCase):
             self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
             self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
 
+    def test_journeys_blind9_is_a_suite(self):
+        self.assertIn("journeys_blind9", server_suites.SUITES)
+        self.assertNotIn("journeys_blind9", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind9"]
+        self.assertIs(runner, server_suites.run_journeys_blind9)
+        self.assertEqual(sorted(mocks), ["cloudinary", "directus", "moderntreasury", "resourcemanager", "xero"])
+        self.assertEqual(sorted(server_suites.BLIND9_JOURNEYS), sorted(mocks))
+        for name, (contract, prefix, persona) in mocks.items():
+            self.assertIsNone(persona)
+            self.assertEqual(prefix, f"/{name}")
+            self.assertTrue(contract.startswith("scripts/llm-bench/contracts/blind9/"), contract)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+            self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
+        # A blind set's journeys are new: none shares a name with an earlier suite's.
+        earlier = set(server_suites.JOURNEYS) | set(server_suites.HELDOUT_JOURNEYS) | set(server_suites.BLIND_JOURNEYS)
+        for n in range(2, 9):
+            earlier |= set(getattr(server_suites, f"BLIND{n}_MOCKS"))
+        self.assertEqual(earlier & set(mocks), set())
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
@@ -460,7 +481,7 @@ class FakeEmpty(FakeStripe):
 
 
 class EmptyAnswersTest(unittest.TestCase):
-    def test_each_blind7_and_blind8_journey_records_every_check_on_empty_answers(self):
+    def test_each_blind7_to_blind9_journey_records_every_check_on_empty_answers(self):
         # Every check runs and fails on its own: none gates the rest and none raises.
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeEmpty)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -474,7 +495,8 @@ class EmptyAnswersTest(unittest.TestCase):
             model, timeout, repeat = "m/x", 10, 1
 
         for suite, journeys in (("journeys_blind7", server_suites.BLIND7_JOURNEYS),
-                                ("journeys_blind8", server_suites.BLIND8_JOURNEYS)):
+                                ("journeys_blind8", server_suites.BLIND8_JOURNEYS),
+                                ("journeys_blind9", server_suites.BLIND9_JOURNEYS)):
             for name, steps in journeys.items():
                 self.run_on_empty_answers(Srv, Args, suite, name, steps)
 
@@ -486,6 +508,68 @@ class EmptyAnswersTest(unittest.TestCase):
         self.assertEqual(sorted(rows), sorted(f"{name}.{c}" for c in server_suites.JOURNEY_CHECKS[name]), name)
         self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [], name)
         self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
+
+
+class FakeCursorHeader(FakeStripe):
+    """Answers every call with an empty JSON array and an `X-After-Cursor` header."""
+
+    def answer(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        raw = b"[]"
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("x-after-cursor", "cur_2")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    do_GET = answer
+
+
+class Blind9HelpersTest(unittest.TestCase):
+    def test_a_journey_keeps_the_headers_of_the_latest_answer(self):
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeCursorHeader)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with tempfile.TemporaryDirectory() as out:
+            j = server_suites.Journey("moderntreasury", Srv, server_suites.Sink(out, "m/x", "journeys_blind9"), Args, 0)
+            self.assertEqual(j.call("GET", "/api/ledger_transactions"), [])
+        self.assertEqual(j.answer_headers.get("X-After-Cursor"), "cur_2")
+
+    def test_the_signature_is_cloudinarys_documented_example(self):
+        # From Cloudinary's "Generating authentication signatures" guide.
+        params = {"eager": "w_400,h_300,c_pad|w_260,h_200,c_crop", "public_id": "sample_image",
+                  "timestamp": "1315060510", "file": "bike.png"}
+        signed = server_suites.cloudinary_signed(params, key="1234", secret="abcd")
+        self.assertEqual(signed["signature"], "bfd09f95f331f558cbd1320e67aa8d488770583e")
+        self.assertEqual(signed["api_key"], "1234")
+
+    def test_a_multipart_body_parses_back_into_its_parts(self):
+        from email.parser import BytesParser
+        from email.policy import HTTP
+
+        class J:
+            rng = random.Random(1)
+
+        png = server_suites.tiny_png()
+        kind, body = server_suites.multipart_body(J, {"public_id": "bike_1", "context": "alt=Red bike|caption=x"},
+                                                  {"file": ("bike.png", "image/png", png)})
+        self.assertTrue(kind.startswith("multipart/form-data; boundary="))
+        message = BytesParser(policy=HTTP).parsebytes(f"Content-Type: {kind}\r\n\r\n".encode() + body)
+        parts = {p.get_param("name", header="content-disposition"): p for p in message.iter_parts()}
+        self.assertEqual(sorted(parts), ["context", "file", "public_id"])
+        self.assertEqual(parts["public_id"].get_content().strip(), "bike_1")
+        self.assertEqual(parts["file"].get_filename(), "bike.png")
+        self.assertEqual(parts["file"].get_content(), png)
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n") and png.endswith(b"IEND\xaeB`\x82"))
 
 
 class SoapXmlTest(unittest.TestCase):
@@ -693,6 +777,11 @@ class JobsTest(unittest.TestCase):
     def test_journeys_blind8(self):
         rows = self.assert_same_rows("journeys_blind8")
         self.assertEqual(len(rows), 3 * sum(len(server_suites.JOURNEY_CHECKS[n]) for n in server_suites.BLIND8_JOURNEYS))
+
+    def test_journeys_blind9(self):
+        rows = self.assert_same_rows("journeys_blind9")
+        self.assertEqual(len(rows), 3 * 5 * 14)
+        self.assertEqual({r["case"].split(".")[0] for r in rows}, set(server_suites.BLIND9_JOURNEYS))
 
     def test_a_unit_error_is_raised_and_stops_units_not_started(self):
         ran = []
