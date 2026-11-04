@@ -414,18 +414,60 @@ fn param_field<'a>(
     props: &'a Map<String, Value>,
     defs: &Map<String, Value>,
 ) -> Option<&'a str> {
-    property(props, param).or_else(|| {
-        let words = mb_mcm::words(param);
-        (0..words.len()).find_map(|from| {
-            let group = mb_mcm::joined_name(&words[from..].concat());
-            props
-                .iter()
-                .find(|(member, schema)| {
-                    mb_mcm::joined_name(member) == group && is_scalar_member(schema, defs)
-                })
-                .map(|(member, _)| member.as_str())
-        })
+    param_match(param, props, defs).map(|(_, member)| member)
+}
+
+/// [`param_field`], with how much of the parameter the member names: how many of its
+/// words, and more than all of them for the member of its very name.
+fn param_match<'a>(
+    param: &str,
+    props: &'a Map<String, Value>,
+    defs: &Map<String, Value>,
+) -> Option<(usize, &'a str)> {
+    let words = mb_mcm::words(param);
+    if let Some(member) = property(props, param) {
+        return Some((words.len() + 1, member));
+    }
+    (0..words.len()).find_map(|from| {
+        let group = mb_mcm::joined_name(&words[from..].concat());
+        props
+            .iter()
+            .find(|(member, schema)| {
+                mb_mcm::joined_name(member) == group && is_scalar_member(schema, defs)
+            })
+            .map(|(member, _)| (words.len() - from, member.as_str()))
     })
+}
+
+/// The identity of the record an envelope holds as the one item of an array member
+/// (`{Id, Status, Contacts: [Contact]}` for `/Contacts/{ContactID}`): the item of one
+/// array member only has a member of the path parameter's very name, which is the
+/// item's own key (an item keyed by its `id` beside it, as an incident's updates
+/// keyed by `id` beside `incident_id`, refers to its owner by it), and the envelope
+/// has none that names the parameter as well ([`param_match`]: its `Id` names
+/// `ContactID` by one word).
+fn item_identity(
+    param: &str,
+    props: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    keys: &Keys,
+) -> Option<Identity> {
+    let full = mb_mcm::words(param).len() + 1;
+    if param_match(param, props, defs).is_some_and(|(score, _)| score >= full) {
+        return None;
+    }
+    let mut held = props.iter().filter_map(|(member, schema)| {
+        let item = array_items(schema, defs)?;
+        let item_props = schema_properties(Some(item), defs)?;
+        let (score, named) = param_match(param, &item_props, defs)?;
+        let identity = identity_at(Some(param), Some(item), defs, keys)?;
+        (score >= full && identity.field == named).then_some((member, identity))
+    });
+    let (Some((member, mut identity)), None) = (held.next(), held.next()) else {
+        return None;
+    };
+    identity.record = Some(mb_mcm::RecordAt::MemberItem(member.clone()));
+    Some(identity)
 }
 
 /// `allOf` branches [`schema_properties`] reads, so ref cycles terminate.
@@ -444,41 +486,83 @@ fn resolve<'a>(schema: &'a Value, defs: &'a Map<String, Value>) -> Option<&'a Va
 }
 
 /// The members a schema declares at its top level, with those of its `allOf`
-/// branches: an answer has them all.
+/// branches: an answer has them all. An answer meets every branch, so a member two
+/// branches declare is held to both: one that adds no constraint (`result: {}` on a
+/// base envelope) leaves the other's (`result: $ref Record`), and of two that both
+/// constrain it, the later branch's, an extension coming after its base, is kept.
+/// A schema's own `properties` come after its `allOf`, which it extends.
 fn schema_properties<'a>(
     schema: Option<&'a Value>,
     defs: &'a Map<String, Value>,
 ) -> Option<Cow<'a, Map<String, Value>>> {
     let schema = resolve(schema?, defs)?;
     let own = schema.get("properties").and_then(Value::as_object);
-    let Some(branches) = schema.get("allOf").and_then(Value::as_array) else {
+    if schema.get("allOf").and_then(Value::as_array).is_none() {
         return own.map(Cow::Borrowed);
-    };
-    let mut merged = own.cloned().unwrap_or_default();
-    let mut found = own.is_some();
-    let mut pending: Vec<&Value> = branches.iter().collect();
-    let mut visits = 0;
-    while let Some(branch) = pending.pop() {
-        visits += 1;
-        if visits > MAX_ALL_OF_BRANCHES {
-            break;
-        }
-        let Some(branch) = resolve(branch, defs) else {
-            continue;
-        };
-        if let Some(props) = branch.get("properties").and_then(Value::as_object) {
-            found = true;
-            merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
-        }
-        pending.extend(
-            branch
-                .get("allOf")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten(),
-        );
     }
+    let mut merged = Map::new();
+    let mut visits = 0;
+    let found = merge_all_of(schema, defs, &mut merged, &mut visits);
     found.then_some(Cow::Owned(merged))
+}
+
+/// Adds the members `schema` declares, through its `allOf` branches in their order
+/// and then its own, to `merged` (see [`schema_properties`]). Whether any level
+/// declares `properties`.
+fn merge_all_of(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    merged: &mut Map<String, Value>,
+    visits: &mut usize,
+) -> bool {
+    *visits += 1;
+    if *visits > MAX_ALL_OF_BRANCHES {
+        return false;
+    }
+    let mut found = false;
+    for branch in schema
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(branch) = resolve(branch, defs) {
+            found |= merge_all_of(branch, defs, merged, visits);
+        }
+    }
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        found = true;
+        for (member, inner) in props {
+            let held = merged.get(member);
+            if held.is_none() || !unconstrained(inner, defs) {
+                merged.insert(member.clone(), inner.clone());
+            }
+        }
+    }
+    found
+}
+
+/// Whether a member's schema says nothing an answer must meet beyond being an
+/// object, if that: `{}`, `{type: object}`, or annotations only (`description`,
+/// `title`, `example`s). Beside another branch's schema for the same member, it adds
+/// no constraint.
+fn unconstrained(schema: &Value, defs: &Map<String, Value>) -> bool {
+    const ANNOTATIONS: [&str; 6] = [
+        "description",
+        "title",
+        "example",
+        "examples",
+        "default",
+        "nullable",
+    ];
+    let Some(schema) = resolve(schema, defs).and_then(Value::as_object) else {
+        return false;
+    };
+    schema.iter().all(|(key, value)| match key.as_str() {
+        "type" => value == "object",
+        "additionalProperties" => value == &Value::Bool(true),
+        key => ANNOTATIONS.contains(&key),
+    })
 }
 
 pub(crate) fn infer_identity(
@@ -497,6 +581,18 @@ pub(crate) fn infer_identity(
 /// the one scalar member that is one of the contract's `keys`; with none of those,
 /// an [`ID_FALLBACKS`] member, and with two, none.
 fn identity_for(
+    path_param: Option<&str>,
+    success_schema: Option<&Value>,
+    defs: &Map<String, Value>,
+    keys: &Keys,
+) -> Option<Identity> {
+    let props = schema_properties(success_schema, defs)?;
+    let item = path_param.and_then(|param| item_identity(param, &props, defs, keys));
+    item.or_else(|| identity_at(path_param, success_schema, defs, keys))
+}
+
+/// [`identity_for`] of the answer itself, not of an item it holds.
+fn identity_at(
     path_param: Option<&str>,
     success_schema: Option<&Value>,
     defs: &Map<String, Value>,
@@ -1507,6 +1603,10 @@ fn record_held(
             resolve(props.get(member)?, defs).cloned()
         }
         Some(mb_mcm::RecordAt::Item) => array_items(served, defs).cloned(),
+        Some(mb_mcm::RecordAt::MemberItem(member)) => {
+            let props = schema_properties(Some(served), defs)?;
+            array_items(props.get(member)?, defs).cloned()
+        }
     }
 }
 
@@ -3335,6 +3435,87 @@ mod tests {
             assert_eq!(
                 identity_of(&bundle, id),
                 wrapped(Some("id"), "id", "widget"),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_all_of_member_no_branch_constrains_keeps_the_one_that_does() {
+        let defs = json!({
+            "Base": {"type": "object", "properties": {
+                "ok": {"type": "boolean"},
+                "result": {},
+                "meta": {"type": "string"},
+            }},
+            "Gadget": obj(json!({"id": {"type": "string"}})),
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let schema = json!({"allOf": [
+            {"$ref": "#/$defs/Base"},
+            {"type": "object", "properties": {
+                "result": {"$ref": "#/$defs/Gadget"},
+                "meta": {"type": "integer"},
+            }},
+        ]});
+        let props = schema_properties(Some(&schema), &defs).unwrap();
+        assert_eq!(props["result"], json!({"$ref": "#/$defs/Gadget"}));
+        // Both constrain it: the extension, after its base, is kept.
+        assert_eq!(props["meta"], json!({"type": "integer"}));
+        assert_eq!(props["ok"], json!({"type": "boolean"}));
+        // The base after the extension: its `{}` still adds nothing.
+        let reversed = json!({"allOf": [
+            {"type": "object", "properties": {"result": {"$ref": "#/$defs/Gadget"}}},
+            {"$ref": "#/$defs/Base"},
+        ]});
+        let props = schema_properties(Some(&reversed), &defs).unwrap();
+        assert_eq!(props["result"], json!({"$ref": "#/$defs/Gadget"}));
+        // A schema's own members extend its `allOf`.
+        let own = json!({
+            "allOf": [{"$ref": "#/$defs/Base"}],
+            "properties": {"result": {"$ref": "#/$defs/Gadget"}},
+        });
+        let props = schema_properties(Some(&own), &defs).unwrap();
+        assert_eq!(props["result"], json!({"$ref": "#/$defs/Gadget"}));
+    }
+
+    #[test]
+    fn an_envelope_extending_a_base_with_a_placeholder_holds_its_record() {
+        let schemas = json!({
+            "Envelope": {"type": "object", "required": ["success", "result"], "properties": {
+                "success": {"type": "boolean"},
+                "messages": {"type": "array", "items": {"type": "string"}},
+                "result": {},
+            }},
+            "Gadget": obj(json!({"id": {"type": "string"}, "name": {"type": "string"}})),
+        });
+        let single = json!({"allOf": [
+            {"$ref": "#/components/schemas/Envelope"},
+            {"type": "object", "properties": {"result": {"$ref": "#/components/schemas/Gadget"}}},
+        ]});
+        let listing = json!({"allOf": [
+            {"$ref": "#/components/schemas/Envelope"},
+            {"type": "object", "properties": {"result": {
+                "type": "array", "items": {"$ref": "#/components/schemas/Gadget"},
+            }}},
+        ]});
+        let bundle = compiled(
+            &json!({
+                "/gadgets": {"get": answering("list", &listing)},
+                "/gadgets/{gadget_id}": {
+                    "parameters": path_param("gadget_id"),
+                    "get": answering("read", &single),
+                    "put": sending("replace", &obj(json!({"name": {"type": "string"}})), &single),
+                },
+            }),
+            &schemas,
+        );
+        for id in ["read", "replace"] {
+            assert_eq!(
+                identity_of(&bundle, id),
+                wrapped(Some("gadget_id"), "id", "result"),
                 "{id}"
             );
         }

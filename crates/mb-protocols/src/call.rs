@@ -1459,10 +1459,7 @@ pub(crate) async fn complete(
                 body: Some(answer.clone()),
                 ..generated.clone()
             });
-            let own = held_in.and_then(|i| match &i.record {
-                Some(mb_mcm::RecordAt::Member(member)) => Some(member.as_str()),
-                _ => None,
-            });
+            let own = held_in.and_then(mb_mcm::Identity::envelope_member);
             store_wrapped(
                 &mut state,
                 session,
@@ -3177,6 +3174,11 @@ fn record_schema_of(
             let (parts, _) = schema_parts(bundle, Some(schema));
             parts.iter().find_map(|p| p.get("items")).cloned()
         }
+        mb_mcm::RecordAt::MemberItem(member) => {
+            let list = property_schema(bundle, schema, member)?;
+            let (parts, _) = schema_parts(bundle, Some(&list));
+            parts.iter().find_map(|p| p.get("items")).cloned()
+        }
     }
 }
 
@@ -4321,13 +4323,15 @@ async fn seed_entities(
         found: Vec::new(),
     };
     walk.visit(body, schema, "", 0);
-    for resource in walk.found {
-        let stored = resource.clone();
-        if state.insert_seeded(session, resource).await
-            && let Some((_, collection)) = created.filter(|(t, _)| *t == stored.resource_type)
+    // One answer's records read back in its order.
+    let found = walk.found;
+    let stored = state.insert_seeded_all(session, found.clone()).await;
+    for (resource, stored) in found.iter().zip(stored) {
+        if stored
+            && let Some((_, collection)) = created.filter(|(t, _)| *t == resource.resource_type)
         {
             rt.collections()
-                .remember(session, &stored, collection.clone());
+                .remember(session, resource, collection.clone());
         }
     }
 }
@@ -5868,6 +5872,71 @@ impl<'a> StateAccess<'a> {
         }
         stored
     }
+
+    /// [`StateAccess::insert_seeded`] of each of `resources` as one write, so they
+    /// list in their order (see [`mb_state::StateStore::insert_seeded_all`]); whether each was
+    /// stored, in their order.
+    pub(crate) async fn insert_seeded_all(
+        &mut self,
+        s: &SessionKey,
+        resources: Vec<StoredResource>,
+    ) -> Vec<bool> {
+        let mut stored = vec![false; resources.len()];
+        if !self.open() {
+            return stored;
+        }
+        let mut kept: Vec<(usize, StoredResource)> = Vec::with_capacity(resources.len());
+        for (at, r) in resources.into_iter().enumerate() {
+            // The first of two of one id is the one stored, as one at a time.
+            let again = |(_, k): &(usize, StoredResource)| {
+                k.resource_type == r.resource_type && k.id == r.id
+            };
+            if kept.iter().any(again) {
+                continue;
+            }
+            if self.tracks_deleted
+                && deleted::mention_is_deleted(self, s, &r.resource_type, &r.id).await
+            {
+                continue;
+            }
+            kept.push((at, r));
+        }
+        if kept.is_empty() || !self.open() {
+            return stored;
+        }
+        let rt = self.rt;
+        let mut notes = Vec::with_capacity(kept.len());
+        let mut batch = Vec::with_capacity(kept.len());
+        for (at, r) in kept {
+            let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
+            let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
+            notes.push((
+                at,
+                r.resource_type.clone(),
+                value_index::Indexed::of(rt, &r),
+                named,
+                values,
+            ));
+            batch.push(r);
+        }
+        let result = rt.state.insert_seeded_all(s, batch).await;
+        let Some(results) = self.settle(result) else {
+            return stored;
+        };
+        for ((at, t, indexed, named, values), ok) in notes.into_iter().zip(results) {
+            self.wrote |= ok;
+            stored[at] = ok;
+            if !ok {
+                continue;
+            }
+            rt.written_types().remember(s, &t);
+            rt.value_index().remember_indexed(s, indexed);
+            if let Some((t, id)) = named {
+                rt.path_aliases().remember(s, &t, &id, values);
+            }
+        }
+        stored
+    }
 }
 
 /// Stores `resources` in the session: merged over what it holds
@@ -6503,6 +6572,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             op,
             generated.body.as_ref().unwrap_or(&Value::Null),
         );
+        let mut seeded = Vec::new();
         for item in items {
             let Some(id) = item.get(&field).and_then(id_string) else {
                 continue;
@@ -6518,17 +6588,20 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     continue;
                 }
             }
-            let resource = StoredResource {
+            seeded.push(StoredResource {
                 resource_type: resource_type.into(),
-                id: id.clone(),
+                id,
                 data: item.clone(),
-            };
-            let stored = resource.clone();
+            });
+        }
+        // The list's items read back in its order.
+        let stored = state.insert_seeded_all(session, seeded.clone()).await;
+        for (stored, inserted) in seeded.into_iter().zip(stored) {
             let Some(collection) = collection.clone() else {
-                state.insert_seeded(session, resource).await;
                 continue;
             };
-            if state.insert_seeded(session, resource).await {
+            let id = stored.id.clone();
+            if inserted {
                 rt.collections().remember(session, &stored, collection);
             } else if let Some(held) = state.get(session, resource_type, &id).await
                 && rt.collections().get(session, &held).is_none()
@@ -6545,10 +6618,20 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
             let Some(data) = data else { return };
-            let Some(id) = data.get(field).and_then(id_string) else {
-                return;
-            };
-            (id, Some(data))
+            match data.get(field).and_then(id_string) {
+                Some(id) => (id, Some(data)),
+                // An envelope the contract does not say holds the record: the one
+                // member of it that is a record of the type is.
+                None => {
+                    let Some(record) = fitting_member(rt, resource_type, &data, None) else {
+                        return;
+                    };
+                    let Some(id) = record.get(field).and_then(id_string) else {
+                        return;
+                    };
+                    (id, Some(record))
+                }
+            }
         }
         OperationKind::Command(Effect::Update) => {
             let (Some(id), Some(data)) = (target_id, data) else {
@@ -6562,8 +6645,15 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     write_memory::onto_record(rt, op, on, data, generated.status)
                 }
                 // With nothing held, an answer that does not suit the type (a task
-                // acknowledging the update) is no record of it: nothing is stored.
-                Some(_) if !entity_fits(rt, resource_type, &data) => return,
+                // acknowledging the update) is no record of it: nothing is stored,
+                // unless it is an envelope holding the record, the one member of it
+                // that suits the type and carries the target's id.
+                Some(_) if !entity_fits(rt, resource_type, &data) => {
+                    match fitting_member(rt, resource_type, &data, Some((op, id.as_str()))) {
+                        Some(record) => record,
+                        None => return,
+                    }
+                }
                 _ => data,
             };
             (id, Some(data))
@@ -6613,6 +6703,41 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 rt.collections().forget(session, &gone);
             }
         }
+    }
+}
+
+/// The one member of an object `answer`, one level down, that is a record of type
+/// `t` ([`entity_fits`]): the record an envelope the contract does not describe
+/// holds (`{result: {...}, success}`). With a `target` id, a member must also carry
+/// it: as its identity's key or the member the path names, or, with no identity, as
+/// any of its single values. `None` when no member or several are such records.
+fn fitting_member(
+    rt: &MockRuntime,
+    t: &str,
+    answer: &Value,
+    target: Option<(&Operation, &str)>,
+) -> Option<Value> {
+    let Value::Object(members) = answer else {
+        return None;
+    };
+    let carries = |record: &Value| {
+        let Some((op, id)) = target else {
+            return true;
+        };
+        let is_id = |v: &Value| id_string(v).is_some_and(|v| v == id);
+        match &op.identity {
+            Some(identity) => [identity.field.as_str(), identity.path_member()]
+                .iter()
+                .any(|f| record.get(*f).is_some_and(is_id)),
+            None => record.as_object().is_some_and(|r| r.values().any(is_id)),
+        }
+    };
+    let mut fitting = members
+        .values()
+        .filter(|v| v.is_object() && carries(v) && entity_fits(rt, t, v));
+    match (fitting.next(), fitting.next()) {
+        (Some(record), None) => Some(record.clone()),
+        _ => None,
     }
 }
 

@@ -24,6 +24,7 @@ mod create_refusals;
 mod create_repeats;
 mod data_plane_auth;
 mod data_plane_auth_protocols;
+mod envelope_writes;
 #[cfg(feature = "amqp")]
 mod events_amqp;
 mod events_broker;

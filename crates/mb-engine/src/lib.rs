@@ -1214,15 +1214,15 @@ impl Engine {
             return Some(record.clone());
         };
         let mut answer = identity.answer_holding(record.clone(), None);
-        let (Some(mb_mcm::RecordAt::Member(member)), Some(envelope), Some(schema)) = (
-            identity.record.as_ref(),
+        let (Some(member), Some(envelope), Some(schema)) = (
+            identity.envelope_member(),
             answer.as_object_mut(),
             response_schema.or_else(|| op.success_output()?.schema.as_ref()),
         ) else {
             return Some(answer);
         };
         for name in consistency::required_members(bundle, schema) {
-            if &name == member || envelope.contains_key(&name) {
+            if name == member || envelope.contains_key(&name) {
                 continue;
             }
             let member_schema = consistency::property_schema(bundle, schema, &name)?;
@@ -2345,10 +2345,10 @@ fn reflect(
             None => body,
         },
         OperationKind::Command(Effect::Create) => {
-            overlay_request(validator, body, call.body.as_ref())
+            echo_request(validator, body, call.body.as_ref(), from_llm)
         }
         OperationKind::Command(Effect::Update) => {
-            let overlaid = overlay_request(validator, body.clone(), call.body.as_ref());
+            let overlaid = echo_request(validator, body.clone(), call.body.as_ref(), from_llm);
             if is_new_record(op, call, ctx.target, &response, &overlaid) {
                 response.new_record = true;
                 overlaid
@@ -2380,7 +2380,17 @@ fn reflect(
                             Some(target) if op.is_action() && from_llm => {
                                 fill_omitted(validator, body, target)
                             }
-                            target => overlay(validator, body, target.map(|t| &t.data)),
+                            Some(target) => overlay(validator, body, Some(&target.data)),
+                            // Nothing held: the request goes onto the answer itself.
+                            None => {
+                                return reflected(
+                                    validator,
+                                    op,
+                                    call,
+                                    response,
+                                    echo_request(validator, body, call.body.as_ref(), from_llm),
+                                );
+                            }
                         };
                         overlay_request(validator, body, call.body.as_ref())
                     }
@@ -2399,12 +2409,90 @@ fn reflect(
             body
         }
     };
+    reflected(validator, op, call, response, body)
+}
+
+/// `response` answering `body`, with the path's identity forced on it unless it is a
+/// new record ([`reflect`]).
+fn reflected(
+    validator: &SchemaValidator,
+    op: &Operation,
+    call: &OperationCall,
+    mut response: GeneratedResponse,
+    body: Value,
+) -> GeneratedResponse {
     response.body = Some(if response.new_record {
         body
     } else {
         force_identity(validator, op, call, body)
     });
     response
+}
+
+/// [`overlay_request`] onto an answer no stored record settled: a member the request
+/// sends as a list of objects, where the answer holds as many, goes item by item
+/// ([`echo_item`]), so the request's items never take away what the answer's say
+/// beside them (an id, a status, a time the server assigned).
+fn echo_request(
+    validator: &SchemaValidator,
+    base: Value,
+    body: Option<&Value>,
+    answer_wins: bool,
+) -> Value {
+    let (Some(Value::Object(fields)), Value::Object(answer)) = (body, &base) else {
+        return overlay_request(validator, base, body);
+    };
+    let mut fields = fields.clone();
+    for (name, sent) in &mut fields {
+        if let Some(answered) = answer.get(name)
+            && let Some(items) = echo_items(answered, sent, answer_wins)
+        {
+            *sent = items;
+        }
+    }
+    overlay_request(validator, base, Some(&Value::Object(fields)))
+}
+
+/// `sent`'s objects onto `answered`'s, item by item ([`echo_item`]), when both are
+/// lists of as many objects.
+fn echo_items(answered: &Value, sent: &Value, answer_wins: bool) -> Option<Value> {
+    let (Value::Array(answered), Value::Array(sent)) = (answered, sent) else {
+        return None;
+    };
+    let objects = |items: &[Value]| items.iter().all(Value::is_object);
+    if answered.len() != sent.len() || !objects(answered) || !objects(sent) {
+        return None;
+    }
+    let items = answered.iter().zip(sent);
+    Some(Value::Array(
+        items.map(|(a, s)| echo_item(a, s, answer_wins)).collect(),
+    ))
+}
+
+/// The members a request's item sends, onto the answer's item: each it lacks or holds
+/// as `null`, and, for a faker's answer (`!answer_wins`), which knows nothing of the
+/// request, each the request names. An LLM's answer was told the request and keeps its
+/// own. An object or a list of as many objects goes member by member, item by item.
+fn echo_item(answered: &Value, sent: &Value, answer_wins: bool) -> Value {
+    let (Value::Object(answered), Value::Object(sent)) = (answered, sent) else {
+        return answered.clone();
+    };
+    let mut item = answered.clone();
+    for (name, value) in sent {
+        let merged = match item.get(name) {
+            None | Some(Value::Null) => value.clone(),
+            Some(held @ Value::Object(_)) if value.is_object() => {
+                echo_item(held, value, answer_wins)
+            }
+            Some(held) => match echo_items(held, value, answer_wins) {
+                Some(items) => items,
+                None if answer_wins || value.is_null() => held.clone(),
+                None => value.clone(),
+            },
+        };
+        item.insert(name.clone(), merged);
+    }
+    Value::Object(item)
 }
 
 /// The top-level members of an update's stored target its LLM answer advances (see
@@ -3107,6 +3195,10 @@ fn record_schema(bundle: &Bundle, identity: &mb_mcm::Identity, schema: &Value) -
     match identity.record.as_ref()? {
         mb_mcm::RecordAt::Member(member) => consistency::property_schema(bundle, schema, member),
         mb_mcm::RecordAt::Item => consistency::deref(bundle, schema).get("items").cloned(),
+        mb_mcm::RecordAt::MemberItem(member) => {
+            let list = consistency::property_schema(bundle, schema, member)?;
+            consistency::deref(bundle, &list).get("items").cloned()
+        }
     }
 }
 
@@ -3253,6 +3345,50 @@ mod tests {
         // All at once when that validates.
         let out = overlay(&v, json!({"a": "x"}), Some(&json!({"b": 3})));
         assert_eq!(out, json!({"a": "x", "b": 3}));
+    }
+
+    /// A request's list of objects goes onto the answer's item by item: what the
+    /// answer's items say beside the request's members stays, and an LLM's answer keeps
+    /// its own values where a faker's takes the request's.
+    #[test]
+    fn a_request_list_echoes_onto_the_answer_item_by_item() {
+        let item = json!({"type": "object", "properties": {
+            "key": {"type": ["string", "null"]},
+            "name": {"type": "string"},
+            "state": {"type": ["string", "null"]},
+            "tags": {"type": "array", "items": {"type": "object"}},
+        }});
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": item}, "count": {"type": "integer"}},
+        }))
+        .unwrap();
+        let answer = json!({"count": 1, "items": [{
+            "key": "k-1", "name": "Answered", "state": "ACTIVE", "tags": [{"id": "t1", "label": "x"}],
+        }]});
+        let sent = json!({"items": [{
+            "name": "Sent", "state": null, "key": null, "tags": [{"label": "y", "note": "n"}],
+        }]});
+        let llm = echo_request(&v, answer.clone(), Some(&sent), true);
+        assert_eq!(
+            llm,
+            json!({"count": 1, "items": [{
+                "key": "k-1", "name": "Answered", "state": "ACTIVE",
+                "tags": [{"id": "t1", "label": "x", "note": "n"}],
+            }]})
+        );
+        let faker = echo_request(&v, answer.clone(), Some(&sent), false);
+        assert_eq!(
+            faker,
+            json!({"count": 1, "items": [{
+                "key": "k-1", "name": "Sent", "state": "ACTIVE",
+                "tags": [{"id": "t1", "label": "y", "note": "n"}],
+            }]})
+        );
+        // As many items or none: the request's list replaces the answer's, as before.
+        let two = json!({"items": [{"name": "a"}, {"name": "b"}]});
+        let out = echo_request(&v, answer, Some(&two), true);
+        assert_eq!(out["items"], two["items"]);
     }
 
     /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.

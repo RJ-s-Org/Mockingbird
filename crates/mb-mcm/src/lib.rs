@@ -637,6 +637,9 @@ pub enum RecordAt {
     /// The one item of an array: SendGrid's `GET /bounces/{email}` answering
     /// `[{"email": ...}]`, or none when nothing matches.
     Item,
+    /// The one item of an array member of an envelope: an answer of
+    /// `{"Id": ..., "Status": ..., "Contacts": [{"ContactID": ...}]}` for one contact.
+    MemberItem(String),
 }
 
 impl Identity {
@@ -651,6 +654,12 @@ impl Identity {
                 [one] if one.is_object() => Some(one),
                 _ => None,
             },
+            Some(RecordAt::MemberItem(member)) => {
+                match answer.get(member)?.as_array()?.as_slice() {
+                    [one] if one.is_object() => Some(one),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -663,6 +672,12 @@ impl Identity {
                 [one] if one.is_object() => Some(one),
                 _ => None,
             },
+            Some(RecordAt::MemberItem(member)) => {
+                match answer.get_mut(member)?.as_array_mut()?.as_mut_slice() {
+                    [one] if one.is_object() => Some(one),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -678,6 +693,22 @@ impl Identity {
                 Value::Object(envelope)
             }
             Some(RecordAt::Item) => Value::Array(vec![record]),
+            Some(RecordAt::MemberItem(member)) => {
+                let mut envelope = rest.and_then(Value::as_object).cloned().unwrap_or_default();
+                envelope.insert(member.clone(), Value::Array(vec![record]));
+                Value::Object(envelope)
+            }
+        }
+    }
+
+    /// The envelope member holding the record, as [`RecordAt::Member`] or
+    /// [`RecordAt::MemberItem`] name it; `None` for an answer that is the record or
+    /// an array.
+    #[must_use]
+    pub fn envelope_member(&self) -> Option<&str> {
+        match &self.record {
+            Some(RecordAt::Member(member) | RecordAt::MemberItem(member)) => Some(member),
+            None | Some(RecordAt::Item) => None,
         }
     }
 

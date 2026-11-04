@@ -199,6 +199,24 @@ pub trait StateStore: Send + Sync {
         self.upsert(s, r).await?;
         Ok(true)
     }
+    /// [`StateStore::insert_seeded`] of each of `resources`, as one write: each one
+    /// stored is more recent than anything stored before, and among themselves they
+    /// keep their order, so [`StateStore::list`] (most recent first) has an earlier
+    /// entry before a later one. The records an answer holds read back in its order.
+    /// Whether each was stored, in their order. This default inserts the last entry
+    /// first, so every backend's recency sequence orders them.
+    async fn insert_seeded_all(
+        &self,
+        s: &SessionKey,
+        resources: Vec<StoredResource>,
+    ) -> Result<Vec<bool>, StateError> {
+        let mut stored = Vec::with_capacity(resources.len());
+        for r in resources.into_iter().rev() {
+            stored.push(self.insert_seeded(s, r).await?);
+        }
+        stored.reverse();
+        Ok(stored)
+    }
     /// `true` if the resource existed. Never creates a session.
     async fn delete(
         &self,
