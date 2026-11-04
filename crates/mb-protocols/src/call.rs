@@ -33,6 +33,8 @@ mod deleted;
 mod envelopes;
 mod lists;
 mod minted;
+#[cfg(test)]
+mod owner_tie_tests;
 mod pages;
 mod repeats;
 mod runs;
@@ -911,7 +913,7 @@ pub(crate) async fn prepare<'a>(
         && target
             .as_ref()
             .is_none_or(|found| Some(found.id.as_str()) != named_id.as_deref())
-        && state.tracks_deleted
+        && (state.tracks_deleted || deleted::marks_by_id(rt, plan))
         && let (Some(t), Some(id)) = (resource_type, named_id.as_deref())
         && deleted::is_deleted(
             &mut state,
@@ -2867,13 +2869,61 @@ async fn taken_id(
     if requested.as_deref() == Some(id.as_str()) {
         return None;
     }
+    let body = generated.body.as_ref()?;
     if state.get(session, resource_type, &id).await.is_some()
         || (request_values(op, call).contains(&id)
+            && !keyed_apart(state.rt, op, resource_type, field, body)
             && world::held_elsewhere(state, session, resource_type, &id).await)
     {
         return Some(id);
     }
     None
+}
+
+/// Whether `answer` also holds, beside its identity `field` (`id`), the one scalar
+/// member named for its own type `t` (`seat_id` of a `seats` record), and one of the
+/// type's read schema, its record schema or `op`'s own declared success answer
+/// declares both: then the contract keys the record apart from `id`, which may well
+/// hold another record's id (the showing booked), and its naming a held record of
+/// another type is no collision. What the answer alone holds, with no schema
+/// declaring it, keys nothing apart.
+fn keyed_apart(rt: &MockRuntime, op: &Operation, t: &str, field: &str, answer: &Value) -> bool {
+    let Value::Object(members) = answer else {
+        return false;
+    };
+    if field != "id" {
+        return false;
+    }
+    let own = mb_mcm::stem(t);
+    let mut keys = members.iter().filter(|(member, value)| {
+        let lower = member.to_ascii_lowercase();
+        let named = lower
+            .strip_suffix("_id")
+            .or_else(|| lower.strip_suffix("id"))
+            .filter(|name| !name.is_empty())
+            .is_some_and(|name| mb_mcm::stem(name) == own);
+        member.as_str() != field && named && (value.is_string() || value.is_number())
+    });
+    let (Some((key, _)), None) = (keys.next(), keys.next()) else {
+        return false;
+    };
+    let index = rt.index();
+    let read = index.detail_reads.get(t).and_then(|i| {
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    let answered = op.success_output().and_then(|o| o.schema.as_ref());
+    [index.record_schemas.get(t), read, answered]
+        .into_iter()
+        .flatten()
+        .any(|schema| {
+            let declared = schema_members(rt, Some(schema));
+            declared.contains(&"id") && declared.contains(&key.as_str())
+        })
 }
 
 /// A different identity for `record`, the record a create's answer holds (in
@@ -5793,8 +5843,118 @@ fn relative_path_ending(text: &str, name: &str) -> bool {
 
 /// How a member relates to parameter `param`: named for it, or for its id.
 /// `org` also means `organization`, but `org_ref` and `owner_previous` are
-/// other things.
+/// other things. A compound parameter (`organization_id_or_slug`) is tied to
+/// what any of its alternatives is (see [`Compound`]).
 fn tied_to_param(member: &str, param: &str) -> bool {
+    match Compound::of(param) {
+        Some(compound) => compound.ties(member, &[]),
+        None => tied_to_one_param(member, param),
+    }
+}
+
+/// A path parameter whose name joins alternatives with `_or_`
+/// (`organization_id_or_slug`), naming one thing by any of them: the thing
+/// itself, by its stem (`organization`, the first alternative before its last
+/// `_`), and its keys, the first alternative (`organization_id`) and each later
+/// one as a member of the thing (`slug` as `organization_slug`). A compound
+/// whose first alternative has no stem (`id_or_name`) names nothing another
+/// record could be named for, and is read as a plain name. `_or_` is the one
+/// separator read.
+#[derive(Debug, PartialEq)]
+struct Compound {
+    stem: String,
+    keys: Vec<String>,
+}
+
+impl Compound {
+    fn of(param: &str) -> Option<Self> {
+        let lower = param.to_lowercase();
+        let mut parts = lower.split("_or_").filter(|p| !p.is_empty());
+        let (first, second) = (parts.next()?, parts.next()?);
+        let (stem, _) = first
+            .rsplit_once('_')
+            .filter(|(stem, _)| !stem.is_empty())?;
+        let mut keys = vec![first.to_string()];
+        for later in std::iter::once(second).chain(parts) {
+            if later.starts_with(&format!("{stem}_")) {
+                keys.push(later.to_string());
+            } else {
+                keys.push(format!("{stem}_{later}"));
+            }
+        }
+        Some(Self {
+            stem: stem.to_string(),
+            keys,
+        })
+    }
+
+    /// Whether `member` is named for the thing: its stem exactly, or the stem
+    /// then a word boundary (`organization_ref`, `organizationSlug`; not
+    /// `organizations`, nor `username` for `user`), or one of its keys as
+    /// [`tied_to_one_param`] has it. A key the record's own type declares,
+    /// among `own`, is the record's own member and ties nothing.
+    fn ties(&self, member: &str, own: &[&str]) -> bool {
+        let lower = member.to_lowercase();
+        let at_boundary = member.len() > self.stem.len()
+            && lower.starts_with(&self.stem)
+            && member
+                .get(self.stem.len()..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|c| c == '_' || c.is_ascii_uppercase());
+        let keyed = self.keys.iter().any(|key| tied_to_one_param(member, key));
+        let declared = own.iter().any(|o| o.eq_ignore_ascii_case(member));
+        if keyed && declared {
+            return false;
+        }
+        lower == self.stem || at_boundary || keyed
+    }
+}
+
+#[cfg(test)]
+mod compound_param_tests {
+    use super::{Compound, tied_to_param};
+
+    #[test]
+    fn a_compound_parameter_stands_for_each_alternative() {
+        assert_eq!(
+            Compound::of("organization_id_or_slug"),
+            Some(Compound {
+                stem: "organization".into(),
+                keys: vec!["organization_id".into(), "organization_slug".into()],
+            })
+        );
+        assert_eq!(Compound::of("organization"), None);
+        assert_eq!(Compound::of("id_or_name"), None);
+    }
+
+    #[test]
+    fn a_member_ties_to_a_compound_parameter_by_its_alternatives() {
+        for member in [
+            "organization",
+            "organization_id",
+            "organizationId",
+            "organization_slug",
+            "organizationSlug",
+        ] {
+            assert!(tied_to_param(member, "organization_id_or_slug"), "{member}");
+        }
+        // The record's own `slug` or `username` is not its owner's, and `_or_` is the
+        // only separator.
+        assert!(!tied_to_param("slug", "organization_id_or_slug"));
+        assert!(!tied_to_param("organizations", "organization_id_or_slug"));
+        assert!(!tied_to_param("username", "user_id_or_username"));
+        assert!(!tied_to_param("team", "organization_id_or_slug"));
+        assert!(!tied_to_param("organization", "organizationIdOrSlug"));
+        assert!(!tied_to_param("organization", "organization_id"));
+        // A key the record's own type declares is its own.
+        let compound = Compound::of("organization_id_or_slug").unwrap();
+        assert!(!compound.ties("organization_id", &["id", "organization_id"]));
+        assert!(compound.ties("organization", &["id", "organization_id"]));
+    }
+}
+
+/// [`tied_to_param`] for one parameter name.
+fn tied_to_one_param(member: &str, param: &str) -> bool {
     let (member, param) = (member.to_lowercase(), param.to_lowercase());
     member == param
         || member == format!("{param}_id")
@@ -5827,13 +5987,19 @@ fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option
     };
     let is_link = |value: &Value| value.as_str().is_some_and(|text| text.contains("://"));
     let numeric_owner = owner.value.parse::<f64>().is_ok();
+    let compound = Compound::of(&owner.param);
+    let declared = match compound {
+        Some(_) => declared_members(rt, &r.resource_type),
+        None => Vec::new(),
+    };
+    let ties = |member: &str| match &compound {
+        Some(compound) => compound.ties(member, &declared),
+        None => tied_to_param(member, &owner.param),
+    };
     let mut tied = members
         .iter()
         .filter(|(member, value)| {
-            !mb_mcm::is_generic_id(member)
-                && tied_to_param(member, &owner.param)
-                && !is_link(value)
-                && !own_type(member)
+            !mb_mcm::is_generic_id(member) && ties(member) && !is_link(value) && !own_type(member)
         })
         // A number says nothing of an owner the route names by a string.
         .filter(|(_, value)| {
@@ -5841,11 +6007,48 @@ fn owner_evidence(rt: &MockRuntime, r: &StoredResource, owner: &Owner) -> Option
         })
         .peekable();
     if tied.peek().is_some() {
-        return Some(tied.any(|(_, value)| holds(value)));
+        let held = tied.any(|(_, value)| holds(value));
+        // A compound parameter names its owner by one key of several: a member
+        // holding another (the id, under a route given the slug) says nothing.
+        if held || compound.is_none() {
+            return Some(held);
+        }
     }
     strings()
         .any(|text| text.contains("://") && path_shows(text, owner))
         .then_some(true)
+}
+
+/// The members the record schema of `resource_type` declares, as [`typed_as_own`]
+/// finds that schema.
+fn declared_members<'a>(rt: &'a MockRuntime, resource_type: &str) -> Vec<&'a str> {
+    let index = rt.index();
+    let schema = index.record_schemas.get(resource_type).or_else(|| {
+        let i = index.detail_reads.get(resource_type)?;
+        rt.bundle()
+            .operations
+            .get(*i)?
+            .success_output()?
+            .schema
+            .as_ref()
+    });
+    schema_members(rt, schema)
+}
+
+/// The members `schema` declares, its `$ref`s followed and its branches flattened.
+fn schema_members<'a>(rt: &'a MockRuntime, schema: Option<&'a Value>) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    for name in schema_parts(rt.bundle(), schema)
+        .0
+        .iter()
+        .filter_map(|p| p.get("properties")?.as_object())
+        .flat_map(|p| p.keys())
+    {
+        if !names.contains(&name.as_str()) {
+            names.push(name.as_str());
+        }
+    }
+    names
 }
 
 /// Whether the contract types `member` of a `resource_type` record as that same type
@@ -6287,14 +6490,27 @@ pub(crate) async fn stored(
         .await
 }
 
-/// Removes `gone`, a resource the session holds, from it. Keeps the
+/// Removes `gone`, a resource the session holds, from it, as `op`'s delete
+/// `call` asked, and, with `marks`, leaves the marker a REST delete leaves (see
+/// [`deleted`]), so that a later read of it is not generated back. Keeps the
 /// session alive.
 #[cfg(feature = "graphql")]
-pub(crate) async fn delete_resource(rt: &MockRuntime, session: &SessionKey, gone: StoredResource) {
+pub(crate) async fn delete_resource(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    gone: StoredResource,
+    marks: bool,
+) {
+    let session = &plan.session;
     let mut state = StateAccess::new(rt);
     async {
         if state.delete(session, &gone.resource_type, &gone.id).await {
             rt.collections().forget(session, &gone);
+        }
+        if marks && deleted::marks_by_id(rt, plan) {
+            let (t, id) = (gone.resource_type.as_str(), gone.id.as_str());
+            deleted::mark(&mut state, session, (plan.op, call), t, id, Some(&gone)).await;
         }
         state.touch(session).await;
     }

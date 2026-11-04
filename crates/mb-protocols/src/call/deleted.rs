@@ -31,8 +31,9 @@
 //! that value clears its marker, so a record made again with the same email stays.
 //!
 //! An LLM and `consistency: on` only: offline answers, and those with consistency
-//! off, are as they were. Not GraphQL, which stores what its answers hold under their
-//! own types.
+//! off, are as they were. Of GraphQL, only a root delete by id marks, and only a root
+//! read by id honours the marker ([`marks_by_id`]): GraphQL stores what its answers
+//! hold under their own types, so its lists and mentions are left as they are.
 
 use mb_engine::consistency::{list_items_mut, list_member};
 use mb_state::INTERNAL_TYPE;
@@ -55,9 +56,16 @@ const COUNT_NAMES: [&str; 5] = ["total", "count", "totalcount", "totalresults", 
 
 /// Whether this call keeps and honours markers.
 pub(super) fn applies(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
-    rt.consistency
-        && plan.engine.has_provider()
-        && !matches!(plan.op.binding, Binding::Graphql { .. })
+    marks_by_id(rt, plan) && !matches!(plan.op.binding, Binding::Graphql { .. })
+}
+
+/// Whether a delete by id marks what it removed and a read by id honours the marker:
+/// [`applies`], and GraphQL's root fields too, whose delete by id leaves a marker
+/// like a REST one, and whose read of a marked id the session does not hold answers
+/// `null` and an error. The rest stays REST's: a GraphQL answer's lists and mentions
+/// are not checked against markers.
+pub(super) fn marks_by_id(rt: &MockRuntime, plan: &CallPlan<'_>) -> bool {
+    rt.consistency && plan.engine.has_provider()
 }
 
 fn marker_key(t: &str, scope: Option<&str>, id: &str) -> String {
