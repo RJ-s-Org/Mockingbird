@@ -503,7 +503,7 @@ pub(super) async fn mint(
             (plan, call),
             body,
             (cut.size, &cut.size_param),
-            (rest, truncated),
+            (rest, truncated, generated_rest > 0),
         ),
     };
     let Some((page, document)) = kept else {

@@ -39,12 +39,15 @@
 //! again. A page past the run's items is the model's. The member that confirmed the
 //! parameter holds the request's value where it held the first page's; so does the one
 //! integer member beside the list, or in an object beside it, named as the page size.
-//! The more flag is the one boolean the answer declares in the object holding that
-//! member (`page_context.has_more_page`, as [`pages`]' sits beside its token); with no such
-//! member, or several booleans there, there is none. The first page keeps the model's
-//! value, and the last page sets it `false` where the first said `true`, unless the run
-//! may hold fewer records than the store (a read of it that came back full). Such a page
-//! is not cached, as the run serves it.
+//! The more flag is the one boolean the answer declares in the nested object holding
+//! that member (`page_context.has_more_page`, as [`pages`]' sits beside its token); with
+//! no such member, one in the envelope itself (where `success` sits beside `page`), or
+//! several booleans there, there is none. The first page keeps the model's value. The
+//! last page sets it `false` where the first said `true` only when the model answered
+//! more items than its page size, so that `true` said more follow; of a run the store's
+//! records made, the model saw one full page, and its flag stays as given. Nor does it
+//! when the run may hold fewer records than the store (a read of it that came back
+//! full). Such a page is not cached, as the run serves it.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says, and plain calls
 //! (no scenario or forced status).
@@ -329,6 +332,9 @@ struct Run {
     rest: Vec<Value>,
     /// Whether the store may hold more records than `rest`.
     truncated: bool,
+    /// Whether the model answered more items than the page size, so that its more
+    /// flag, if `true`, said there were more.
+    from_cut: bool,
 }
 
 impl Run {
@@ -344,6 +350,7 @@ impl Run {
             "page": self.page,
             "rest": self.rest,
             "truncated": self.truncated,
+            "from_cut": self.from_cut,
         })
     }
 
@@ -362,6 +369,7 @@ impl Run {
             size: usize::try_from(value.get("size")?.as_u64()?).ok()?,
             size_param: text(&value, "size_param")?,
             truncated: value.get("truncated")?.as_bool()?,
+            from_cut: value.get("from_cut")?.as_bool()?,
             page: value.get_mut("page")?.take(),
             rest,
         })
@@ -369,13 +377,18 @@ impl Run {
 }
 
 /// The more flag of a list whose page-start parameter is `position`: the one boolean
-/// the answer declares in the object holding its echo, its parents and name.
+/// the answer declares in the object holding its echo, its parents and name, when that
+/// object is nested (Zoho's `page_context`): in the envelope itself, a boolean beside
+/// the echo (`success`) says nothing of pages.
 fn flag(
     bundle: &mb_mcm::Bundle,
     op: &Operation,
     position: &Position,
 ) -> Option<(Vec<String>, String)> {
     let (_, parents) = position.echo.as_ref()?.split_last()?;
+    if parents.is_empty() {
+        return None;
+    }
     match booleans_at(bundle, op, parents).as_slice() {
         [one] => Some((parents.to_vec(), one.clone())),
         _ => None,
@@ -430,7 +443,7 @@ pub(super) fn first_page(
     (plan, call): (&CallPlan<'_>, &OperationCall),
     body: &Value,
     (size, size_param): (usize, &str),
-    (rest, truncated): (Vec<Value>, bool),
+    (rest, truncated, from_cut): (Vec<Value>, bool, bool),
 ) -> Option<(Value, StoredResource)> {
     let bundle = rt.bundle();
     let op = plan.op;
@@ -468,6 +481,7 @@ pub(super) fn first_page(
         page: page.clone(),
         rest,
         truncated,
+        from_cut,
     };
     let document = StoredResource {
         resource_type: INTERNAL_TYPE.to_string(),
@@ -571,7 +585,9 @@ pub(super) async fn serve(
             body = said;
         }
     }
-    let last = !more && !run.truncated;
+    // Only a model that answered more than a page said, with `true`, there was more: of
+    // one full page it could not know, and its flag stays as given.
+    let last = !more && !run.truncated && run.from_cut;
     let mut served = if last {
         // The last page: no more, as the first page said there was, where the answer
         // allows.

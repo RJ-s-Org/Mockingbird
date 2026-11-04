@@ -2078,7 +2078,8 @@ fn zoho_page(tasks: &[Value], page: u64, more: bool) -> Value {
 
 /// Page 1 of one, while the session holds another task: page 1 is as the model
 /// answered it, and page 2 is the other task, served from the store, saying it is page
-/// 2 and, as page 1 said there was more, the last.
+/// 2. The model saw one full page, so its `has_more_page` says nothing of the store's
+/// records: it stays as given.
 #[tokio::test]
 async fn page_two_by_number_is_the_stored_rest() {
     let mut script = created("open");
@@ -2092,7 +2093,7 @@ async fn page_two_by_number_is_the_stored_rest() {
     let second = api.get("/tasks?per_page=1&page=2").await;
     assert_eq!(
         second,
-        zoho_page(&[stored_task("t2", "B", "open")], 2, false),
+        zoho_page(&[stored_task("t2", "B", "open")], 2, true),
         "{second}"
     );
     // The first page again is the same page.
@@ -2556,7 +2557,7 @@ async fn page_two_sees_a_delete_and_an_update_since_page_one() {
     let second = api.get("/tasks?per_page=1&page=2").await;
     assert_eq!(
         second,
-        zoho_page(&[stored_task("t3", "C2", "done")], 2, false),
+        zoho_page(&[stored_task("t3", "C2", "done")], 2, true),
         "{second}"
     );
     // The delete needs no model call.
@@ -2631,4 +2632,73 @@ async fn page_two_is_of_the_page_s_parent() {
         theirs
     );
     assert_eq!(api.provider.requests().len(), 5);
+}
+
+/// A page the model answered longer than its size, saying there is more: the last page
+/// says there is none.
+#[tokio::test]
+async fn a_cut_page_s_more_flag_ends_on_the_last_page() {
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    let answer = json!({
+        "code": 0,
+        "data": [t1, t2],
+        "page_context": {"page": 1, "per_page": 1, "has_more_page": true},
+    });
+    let api = api_of(&stored_pages(BY_PAGE), true, vec![Ok(answer.to_string())]);
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(first, zoho_page(std::slice::from_ref(&t1), 1, true));
+    let last = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(last, zoho_page(&[t2], 2, false));
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// C2: a boolean in the envelope beside a top-level echo of the page (`success`) is no
+/// more flag, even on the last page of a cut.
+#[tokio::test]
+async fn a_boolean_beside_a_top_level_echo_is_no_more_flag() {
+    let schema = r##"
+                type: object
+                properties:
+                  success: {type: boolean}
+                  page: {type: integer}
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}"##;
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    pages_of(
+        schema,
+        json!({"success": true, "page": 1, "data": [t1, t2]}),
+        json!({"success": true, "page": 1, "data": [t1]}),
+        json!({"success": true, "page": 2, "data": [t2]}),
+    )
+    .await;
+}
+
+/// C3: of a run the store's records made, the model saw one full page, so the flag
+/// beside the echo (`meta.isLast`, which the model set `true`) stays as given.
+#[tokio::test]
+async fn a_stored_run_leaves_the_flag_as_given() {
+    let schema = r##"
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  meta:
+                    type: object
+                    properties: {page: {type: integer}, isLast: {type: boolean}}"##;
+    let mut script = created("open");
+    let page =
+        json!({"data": [stored_task("t1", "A", "open")], "meta": {"page": 1, "isLast": true}});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(&list_of(PAGE_PARAM, schema)), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, page);
+    assert_eq!(
+        api.get("/tasks?per_page=1&page=2").await,
+        json!({"data": [stored_task("t2", "B", "open")], "meta": {"page": 2, "isLast": true}})
+    );
+    assert_eq!(api.provider.requests().len(), 3);
 }
