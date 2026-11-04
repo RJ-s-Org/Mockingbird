@@ -1288,15 +1288,21 @@ pub(crate) async fn complete(
             && deleted::applies(rt, plan)
             && let Some(body) = generated.body.as_mut()
         {
+            // The model's own next page, after a rest the mock served: not those again,
+            // and its token as the model gave it.
+            let followed = pages::followed(&mut state, (plan, call), body).await;
             // The store first: a filter sees what the session wrote since.
             lists::overlay_stored(&mut state, (plan, call), resource_type, body).await;
+            if let Some(followed) = &followed {
+                pages::drop_served(plan, rt, body, followed);
+            }
             let cut = lists::narrow(rt, plan, call, body);
             // A full page whose rest the model left out, but the store holds.
-            let cut = match fallback {
-                false => {
+            let cut = match (fallback, followed.is_some()) {
+                (false, false) => {
                     lists::stored_rest(&mut state, (plan, call), resource_type, body, cut).await
                 }
-                true => None,
+                _ => None,
             };
             let kept = match cut {
                 Some(cut) => {
@@ -1304,9 +1310,15 @@ pub(crate) async fn complete(
                 }
                 None => false,
             };
-            // A first page kept nothing: no run of an earlier one serves its next pages.
+            // A first page kept nothing: no run of an earlier one serves its next pages,
+            // and a token of the model's it keeps leads on to nothing the mock served.
             if !kept {
                 runs::forget(&mut state, (plan, call)).await;
+                if followed.is_none()
+                    && let Some(body) = generated.body.as_ref()
+                {
+                    pages::forget_followed(&mut state, (plan, call), body).await;
+                }
             }
         }
         if (200..300).contains(&generated.status)
@@ -1447,6 +1459,7 @@ pub(crate) async fn complete(
                         target_id: target_id.clone().filter(|_| !foreign_key),
                         generated: &generated,
                         request_body: state_call.body.as_ref(),
+                        query: Some(&call.query),
                         collection: collection.clone(),
                         origin,
                         held: target.is_some() && !generated.new_record,
@@ -5355,26 +5368,113 @@ struct CollectionRecords {
     records: HashMap<OwnRead, CollectionRecord>,
     /// The resources a top-level create stored, in no collection, until a write puts
     /// them in one.
-    top_level: std::collections::HashSet<OwnRead>,
+    top_level: HashMap<OwnRead, TopLevel>,
     /// The order of the next record.
     next: u64,
 }
 
-/// Where a resource was recorded, its hash then, when, and whether a create put it
-/// there.
+impl CollectionRecords {
+    /// Makes room for one more: when full, the oldest quarter goes, whichever session
+    /// it is of, so no session's records are all lost at once.
+    fn make_room(&mut self) {
+        let len = self.records.len() + self.top_level.len();
+        if len < MAX_COLLECTIONS {
+            return;
+        }
+        let mut orders: Vec<u64> = self
+            .records
+            .values()
+            .map(|r| r.order)
+            .chain(self.top_level.values().map(|t| t.order))
+            .collect();
+        orders.sort_unstable();
+        let keep_from = orders.get(len / 4).copied().unwrap_or(u64::MAX);
+        self.records.retain(|_, r| r.order >= keep_from);
+        self.top_level.retain(|_, t| t.order >= keep_from);
+    }
+
+    fn next_order(&mut self) -> u64 {
+        let order = self.next;
+        self.next += 1;
+        order
+    }
+}
+
+/// The query values the create that stored a resource carried (`org=acme`), as
+/// trimmed text, with the hash of the resource as this runtime last wrote it: a list
+/// asking them again asks for what the create was made in. This runtime's own writes
+/// of the resource keep it, as a write does not move a resource out of its scope, and
+/// bring the hash up to date. A change this runtime did not write (another node's, an
+/// effect stored past [`write_state`], a reset of the session followed by a record
+/// with other members) leaves it noted but no longer known ([`ScopeOf::Noted`]). A
+/// reset of the session is not told to the runtime, so a record stored again after one
+/// with the very same members finds the scope its create had.
+#[derive(Debug, Clone)]
+struct Scope {
+    pairs: Vec<(String, String)>,
+    digest: u64,
+}
+
+/// What this runtime knows of the scope a stored resource's create carried, for one
+/// query parameter.
+#[derive(Debug, PartialEq, Eq)]
+enum ScopeOf {
+    /// The create carried these values under it, and the resource is as this runtime
+    /// last wrote it.
+    Carried(Vec<String>),
+    /// The create carried it, but the resource changed since in a way this runtime did
+    /// not write: its values are not known to hold, nor is any part of its text.
+    Noted,
+    /// Not known: no scope noted, or the create did not carry the parameter.
+    Unknown,
+}
+
+/// A resource a top-level create stored: when, and the scope its create carried.
+#[derive(Debug)]
+struct TopLevel {
+    order: u64,
+    scope: Option<Scope>,
+}
+
+/// The values of `query` as trimmed, non-empty text, each under its parameter: every
+/// element of an array, and nothing of an object.
+fn query_texts(query: &Map<String, Value>) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (name, value) in query {
+        let values = match value {
+            Value::Array(values) => values.iter().collect(),
+            other => vec![other],
+        };
+        for value in values {
+            if let Some(text) = id_string(value) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    pairs.push((name.clone(), text.to_string()));
+                }
+            }
+        }
+    }
+    pairs
+}
+
+/// Where a resource was recorded, its hash then, when, whether a create put it there,
+/// and the scope that create carried (see [`Scope`]).
 #[derive(Debug)]
 struct CollectionRecord {
     collection: Collection,
     digest: u64,
     order: u64,
     created: bool,
+    scope: Option<Scope>,
 }
 
 impl Collections {
     fn remember(&self, session: &SessionKey, r: &StoredResource, collection: Collection) {
-        self.record(session, r, collection, false);
+        self.place(session, r, collection, false, false);
     }
 
+    /// Records where this runtime's write of `r` put it, keeping the scope noted for it
+    /// (see [`Scope`]), as of `r` now.
     fn record(
         &self,
         session: &SessionKey,
@@ -5382,17 +5482,36 @@ impl Collections {
         collection: Collection,
         created: bool,
     ) {
+        self.place(session, r, collection, created, true);
+    }
+
+    /// Records where `r` is, keeping the scope noted for it: as of `r` now when
+    /// `written`, this runtime's own write; as it was otherwise (a list showing `r`),
+    /// so a scope no longer known ([`ScopeOf::Noted`]) does not come back.
+    fn place(
+        &self,
+        session: &SessionKey,
+        r: &StoredResource,
+        collection: Collection,
+        created: bool,
+        written: bool,
+    ) {
         let Ok(mut held) = self.0.lock() else {
             return;
         };
-        if held.records.len() + held.top_level.len() >= MAX_COLLECTIONS {
-            held.records.clear();
-            held.top_level.clear();
-        }
-        let order = held.next;
-        held.next += 1;
+        held.make_room();
+        let order = held.next_order();
         let key = OwnReads::key(session, r);
-        held.top_level.remove(&key);
+        let digest = OwnReads::digest(&r.data);
+        let scope = held
+            .top_level
+            .remove(&key)
+            .and_then(|top| top.scope)
+            .or_else(|| held.records.get(&key).and_then(|was| was.scope.clone()))
+            .map(|scope| match written {
+                true => Scope { digest, ..scope },
+                false => scope,
+            });
         // A later write or list there leaves what a create put there.
         let created = created
             || held
@@ -5401,18 +5520,97 @@ impl Collections {
                 .is_some_and(|was| was.created && was.collection == collection);
         let record = CollectionRecord {
             collection,
-            digest: OwnReads::digest(&r.data),
+            digest,
             order,
             created,
+            scope,
         };
         held.records.insert(key, record);
     }
 
     fn forget(&self, session: &SessionKey, r: &StoredResource) {
+        self.forget_key(&OwnReads::key(session, r));
+    }
+
+    /// Forgets the resource of type `t` and id `id` in `session`, its scope with it.
+    fn forget_id(&self, session: &SessionKey, t: &str, id: &str) {
+        self.forget_key(&OwnRead {
+            session: session.clone(),
+            resource_type: t.to_string(),
+            id: id.to_string(),
+        });
+    }
+
+    fn forget_key(&self, key: &OwnRead) {
         if let Ok(mut held) = self.0.lock() {
-            let key = OwnReads::key(session, r);
-            held.records.remove(&key);
-            held.top_level.remove(&key);
+            held.records.remove(key);
+            held.top_level.remove(key);
+        }
+    }
+
+    /// Records the query values the create that stored `r` just carried, beside where
+    /// it was placed (see [`Scope`]); nothing where it was placed nowhere known. Nothing
+    /// is stored.
+    fn note_scope(&self, session: &SessionKey, r: &StoredResource, query: &Map<String, Value>) {
+        let pairs = query_texts(query);
+        let scope = (!pairs.is_empty()).then(|| Scope {
+            pairs,
+            digest: OwnReads::digest(&r.data),
+        });
+        let Ok(mut held) = self.0.lock() else {
+            return;
+        };
+        let key = OwnReads::key(session, r);
+        if let Some(record) = held.records.get_mut(&key) {
+            record.scope = scope;
+        } else if let Some(top) = held.top_level.get_mut(&key) {
+            top.scope = scope;
+        }
+    }
+
+    /// Brings the scope noted for `r` up to date with this runtime's own write of it,
+    /// other than its create: it stays, as of `r` now.
+    fn refresh_scope(&self, session: &SessionKey, r: &StoredResource) {
+        let Ok(mut held) = self.0.lock() else {
+            return;
+        };
+        let key = OwnReads::key(session, r);
+        let digest = OwnReads::digest(&r.data);
+        if let Some(scope) = held.records.get_mut(&key).and_then(|r| r.scope.as_mut()) {
+            scope.digest = digest;
+        }
+        if let Some(scope) = held.top_level.get_mut(&key).and_then(|t| t.scope.as_mut()) {
+            scope.digest = digest;
+        }
+    }
+
+    /// What the create that stored `r` carried under query parameter `param` (see
+    /// [`ScopeOf`]).
+    fn carried(&self, session: &SessionKey, r: &StoredResource, param: &str) -> ScopeOf {
+        let Ok(held) = self.0.lock() else {
+            return ScopeOf::Unknown;
+        };
+        let key = OwnReads::key(session, r);
+        let Some(scope) = held
+            .records
+            .get(&key)
+            .and_then(|record| record.scope.as_ref())
+            .or_else(|| held.top_level.get(&key).and_then(|t| t.scope.as_ref()))
+        else {
+            return ScopeOf::Unknown;
+        };
+        let values: Vec<String> = scope
+            .pairs
+            .iter()
+            .filter(|(p, _)| p == param)
+            .map(|(_, v)| v.clone())
+            .collect();
+        if values.is_empty() {
+            ScopeOf::Unknown
+        } else if scope.digest == OwnReads::digest(&r.data) {
+            ScopeOf::Carried(values)
+        } else {
+            ScopeOf::Noted
         }
     }
 
@@ -5421,13 +5619,11 @@ impl Collections {
         let Ok(mut held) = self.0.lock() else {
             return;
         };
-        if held.records.len() + held.top_level.len() >= MAX_COLLECTIONS {
-            held.records.clear();
-            held.top_level.clear();
-        }
+        held.make_room();
+        let order = held.next_order();
         let key = OwnReads::key(session, r);
         held.records.remove(&key);
-        held.top_level.insert(key);
+        held.top_level.insert(key, TopLevel { order, scope: None });
     }
 
     /// Where `r` is, as far as this runtime's writes tell: `Some(Some(_))` in a
@@ -5439,7 +5635,7 @@ impl Collections {
         }
         let held = self.0.lock().ok()?;
         held.top_level
-            .contains(&OwnReads::key(session, r))
+            .contains_key(&OwnReads::key(session, r))
             .then_some(None)
     }
 
@@ -5937,6 +6133,7 @@ impl<'a> StateAccess<'a> {
         self.wrote |= ok;
         if ok {
             self.rt.value_index().forget(s, t, id);
+            self.rt.collections().forget_id(s, t, id);
         }
         ok
     }
@@ -6572,6 +6769,9 @@ struct WriteRequest<'a> {
     target_id: Option<String>,
     generated: &'a GeneratedResponse,
     request_body: Option<&'a Value>,
+    /// The call's query, which a create's record is noted as made under (see
+    /// [`Collections::note_scope`]).
+    query: Option<&'a Map<String, Value>>,
     /// Where the path puts what this writes (see [`collection_of`]).
     collection: Option<Collection>,
     origin: WriteOrigin,
@@ -6590,6 +6790,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         target_id,
         generated,
         request_body,
+        query,
         collection,
         origin,
         held: was_held,
@@ -6705,6 +6906,10 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     (None, None) if created => rt.collections().place_top_level(session, &stored),
                     (None, None) => {}
                 }
+                match query {
+                    Some(query) if created => rt.collections().note_scope(session, &stored, query),
+                    _ => rt.collections().refresh_scope(session, &stored),
+                }
             }
         }
         None => {
@@ -6748,6 +6953,108 @@ mod tests {
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn a_create_s_scope_is_noted_and_forgotten() {
+        let collections = Collections::default();
+        let at = SessionKey {
+            workspace: "default".into(),
+            mock: "scopes".into(),
+            session: "s".into(),
+        };
+        let r = StoredResource {
+            resource_type: "invoices".into(),
+            id: "1".into(),
+            data: json!({"id": "1"}),
+        };
+        let mut query = Map::new();
+        query.insert("organization_id".into(), json!(" 42 "));
+        query.insert("tag".into(), json!(["a", "b"]));
+        query.insert("deep".into(), json!({"x": 1}));
+        // Placed nowhere known: no scope.
+        collections.note_scope(&at, &r, &query);
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Unknown
+        );
+        collections.place_top_level(&at, &r);
+        collections.note_scope(&at, &r, &query);
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Carried(vec!["42".to_string()])
+        );
+        assert_eq!(
+            collections.carried(&at, &r, "tag"),
+            ScopeOf::Carried(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(collections.carried(&at, &r, "deep"), ScopeOf::Unknown);
+        // Changed by a write this runtime did not record: noted, no longer known.
+        let changed = StoredResource {
+            data: json!({"id": "1", "x": 2}),
+            ..r.clone()
+        };
+        assert_eq!(
+            collections.carried(&at, &changed, "organization_id"),
+            ScopeOf::Noted
+        );
+        // This runtime's own write keeps it, as of the record now.
+        collections.refresh_scope(&at, &changed);
+        assert_eq!(
+            collections.carried(&at, &changed, "organization_id"),
+            ScopeOf::Carried(vec!["42".to_string()])
+        );
+        // So does a write placing it in a collection.
+        let collection = Collection {
+            template: "/orgs/{org}/invoices".into(),
+            path: "/orgs/o/invoices".into(),
+        };
+        collections.record(&at, &r, collection.clone(), false);
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Carried(vec!["42".to_string()])
+        );
+        // A list showing it changed behind the runtime's back leaves it noted only.
+        let moved = StoredResource {
+            data: json!({"id": "1", "x": 3}),
+            ..r.clone()
+        };
+        collections.remember(&at, &moved, collection);
+        assert_eq!(
+            collections.carried(&at, &moved, "organization_id"),
+            ScopeOf::Noted
+        );
+        // A delete ends it.
+        collections.forget_id(&at, "invoices", "1");
+        assert_eq!(
+            collections.carried(&at, &r, "organization_id"),
+            ScopeOf::Unknown
+        );
+    }
+
+    #[test]
+    fn a_full_collections_record_drops_only_its_oldest() {
+        let collections = Collections::default();
+        let at = |n: usize| SessionKey {
+            workspace: "default".into(),
+            mock: "full".into(),
+            session: format!("s{n}"),
+        };
+        let r = |n: usize| StoredResource {
+            resource_type: "t".into(),
+            id: n.to_string(),
+            data: json!({"id": n}),
+        };
+        for n in 0..=MAX_COLLECTIONS {
+            collections.place_top_level(&at(n), &r(n));
+        }
+        assert_eq!(collections.placement(&at(0), &r(0)), None);
+        let last = MAX_COLLECTIONS;
+        assert_eq!(collections.placement(&at(last), &r(last)), Some(None));
+        assert_eq!(
+            collections.placement(&at(last - 1), &r(last - 1)),
+            Some(None)
+        );
+    }
 
     #[test]
     fn siblings_are_one_level_under_the_parent() {
