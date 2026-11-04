@@ -16,8 +16,7 @@ info:
     `duplicate`. Without an `id` the service makes one.
 
     ETags. Every calendar and event has an `etag`, which changes whenever the resource
-    changes, and a read answers the same value in its `ETag` header. A GET that sends
-    the etag it last read in `If-None-Match` answers 304 Not Modified, with no body,
+    changes. A GET that sends the etag it last read in `If-None-Match` answers 304 Not Modified, with no body,
     when the resource is unchanged, and the resource with its new etag when it has
     changed. An update, patch or delete that sends `If-Match` succeeds only while the
     resource still has that etag; once it has changed, the request is refused with
@@ -38,9 +37,10 @@ info:
     Sync tokens. The last page of a list answers `nextSyncToken`. A later list that sends
     it as `syncToken` answers only the events that changed since that token was made:
     created, updated or deleted ones, deleted events included with `status`
-    `cancelled` whatever `showDeleted` says, and answers a fresh `nextSyncToken`.
-    `syncToken` cannot be combined with `timeMin`, `timeMax`, `q`, `orderBy`,
-    `iCalUID`, `privateExtendedProperty` or `sharedExtendedProperty`: such a request is
+    `cancelled`, and answers a fresh `nextSyncToken`. With `syncToken`, deleted events
+    are always included and `showDeleted=false` may not be sent. `syncToken` cannot be
+    combined with `iCalUID`, `orderBy`, `privateExtendedProperty`, `q`,
+    `sharedExtendedProperty`, `timeMin`, `timeMax` or `updatedMin`: such a request is
     refused with 400. A token the server has invalidated answers 410 Gone (reason
     `fullSyncRequired`); the client then lists everything again without a token.
 
@@ -91,8 +91,6 @@ paths:
       responses:
         "200":
           description: The calendar.
-          headers:
-            ETag: {$ref: "#/components/headers/ETag"}
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Calendar"}
@@ -109,8 +107,9 @@ paths:
       description: |
         The calendar's events, filtered by the parameters. Deleted events are left out
         unless `showDeleted=true` or a `syncToken` is sent. With `syncToken`, only the
-        events changed since that token; `timeMin`, `timeMax`, `q` and `orderBy` cannot
-        be sent with it (400).
+        events changed since that token, deleted ones always included; `iCalUID`,
+        `orderBy`, `privateExtendedProperty`, `q`, `sharedExtendedProperty`, `timeMin`,
+        `timeMax` and `updatedMin` cannot be sent with it (400), nor `showDeleted=false`.
       parameters:
         - name: timeMin
           in: query
@@ -142,7 +141,7 @@ paths:
           schema: {type: string}
         - name: showDeleted
           in: query
-          description: "Also list deleted events, with `status` `cancelled`."
+          description: "Also list deleted events, with `status` `cancelled`. With syncToken deleted events are always included, and false may not be sent."
           schema: {type: boolean, default: false}
         - name: syncToken
           in: query
@@ -191,9 +190,7 @@ paths:
         - $ref: "#/components/parameters/ifNoneMatch"
       responses:
         "200":
-          description: The event; the ETag header holds its etag.
-          headers:
-            ETag: {$ref: "#/components/headers/ETag"}
+          description: The event.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Event"}
@@ -285,10 +282,6 @@ components:
       in: header
       description: "An etag last read: the change goes ahead only while the resource still has it, else 412."
       schema: {type: string}
-  headers:
-    ETag:
-      description: The resource's etag, the same value as its etag field.
-      schema: {type: string, example: '"3181161784712000"'}
   responses:
     Error:
       description: "`{error: {code, message, errors: [{domain, reason, message}]}}`."

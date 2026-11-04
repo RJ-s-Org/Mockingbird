@@ -26,9 +26,9 @@ info:
     with 409 `AlreadyExists`. The same name may be used in another namespace, and each
     namespace's objects are its own: a list in one namespace never holds another's.
 
-    Updates are optimistic. `PUT` replaces the whole object and must send the
-    `metadata.resourceVersion` it read; when the object has been written since, the
-    update is refused with 409 `Conflict` and nothing changes. A `PUT` that changes the
+    Updates are optimistic. `PUT` replaces the whole object; when it sends a
+    `metadata.resourceVersion` that is no longer current (the object has been written
+    since it was read), the update is refused with 409 `Conflict` and nothing changes. A `PUT` that changes the
     object answers it with a new `resourceVersion`. `PATCH` changes part of an object
     without a resourceVersion; with `Content-Type: application/merge-patch+json` the body
     is a JSON merge patch (RFC 7386): keys sent are set, a key sent as `null` is removed,
@@ -40,8 +40,9 @@ info:
     terms (`app`, `!app`), joined by commas, which all must hold. `fieldSelector`
     filters on `metadata.name` and `metadata.namespace` the same way (`metadata.name=x`).
     Lists are paged by `limit`: when more objects follow, `metadata.continue` holds a
-    token and `metadata.remainingItemCount` counts the objects after this page; the next
-    request sends that token as `continue` with the same selectors. The last page has no
+    token and `metadata.remainingItemCount` counts the objects after this page (it is
+    unset when a label or field selector is used); the next request sends that token
+    as `continue` with the same selectors. The last page has no
     `continue` token. Pages of one list never repeat an object.
 
     `DELETE` answers 200. Deleting a config map answers a `Status` with `status`
@@ -198,8 +199,8 @@ paths:
       operationId: replaceCoreV1NamespacedConfigMap
       summary: Replace a config map
       description: |
-        Replaces the whole object. `metadata.resourceVersion` must be the one last read:
-        a stale one is refused with 409 Conflict and nothing changes. Changing the data of
+        Replaces the whole object. When it sends a `metadata.resourceVersion` that is no
+        longer current, it is refused with 409 Conflict and nothing changes. Changing the data of
         an immutable config map is refused with 422 Invalid.
       requestBody:
         required: true
@@ -315,7 +316,7 @@ components:
       properties:
         resourceVersion: {type: string}
         continue: {type: string, description: "A token for the next page; absent on the last page."}
-        remainingItemCount: {type: integer, description: The number of objects after this page.}
+        remainingItemCount: {type: integer, description: "The number of objects after this page; unset when a label or field selector is used."}
     Namespace:
       type: object
       properties:

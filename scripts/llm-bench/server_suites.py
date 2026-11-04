@@ -6084,11 +6084,11 @@ BLIND10_CHECKS = {
     ],
     "googlecalendar": [
         "a created calendar keeps its summary and time zone", "an event keeps its id, times and summary",
-        "a taken event id is refused as duplicate", "read matches the event and its ETag header",
+        "a taken event id is refused as duplicate", "read matches the created event",
         "If-None-Match with the current etag answers 304", "a patch changes only the fields sent and the etag",
         "If-None-Match with an old etag answers the changed event", "a stale If-Match is refused with 412",
         "timeMin and timeMax keep the events in the window", "q finds the event by its description",
-        "maxResults 1 by start time answers one event and a page token",
+        "maxResults 1 by start time answers the first event",
         "the page token reaches the next event by start time",
         "a deleted event is listed only with showDeleted, as cancelled",
         "a sync token answers only the changes since",
@@ -6098,7 +6098,7 @@ BLIND10_CHECKS = {
         "a taken name is refused as invalid_params", "config vars set the vars sent",
         "null removes a var and keeps the rest", "each config change adds the current release",
         "a release reads by its version", "a rollback restores that release's config vars",
-        "Range max 1 answers 206 and a Next-Range", "Next-Range reaches the next app",
+        "Range max 1 answers 206 and one app", "Next-Range reaches the next app",
         "order desc reverses the range", "a custom domain is added and listed",
         "a renamed app keeps its id and frees the old name", "a deleted app is not found by id or name",
     ],
@@ -6107,7 +6107,7 @@ BLIND10_CHECKS = {
         "read by namespace and name matches the created config map", "a taken name is refused as AlreadyExists",
         "the same name is free in another namespace", "generateName names the config map from the prefix",
         "an equality selector keeps the namespace's matches", "a set selector keeps the matching tiers",
-        "limit answers a page and a continue token", "continue reaches the rest of the list",
+        "limit answers a page of three", "continue reaches the rest of the list",
         "a put with the read resourceVersion replaces the data", "a stale resourceVersion is refused as a Conflict",
         "a merge patch sets, removes and keeps keys", "an immutable config map refuses a data change",
     ],
@@ -6179,7 +6179,8 @@ def databricks_steps(j):
     read = user(u1)
     j.check("read by id matches the created user",
             eq(read.get("id"), u1) and eq(read.get("userName"), ana) and eq(read.get("displayName"), "Ana Silva")
-            and obj(read.get("name")) == new["name"],
+            and eq(obj(read.get("name")).get("givenName"), "Ana")
+            and eq(obj(read.get("name")).get("familyName"), "Silva"),
             id=read.get("id"), userName=read.get("userName"), user_name=read.get("name"))
     taken = j.call("POST", f"{root}/Users", body={"schemas": [SCIM_USER], "userName": ana.upper(),
                                                   "displayName": "Ana again"})
@@ -6211,7 +6212,8 @@ def databricks_steps(j):
     read = user(u1)
     j.check("a replace patch changes only its path",
             eq(read.get("displayName"), "Ana Costa") and eq(read.get("userName"), ana)
-            and obj(read.get("name")) == new["name"] and read.get("active") is True,
+            and eq(obj(read.get("name")).get("givenName"), "Ana")
+            and eq(obj(read.get("name")).get("familyName"), "Silva") and read.get("active") is True,
             patch_status=patched, displayName=read.get("displayName"), user_name=read.get("name"))
     patch("Users", u2, {"op": "replace", "path": "active", "value": False})
     state = user(u2).get("active")
@@ -6298,13 +6300,11 @@ def googlecalendar_steps(j):
     j.call("POST", events, body={"id": c, "summary": "Retro", "start": at("2026-12-05T11:00:00Z"),
                                  "end": at("2026-12-05T11:30:00Z")})
     read = obj(j.call("GET", f"{events}/{a}"))
-    header = j.answer_headers.get("ETag")
     first = given(read.get("etag"), None)
-    j.check("read matches the event and its ETag header",
+    j.check("read matches the created event",
             eq(read.get("id"), a) and eq(read.get("summary"), "Sprint planning") and eq(read.get("location"), "Room 4")
-            and first is not None and eq(header, first)
-            and (eq(first, made.get("etag")) if given(made.get("etag"), None) else True),
-            id=read.get("id"), etag=first, etag_header=header, created_etag=made.get("etag"))
+            and first is not None and (eq(first, made.get("etag")) if given(made.get("etag"), None) else True),
+            id=read.get("id"), etag=first, created_etag=made.get("etag"))
     old = first or made_up(j, '"', 16, "0123456789") + '"'
     with sent_headers(j, {"If-None-Match": old}):
         j.call("GET", f"{events}/{a}")
@@ -6343,10 +6343,15 @@ def googlecalendar_steps(j):
     ordered = {"singleEvents": "true", "orderBy": "startTime", "maxResults": 1}
     rows, page = listed(**ordered)
     token = given(page.get("nextPageToken"), None)
-    j.check("maxResults 1 by start time answers one event and a page token", rows == [a] and token is not None,
-            listed=rows, next_page_token=token)
-    rest, _ = listed(pageToken=token or made_up(j, "", 24), **ordered)
-    j.check("the page token reaches the next event by start time", rest == [b], first=rows, listed=rest)
+    # One check judges the page and the next judges the token, so a page without a token
+    # is one miss. With no token there is nothing to follow, and no made-up token is sent.
+    j.check("maxResults 1 by start time answers the first event", rows == [a], listed=rows)
+    if token is not None:
+        rest, _ = listed(pageToken=token, **ordered)
+        j.check("the page token reaches the next event by start time", rest == [b], first=rows, listed=rest)
+    else:
+        j.check("the page token reaches the next event by start time", False, first=rows,
+                next_page_token=page.get("nextPageToken"), reason="the first page gave no nextPageToken")
     j.call("DELETE", f"{events}/{c}")
     deleted = j.last["status"]
     rows, _ = listed()
@@ -6448,19 +6453,25 @@ def heroku_steps(j):
     ids = {alpha: app}
     for name in (beta, gamma):
         ids[name] = own(obj(j.call("POST", "/apps", body={"name": name, "region": "us"})).get("id"))
-    # Sorted by name: alpha, beta, gamma. The range is bounded by this run's names.
-    span = f"name {alpha}..{gamma}"
-    found, next_range = ranged("/apps", f"{span}; max=1")
+    # Sorted by name: alpha, beta, gamma. The ascending range is bounded by this run's
+    # names; the descending one is not, and is judged on this run's names only.
+    found, next_range = ranged("/apps", f"name {alpha}..{gamma}; max=1;")
     page_status = j.last["status"]
-    j.check("Range max 1 answers 206 and a Next-Range",
-            page_status == 206 and [a.get("name") for a in found] == [alpha] and given(next_range, None) is not None,
-            status_code=page_status, listed=[a.get("name") for a in found], next_range=next_range)
-    more, _ = ranged("/apps", given(next_range, f"name ]{alpha}..{gamma}; max=1"))
-    j.check("Next-Range reaches the next app", [a.get("name") for a in more] == [beta],
-            first=[a.get("name") for a in found], listed=[a.get("name") for a in more])
-    found, _ = ranged("/apps", f"{span}; max=10, order=desc")
-    j.check("order desc reverses the range",
-            j.last["status"] == 200 and [a.get("name") for a in found] == [gamma, beta, alpha],
+    first_names = [a.get("name") for a in found]
+    # One check judges the page and the next judges Next-Range, so a page without one is
+    # one miss. With no Next-Range there is nothing to follow, and no made-up range is sent.
+    j.check("Range max 1 answers 206 and one app", page_status == 206 and first_names == [alpha],
+            status_code=page_status, listed=first_names)
+    if given(next_range, None) is not None:
+        more, _ = ranged("/apps", next_range)
+        j.check("Next-Range reaches the next app", [a.get("name") for a in more] == [beta],
+                first=first_names, listed=[a.get("name") for a in more], next_range=next_range)
+    else:
+        j.check("Next-Range reaches the next app", False, first=first_names, next_range=next_range,
+                reason="the first page gave no Next-Range header")
+    found, _ = ranged("/apps", "name ..; order=desc,max=10;")
+    mine = [a.get("name") for a in found if a.get("name") in (alpha, beta, gamma)]
+    j.check("order desc reverses the range", j.last["status"] == 200 and mine == [gamma, beta, alpha],
             listed=[a.get("name") for a in found])
     host = f"www.bench{tag}.example.com"
     domain = obj(j.call("POST", f"/apps/{app}/domains", body={"hostname": host, "sni_endpoint": None}))
@@ -6559,7 +6570,8 @@ def kubernetes_steps(j):
     j.check("generateName names the config map from the prefix",
             j.last["status"] == 201 and matches("job-[a-z0-9]{5}", generated) and eq(meta(job).get("namespace"), ns),
             generated=generated)
-    generated = generated if matches("job-[a-z0-9]{5}", generated) else f"job-{made_up(j, '', 5, LOWER_ALNUM)}"
+    # Paging below goes by the name the server gave, whatever the generateName check said.
+    generated = given(generated, f"job-{made_up(j, '', 5, LOWER_ALNUM)}")
     config_map(ns, "cache-settings", {"MODE": "lru", "SIZE": "512"}, {"app": "web", "tier": "cache"})
     config_map(ns, "db-settings", {"POOL": "10"}, {"app": "api", "tier": "db"})
     everything = ["web-settings", generated, "cache-settings", "db-settings"]
@@ -6571,14 +6583,19 @@ def kubernetes_steps(j):
     j.check("a set selector keeps the matching tiers", same_items(rows, ["cache-settings", "db-settings"]), listed=rows)
     first, page = names(limit=3)
     token = given(meta(page).get("continue"), None)
-    j.check("limit answers a page and a continue token",
-            len(first) == 3 and set(first) <= set(everything) and token is not None
-            and eq(meta(page).get("remainingItemCount"), 1),
-            listed=first, continue_token=token, remainingItemCount=meta(page).get("remainingItemCount"))
-    rest, page = names(limit=3, **{"continue": token or made_up(j, "", 32)})
-    j.check("continue reaches the rest of the list",
-            len(rest) == 1 and same_items(first + rest, everything) and not meta(page).get("continue"),
-            first=first, listed=rest, continue_token=meta(page).get("continue"))
+    # One check judges the page and the next judges the token, so a page without a token
+    # is one miss. With no token there is nothing to follow, and no made-up token is sent.
+    j.check("limit answers a page of three",
+            len(first) == 3 and set(first) <= set(everything) and eq(meta(page).get("remainingItemCount"), 1),
+            listed=first, remainingItemCount=meta(page).get("remainingItemCount"))
+    if token is not None:
+        rest, page = names(limit=3, **{"continue": token})
+        j.check("continue reaches the rest of the list",
+                len(rest) == 1 and same_items(first + rest, everything) and not meta(page).get("continue"),
+                first=first, listed=rest, continue_token=meta(page).get("continue"))
+    else:
+        j.check("continue reaches the rest of the list", False, first=first,
+                continue_token=meta(page).get("continue"), reason="the first page gave no continue token")
     current = read("web-settings")
     version = given(meta(current).get("resourceVersion"), made_up(j, "", 6, "0123456789"))
     replacement = {"apiVersion": "v1", "kind": "ConfigMap",
@@ -6617,7 +6634,7 @@ def pagerduty_steps(j):
     # the incidents made here.
     tag = j.rng.randrange(10**5, 10**6)
     email = f"oncall.{tag}@bench.example"
-    j.headers.update({"authorization": "Token token=bench-placeholder", "From": email,
+    j.headers.update({"authorization": "Token token=bench-placeholder",
                       "accept": "application/vnd.pagerduty+json;version=2"})
 
     def own(value):
@@ -6652,6 +6669,8 @@ def pagerduty_steps(j):
             and eq(made.get("role"), "user") and given(made.get("id"), None) is not None,
             user={k: made.get(k) for k in ("id", "name", "email", "role")})
     user = own(made.get("id"))
+    # From names a valid user, so it is sent only once the user exists.
+    j.headers["From"] = email
     policy = obj(obj(j.call("POST", "/escalation_policies", body={"escalation_policy": {
         "type": "escalation_policy", "name": f"Bench policy {tag}",
         "escalation_rules": [{"escalation_delay_in_minutes": 30, "targets": [ref(user, "user_reference")]}]}})

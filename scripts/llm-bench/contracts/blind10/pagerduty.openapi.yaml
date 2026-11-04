@@ -10,7 +10,8 @@ info:
     `Authorization: Token token=<API key>`. Creating or updating an incident, and adding
     a note, also sends `From`: the email address of a valid user on the account, who is
     recorded as the one acting (the note's `user`, the acknowledger, the resolver).
-    Without `From` such a request is refused with 400.
+    Without `From` such a request is refused with 400 and error code 2011 ("You must
+    specify a requester_id to perform this action").
 
     Bodies are wrapped in the resource's name: a create sends `{"incident": {...}}` and
     answers `{"incident": {...}}`; a list answers the plural (`{"incidents": [...]}`).
@@ -48,7 +49,7 @@ info:
     match the whole query). Array parameters repeat with brackets: `statuses[]=triggered`
     `&statuses[]=acknowledged`, `service_ids[]=PABC123`. `GET /incidents` filters by
     `statuses[]`, `service_ids[]`, `incident_key` and `urgencies[]`, and sorts by
-    `sort_by` (such as `created_at:asc`, the default, or `incident_number:desc`).
+    `sort_by` (such as `created_at:asc` or `incident_number:desc`).
 
     Includes. `include[]` side-loads related resources: with `include[]=services` each
     incident's `service` is the full service object (`type` `service`, with `name`,
@@ -56,8 +57,9 @@ info:
     escalation policy, and `include[]=escalation_policies` on a service.
 
     Errors answer `{"error": {"code", "message", "errors": [...]}}`: code 2001 "Invalid
-    Input Provided" (400), 2002 "Arguments Caused Error" (400), 2100 "Not Found" (404),
-    and 2006 "Not Authorized" (401).
+    Input Provided" (400), 2002 "Arguments Caused Error" (400), 2006 "Authentication
+    failed" (401), 2010 "Access Denied" (403), 2011 "You must specify a requester_id to
+    perform this action" (400, a missing `From`) and 2100 "Not Found" (404).
 servers:
   - url: https://api.pagerduty.com
 security:
@@ -261,7 +263,7 @@ paths:
           schema: {type: string}
         - name: sort_by
           in: query
-          description: "A field and a direction: `created_at:asc` (the default), `created_at:desc`, `incident_number:asc`, `incident_number:desc`, `resolved_at:asc`."
+          description: "A field and a direction: `created_at:asc`, `created_at:desc`, `incident_number:asc`, `incident_number:desc`, `resolved_at:asc`."
           schema: {type: string}
         - $ref: "#/components/parameters/include"
         - $ref: "#/components/parameters/offset"

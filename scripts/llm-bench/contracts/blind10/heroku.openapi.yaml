@@ -39,8 +39,10 @@ info:
     answers it, and it leaves the app's list.
 
     Lists answer JSON arrays and are paged by the `Range` request header:
-    `Range: <field> [<start>]..[<end>][; max=<n>][, order=<asc|desc>]` (as
-    `Range: name ..; max=10` or `Range: name ..; max=10, order=desc`). Each list sorts on
+    `Range: <field> [<start>]..[<end>][; [order=<asc|desc>,]max=<n>;]`, as
+    `Range: id ..; max=10;` or `Range: name ..; order=desc,max=10;`. `<start>` and
+    `<end>` are values of the field and bound the items it selects, both included; a
+    `]` before `<start>` leaves the start value out. Each list sorts on
     the fields its `Accept-Ranges` response header names (`id` and `name` for apps,
     `id` and `version` for releases, `id` and `hostname` for domains), ascending by
     default; without a `Range` header a list sorts by `id`. `max` defaults to 200 and is
@@ -366,12 +368,12 @@ components:
     range:
       name: Range
       in: header
-      description: "`<field> [<start>]..[<end>][; max=<n>][, order=<asc|desc>]`, such as `name ..; max=10` or the `Next-Range` of the previous page."
-      schema: {type: string, example: "name ..; max=10"}
+      description: "`<field> [<start>]..[<end>][; [order=<asc|desc>,]max=<n>;]`, such as `id ..; max=10;`, `name ..; order=desc,max=10;` or the `Next-Range` of the previous page."
+      schema: {type: string, example: "name ..; order=desc,max=10;"}
   headers:
     NextRange:
       description: The Range header that asks for the items after this page.
-      schema: {type: string, example: "]my-app-b..; max=10"}
+      schema: {type: string, example: "]my-app-b..; max=10;"}
     ContentRange:
       description: The range this answer covers.
       schema: {type: string, example: "name my-app-a..my-app-b"}
