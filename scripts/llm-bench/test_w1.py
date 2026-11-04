@@ -322,6 +322,21 @@ class HeldOutJourneyTest(unittest.TestCase):
             self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
             self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
 
+    def test_journeys_blind8_is_a_suite(self):
+        self.assertIn("journeys_blind8", server_suites.SUITES)
+        self.assertNotIn("journeys_blind8", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind8"]
+        self.assertIs(runner, server_suites.run_journeys_blind8)
+        self.assertEqual(sorted(mocks), ["azuredevops", "businesscentral", "commercetools", "ebay", "meilisearch"])
+        self.assertEqual(sorted(server_suites.BLIND8_JOURNEYS), sorted(mocks))
+        self.assertTrue(mocks["ebay"][0].endswith("/ebay-trading.wsdl"))
+        for contract, prefix, persona in mocks.values():
+            self.assertIsNone(persona)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+            self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
@@ -445,7 +460,7 @@ class FakeEmpty(FakeStripe):
 
 
 class EmptyAnswersTest(unittest.TestCase):
-    def test_each_blind7_journey_records_every_check_on_empty_answers(self):
+    def test_each_blind7_and_blind8_journey_records_every_check_on_empty_answers(self):
         # Every check runs and fails on its own: none gates the rest and none raises.
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeEmpty)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -458,14 +473,39 @@ class EmptyAnswersTest(unittest.TestCase):
         class Args:
             model, timeout, repeat = "m/x", 10, 1
 
-        for name, steps in server_suites.BLIND7_JOURNEYS.items():
-            with tempfile.TemporaryDirectory() as out:
-                sink = server_suites.Sink(out, "m/x", "journeys_blind7")
-                server_suites.run_one_journey(name, steps, Srv, sink, Args, 0)
-            rows = {r["case"]: r for r in sink.rows}
-            self.assertEqual(sorted(rows), sorted(f"{name}.{c}" for c in server_suites.JOURNEY_CHECKS[name]), name)
-            self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [], name)
-            self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
+        for suite, journeys in (("journeys_blind7", server_suites.BLIND7_JOURNEYS),
+                                ("journeys_blind8", server_suites.BLIND8_JOURNEYS)):
+            for name, steps in journeys.items():
+                self.run_on_empty_answers(Srv, Args, suite, name, steps)
+
+    def run_on_empty_answers(self, Srv, Args, suite, name, steps):
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", suite)
+            server_suites.run_one_journey(name, steps, Srv, sink, Args, 0)
+        rows = {r["case"]: r for r in sink.rows}
+        self.assertEqual(sorted(rows), sorted(f"{name}.{c}" for c in server_suites.JOURNEY_CHECKS[name]), name)
+        self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [], name)
+        self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
+
+
+class SoapXmlTest(unittest.TestCase):
+    def test_a_request_element_renders_attributes_text_and_children_in_order(self):
+        xml = server_suites.xml_element("Item", {"ItemID": "1", "StartPrice": {"@currencyID": "USD", "#text": "19.99"},
+                                                 "Title": "A & B", "Include": True, "Fee": ["x", "y"]})
+        self.assertEqual(xml, '<Item><ItemID>1</ItemID><StartPrice currencyID="USD">19.99</StartPrice>'
+                              "<Title>A &amp; B</Title><Include>true</Include><Fee>x</Fee><Fee>y</Fee></Item>")
+
+    def test_a_response_is_read_by_local_names(self):
+        raw = (b'<?xml version="1.0"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+               b'<soapenv:Body><GetItemResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack>'
+               b'<Item><ItemID>110</ItemID><StartPrice currencyID="USD">24.99</StartPrice></Item>'
+               b"</GetItemResponse></soapenv:Body></soapenv:Envelope>")
+        answer = server_suites.soap_answer(raw, "GetItemResponse")
+        self.assertEqual(server_suites.xml_text(answer, "Ack"), "Success")
+        self.assertEqual(server_suites.xml_text(answer, "Item/ItemID"), "110")
+        self.assertEqual(server_suites.xml_one(answer, "Item/StartPrice").get("currencyID"), "USD")
+        for bad in (b"{}", b"", b"<a>", raw.replace(b"GetItemResponse", b"Other")):
+            self.assertIsNone(server_suites.xml_text(server_suites.soap_answer(bad, "GetItemResponse"), "Ack"))
 
 
 class FakeServer(BaseHTTPRequestHandler):
@@ -649,6 +689,10 @@ class JobsTest(unittest.TestCase):
     def test_journeys_blind7(self):
         rows = self.assert_same_rows("journeys_blind7")
         self.assertEqual(len(rows), 3 * sum(len(server_suites.JOURNEY_CHECKS[n]) for n in server_suites.BLIND7_JOURNEYS))
+
+    def test_journeys_blind8(self):
+        rows = self.assert_same_rows("journeys_blind8")
+        self.assertEqual(len(rows), 3 * sum(len(server_suites.JOURNEY_CHECKS[n]) for n in server_suites.BLIND8_JOURNEYS))
 
     def test_a_unit_error_is_raised_and_stops_units_not_started(self):
         ran = []

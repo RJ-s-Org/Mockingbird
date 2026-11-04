@@ -1,0 +1,588 @@
+openapi: 3.0.3
+info:
+  title: Dynamics 365 Business Central API v2.0 (customers, items and sales invoices)
+  version: "2.0"
+  description: |
+    A subset of the Business Central API v2.0, written from its public documentation.
+    It is OData v4: an entity is addressed by its key in parentheses after its entity
+    set, as `companies({id})/customers({id})`, with the GUID unquoted. Every resource
+    lives in a company, so every path but the company list starts with
+    `companies({company_id})`.
+
+    A collection answers `value`, the entities of this page, and `@odata.context`.
+    `$filter` takes an OData expression (`postalCode eq '1000'`,
+    `displayName eq 'Coho Winery'`, joined with `and`); `$top` answers at most that
+    many entities and `$skip` leaves out that many first; `$orderby` sorts by a property
+    (`displayName desc`); `$count=true` adds `@odata.count`, the number of entities the
+    filter matches over all pages. A client can also ask for server-driven paging with
+    the header `Prefer: odata.maxpagesize=N`: a page then holds at most N entities and,
+    when more match, `@odata.nextLink`, the URL of the next page, which carries a
+    `$skiptoken` and the query options of the request.
+
+    Every entity answers `@odata.etag`, its current version. `PATCH` and `DELETE`
+    require the header `If-Match` with that etag (or `*`). A `PATCH` changes only the
+    properties sent, keeps the others, and answers the updated entity with a new
+    `@odata.etag`. When the etag sent is not the entity's current one, the change is
+    refused with 409 and the error code `Request_EntityChanged`, and the entity is left
+    as it was.
+
+    `POST` creates an entity and answers 201 with it, its `id` and `number` assigned.
+    A new sales invoice is a `Draft` for the customer named by `customerId` (or
+    `customerNumber`); its totals are the sums of its lines, a line's
+    `amountExcludingTax` being its `quantity` times its `unitPrice` less its
+    `discountAmount`. The bound action `Microsoft.NAV.post` posts a draft invoice: it
+    answers 204 and the invoice then reads with status `Open`, keeping its id.
+
+    A deleted entity, or an id that names none, answers 404. Errors are
+    `{"error": {"code", "message"}}`.
+servers:
+  - url: https://api.businesscentral.dynamics.com/v2.0/{tenantId}/{environment}/api/v2.0
+    variables:
+      tenantId:
+        default: common
+        description: The Microsoft Entra tenant id or domain.
+      environment:
+        default: production
+        description: The environment name.
+security:
+  - oauth2: []
+tags:
+  - name: companies
+  - name: customers
+  - name: items
+  - name: salesInvoices
+paths:
+  /companies:
+    get:
+      tags: [companies]
+      operationId: listCompanies
+      summary: List the companies of the environment
+      parameters:
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/top"
+        - $ref: "#/components/parameters/skip"
+      responses:
+        "200":
+          description: The companies.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value]
+                properties:
+                  "@odata.context": {type: string}
+                  value:
+                    type: array
+                    items: {$ref: "#/components/schemas/Company"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /companies({company_id})/customers:
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+    get:
+      tags: [customers]
+      operationId: listCustomers
+      summary: List customers
+      parameters:
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/top"
+        - $ref: "#/components/parameters/skip"
+        - $ref: "#/components/parameters/orderby"
+        - $ref: "#/components/parameters/count"
+        - $ref: "#/components/parameters/skiptoken"
+        - $ref: "#/components/parameters/prefer"
+      responses:
+        "200":
+          description: The customers the query options select.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CustomerCollection"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [customers]
+      operationId: createCustomer
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CustomerInput"}
+      responses:
+        "201":
+          description: The created customer, with its id, number and etag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /companies({company_id})/customers({customer_id}):
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+      - $ref: "#/components/parameters/customerId"
+    get:
+      tags: [customers]
+      operationId: getCustomer
+      summary: Get a customer
+      responses:
+        "200":
+          description: The customer.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [customers]
+      operationId: updateCustomer
+      summary: Update a customer
+      description: |
+        Changes only the properties sent. `If-Match` must hold the customer's current
+        `@odata.etag` (or `*`); an etag that is no longer current is refused with 409
+        `Request_EntityChanged` and changes nothing.
+      parameters:
+        - $ref: "#/components/parameters/ifMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CustomerInput"}
+      responses:
+        "200":
+          description: The updated customer, with a new etag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Customer"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+    delete:
+      tags: [customers]
+      operationId: deleteCustomer
+      summary: Delete a customer
+      description: "`If-Match` must hold the customer's current etag (or `*`). The customer answers 404 afterwards."
+      parameters:
+        - $ref: "#/components/parameters/ifMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /companies({company_id})/items:
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+    get:
+      tags: [items]
+      operationId: listItems
+      summary: List items
+      parameters:
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/top"
+        - $ref: "#/components/parameters/skip"
+      responses:
+        "200":
+          description: The items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value]
+                properties:
+                  "@odata.context": {type: string}
+                  "@odata.count": {type: integer}
+                  "@odata.nextLink": {type: string, format: uri}
+                  value:
+                    type: array
+                    items: {$ref: "#/components/schemas/Item"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [items]
+      operationId: createItem
+      summary: Create an item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ItemInput"}
+      responses:
+        "201":
+          description: The created item.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Item"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /companies({company_id})/salesInvoices:
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+    get:
+      tags: [salesInvoices]
+      operationId: listSalesInvoices
+      summary: List sales invoices
+      parameters:
+        - $ref: "#/components/parameters/filter"
+        - $ref: "#/components/parameters/top"
+        - $ref: "#/components/parameters/skip"
+      responses:
+        "200":
+          description: The sales invoices, drafts and posted ones.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value]
+                properties:
+                  "@odata.context": {type: string}
+                  "@odata.count": {type: integer}
+                  "@odata.nextLink": {type: string, format: uri}
+                  value:
+                    type: array
+                    items: {$ref: "#/components/schemas/SalesInvoice"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [salesInvoices]
+      operationId: createSalesInvoice
+      summary: Create a sales invoice
+      description: The new invoice is a `Draft` for the customer named by `customerId` or `customerNumber`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SalesInvoiceInput"}
+      responses:
+        "201":
+          description: The created draft invoice.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SalesInvoice"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /companies({company_id})/salesInvoices({sales_invoice_id}):
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+      - $ref: "#/components/parameters/salesInvoiceId"
+    get:
+      tags: [salesInvoices]
+      operationId: getSalesInvoice
+      summary: Get a sales invoice
+      responses:
+        "200":
+          description: The invoice, with its current status and totals.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SalesInvoice"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [salesInvoices]
+      operationId: updateSalesInvoice
+      summary: Update a draft sales invoice
+      parameters:
+        - $ref: "#/components/parameters/ifMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SalesInvoiceInput"}
+      responses:
+        "200":
+          description: The updated invoice.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SalesInvoice"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /companies({company_id})/salesInvoices({sales_invoice_id})/salesInvoiceLines:
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+      - $ref: "#/components/parameters/salesInvoiceId"
+    get:
+      tags: [salesInvoices]
+      operationId: listSalesInvoiceLines
+      summary: List the lines of a sales invoice
+      responses:
+        "200":
+          description: The invoice's lines, in sequence.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [value]
+                properties:
+                  "@odata.context": {type: string}
+                  value:
+                    type: array
+                    items: {$ref: "#/components/schemas/SalesInvoiceLine"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [salesInvoices]
+      operationId: createSalesInvoiceLine
+      summary: Add a line to a draft sales invoice
+      description: The invoice's totals then include the line.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SalesInvoiceLineInput"}
+      responses:
+        "201":
+          description: The created line.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SalesInvoiceLine"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /companies({company_id})/salesInvoices({sales_invoice_id})/Microsoft.NAV.post:
+    parameters:
+      - $ref: "#/components/parameters/companyId"
+      - $ref: "#/components/parameters/salesInvoiceId"
+    post:
+      tags: [salesInvoices]
+      operationId: postSalesInvoice
+      summary: Post a draft sales invoice
+      description: The bound action posts the invoice; it then reads with status `Open` and keeps its id.
+      responses:
+        "204":
+          description: Posted.
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      description: A Microsoft Entra access token for Business Central.
+      flows:
+        clientCredentials:
+          tokenUrl: https://login.microsoftonline.com/common/oauth2/v2.0/token
+          scopes:
+            https://api.businesscentral.dynamics.com/.default: Business Central APIs.
+  parameters:
+    companyId:
+      name: company_id
+      in: path
+      required: true
+      description: The company's id, a GUID written without quotes or braces.
+      schema: {type: string, format: uuid}
+    customerId:
+      name: customer_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    salesInvoiceId:
+      name: sales_invoice_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    filter:
+      name: $filter
+      in: query
+      description: "An OData filter expression, such as `postalCode eq '1000' and city eq 'Lisbon'`."
+      schema: {type: string}
+    top:
+      name: $top
+      in: query
+      description: Answer at most this many entities.
+      schema: {type: integer, minimum: 0}
+    skip:
+      name: $skip
+      in: query
+      description: Leave out this many entities first.
+      schema: {type: integer, minimum: 0}
+    orderby:
+      name: $orderby
+      in: query
+      description: "A property to sort by, with `asc` (the default) or `desc`."
+      schema: {type: string}
+    count:
+      name: $count
+      in: query
+      description: With true, the answer holds `@odata.count`, the entities the filter matches over all pages.
+      schema: {type: boolean}
+    skiptoken:
+      name: $skiptoken
+      in: query
+      description: Where the next page starts, as `@odata.nextLink` carries it.
+      schema: {type: string}
+    prefer:
+      name: Prefer
+      in: header
+      description: "`odata.maxpagesize=N` asks for pages of at most N entities, linked by `@odata.nextLink`."
+      schema: {type: string, example: odata.maxpagesize=50}
+    ifMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: "The entity's current `@odata.etag`, or `*`."
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: A query option or a property is not valid.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: No valid access token.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No entity has the key.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Conflict:
+      description: "The etag in `If-Match` is not the entity's current one (`Request_EntityChanged`); nothing changed."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: "Such as `Request_EntityChanged`, `BadRequest_NotFound` or `Internal_RecordNotFound`."
+            message: {type: string}
+    Company:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string, format: uuid}
+        systemVersion: {type: string}
+        name: {type: string}
+        displayName: {type: string}
+        businessProfileId: {type: string}
+        systemCreatedAt: {type: string, format: date-time}
+    CustomerInput:
+      type: object
+      properties:
+        displayName: {type: string, maxLength: 100}
+        type: {type: string, enum: [Company, Person]}
+        addressLine1: {type: string, maxLength: 100}
+        addressLine2: {type: string, maxLength: 50}
+        city: {type: string, maxLength: 30}
+        state: {type: string, maxLength: 30}
+        country: {type: string, maxLength: 10}
+        postalCode: {type: string, maxLength: 20}
+        phoneNumber: {type: string, maxLength: 30}
+        email: {type: string, maxLength: 80}
+        website: {type: string, maxLength: 80}
+        taxLiable: {type: boolean}
+        currencyCode: {type: string, maxLength: 10}
+        blocked: {type: string, enum: [" ", Ship, Invoice, All]}
+    Customer:
+      allOf:
+        - $ref: "#/components/schemas/CustomerInput"
+        - type: object
+          required: ["@odata.etag", id, number, displayName, lastModifiedDateTime]
+          properties:
+            "@odata.etag": {type: string, description: "The customer's current version, for `If-Match`.", example: "W/\"JzQ0O0pZRUFBQUFDTERBQUFBQUFBQUE9MTswMDsn\""}
+            id: {type: string, format: uuid}
+            number: {type: string, maxLength: 20, description: Assigned from the company's number series.}
+            balanceDue: {type: number}
+            lastModifiedDateTime: {type: string, format: date-time}
+    CustomerCollection:
+      type: object
+      required: [value]
+      properties:
+        "@odata.context": {type: string}
+        "@odata.count": {type: integer, description: "With `$count=true`: the customers the filter matches over all pages."}
+        "@odata.nextLink": {type: string, format: uri, description: "The next page under `Prefer: odata.maxpagesize`; absent on the last page."}
+        value:
+          type: array
+          items: {$ref: "#/components/schemas/Customer"}
+    ItemInput:
+      type: object
+      properties:
+        number: {type: string, maxLength: 20}
+        displayName: {type: string, maxLength: 100}
+        type: {type: string, enum: [Inventory, Service, Non-Inventory]}
+        unitPrice: {type: number}
+        unitCost: {type: number}
+        baseUnitOfMeasureCode: {type: string, maxLength: 10}
+        gtin: {type: string, maxLength: 14}
+        blocked: {type: boolean}
+    Item:
+      allOf:
+        - $ref: "#/components/schemas/ItemInput"
+        - type: object
+          required: ["@odata.etag", id, number, displayName, type]
+          properties:
+            "@odata.etag": {type: string}
+            id: {type: string, format: uuid}
+            inventory: {type: number}
+            lastModifiedDateTime: {type: string, format: date-time}
+    SalesInvoiceInput:
+      type: object
+      properties:
+        externalDocumentNumber: {type: string, maxLength: 35}
+        invoiceDate: {type: string, format: date}
+        postingDate: {type: string, format: date}
+        dueDate: {type: string, format: date}
+        customerId: {type: string, format: uuid}
+        customerNumber: {type: string, maxLength: 20}
+        currencyCode: {type: string, maxLength: 10}
+        pricesIncludeTax: {type: boolean}
+        email: {type: string}
+    SalesInvoice:
+      allOf:
+        - $ref: "#/components/schemas/SalesInvoiceInput"
+        - type: object
+          required: ["@odata.etag", id, number, customerId, status, totalAmountExcludingTax, totalAmountIncludingTax]
+          properties:
+            "@odata.etag": {type: string}
+            id: {type: string, format: uuid}
+            number: {type: string, maxLength: 20}
+            customerName: {type: string}
+            status:
+              type: string
+              enum: [Draft, In Review, Open, Paid, Canceled, Corrective]
+              description: "`Draft` until posted; `Open` once posted and unpaid."
+            discountAmount: {type: number}
+            totalAmountExcludingTax: {type: number, description: The sum of the lines' amountExcludingTax.}
+            totalTaxAmount: {type: number}
+            totalAmountIncludingTax: {type: number}
+            remainingAmount: {type: number}
+            lastModifiedDateTime: {type: string, format: date-time}
+    SalesInvoiceLineInput:
+      type: object
+      properties:
+        sequence: {type: integer}
+        lineType: {type: string, enum: [Comment, Account, Item, Resource, Fixed Asset, Charge]}
+        itemId: {type: string, format: uuid}
+        accountId: {type: string, format: uuid}
+        lineObjectNumber: {type: string, maxLength: 20, description: The number of the item or account the line is for.}
+        description: {type: string, maxLength: 100}
+        quantity: {type: number}
+        unitPrice: {type: number}
+        discountAmount: {type: number}
+        taxCode: {type: string}
+    SalesInvoiceLine:
+      allOf:
+        - $ref: "#/components/schemas/SalesInvoiceLineInput"
+        - type: object
+          required: ["@odata.etag", id, documentId, sequence, lineType]
+          properties:
+            "@odata.etag": {type: string}
+            id: {type: string}
+            documentId: {type: string, format: uuid, description: The invoice the line belongs to.}
+            amountExcludingTax: {type: number, description: quantity times unitPrice less discountAmount.}
+            taxPercent: {type: number}
+            totalTaxAmount: {type: number}
+            amountIncludingTax: {type: number}
+            netAmount: {type: number}

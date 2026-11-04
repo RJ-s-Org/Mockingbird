@@ -1,0 +1,456 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wsdl:definitions name="eBayAPI"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:ns="urn:ebay:apis:eBLBaseComponents"
+    targetNamespace="urn:ebay:apis:eBLBaseComponents">
+  <wsdl:documentation>
+    A subset of the eBay Trading API (SOAP), written from its public documentation:
+    fixed-price listings made with AddFixedPriceItem, read with GetItem, changed with
+    ReviseFixedPriceItem, ended with EndFixedPriceItem and listed with GetMyeBaySelling.
+    Every request carries the seller's token in the RequesterCredentials SOAP header.
+
+    Every response carries Timestamp, Ack and the Version and Build that answered. A
+    call that fails answers Ack Failure with one or more Errors (ShortMessage,
+    LongMessage, ErrorCode, SeverityCode Error) in the normal response element, not a
+    SOAP Fault; a Fault is only for a request that is not a valid SOAP message. Ack
+    Warning means the call succeeded with Errors of SeverityCode Warning.
+
+    Money is an AmountType: a decimal value with the currency in the currencyID
+    attribute, as in &lt;StartPrice currencyID="USD"&gt;19.99&lt;/StartPrice&gt;. Fees are
+    answered in the currency of the site the item is listed on (USD on the US site).
+
+    AddFixedPriceItem answers the new listing's ItemID (a string of digits, unique on
+    eBay), its StartTime and EndTime, and the Fees for listing it, one Fee per fee
+    name, ListingFee among them. A new listing is Active (SellingStatus.ListingStatus).
+    With InventoryTrackingMethod SKU, the seller's SKU identifies the listing: GetItem,
+    ReviseFixedPriceItem and EndFixedPriceItem accept the SKU in place of the ItemID,
+    and a second AddFixedPriceItem with a SKU that an active listing of the seller
+    already has is refused with Ack Failure.
+
+    ReviseFixedPriceItem changes only the Item fields it is sent and keeps the others;
+    the ItemID does not change. EndFixedPriceItem ends the listing at once and answers
+    its EndTime; afterwards GetItem still answers the item, with ListingStatus Completed,
+    and the listing is no longer in the seller's ActiveList.
+
+    GetMyeBaySelling answers the seller's ActiveList when it is asked for with Include
+    true, paged by Pagination (EntriesPerPage, PageNumber from 1); PaginationResult
+    holds TotalNumberOfEntries (the active listings in all pages) and TotalNumberOfPages.
+    Sort orders the list: StartTime puts the listing that started first first,
+    StartTimeDescending the newest first, ItemID and ItemIDDescending by ItemID.
+  </wsdl:documentation>
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:ebay:apis:eBLBaseComponents" elementFormDefault="qualified">
+      <xs:simpleType name="AckCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="Success"/>
+          <xs:enumeration value="Failure"/>
+          <xs:enumeration value="Warning"/>
+          <xs:enumeration value="PartialFailure"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="SeverityCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="Error"/>
+          <xs:enumeration value="Warning"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="ErrorClassificationCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="RequestError"/>
+          <xs:enumeration value="SystemError"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="CurrencyCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="USD"/>
+          <xs:enumeration value="CAD"/>
+          <xs:enumeration value="GBP"/>
+          <xs:enumeration value="EUR"/>
+          <xs:enumeration value="AUD"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="CountryCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="US"/>
+          <xs:enumeration value="CA"/>
+          <xs:enumeration value="GB"/>
+          <xs:enumeration value="DE"/>
+          <xs:enumeration value="AU"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="ListingTypeCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="FixedPriceItem"/>
+          <xs:enumeration value="Chinese"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="ListingStatusCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="Active"/>
+          <xs:enumeration value="Ended"/>
+          <xs:enumeration value="Completed"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="ItemSortTypeCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="ItemID"/>
+          <xs:enumeration value="ItemIDDescending"/>
+          <xs:enumeration value="StartTime"/>
+          <xs:enumeration value="StartTimeDescending"/>
+          <xs:enumeration value="Title"/>
+          <xs:enumeration value="TitleDescending"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="InventoryTrackingMethodCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="ItemID"/>
+          <xs:enumeration value="SKU"/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType name="EndReasonCodeType">
+        <xs:restriction base="xs:token">
+          <xs:enumeration value="Incorrect"/>
+          <xs:enumeration value="LostOrBroken"/>
+          <xs:enumeration value="NotAvailable"/>
+          <xs:enumeration value="OtherListingError"/>
+          <xs:enumeration value="SellToHighBidder"/>
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:complexType name="AmountType">
+        <xs:annotation>
+          <xs:documentation>A decimal amount; currencyID names its currency.</xs:documentation>
+        </xs:annotation>
+        <xs:simpleContent>
+          <xs:extension base="xs:double">
+            <xs:attribute name="currencyID" type="ns:CurrencyCodeType" use="required"/>
+          </xs:extension>
+        </xs:simpleContent>
+      </xs:complexType>
+      <xs:complexType name="ErrorType">
+        <xs:sequence>
+          <xs:element name="ShortMessage" type="xs:string" minOccurs="0"/>
+          <xs:element name="LongMessage" type="xs:string" minOccurs="0"/>
+          <xs:element name="ErrorCode" type="xs:token" minOccurs="0"/>
+          <xs:element name="SeverityCode" type="ns:SeverityCodeType" minOccurs="0"/>
+          <xs:element name="ErrorClassification" type="ns:ErrorClassificationCodeType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="CustomSecurityHeaderType">
+        <xs:sequence>
+          <xs:element name="eBayAuthToken" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:element name="RequesterCredentials" type="ns:CustomSecurityHeaderType"/>
+
+      <xs:complexType name="AbstractRequestType" abstract="true">
+        <xs:sequence>
+          <xs:element name="ErrorLanguage" type="xs:string" minOccurs="0"/>
+          <xs:element name="Version" type="xs:string" minOccurs="0"/>
+          <xs:element name="WarningLevel" type="xs:token" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="AbstractResponseType" abstract="true">
+        <xs:sequence>
+          <xs:element name="Timestamp" type="xs:dateTime" minOccurs="0"/>
+          <xs:element name="Ack" type="ns:AckCodeType" minOccurs="0"/>
+          <xs:element name="Errors" type="ns:ErrorType" minOccurs="0" maxOccurs="unbounded"/>
+          <xs:element name="Version" type="xs:string" minOccurs="0"/>
+          <xs:element name="Build" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+
+      <xs:complexType name="CategoryType">
+        <xs:sequence>
+          <xs:element name="CategoryID" type="xs:string" minOccurs="0"/>
+          <xs:element name="CategoryName" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ListingDetailsType">
+        <xs:sequence>
+          <xs:element name="StartTime" type="xs:dateTime" minOccurs="0"/>
+          <xs:element name="EndTime" type="xs:dateTime" minOccurs="0"/>
+          <xs:element name="ViewItemURL" type="xs:anyURI" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="SellingStatusType">
+        <xs:sequence>
+          <xs:element name="CurrentPrice" type="ns:AmountType" minOccurs="0"/>
+          <xs:element name="QuantitySold" type="xs:int" minOccurs="0"/>
+          <xs:element name="ListingStatus" type="ns:ListingStatusCodeType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ItemType">
+        <xs:sequence>
+          <xs:element name="Country" type="ns:CountryCodeType" minOccurs="0"/>
+          <xs:element name="Currency" type="ns:CurrencyCodeType" minOccurs="0"/>
+          <xs:element name="Description" type="xs:string" minOccurs="0"/>
+          <xs:element name="DispatchTimeMax" type="xs:int" minOccurs="0"/>
+          <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+          <xs:element name="ListingDetails" type="ns:ListingDetailsType" minOccurs="0"/>
+          <xs:element name="ListingDuration" type="xs:token" minOccurs="0"/>
+          <xs:element name="ListingType" type="ns:ListingTypeCodeType" minOccurs="0"/>
+          <xs:element name="Location" type="xs:string" minOccurs="0"/>
+          <xs:element name="PrimaryCategory" type="ns:CategoryType" minOccurs="0"/>
+          <xs:element name="Quantity" type="xs:int" minOccurs="0"/>
+          <xs:element name="SellingStatus" type="ns:SellingStatusType" minOccurs="0"/>
+          <xs:element name="StartPrice" type="ns:AmountType" minOccurs="0"/>
+          <xs:element name="Title" type="xs:string" minOccurs="0"/>
+          <xs:element name="SKU" type="xs:string" minOccurs="0"/>
+          <xs:element name="PostalCode" type="xs:string" minOccurs="0"/>
+          <xs:element name="ConditionID" type="xs:int" minOccurs="0"/>
+          <xs:element name="InventoryTrackingMethod" type="ns:InventoryTrackingMethodCodeType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="FeeType">
+        <xs:sequence>
+          <xs:element name="Name" type="xs:string" minOccurs="0"/>
+          <xs:element name="Fee" type="ns:AmountType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="FeesType">
+        <xs:sequence>
+          <xs:element name="Fee" type="ns:FeeType" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ItemArrayType">
+        <xs:sequence>
+          <xs:element name="Item" type="ns:ItemType" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="PaginationType">
+        <xs:sequence>
+          <xs:element name="EntriesPerPage" type="xs:int" minOccurs="0"/>
+          <xs:element name="PageNumber" type="xs:int" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="PaginationResultType">
+        <xs:sequence>
+          <xs:element name="TotalNumberOfPages" type="xs:int" minOccurs="0"/>
+          <xs:element name="TotalNumberOfEntries" type="xs:int" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ItemListCustomizationType">
+        <xs:sequence>
+          <xs:element name="Include" type="xs:boolean" minOccurs="0"/>
+          <xs:element name="Sort" type="ns:ItemSortTypeCodeType" minOccurs="0"/>
+          <xs:element name="Pagination" type="ns:PaginationType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="PaginatedItemArrayType">
+        <xs:sequence>
+          <xs:element name="ItemArray" type="ns:ItemArrayType" minOccurs="0"/>
+          <xs:element name="PaginationResult" type="ns:PaginationResultType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+
+      <xs:element name="AddFixedPriceItemRequest">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractRequestType">
+              <xs:sequence>
+                <xs:element name="Item" type="ns:ItemType"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="AddFixedPriceItemResponse">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractResponseType">
+              <xs:sequence>
+                <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+                <xs:element name="SKU" type="xs:string" minOccurs="0"/>
+                <xs:element name="StartTime" type="xs:dateTime" minOccurs="0"/>
+                <xs:element name="EndTime" type="xs:dateTime" minOccurs="0"/>
+                <xs:element name="Fees" type="ns:FeesType" minOccurs="0"/>
+                <xs:element name="CategoryID" type="xs:string" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="GetItemRequest">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractRequestType">
+              <xs:sequence>
+                <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+                <xs:element name="SKU" type="xs:string" minOccurs="0"/>
+                <xs:element name="DetailLevel" type="xs:token" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="GetItemResponse">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractResponseType">
+              <xs:sequence>
+                <xs:element name="Item" type="ns:ItemType" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="ReviseFixedPriceItemRequest">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractRequestType">
+              <xs:sequence>
+                <xs:element name="Item" type="ns:ItemType"/>
+                <xs:element name="DeletedField" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="ReviseFixedPriceItemResponse">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractResponseType">
+              <xs:sequence>
+                <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+                <xs:element name="SKU" type="xs:string" minOccurs="0"/>
+                <xs:element name="StartTime" type="xs:dateTime" minOccurs="0"/>
+                <xs:element name="EndTime" type="xs:dateTime" minOccurs="0"/>
+                <xs:element name="Fees" type="ns:FeesType" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="EndFixedPriceItemRequest">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractRequestType">
+              <xs:sequence>
+                <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+                <xs:element name="SKU" type="xs:string" minOccurs="0"/>
+                <xs:element name="EndingReason" type="ns:EndReasonCodeType" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="EndFixedPriceItemResponse">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractResponseType">
+              <xs:sequence>
+                <xs:element name="EndTime" type="xs:dateTime" minOccurs="0"/>
+                <xs:element name="SKU" type="xs:string" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="GetMyeBaySellingRequest">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractRequestType">
+              <xs:sequence>
+                <xs:element name="ActiveList" type="ns:ItemListCustomizationType" minOccurs="0"/>
+                <xs:element name="SoldList" type="ns:ItemListCustomizationType" minOccurs="0"/>
+                <xs:element name="UnsoldList" type="ns:ItemListCustomizationType" minOccurs="0"/>
+                <xs:element name="DetailLevel" type="xs:token" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="GetMyeBaySellingResponse">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="ns:AbstractResponseType">
+              <xs:sequence>
+                <xs:element name="ActiveList" type="ns:PaginatedItemArrayType" minOccurs="0"/>
+                <xs:element name="SoldList" type="ns:PaginatedItemArrayType" minOccurs="0"/>
+                <xs:element name="UnsoldList" type="ns:PaginatedItemArrayType" minOccurs="0"/>
+              </xs:sequence>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
+    </xs:schema>
+  </wsdl:types>
+
+  <wsdl:message name="RequesterCredentials"><wsdl:part name="RequesterCredentials" element="ns:RequesterCredentials"/></wsdl:message>
+  <wsdl:message name="AddFixedPriceItemRequest"><wsdl:part name="AddFixedPriceItemRequest" element="ns:AddFixedPriceItemRequest"/></wsdl:message>
+  <wsdl:message name="AddFixedPriceItemResponse"><wsdl:part name="AddFixedPriceItemResponse" element="ns:AddFixedPriceItemResponse"/></wsdl:message>
+  <wsdl:message name="GetItemRequest"><wsdl:part name="GetItemRequest" element="ns:GetItemRequest"/></wsdl:message>
+  <wsdl:message name="GetItemResponse"><wsdl:part name="GetItemResponse" element="ns:GetItemResponse"/></wsdl:message>
+  <wsdl:message name="ReviseFixedPriceItemRequest"><wsdl:part name="ReviseFixedPriceItemRequest" element="ns:ReviseFixedPriceItemRequest"/></wsdl:message>
+  <wsdl:message name="ReviseFixedPriceItemResponse"><wsdl:part name="ReviseFixedPriceItemResponse" element="ns:ReviseFixedPriceItemResponse"/></wsdl:message>
+  <wsdl:message name="EndFixedPriceItemRequest"><wsdl:part name="EndFixedPriceItemRequest" element="ns:EndFixedPriceItemRequest"/></wsdl:message>
+  <wsdl:message name="EndFixedPriceItemResponse"><wsdl:part name="EndFixedPriceItemResponse" element="ns:EndFixedPriceItemResponse"/></wsdl:message>
+  <wsdl:message name="GetMyeBaySellingRequest"><wsdl:part name="GetMyeBaySellingRequest" element="ns:GetMyeBaySellingRequest"/></wsdl:message>
+  <wsdl:message name="GetMyeBaySellingResponse"><wsdl:part name="GetMyeBaySellingResponse" element="ns:GetMyeBaySellingResponse"/></wsdl:message>
+
+  <wsdl:portType name="eBayAPIInterface">
+    <wsdl:operation name="AddFixedPriceItem">
+      <wsdl:documentation>Lists a fixed-price item. Answers its ItemID, StartTime, EndTime and the Fees for listing it; the new listing is Active. A SKU an active listing of the seller already has is refused with Ack Failure when InventoryTrackingMethod is SKU.</wsdl:documentation>
+      <wsdl:input message="ns:AddFixedPriceItemRequest"/>
+      <wsdl:output message="ns:AddFixedPriceItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="GetItem">
+      <wsdl:documentation>Answers one listing by ItemID, or by SKU for a listing tracked by SKU, with its current SellingStatus. An ended listing is still answered.</wsdl:documentation>
+      <wsdl:input message="ns:GetItemRequest"/>
+      <wsdl:output message="ns:GetItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="ReviseFixedPriceItem">
+      <wsdl:documentation>Changes the Item fields sent (Item.ItemID or Item.SKU names the listing) and keeps the others. The ItemID stays the same.</wsdl:documentation>
+      <wsdl:input message="ns:ReviseFixedPriceItemRequest"/>
+      <wsdl:output message="ns:ReviseFixedPriceItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="EndFixedPriceItem">
+      <wsdl:documentation>Ends a listing at once and answers its EndTime. The listing then reads as Completed and leaves the seller's ActiveList.</wsdl:documentation>
+      <wsdl:input message="ns:EndFixedPriceItemRequest"/>
+      <wsdl:output message="ns:EndFixedPriceItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="GetMyeBaySelling">
+      <wsdl:documentation>Answers the seller's active listings (ActiveList with Include true), ordered by Sort (StartTime: the listing that started first first) and paged by Pagination; PaginationResult.TotalNumberOfEntries counts them across all pages.</wsdl:documentation>
+      <wsdl:input message="ns:GetMyeBaySellingRequest"/>
+      <wsdl:output message="ns:GetMyeBaySellingResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
+
+  <wsdl:binding name="eBayAPISoapBinding" type="ns:eBayAPIInterface">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="AddFixedPriceItem">
+      <soap:operation soapAction=""/>
+      <wsdl:input><soap:header message="ns:RequesterCredentials" part="RequesterCredentials" use="literal"/><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="GetItem">
+      <soap:operation soapAction=""/>
+      <wsdl:input><soap:header message="ns:RequesterCredentials" part="RequesterCredentials" use="literal"/><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="ReviseFixedPriceItem">
+      <soap:operation soapAction=""/>
+      <wsdl:input><soap:header message="ns:RequesterCredentials" part="RequesterCredentials" use="literal"/><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="EndFixedPriceItem">
+      <soap:operation soapAction=""/>
+      <wsdl:input><soap:header message="ns:RequesterCredentials" part="RequesterCredentials" use="literal"/><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="GetMyeBaySelling">
+      <soap:operation soapAction=""/>
+      <wsdl:input><soap:header message="ns:RequesterCredentials" part="RequesterCredentials" use="literal"/><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+
+  <wsdl:service name="eBayAPIInterfaceService">
+    <wsdl:port name="eBayAPI" binding="ns:eBayAPISoapBinding">
+      <soap:address location="https://api.ebay.com/wsapi"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
