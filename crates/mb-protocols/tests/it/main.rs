@@ -47,6 +47,7 @@ mod references_by_value;
 mod related_writes;
 mod routing;
 mod runtime;
+mod sibling_writes;
 mod soap;
 mod sse;
 mod state_reads;

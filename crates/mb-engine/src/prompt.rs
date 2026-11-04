@@ -520,6 +520,21 @@ pub(crate) fn acts(op: &Operation, status: u16, ctx: &GenerationContext<'_>) -> 
         && (ctx.target.is_some() || !ctx.related.is_empty() || !ctx.created_since.is_empty())
 }
 
+/// Whether a 2xx write of `op` whose answer has no body is still asked for its effects
+/// (see [`crate::Engine::generate`]): it is shown records besides its target, which only
+/// an effect could change, and no scenario decides its answer. A delete is not: what it
+/// removed goes from state, and its parent is told of it instead, so deletes cost no call.
+pub(crate) fn asks_bodyless_effects(
+    op: &Operation,
+    status: u16,
+    ctx: &GenerationContext<'_>,
+) -> bool {
+    matches!(op.kind, OperationKind::Command(effect) if effect != Effect::Delete)
+        && (200..300).contains(&status)
+        && ctx.scenario.is_none()
+        && (!ctx.related.is_empty() || !ctx.created_since.is_empty())
+}
+
 /// Whether a 2xx read of `op` changes its stored target only through the effects its
 /// answer lists (see [`GenerationContext::changes_by_effects`]), so it is offered the
 /// effects envelope.
