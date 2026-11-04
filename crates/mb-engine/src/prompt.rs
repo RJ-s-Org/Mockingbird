@@ -30,6 +30,10 @@ pub const MAX_API_DESCRIPTION: usize = 2000;
 /// longer one (a WSDL operation's `wsdl:documentation`, say) is cut.
 pub const MAX_SUMMARY: usize = 500;
 
+/// Maximum characters of one hint (an operation's or channel's description,
+/// tag or comment) included in a prompt; a longer one is cut.
+pub const MAX_HINT: usize = 1000;
+
 /// Maximum number of received stream items (the most recent) included in a
 /// stream prompt.
 pub const MAX_REQUEST_STREAM: usize = 20;
@@ -625,7 +629,7 @@ fn operation_lines(s: &mut String, op: &Operation) {
     if !op.semantic_hints.is_empty() {
         s.push_str("Hints:\n");
         for hint in &op.semantic_hints {
-            let _ = writeln!(s, "- {hint}");
+            let _ = writeln!(s, "- {}", hint_text(hint));
         }
     }
 }
@@ -900,11 +904,11 @@ fn message_system_message(bundle: &Bundle, channel: &Channel, persona: Option<&s
         }
     }
     let _ = writeln!(s, "Messages: {}", channel.message_names.join(", "));
-    let _ = writeln!(s, "Summary: {}", channel.title);
+    let _ = writeln!(s, "Summary: {}", capped_to(&channel.title, MAX_SUMMARY));
     if !channel.semantic_hints.is_empty() {
         s.push_str("Hints:\n");
         for hint in &channel.semantic_hints {
-            let _ = writeln!(s, "- {hint}");
+            let _ = writeln!(s, "- {}", hint_text(hint));
         }
     }
     let schema = crate::compact::prompt_schema(bundle, &channel.message_schema);
@@ -1125,6 +1129,28 @@ fn capped_to(text: &str, max: usize) -> String {
         break;
     }
     out
+}
+
+/// A hint (contract prose: a description, tag or comment) as the prompt shows it:
+/// its credentials redacted (see [`redacted_text`]), escaped so it cannot open or
+/// close a tag block, and cut to [`MAX_HINT`] characters of the escaped text
+/// (marking the cut, never inside an entity). Unlike [`capped_to`] it keeps its
+/// spacing and line breaks when nothing in it is redacted, so a soft-wrapped
+/// description reads as written.
+fn hint_text(text: &str) -> String {
+    let redacted = redacted_text(text);
+    let escaped = escape(redacted.as_deref().unwrap_or(text));
+    if escaped.chars().count() <= MAX_HINT {
+        return escaped;
+    }
+    let mut cut: String = escaped.chars().take(MAX_HINT).collect();
+    if let Some(amp) = cut.rfind('&')
+        && !cut[amp..].contains(';')
+    {
+        cut.truncate(amp);
+    }
+    cut.push('…');
+    cut
 }
 
 /// What the previous word of contract prose says of the next one.

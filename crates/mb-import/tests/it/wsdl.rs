@@ -1277,3 +1277,153 @@ fn rpc_part_documentation_describes_the_member() {
     assert_eq!(b.description, None);
     assert_eq!(op.summary, None);
 }
+
+/// A document/literal WSDL whose `definitions`, service, portType operation and
+/// binding operation documentation are `docs` in that order (none when empty),
+/// with `types` as its schema.
+fn rules_wsdl(docs: [&str; 4], types: &str) -> String {
+    let doc = |d: &str| {
+        if d.is_empty() {
+            String::new()
+        } else {
+            format!("<wsdl:documentation>{d}</wsdl:documentation>")
+        }
+    };
+    format!(
+        r#"<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:rules" targetNamespace="urn:rules">
+  {}
+  <wsdl:types>
+    <xs:schema elementFormDefault="qualified" targetNamespace="urn:rules">{types}</xs:schema>
+  </wsdl:types>
+  <wsdl:message name="In"><wsdl:part name="p" element="tns:Req"/></wsdl:message>
+  <wsdl:message name="Out"><wsdl:part name="p" element="tns:Res"/></wsdl:message>
+  <wsdl:portType name="P">
+    <wsdl:operation name="Op">{}<wsdl:input message="tns:In"/><wsdl:output message="tns:Out"/></wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="B" type="tns:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Op">{}
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S">{}
+    <wsdl:port name="Port" binding="tns:B"><soap:address location="http://h/rules"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#,
+        doc(docs[0]),
+        doc(docs[2]),
+        doc(docs[3]),
+        doc(docs[1]),
+    )
+}
+
+const RULE_TYPES: &str = r#"
+<xs:simpleType name="Code">
+  <xs:annotation><xs:documentation>The type's words.</xs:documentation></xs:annotation>
+  <xs:restriction base="xs:string"><xs:maxLength value="8"/></xs:restriction>
+</xs:simpleType>
+<xs:simpleType name="Tags">
+  <xs:annotation><xs:documentation>Space-separated tags.</xs:documentation></xs:annotation>
+  <xs:list itemType="xs:string"/>
+</xs:simpleType>
+<xs:simpleType name="Either">
+  <xs:annotation><xs:documentation>A number or a word.</xs:documentation></xs:annotation>
+  <xs:union memberTypes="xs:int xs:string"/>
+</xs:simpleType>
+<xs:attribute name="lang" type="xs:string">
+  <xs:annotation><xs:documentation>The global attribute's words.</xs:documentation></xs:annotation>
+</xs:attribute>
+<xs:element name="Req">
+  <xs:complexType>
+    <xs:annotation><xs:documentation>The inline type's words.</xs:documentation></xs:annotation>
+    <xs:sequence>
+      <xs:element name="plain" type="tns:Code"/>
+      <xs:element name="own" type="tns:Code">
+        <xs:annotation><xs:documentation>The element's words.</xs:documentation></xs:annotation>
+      </xs:element>
+      <xs:element name="tags" type="tns:Tags"/>
+      <xs:element name="either" type="tns:Either"/>
+    </xs:sequence>
+    <xs:attribute ref="tns:lang"/>
+  </xs:complexType>
+</xs:element>
+<xs:element name="Res">
+  <xs:annotation><xs:documentation>The global element's words.</xs:documentation></xs:annotation>
+  <xs:complexType>
+    <xs:annotation><xs:documentation>Replaced.</xs:documentation></xs:annotation>
+    <xs:sequence>
+      <xs:element name="x" type="xs:string"/>
+    </xs:sequence>
+    <xs:attribute ref="tns:lang">
+      <xs:annotation><xs:documentation>The reference's words.</xs:documentation></xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
+</xs:element>
+"#;
+
+/// A declaration's own documentation replaces its type's; an attribute `ref`
+/// takes the global attribute's documentation unless it has its own; `list`
+/// and `union` simpleTypes keep theirs.
+#[test]
+fn schema_documentation_rules() {
+    let b = compile(rules_wsdl(["", "", "", ""], RULE_TYPES).as_bytes()).unwrap();
+    let req = &b.defs["Req"];
+    assert_eq!(req["description"], json!("The inline type's words."));
+    let props = &req["properties"];
+    assert_eq!(
+        props["plain"],
+        json!({"type": "string", "maxLength": 8, "description": "The type's words."})
+    );
+    assert_eq!(
+        props["own"],
+        json!({"type": "string", "maxLength": 8, "description": "The element's words."})
+    );
+    assert_eq!(
+        props["tags"],
+        json!({"type": "string", "description": "Space-separated tags."})
+    );
+    assert_eq!(
+        props["either"],
+        json!({"type": "string", "description": "A number or a word."})
+    );
+    assert_eq!(
+        props["@lang"],
+        json!({"type": "string", "description": "The global attribute's words."})
+    );
+    let res = &b.defs["Res"];
+    assert_eq!(res["description"], json!("The global element's words."));
+    assert_eq!(
+        res["properties"]["@lang"],
+        json!({"type": "string", "description": "The reference's words."})
+    );
+}
+
+/// Documentation repeated word for word is shown once; texts that differ in
+/// any way, even only in case or punctuation, are all kept, in order.
+#[test]
+fn repeated_documentation_is_shown_once() {
+    let compiled = |docs| compile(rules_wsdl(docs, RULE_TYPES).as_bytes()).unwrap();
+    let same = compiled(["Same.", "Same.", "Twice.", "Twice."]);
+    assert_eq!(same.description.as_deref(), Some("Same."));
+    assert_eq!(
+        same.operation("Op").unwrap().summary.as_deref(),
+        Some("Twice.")
+    );
+    let differ = compiled(["Same.", "Same!", "One.", "one."]);
+    assert_eq!(differ.description.as_deref(), Some("Same.\n\nSame!"));
+    assert_eq!(
+        differ.operation("Op").unwrap().summary.as_deref(),
+        Some("One. one.")
+    );
+    let binding_only = compiled(["", "Svc.", "", "Bound."]);
+    assert_eq!(binding_only.description.as_deref(), Some("Svc."));
+    assert_eq!(
+        binding_only.operation("Op").unwrap().summary.as_deref(),
+        Some("Bound.")
+    );
+}
