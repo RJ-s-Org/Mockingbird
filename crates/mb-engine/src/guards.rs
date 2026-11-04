@@ -586,35 +586,62 @@ pub(crate) fn names_phrase(text: &str, phrase: &str) -> bool {
     says(text, &wanted)
 }
 
-/// The sentences of `text`: each ends at a `.`, `!` or `?` followed by a space or the
-/// end.
-fn sentences(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        let ends = matches!(c, '.' | '!' | '?')
-            && chars.peek().is_none_or(|(_, next)| next.is_whitespace());
-        if ends {
-            out.push(&text[start..i + c.len_utf8()]);
-            start = i + c.len_utf8();
+/// The top-level members a create's request body declares (at its top level or in an
+/// `allOf` part), by name.
+#[must_use]
+pub fn request_members(bundle: &mb_mcm::Bundle, op: &mb_mcm::Operation) -> Vec<String> {
+    let Some(body) = op.input.body.as_ref() else {
+        return Vec::new();
+    };
+    let schema = crate::consistency::deref(bundle, body);
+    let parts = schema
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|part| crate::consistency::deref(bundle, part));
+    let mut out: Vec<String> = Vec::new();
+    for part in std::iter::once(schema).chain(parts) {
+        for name in part
+            .get("properties")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|p| p.keys())
+        {
+            if !out.contains(name) {
+                out.push(name.clone());
+            }
         }
     }
-    if start < text.len() {
-        out.push(&text[start..]);
+    out
+}
+
+/// The HTTP statuses `text` names as numbers (a whole word from 100 to 599), each once.
+pub(crate) fn status_numbers(text: &str) -> Vec<u16> {
+    let mut out = Vec::new();
+    for word in words(text) {
+        if word.len() == 3
+            && let Ok(n) = word.parse::<u16>()
+            && (100..600).contains(&n)
+            && !out.contains(&n)
+        {
+            out.push(n);
+        }
     }
     out
 }
 
 /// The declared refusal status the contract ties to a repeated value of request member
-/// `member` of a create, when it does: the first status [`refusal_codes`] offers that is
-/// a `409` whose response description names `member` (as [`a_refusal_names`] reads it),
-/// or that one sentence states as a number beside the member's name: a sentence of the
-/// operation's description, or one of the API-level description (`info.description`)
-/// that also names the type the create makes ("A product's `sku` is unique: a create
-/// with an SKU another product has is refused with 400"). The contract's own word that
-/// the repeat is refused with that status, strong enough to refuse it whatever an LLM
-/// answered. `None` for an operation that is no create, or a member nothing ties.
+/// `member` of a create, strongly enough to refuse the repeat whatever an LLM answered:
+/// the first status [`refusal_codes`] offers whose own response description says so.
+/// A `409`'s says so when it names `member` (as [`a_refusal_names`] reads it: "A
+/// gadget with this serial is already on the shelf"). A `400`'s, `412`'s or `422`'s
+/// most often speaks of validation, so it says so only when it names `member` in code
+/// position, names no other member of the request in code position or as a word, and
+/// names no other status. Sentences of the operation's or the API's description never
+/// tie a refusal here: a number beside a member's name is as often a limit ("at most
+/// 400 characters") as a status. `None` for an operation that is no create, or a member
+/// nothing ties.
 #[must_use]
 pub fn refusal_tied_to(
     bundle: &mb_mcm::Bundle,
@@ -624,29 +651,25 @@ pub fn refusal_tied_to(
     if op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create) {
         return None;
     }
-    let resource = op.resource_type.as_deref();
+    let others: Vec<String> = request_members(bundle, op)
+        .into_iter()
+        .filter(|m| m != member)
+        .collect();
     offered_codes(op).into_iter().find(|code| {
-        // A conflict's own description naming the member is the tie; a `400`'s or a
-        // `422`'s most often speaks of validation, so only a sentence giving the
-        // status beside the member ties it.
-        let described = *code == 409
-            && op
-                .output_for_status(*code)
-                .filter(|o| o.status == mb_mcm::StatusSelector::Code(*code))
-                .and_then(|o| o.description.as_deref())
-                .is_some_and(|d| names_phrase(d, member));
-        let status = code.to_string();
-        let states = |s: &&str| names_phrase(s, &status) && names_phrase(s, member);
-        described
-            || op
-                .semantic_hints
-                .iter()
-                .any(|text| sentences(text).iter().any(states))
-            || bundle.description.as_deref().is_some_and(|text| {
-                sentences(text)
-                    .iter()
-                    .any(|s| states(s) && resource.is_some_and(|t| names_phrase(s, t)))
-            })
+        let Some(description) = op
+            .output_for_status(*code)
+            .filter(|o| o.status == mb_mcm::StatusSelector::Code(*code))
+            .and_then(|o| o.description.as_deref())
+        else {
+            return false;
+        };
+        if *code == 409 {
+            return names_phrase(description, member);
+        }
+        let spans = crate::contract_values::code_spans(description);
+        spans.iter().any(|s| s == member)
+            && !others.iter().any(|m| names_phrase(description, m))
+            && status_numbers(description).iter().all(|n| n == code)
     })
 }
 

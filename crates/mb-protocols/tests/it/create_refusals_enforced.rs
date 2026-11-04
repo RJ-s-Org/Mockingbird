@@ -130,12 +130,16 @@ fn session() -> SessionKey {
 }
 
 fn harness(script: Vec<Value>) -> Harness {
+    harness_with(CONTRACT, script)
+}
+
+fn harness_with(contract: &str, script: Vec<Value>) -> Harness {
     let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
     let rt = MockRuntime::new(
         "m",
-        Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -196,29 +200,52 @@ fn widget(id: &str, sku: &str) -> Value {
     json!({"id": id, "sku": sku, "label": "Blue widget"})
 }
 
-/// A second widget with a taken SKU, answered `201` by the LLM, is refused with the 400
-/// a sentence of the API description ties to the SKU, under the code that sentence
-/// names; nothing is stored.
+/// A 400 that names the SKU only in prose, beside two codes, and a sentence of the API
+/// description are no tie strong enough to enforce: the LLM's success for a taken SKU
+/// stands, the refusal an offer.
 #[tokio::test]
-async fn a_success_for_a_taken_sku_is_refused_with_the_contracts_code() {
+async fn a_prose_tie_to_a_400_is_only_an_offer() {
     let h = harness(vec![
         widget("wd-000001", "WID-7781-BLU"),
         success(widget("wd-000002", "WID-7781-BLU")),
     ]);
     let body = json!({"sku": "WID-7781-BLU", "label": "Blue widget"});
-    let (status, _) = h.post("/widgets", body.clone()).await;
-    assert_eq!(status, StatusCode::CREATED);
+    h.post("/widgets", body.clone()).await;
     let (status, out) = h.post("/widgets", body).await;
     let prompt = h.prompt(1);
     assert!(prompt.contains("same_values"), "{prompt}");
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{out} {prompt}");
+    assert_eq!(status, StatusCode::CREATED, "{out}");
+}
+
+/// A 400 whose own description names the SKU in code position, and no other member or
+/// status, ties it: the success is refused, under the code the API description's
+/// sentence of that status, member and type names; nothing is stored.
+#[tokio::test]
+async fn a_400_naming_the_member_in_code_position_is_enforced_with_the_contracts_code() {
+    let contract = CONTRACT.replace(
+        "\"`sku_taken` when another widget has the SKU; `bad_param` for a property that is not valid.\"",
+        "\"Another widget has this `sku`.\"",
+    );
+    assert_ne!(contract, CONTRACT);
+    let h = harness_with(
+        &contract,
+        vec![
+            widget("wd-000001", "WID-7781-BLU"),
+            success(widget("wd-000002", "WID-7781-BLU")),
+        ],
+    );
+    let body = json!({"sku": "WID-7781-BLU", "label": "Blue widget"});
+    h.post("/widgets", body.clone()).await;
+    let (status, out) = h.post("/widgets", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out} {}", h.prompt(1));
     assert_eq!(out["code"], "sku_taken", "{out}");
     assert_eq!(h.exported().await, ["widgets/wd-000001"], "nothing stored");
 }
 
-/// The LLM's own refusal takes the same code, written by the faker.
+/// The LLM's own refusal may be of anything: the API description's sentence about a
+/// repeat gives it no code.
 #[tokio::test]
-async fn an_llm_refusal_of_a_taken_sku_takes_the_contracts_code() {
+async fn an_llm_refusal_takes_no_code_from_a_repeats_sentence() {
     let h = harness(vec![
         widget("wd-000001", "WID-7781-BLU"),
         json!({"effects": [], "response": null, "refusal": 400}),
@@ -227,7 +254,7 @@ async fn an_llm_refusal_of_a_taken_sku_takes_the_contracts_code() {
     h.post("/widgets", body.clone()).await;
     let (status, out) = h.post("/widgets", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
-    assert_eq!(out["code"], "sku_taken", "{out}");
+    assert_ne!(out["code"], "sku_taken", "{out}");
 }
 
 /// Another SKU repeats nothing: the LLM's success is served and stored.

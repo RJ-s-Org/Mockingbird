@@ -21,21 +21,22 @@
 //!    `message` members `` names two members, not a code). The member may also be named as a plain word of the prose (`the code`, `Code`,
 //!    whatever its case), and a member typed only as a number also takes a plain
 //!    number of the prose (`code 1001`), never the response's own status;
-//! 3. when the body refuses a create for repeating a value of a member (a taken `sku`),
-//!    a value the contract's API-level description (`info.description`) names as in
-//!    (2), within one of its sentences that holds this response's status as a number
-//!    and names that repeated member and the type the call makes, singular or plural
-//!    ("A product's `sku` is unique: a create with an SKU another product has is
-//!    refused with 400 and the code `product_invalid_sku`").
-//!    A sentence of another status, or of no member the refusal repeats, names nothing
-//!    for this body, and a body that refuses no repeat takes nothing from it;
+//! 3. when the body is the mock's own refusal of a create for repeating a value of a
+//!    member (a taken `sku`; never an LLM's refusal, which may be of anything), a value
+//!    the contract's API-level description (`info.description`) names as in (2),
+//!    within one of its sentences that holds this response's status as a number and no
+//!    other, and names that repeated member, no other member of the request, and the
+//!    type the call makes, singular or plural ("A product's `sku` is unique: a create
+//!    with an SKU another product has is refused with 400 and the code
+//!    `product_invalid_sku`"). Any other sentence names nothing for this body;
 //! 4. its schema's example (`example`, else the first of `examples`, not a boolean's),
 //!    only where no other status's response uses that schema: an example of a shared
 //!    `Error` says nothing of this status.
 //!
-//! A member no source names keeps the faker's value, and a number that is the response's
-//! own HTTP status, as the engine reflects it into a problem's `status`, is never
-//! changed. Each change is kept only while the whole body still validates, so a value
+//! A body an LLM wrote, valid already, keeps what it chose: only its members left
+//! empty (`null` or `""`) take a value. A member no source names keeps the faker's
+//! value, and a number that is the response's own HTTP status, as the engine reflects
+//! it into a problem's `status`, is never changed. Each change is kept only while the whole body still validates, so a value
 //! that does not fit the branch the faker took changes nothing. Members are told apart by
 //! structure alone: no name is special.
 
@@ -70,6 +71,12 @@ pub(crate) struct Prose<'a> {
     pub repeated: &'a [String],
     /// The type of resource the refused call makes.
     pub resource: Option<&'a str>,
+    /// The top-level members of the refused call's request: a sentence naming another
+    /// than the repeated one ties nothing (source 3).
+    pub request: &'a [String],
+    /// Only members the body leaves empty (`null` or `""`) take a value: the body was
+    /// written by an LLM, valid already, and what it chose stays.
+    pub only_empty: bool,
 }
 
 /// `body`, valid against `validator`, with each scalar member the contract names a
@@ -93,7 +100,7 @@ pub(crate) fn fill(
             stating(
                 sentenced_tokens(text),
                 status,
-                (prose.repeated, prose.resource),
+                (prose.repeated, prose.resource, prose.request),
             )
         })
         .unwrap_or_default();
@@ -114,6 +121,7 @@ pub(crate) fn fill(
     for (pointer, value) in walk.changes {
         let mut candidate = out.clone();
         match candidate.pointer_mut(&pointer) {
+            Some(slot) if prose.only_empty && !(slot.is_null() || *slot == "") => continue,
             Some(slot) => *slot = value,
             None => continue,
         }
@@ -246,13 +254,14 @@ fn names_member(token: &Token, member: &str) -> bool {
     }
 }
 
-/// The pieces of the sentences of `said` that hold `status` as a word and name one of
-/// `repeated` and the type `resource` (source 3 of the module's documentation), as
-/// [`crate::guards::refusal_tied_to`] reads them; none without a repeat or a type.
+/// The pieces of the sentences of `said` that hold `status` as a word, and no other
+/// status, and name one of `repeated`, no other member of `request`, and the type
+/// `resource` (source 3 of the module's documentation); none without a repeat or a type.
+/// A sentence naming two statuses or two members of the request ties neither.
 fn stating(
     said: Vec<(Token, usize)>,
     status: u16,
-    (repeated, resource): (&[String], Option<&str>),
+    (repeated, resource, request): (&[String], Option<&str>, &[String]),
 ) -> Vec<(Token, usize)> {
     let Some(resource) = resource.filter(|_| !repeated.is_empty()) else {
         return Vec::new();
@@ -265,12 +274,16 @@ fn stating(
             Token::Code(span) | Token::Word(span) => span,
         });
     }
-    let status = status.to_string();
+    let status_code = status;
     let stated: HashSet<usize> = texts
         .into_iter()
         .filter(|(_, text)| {
-            crate::guards::names_phrase(text, &status)
+            crate::guards::status_numbers(text) == [status_code]
                 && crate::guards::names_phrase(text, resource)
+                && !request
+                    .iter()
+                    .filter(|m| !repeated.contains(m))
+                    .any(|m| crate::guards::names_phrase(text, m))
                 && repeated
                     .iter()
                     .any(|m| crate::guards::names_phrase(text, m))

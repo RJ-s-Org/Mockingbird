@@ -393,37 +393,34 @@ fn the_api_description_names_a_repeats_code() {
 }
 
 /// What ties a repeat to a refusal strongly enough to enforce it: a 409 whose own
-/// description names the member, or a sentence giving the status beside the member (in
-/// the API description, also beside the type). A 400 naming the member alone is
-/// validation as often as not, and ties nothing.
+/// description names the member, or another status whose own description names it in
+/// code position and names no other member of the request and no other status. No
+/// sentence of the API description ties one, whatever it says.
 #[test]
-fn a_refusal_is_tied_to_a_repeat_by_structure_only() {
+fn a_refusal_is_tied_to_a_repeat_by_its_own_description_only() {
     use mb_engine::guards::refusal_tied_to;
     let tied = |bundle: &Bundle, member: &str| {
         refusal_tied_to(bundle, bundle.operation("createThing").unwrap(), member)
     };
-    let bundle = shop("A thing's `sku` is unique: a taken one is refused with 409.");
+    let set = |bundle: &mut Bundle, code: u16, description: &str| {
+        let op = bundle
+            .operations
+            .iter_mut()
+            .find(|op| op.id == "createThing")
+            .unwrap();
+        let variant = op
+            .outputs
+            .iter_mut()
+            .find(|o| o.status == mb_mcm::StatusSelector::Code(code))
+            .unwrap();
+        variant.description = Some(description.into());
+    };
+    let mut bundle = shop("A thing's `sku` is unique: a taken one is refused with 409.");
+    assert_eq!(tied(&bundle, "sku"), None, "an API sentence ties nothing");
+    set(&mut bundle, 409, "A thing with this SKU exists.");
     assert_eq!(tied(&bundle, "sku"), Some(409));
     assert_eq!(tied(&bundle, "name"), None);
-    let bundle = shop("A gizmo's `sku` is unique: a taken one is refused with 409.");
-    assert_eq!(tied(&bundle, "sku"), None, "another type");
-    let bundle = shop("A thing's `sku` is unique. A taken one is refused with 409.");
-    assert_eq!(tied(&bundle, "sku"), None, "another sentence");
-    let mut bundle = shop("Things.");
-    assert_eq!(tied(&bundle, "sku"), None);
-    let op = bundle
-        .operations
-        .iter_mut()
-        .find(|op| op.id == "createThing")
-        .unwrap();
-    let conflict = op
-        .outputs
-        .iter_mut()
-        .find(|o| o.status == mb_mcm::StatusSelector::Code(409))
-        .unwrap();
-    conflict.description = Some("A thing with this SKU exists.".into());
-    assert_eq!(tied(&bundle, "sku"), Some(409));
-    // A 400 alone, naming the member: no tie.
+    // Without the 409, the 400 is offered: in code position, alone, it ties.
     let op = bundle
         .operations
         .iter_mut()
@@ -431,13 +428,36 @@ fn a_refusal_is_tied_to_a_repeat_by_structure_only() {
         .unwrap();
     op.outputs
         .retain(|o| o.status != mb_mcm::StatusSelector::Code(409));
-    let bad = op
-        .outputs
-        .iter_mut()
-        .find(|o| o.status == mb_mcm::StatusSelector::Code(400))
-        .unwrap();
-    bad.description = Some("The SKU is too long.".into());
-    assert_eq!(tied(&bundle, "sku"), None);
+    for (description, expected) in [
+        ("Another thing has this `sku`.", Some(400)),
+        ("The SKU is too long.", None),
+        ("The `sku` holds at most 300 characters.", None),
+        (
+            "Another thing has this `sku`, or the `name` is empty.",
+            None,
+        ),
+        ("Another thing has this `sku`; 422 for anything else.", None),
+    ] {
+        set(&mut bundle, 400, description);
+        assert_eq!(tied(&bundle, "sku"), expected, "{description}");
+    }
+}
+
+/// A sentence of the API description naming another status too, or another member of
+/// the request, gives a repeat's refusal no code.
+#[test]
+fn an_api_sentence_of_two_statuses_or_members_names_no_code() {
+    for info in [
+        "A thing with a taken `sku` is refused with 400 and the code `sku_taken`, a missing one with 404.",
+        "A thing with a taken `sku` or `name` is refused with 400 and the code `sku_taken`.",
+    ] {
+        let bundle = shop(info);
+        assert_ne!(
+            repeat_body(&bundle, 400, "sku")["code"],
+            "sku_taken",
+            "{info}"
+        );
+    }
 }
 
 /// A member whose own description lists codes takes the one the status's description

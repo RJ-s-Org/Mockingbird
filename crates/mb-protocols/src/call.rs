@@ -1387,10 +1387,10 @@ pub(crate) async fn complete(
                 match enforced {
                     // The holder itself, as stored: served as the model answered it, and
                     // stored over nothing.
-                    Some(repeats::Enforced::Held(held)) => {
+                    Some(repeats::Enforced::Held { id, stored }) => {
                         unstored = true;
-                        drop_all_effects(rt, op, &held, &mut generated);
-                        generated.body = as_answered;
+                        drop_all_effects(rt, op, &id, &mut generated);
+                        generated.body = stored.or(as_answered);
                     }
                     Some(repeats::Enforced::Refuse { code, member, held }) => {
                         if let Some(refusal) = plan.engine.refuse_repeated_value(

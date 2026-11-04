@@ -913,10 +913,11 @@ impl Engine {
                             },
                         ..
                     }) => {
-                        let repeated = repeated_members(&ctx);
+                        // The model's refusal may be of anything: no repeat's prose
+                        // speaks for it.
                         let refusal = Refusal {
                             code,
-                            repeated: &repeated,
+                            repeated: &[],
                             written: refusal_body,
                         };
                         return Ok(self.refused(bundle, op, call, refusal, (source, usage)));
@@ -1274,7 +1275,7 @@ impl Engine {
                 ..GenerationContext::default()
             };
             let mut response = self.fallback(bundle, op, variant, 404, call, &ctx);
-            self.fill_contract_values(bundle, op, variant, &mut response, &[]);
+            self.fill_contract_values(bundle, op, variant, &mut response, (&[], false));
             response
         });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
@@ -1399,10 +1400,17 @@ impl Engine {
         };
         let mut response = match op.output_for_status(code) {
             Some(variant) => {
-                let mut response = self
-                    .written_refusal(bundle, op, variant, code, refusal.written)
-                    .unwrap_or_else(|| self.fallback(bundle, op, variant, code, call, &ctx));
-                self.fill_contract_values(bundle, op, variant, &mut response, refusal.repeated);
+                let written = self.written_refusal(bundle, op, variant, code, refusal.written);
+                let only_empty = written.is_some();
+                let mut response =
+                    written.unwrap_or_else(|| self.fallback(bundle, op, variant, code, call, &ctx));
+                self.fill_contract_values(
+                    bundle,
+                    op,
+                    variant,
+                    &mut response,
+                    (refusal.repeated, only_empty),
+                );
                 response
             }
             // Not offered: a refusal names only a status the operation declares.
@@ -1469,14 +1477,15 @@ impl Engine {
 
     /// The members of `response`, a body the mock built itself for `variant`, that the
     /// contract names a value for, holding it (see [`contract_values`]); `repeated`
-    /// names the request members whose repeated value it refuses, if any.
+    /// names the request members whose repeated value it refuses, if any, and with
+    /// `only_empty` (a valid body an LLM wrote) only members it left empty take one.
     fn fill_contract_values(
         &self,
         bundle: &Bundle,
         op: &Operation,
         variant: &OutputVariant,
         response: &mut GeneratedResponse,
-        repeated: &[String],
+        (repeated, only_empty): (&[String], bool),
     ) {
         if media::is_non_json(op, variant) {
             return;
@@ -1494,6 +1503,8 @@ impl Engine {
                     info: bundle.description.as_deref(),
                     repeated,
                     resource: op.resource_type.as_deref(),
+                    request: &guards::request_members(bundle, op),
+                    only_empty,
                 },
                 body,
             ),
@@ -2190,18 +2201,6 @@ struct Refusal<'a> {
     repeated: &'a [String],
     /// The error body the LLM wrote for it, when it did: not checked yet.
     written: Option<Value>,
-}
-
-/// The members `ctx` shows a create repeating a stored record's value of (see
-/// [`GenerationContext::same_values`]), each once.
-fn repeated_members(ctx: &GenerationContext<'_>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for (_, _, member) in ctx.same_values {
-        if !out.contains(member) {
-            out.push(member.clone());
-        }
-    }
-    out
 }
 
 /// An LLM reply: its text, and, when the provider stopped it at

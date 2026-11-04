@@ -8,9 +8,11 @@
 //! refusal is enforced, and the success is replaced by the declared error:
 //!
 //! - the operation is a create, and the contract ties a declared refusal status to a
-//!   repeat of that member ([`mb_engine::guards::refusal_tied_to`]): a `409` whose
-//!   response description names the member, or a sentence of the operation's or the
-//!   API's description that gives the status beside the member's name;
+//!   repeat of that member in that status's own response description
+//!   ([`mb_engine::guards::refusal_tied_to`]): a `409`'s naming the member, or another
+//!   status's naming it in code position and no other member or status. A sentence of
+//!   the operation's or the API's description never does: a number beside a member is
+//!   as often a limit as a status;
 //! - a stored record of the type the create makes holds the very value the request
 //!   gives that member: read back now, in the collection the create runs in
 //!   ([`super::in_create_collection`]), and agreeing with the references the request
@@ -18,8 +20,10 @@
 //!
 //! Anything weaker (a member no refusal names, another collection, a value that
 //! differs, a record gone since) keeps the model's answer: the refusal stays an offer.
-//! So does an answer that is the very record holding the value, with its identity, as
-//! stored ([`answers_the_held`]): an API answering a repeat with what it holds is right.
+//! An answer that is the very record holding the value, with its identity, is never
+//! refused and stores nothing: as answered when it agrees with the record as stored
+//! ([`answers_the_held`], an API answering a repeat with what it holds), else the stored
+//! record unchanged (it names the holder's identity and value, so it is no new record).
 
 use mb_engine::{GeneratedResponse, OperationCall};
 use mb_mcm::Operation;
@@ -36,9 +40,11 @@ pub(super) enum Enforced {
         member: String,
         held: String,
     },
-    /// The answer is the record that holds the value, with this id, as stored: it
-    /// stands, and stores nothing.
-    Held(String),
+    /// The answer is the record `id` that holds the value: it stores nothing, and is
+    /// served as answered when it agrees with the record as stored, else as `stored`,
+    /// the record unchanged (an answer under the holder's identity and value that
+    /// changes other members is no new record, and no update either).
+    Held { id: String, stored: Option<Value> },
 }
 
 /// What the success `answer`, the body of a create `call` as the model gave it,
@@ -63,9 +69,6 @@ pub(super) async fn enforced(
         let Some(asked) = body.get(member).filter(|v| v.is_string() || v.is_number()) else {
             continue;
         };
-        let Some(code) = mb_engine::guards::refusal_tied_to(rt.bundle(), op, member) else {
-            continue;
-        };
         let Some(held) = state.get(session, t, id).await else {
             continue;
         };
@@ -75,8 +78,20 @@ pub(super) async fn enforced(
             continue;
         }
         if answers_the_held(answer, &held, field) {
-            return Some(Enforced::Held(held.id));
+            return Some(Enforced::Held {
+                id: held.id,
+                stored: None,
+            });
         }
+        if names_the_held(answer, &held, (field, member)) {
+            return Some(Enforced::Held {
+                id: held.id,
+                stored: Some(held.data),
+            });
+        }
+        let Some(code) = mb_engine::guards::refusal_tied_to(rt.bundle(), op, member) else {
+            continue;
+        };
         return Some(Enforced::Refuse {
             code,
             member: member.clone(),
@@ -114,6 +129,27 @@ pub(super) fn answers_the_held(answer: Option<&Value>, held: &StoredResource, fi
         }
     }
     same_id && shared > 0
+}
+
+/// Whether `answer` names the stored record `held`: its id under the identity field
+/// `field`, and `held`'s value of `member`, whatever else it says.
+fn names_the_held(
+    answer: Option<&Value>,
+    held: &StoredResource,
+    (field, member): (&str, &str),
+) -> bool {
+    let Some(Value::Object(answer)) = answer else {
+        return false;
+    };
+    let same_id = answer.get(field).is_some_and(|id| match id {
+        Value::String(s) => *s == held.id,
+        Value::Number(n) => n.to_string() == held.id,
+        _ => false,
+    });
+    same_id
+        && answer
+            .get(member)
+            .is_some_and(|v| same_scalar(held.data.get(member), v))
 }
 
 /// Whether `answered` agrees with `kept`: equal scalars (numbers by value), objects
