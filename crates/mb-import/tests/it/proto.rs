@@ -473,3 +473,38 @@ fn prost_reflect_json_validates_against_schema() {
     assert_eq!(scalars["counts"]["x"], json!("3"));
     validate(&demo, "demo.Scalars", &scalars);
 }
+
+/// Method names take their kind from a verb prefix only: a verb ending the
+/// name (`CanDelete`, `OrderUpdate`) says nothing on gRPC.
+#[test]
+fn a_verb_suffix_gives_no_kind() {
+    let proto = r#"
+syntax = "proto3";
+package demo;
+message Req { string id = 1; }
+message Resp { bool ok = 1; }
+service Orders {
+  rpc CanDelete(Req) returns (Resp);
+  rpc OrderUpdate(Req) returns (Resp);
+  rpc DeleteOrder(Req) returns (Resp);
+}
+"#;
+    let b = compile(proto.as_bytes()).unwrap();
+    let op = |name: &str| {
+        b.operations
+            .iter()
+            .find(|o| o.id.ends_with(name))
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    assert_eq!(op("CanDelete").kind, OperationKind::Query);
+    assert_eq!(op("CanDelete").resource_type.as_deref(), Some("candelete"));
+    assert_eq!(op("OrderUpdate").kind, OperationKind::Query);
+    assert_eq!(
+        op("OrderUpdate").resource_type.as_deref(),
+        Some("orderupdate")
+    );
+    assert_eq!(
+        op("DeleteOrder").kind,
+        OperationKind::Command(Effect::Delete)
+    );
+}

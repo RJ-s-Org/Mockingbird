@@ -7,7 +7,7 @@
 //! `cartLinesAdd` answers is the cart now); a query's are only added when
 //! the session holds none under their id, like a list read's seeded items.
 
-use mb_mcm::{Bundle, Effect, Operation, OperationKind};
+use mb_mcm::{Binding, Bundle, Effect, Operation, OperationKind};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
 
@@ -69,6 +69,118 @@ pub(crate) fn objects(
         }
     }
     walk.found.into_iter().map(|(r, _)| r).collect()
+}
+
+/// What an update or a delete mutation names by its `id` argument: the
+/// type the record is stored under and its id.
+#[derive(Debug, PartialEq)]
+pub(crate) struct ById {
+    /// Lowercased.
+    pub resource_type: String,
+    pub id: String,
+}
+
+/// The record `op`, an update or a delete, acts on by its `id` argument
+/// (`issueUpdate(id:, input:)`, `commentDelete(id:)`), whatever its
+/// payload selects: an `id` of a type with an `id` key that the name says
+/// it writes ([`mb_mcm::write_nouns`]: `issueUpdate`, `deleteComment`).
+/// That is the operation's resource type; for an update whose resource
+/// type has no `id` key, the one type with one among its payload's object
+/// members. A delete never takes a payload's member: another object there
+/// is the parent that stays (`productVariantDelete`'s `product`). A record
+/// the name does not name is never written (`updateTeamMember` returning
+/// its `Team`, or a `TeamMemberPayload` holding it). `None` for any other
+/// mutation, or with no `id`.
+pub(crate) fn by_id(bundle: &Bundle, op: &Operation, args: &Map<String, Value>) -> Option<ById> {
+    let delete = match op.kind {
+        OperationKind::Command(Effect::Delete) => true,
+        OperationKind::Command(Effect::Update) => false,
+        _ => return None,
+    };
+    let Binding::Graphql { field, .. } = &op.binding else {
+        return None;
+    };
+    let id = match args.get("id")? {
+        Value::String(s) if !s.is_empty() => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    let keyed = |name: &str| {
+        bundle
+            .defs
+            .iter()
+            .find(|(n, _)| n.to_lowercase() == name)
+            .and_then(|(_, def)| def.get("properties")?.as_object())
+            .is_some_and(|p| p.contains_key("id"))
+    };
+    let nouns = mb_mcm::write_nouns(field);
+    let named = |t: &str| {
+        let t = t.replace('_', "");
+        nouns
+            .iter()
+            .any(|(effect, noun)| OperationKind::Command(*effect) == op.kind && *noun == t)
+    };
+    let target = |t: &str| {
+        named(t).then(|| ById {
+            resource_type: t.to_string(),
+            id: id.clone(),
+        })
+    };
+    if let Some(own) = op.resource_type.as_deref().filter(|t| keyed(t)) {
+        return target(own);
+    }
+    if delete {
+        return None;
+    }
+    let payload = op
+        .success_output()
+        .and_then(|o| o.schema.as_ref())
+        .and_then(ref_name)
+        .and_then(|name| bundle.defs.get(name)?.get("properties")?.as_object())?;
+    let mut members: Vec<String> = Vec::new();
+    for member in payload.values() {
+        if let Some(name) = ref_name(member).map(str::to_lowercase)
+            && keyed(&name)
+            && !members.contains(&name)
+        {
+            members.push(name);
+        }
+    }
+    match members.as_slice() {
+        [one] => target(one),
+        _ => None,
+    }
+}
+
+/// The input objects' members of an update (`input: {priority, title}`)
+/// that `held`, a stored record, has or its type declares: what the
+/// update sets on it. Its `id` is left alone.
+pub(crate) fn update_of(
+    bundle: &Bundle,
+    held: &StoredResource,
+    args: &Map<String, Value>,
+) -> Map<String, Value> {
+    let declared = bundle
+        .defs
+        .iter()
+        .find(|(name, _)| name.to_lowercase() == held.resource_type)
+        .and_then(|(_, def)| def.get("properties"))
+        .and_then(Value::as_object);
+    let has = |name: &str| {
+        held.data.get(name).is_some() || declared.is_some_and(|d| d.contains_key(name))
+    };
+    let mut out = Map::new();
+    for (name, value) in args.values().filter_map(Value::as_object).flatten() {
+        if name != "id" && has(name) {
+            out.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    out
+}
+
+/// The type a schema refers to, through a nullable `anyOf`.
+fn ref_name(schema: &Value) -> Option<&str> {
+    def_name(schema).or_else(|| schema.get("anyOf")?.as_array()?.iter().find_map(def_name))
 }
 
 struct Walk<'a> {
@@ -334,6 +446,116 @@ mod tests {
         assert_eq!(
             Value::Object(scalar_args(args.as_object().unwrap())),
             json!({"draft": true, "title": "T"})
+        );
+    }
+
+    const SDL: &str = r#"
+type Issue { id: ID! title: String! priority: Int! }
+type Product { id: ID! title: String! }
+type ProductVariant { id: ID! title: String! }
+type Note { body: String! }
+type IssuePayload { success: Boolean! issue: Issue }
+type VariantDeletePayload { deletedId: ID product: Product }
+type PairPayload { issue: Issue product: Product }
+type NotePayload { note: Note }
+type Team { id: ID! role: String }
+type TeamMemberPayload { team: Team }
+input IssueInput { title: String priority: Int stateId: String }
+type Query { issue(id: ID!): Issue }
+type Mutation {
+  issueUpdate(id: ID!, input: IssueInput!): IssuePayload!
+  setIssuePriority(id: ID!, priority: Int!): IssuePayload!
+  setPair(id: ID!, input: IssueInput!): PairPayload!
+  productVariantDelete(id: ID!): VariantDeletePayload!
+  cancelOrder(id: ID!): IssuePayload!
+  setNote(id: ID!, input: IssueInput!): NotePayload!
+  issueBulkUpdate(input: IssueInput!): IssuePayload!
+  updateTeamMember(id: ID!, input: IssueInput!): TeamMemberPayload!
+}
+"#;
+
+    fn by_id_of(name: &str, args: Value) -> Option<ById> {
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        let op = bundle
+            .operations
+            .iter()
+            .find(|o| o.id == format!("Mutation.{name}"))
+            .unwrap();
+        by_id(&bundle, op, args.as_object().unwrap())
+    }
+
+    fn target(t: &str, id: &str) -> Option<ById> {
+        Some(ById {
+            resource_type: t.into(),
+            id: id.into(),
+        })
+    }
+
+    #[test]
+    fn by_id_takes_the_operation_s_own_keyed_type() {
+        assert_eq!(
+            by_id_of("issueUpdate", json!({"id": "i-1"})),
+            target("issue", "i-1")
+        );
+        // A numeric id is its decimal text.
+        assert_eq!(
+            by_id_of("issueUpdate", json!({"id": 5})),
+            target("issue", "5")
+        );
+        assert_eq!(by_id_of("issueUpdate", json!({"id": ""})), None);
+        assert_eq!(by_id_of("issueBulkUpdate", json!({"input": {}})), None);
+    }
+
+    #[test]
+    fn a_delete_acts_only_on_its_own_type() {
+        // The payload's `product` is the parent that stays.
+        assert_eq!(
+            by_id_of("productVariantDelete", json!({"id": "1"})),
+            target("productvariant", "1")
+        );
+        // `cancelOrder` names no record: its payload's issue is not it.
+        assert_eq!(by_id_of("cancelOrder", json!({"id": "i-1"})), None);
+    }
+
+    #[test]
+    fn an_update_falls_back_to_its_payload_s_one_keyed_member_it_names() {
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        // An `issueUpdate` whose resource type is its payload's: the
+        // payload's one keyed member, the issue its name names.
+        let mut op = bundle
+            .operations
+            .iter()
+            .find(|o| o.id == "Mutation.issueUpdate")
+            .unwrap()
+            .clone();
+        op.resource_type = Some("issuepayload".into());
+        let args = json!({"id": "i-1"});
+        assert_eq!(
+            by_id(&bundle, &op, args.as_object().unwrap()),
+            target("issue", "i-1")
+        );
+        // A member the name does not name: nothing.
+        assert_eq!(by_id_of("setIssuePriority", json!({"id": "i-1"})), None);
+        assert_eq!(by_id_of("updateTeamMember", json!({"id": "t-1"})), None);
+        // Two keyed members: which one is unknown.
+        assert_eq!(by_id_of("setPair", json!({"id": "i-1"})), None);
+        // A member type with no `id` key is none (`keyed`).
+        assert_eq!(by_id_of("setNote", json!({"id": "n-1"})), None);
+    }
+
+    #[test]
+    fn update_of_keeps_the_record_s_members_only() {
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        let held = StoredResource {
+            resource_type: "issue".into(),
+            id: "i-1".into(),
+            data: json!({"id": "i-1", "title": "Crash", "priority": 3, "extra": 0}),
+        };
+        let args =
+            json!({"id": "i-2", "input": {"id": "x", "priority": 1, "stateId": "s", "extra": 9}});
+        assert_eq!(
+            Value::Object(update_of(&bundle, &held, args.as_object().unwrap())),
+            json!({"priority": 1, "extra": 9})
         );
     }
 }

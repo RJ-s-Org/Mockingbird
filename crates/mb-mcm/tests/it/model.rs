@@ -776,3 +776,41 @@ fn effective_trigger_slice_matches_effective_triggers() {
     assert!(channel.effective_trigger_slice().is_empty());
     assert!(channel.effective_triggers().is_empty());
 }
+
+#[test]
+fn write_nouns_read_a_write_verb_at_a_word_boundary() {
+    let nouns = |name: &str| write_nouns(name);
+    assert_eq!(nouns("issueUpdate"), vec![(Effect::Update, "issue".into())]);
+    assert_eq!(
+        nouns("deleteComments"),
+        vec![(Effect::Delete, "comment".into())]
+    );
+    assert_eq!(
+        nouns("product_variant_delete"),
+        vec![(Effect::Delete, "productvariant".into())]
+    );
+    assert_eq!(
+        nouns("create_order"),
+        vec![(Effect::Create, "order".into())]
+    );
+    // A prefix first, then a suffix.
+    assert_eq!(
+        nouns("updateIssueDelete"),
+        vec![
+            (Effect::Update, "issuedelete".into()),
+            (Effect::Delete, "updateissue".into())
+        ]
+    );
+    // No boundary, no noun, no write verb.
+    for name in [
+        "issuedelete",
+        "Issuedelete",
+        "updater",
+        "Update",
+        "_Delete",
+        "orderCancel",
+        "markRead",
+    ] {
+        assert_eq!(nouns(name), vec![], "{name}");
+    }
+}
