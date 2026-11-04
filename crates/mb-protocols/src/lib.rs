@@ -32,7 +32,7 @@
 //!
 //! ```
 //! # #[cfg(feature = "http-rest")]
-//! # fn build(bundle: mb_mcm::Bundle) -> Result<axum::Router, mb_protocols::http_rest::RouteError> {
+//! # fn build(bundle: mb_mcm::Bundle) -> axum::Router {
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
@@ -47,8 +47,8 @@
 //!     Arc::new(MemoryStore::new(Duration::from_secs(3600))),
 //! );
 //! // Serve it with `axum::serve`.
-//! let router = http_rest::try_router(Arc::new(rt))?;
-//! # Ok(router)
+//! let router = http_rest::router(Arc::new(rt));
+//! # router
 //! # }
 //! ```
 

@@ -43,6 +43,7 @@ mod identity_by_contract;
 mod provider_policy;
 mod references_by_value;
 mod related_writes;
+mod routing;
 mod runtime;
 mod soap;
 mod sse;

@@ -20,7 +20,7 @@ use tracing::field::Empty;
 
 use super::form;
 use super::problem::{problem, problem_body, render};
-use super::routing::{RouteError, RouteTable};
+use super::routing::RouteTable;
 use crate::call::{
     self, DEFAULT_SESSION, PlanError, PlanFailure, Presented, Report, forwarded_headers,
     public_query, recorded_headers,
@@ -66,8 +66,8 @@ struct InputValidators {
 }
 
 impl RestState {
-    pub(crate) fn new(rt: Arc<MockRuntime>) -> Result<Self, RouteError> {
-        let routes = RouteTable::with_base_paths(&rt.bundle, &rt.base_paths)?;
+    pub(crate) fn new(rt: Arc<MockRuntime>) -> Self {
+        let routes = RouteTable::with_base_paths(&rt.bundle, &rt.base_paths);
         let compile = |op: &Operation, schema: &Option<Value>| {
             let schema = schema.as_ref()?;
             match SchemaValidator::new(&rt.bundle.with_reachable_defs(schema)) {
@@ -91,7 +91,12 @@ impl RestState {
                 (op.id.clone(), v)
             })
             .collect();
-        Ok(Self { rt, routes, inputs })
+        Self { rt, routes, inputs }
+    }
+
+    /// The operations left unrouted ([`RouteTable::skipped`]).
+    pub(crate) fn skipped(&self) -> &[super::RouteError] {
+        self.routes.skipped()
     }
 }
 

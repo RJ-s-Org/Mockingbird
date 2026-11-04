@@ -216,7 +216,7 @@ async fn delete_returns_204_and_removes_state() {
 #[tokio::test]
 async fn routes_trailing_slash_query_and_unknown() {
     let bundle = orders();
-    let table = RouteTable::new(&bundle).unwrap();
+    let table = RouteTable::new(&bundle);
     let (op, params) = table.find(HttpMethod::Get, "/orders/o%201").unwrap();
     assert_eq!(op, "getOrder");
     assert_eq!(params["orderId"], "o 1");
@@ -2036,7 +2036,7 @@ fn session_of(h: &Harness, id: &str) -> SessionKey {
 #[test]
 fn base_paths_route_prefixed_and_unprefixed_paths() {
     let bundle = orders();
-    let table = RouteTable::with_base_paths(&bundle, &["/v1".into(), "/api/v2".into()]).unwrap();
+    let table = RouteTable::with_base_paths(&bundle, &["/v1".into(), "/api/v2".into()]);
     for path in ["/orders/o%201", "/v1/orders/o%201", "/api/v2/orders/o%201/"] {
         let (op, params) = table.find(HttpMethod::Get, path).unwrap();
         assert_eq!(op, "getOrder", "{path}");
@@ -2069,8 +2069,7 @@ fn base_paths_are_normalized_and_bad_ones_skipped() {
             "/".into(),
             "".into(),
         ],
-    )
-    .unwrap();
+    );
     assert!(table.find(HttpMethod::Get, "/v2/orders").is_some());
     assert!(table.find(HttpMethod::Get, "/orders").is_some());
     assert!(table.find(HttpMethod::Get, "/v1/orders").is_none());
@@ -2089,7 +2088,7 @@ fn a_contract_route_wins_over_a_prefixed_route() {
         }
     }"#;
     let bundle = compile(src.as_bytes()).unwrap();
-    let table = RouteTable::with_base_paths(&bundle, &["/v1".into()]).unwrap();
+    let table = RouteTable::with_base_paths(&bundle, &["/v1".into()]);
     assert_eq!(table.find(HttpMethod::Get, "/orders").unwrap().0, "plain");
     assert_eq!(
         table.find(HttpMethod::Get, "/v1/orders").unwrap().0,

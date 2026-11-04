@@ -20,37 +20,31 @@ pub use routing::{RouteError, RouteTable};
 
 /// A router serving every HTTP operation of `rt.bundle`.
 ///
-/// If the bundle's routes conflict, every request gets a 500 problem
-/// response; use [`try_router`] to surface the error instead.
+/// An operation whose route cannot be registered (it matches exactly the
+/// requests of an earlier one, or is no valid pattern) is logged as a
+/// warning and left out; the others are served. Use
+/// [`router_and_skipped`] to get those operations instead.
 pub fn router(rt: Arc<MockRuntime>) -> Router {
-    match try_router(rt) {
-        Ok(router) => router,
-        Err(e) => {
-            tracing::error!(error = %e, "cannot build REST routes");
-            let detail = e.to_string();
-            Router::new().fallback(move || {
-                let detail = detail.clone();
-                async move { problem(500, "Invalid route table", detail) }
-            })
-        }
+    let (router, skipped) = router_and_skipped(rt);
+    for error in &skipped {
+        tracing::warn!(operation = error.operation(), %error, "HTTP route skipped; the other operations are served");
     }
+    router
 }
 
-/// Like [`router`], but fails when two operations claim the same route.
+/// Like [`router`], also returning the operations left out (see
+/// [`RouteTable::skipped`]), without logging them.
 ///
 /// Mocks are meant to be called from browsers, so a permissive CORS layer
 /// answers preflights and exposes `X-Mockingbird-Source`.
-///
-/// # Errors
-///
-/// [`RouteError`] when the bundle's routes conflict (see
-/// [`RouteTable::new`]).
-pub fn try_router(rt: Arc<MockRuntime>) -> Result<Router, RouteError> {
-    let state = handler::RestState::new(rt)?;
-    Ok(Router::new()
+pub fn router_and_skipped(rt: Arc<MockRuntime>) -> (Router, Vec<RouteError>) {
+    let state = handler::RestState::new(rt);
+    let skipped = state.skipped().to_vec();
+    let router = Router::new()
         .fallback(handler::handle)
         .with_state(Arc::new(state))
-        .layer(cors()))
+        .layer(cors());
+    (router, skipped)
 }
 
 fn cors() -> CorsLayer {

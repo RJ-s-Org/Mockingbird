@@ -28,6 +28,12 @@ A REST mock serves each operation at its contract path and also under every base
 
 Base paths are read from the stored contract source when the mock is loaded, so contracts uploaded before this release gain them on the next reload.
 
+## Path matching
+
+A REST operation's path is matched segment by segment (between `/`s). A segment is static text (`/orders`), a parameter (`/orders/{id}`), a template mixing parameters with literal text (`/files/{name}.json`, `/items/{id}:archive`, OData keys `/companies({company_id})` and `/pairs(left={a},right={b})`), or a catch-all as the last segment (`/static/{*path}`, which takes the rest of the path). When several operations of a method match a request, the first segment where they differ decides: static text, then a template (the one with more literal text first), then a parameter, then a catch-all. So `/files/index.json` wins over `/files/{name}.json`, which wins over `/files/{name}`. A parameter never matches an empty string or a `/` (an encoded `%2F` is fine); between two parameters of one segment, the first occurrence of the literal text that lets the rest match separates them, and literal text at the end of a segment is matched at its end. One trailing `/` is ignored.
+
+Two operations of one method whose paths match exactly the same requests (`/items/{id}` and `/items/{itemId}`, or `/a` and `/a/`) conflict: the first one keeps the route and the other is not served. So is an operation whose path is not a valid pattern (an unclosed `{`, two parameters with nothing between them, a catch-all before the last segment). Neither stops the mock from mounting: the other operations are served, the server logs a warning naming each operation left out, and `mockingbird validate` prints the same warning.
+
 ## Response media types
 
 A REST response is served in the media type the contract declares. JSON (`application/json`, any `+json`) is generated as usual. A response that declares only other media types is answered in the first of them:

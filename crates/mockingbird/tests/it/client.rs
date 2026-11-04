@@ -337,6 +337,49 @@ fn validate_handles_proto_and_wsdl() {
     assert!(stdout.contains("GetOrder"), "{stdout}");
 }
 
+#[test]
+fn validate_warns_about_an_operation_it_cannot_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("twins.yaml");
+    std::fs::write(
+        &path,
+        r#"openapi: 3.0.3
+info: {title: Twins, version: "1"}
+paths:
+  /companies({id})/customers({customerId}):
+    get: {operationId: getCustomer, responses: {"200": {description: ok}}}
+  /companies({id})/invoices({invoiceId}):
+    get: {operationId: getInvoice, responses: {"200": {description: ok}}}
+  /items/{id}:
+    get: {operationId: getItem, responses: {"200": {description: ok}}}
+  /items/{itemId}:
+    get: {operationId: getItemAgain, responses: {"200": {description: ok}}}
+"#,
+    )
+    .unwrap();
+    let out = Command::cargo_bin("mockingbird")
+        .unwrap()
+        .arg("validate")
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    let warnings: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("warning:"))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            "warning: operation getItemAgain: cannot route GET /items/{itemId}: it matches the \
+          same requests as operation getItem (GET /items/{id}), which takes them; it is not \
+          served"
+        ],
+        "{stdout}"
+    );
+}
+
 fn smart_fixture(name: &str) -> PathBuf {
     repo_path(&format!("fixtures/smart/{name}"))
 }
