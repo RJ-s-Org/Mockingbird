@@ -1902,6 +1902,32 @@ impl<'a> Place<'a> {
             .find_map(|p| p.get("properties")?.get(key))
     }
 
+    /// Whether a part of the place lists member `key` as `required`.
+    fn requires(&self, key: &str) -> bool {
+        self.parts.iter().any(|p| {
+            p.get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|r| r.iter().any(|k| k.as_str() == Some(key)))
+        })
+    }
+
+    /// What a `null` for member `key` is at this place: kept where the place does
+    /// not declare the member or its schema admits null (see [`admits_null`]),
+    /// otherwise the member's removal when it is optional and refused when it is
+    /// required.
+    fn null_member(&self, rt: &MockRuntime, key: &str) -> NullMember {
+        match self.property(key) {
+            Some(schema) if !admits_null(rt, schema) => {
+                if self.requires(key) {
+                    NullMember::Refused
+                } else {
+                    NullMember::Removed
+                }
+            }
+            _ => NullMember::Kept,
+        }
+    }
+
     /// Whether the place declares any `properties`.
     fn declares(&self) -> bool {
         self.parts
@@ -2000,6 +2026,50 @@ impl<'a> Place<'a> {
     }
 }
 
+/// What a `null` set on a declared member becomes (see [`Place::null_member`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NullMember {
+    /// Stored as null: the member's schema admits it, or the place does not declare it.
+    Kept,
+    /// The member is removed: it is optional, and its schema does not admit null.
+    Removed,
+    /// Not applied: the member is required, and its schema does not admit null.
+    Refused,
+}
+
+/// Whether `schema` admits `null`: a part of it (by its `$ref`s and compositions)
+/// has type `null` (or `nullable: true`), a `const` null or an `enum` holding null,
+/// or none of its parts says what type it is.
+fn admits_null(rt: &MockRuntime, schema: &Value) -> bool {
+    let parts = Place::of(rt, Some(schema)).parts;
+    let null = Value::Null;
+    let says_null = |p: &&Value| {
+        p.get("nullable").and_then(Value::as_bool) == Some(true)
+            || match p.get("type") {
+                Some(Value::String(t)) => t == "null",
+                Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("null")),
+                _ => false,
+            }
+            || p.get("const") == Some(&null)
+            || p.get("enum")
+                .and_then(Value::as_array)
+                .is_some_and(|e| e.contains(&null))
+    };
+    let constrains = |p: &&Value| {
+        [
+            "type",
+            "const",
+            "enum",
+            "properties",
+            "items",
+            "additionalProperties",
+        ]
+        .iter()
+        .any(|k| p.get(*k).is_some())
+    };
+    parts.iter().any(says_null) || !parts.iter().any(constrains)
+}
+
 /// Whether `value` is what a prompt shows in place of a redacted one.
 fn is_redacted(value: &Value) -> bool {
     value.as_str() == Some(mb_engine::REDACTED)
@@ -2042,7 +2112,8 @@ fn restored(held: Option<&Value>, new: &Value) -> Option<Value> {
 /// an object the schema says nothing of, what was redacted in it kept as it was at
 /// its own key (see [`restored`]); and an object of another variant of a union (see
 /// [`Place::same_variant`]) or naming another identity (see [`reassigns`]), which
-/// keeps nothing of `held`, redacted or not.
+/// keeps nothing of `held`, redacted or not. In a value object, a `null` its
+/// member's schema does not admit is no value to store (see [`Place::null_member`]).
 fn merge_at(
     rt: &MockRuntime,
     held: Option<&Value>,
@@ -2050,6 +2121,14 @@ fn merge_at(
     schema: Option<&Value>,
 ) -> Option<Value> {
     let Some(held) = held else {
+        // A new value object's nulls go as its members' places say.
+        if new
+            .as_object()
+            .is_some_and(|m| m.values().any(Value::is_null))
+            && Place::of(rt, schema).declares()
+        {
+            return merge_at(rt, Some(&Value::Object(Map::new())), new, schema);
+        }
         return unredacted(new);
     };
     let (Value::Object(held_members), Value::Object(new_members)) = (held, new) else {
@@ -2066,6 +2145,18 @@ fn merge_at(
     }
     let mut out = held_members.clone();
     for (key, value) in new_members {
+        // A null the member's schema does not admit removes an optional member and
+        // leaves a required one as it was (see [`Place::null_member`]).
+        if value.is_null() {
+            match place.null_member(rt, key) {
+                NullMember::Kept => {}
+                NullMember::Removed => {
+                    out.remove(key);
+                    continue;
+                }
+                NullMember::Refused => continue,
+            }
+        }
         if let Some(merged) = merge_at(rt, out.get(key), value, place.property(key)) {
             out.insert(key.clone(), merged);
         }
@@ -2390,8 +2481,12 @@ impl<'a> StubWalk<'a, '_> {
 /// merged, still suit its type, which must have a schema to check against (see
 /// [`entity_fits`]). Each member goes as its place in the schema says (see
 /// [`merge_at`]), a dotted key may be a path (see [`dotted_as_paths`]), and objects
-/// that only name stored records are filled with them (see [`fill_stubs`]). It
-/// applies whole or not at all.
+/// that only name stored records are filled with them (see [`fill_stubs`]). Member
+/// names written with JSON around them are the declared ones first (see
+/// [`mended_set`]). A `null` a member's schema does not admit removes the member when
+/// it is optional and is not applied when it is required (see [`Place::null_member`]);
+/// an effect setting nothing else is rejected. Otherwise it applies whole or not at
+/// all.
 async fn apply_effect(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -2401,9 +2496,9 @@ async fn apply_effect(
 ) -> Result<(Value, Map<String, Value>), &'static str> {
     let t = effect.resource_type.as_str();
     let index = rt.index();
+    let set = mended_set(rt, t, &effect.set);
     let identity = index.identity_fields(t);
-    if effect
-        .set
+    if set
         .keys()
         .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
     {
@@ -2419,9 +2514,9 @@ async fn apply_effect(
     let Value::Object(data) = &mut stored.data else {
         return Err("the stored resource is not an object");
     };
-    let requested = dotted_as_paths(rt, t, data, &effect.set);
+    let requested = dotted_as_paths(rt, t, data, &set);
     // What was redacted is restored, or left out, where it merges (see [`merge_at`]).
-    if !effect.set.is_empty() && effect.set.values().all(|v| unredacted(v).is_none()) {
+    if !set.is_empty() && set.values().all(|v| unredacted(v).is_none()) {
         return Err("it sets only what was redacted");
     }
     let requested = if let Some((plan, call)) = own {
@@ -2433,6 +2528,30 @@ async fn apply_effect(
     } else {
         requested
     };
+    // A null the member's schema does not admit removes an optional member; on a
+    // required one, that member is not applied.
+    let record = Place::of(rt, write_memory::read_schema(rt, t));
+    let mut requested = requested;
+    let mut removed = Vec::new();
+    requested.retain(|key, value| {
+        if !value.is_null() {
+            return true;
+        }
+        match record.null_member(rt, key) {
+            NullMember::Kept => true,
+            NullMember::Removed => {
+                removed.push(key.clone());
+                false
+            }
+            NullMember::Refused => false,
+        }
+    });
+    if requested.is_empty() && removed.is_empty() {
+        return Err("it sets only required members to null");
+    }
+    for key in &removed {
+        data.remove(key);
+    }
     let keys: Vec<String> = requested.keys().cloned().collect();
     merge_members(rt, t, data, requested);
     // Objects the effect names only by their identity are the records stored under it.
@@ -2456,6 +2575,25 @@ async fn apply_effect(
     }
     rt.collections().carry(session, &held, &carried);
     Ok((merged, applied))
+}
+
+/// `set`, an effect's members for a record of type `t`, with each name written with
+/// JSON around it (`"status:"`) the member the type's schema declares (see
+/// [`mb_engine::mend_member_names`]); as it is when the type has no schema.
+fn mended_set(rt: &MockRuntime, t: &str, set: &Map<String, Value>) -> Map<String, Value> {
+    let Some(schema) = write_memory::read_schema(rt, t) else {
+        return set.clone();
+    };
+    let bundle = rt.bundle();
+    let resolve = |r: &str| r.strip_prefix("#/$defs/").and_then(|n| bundle.defs.get(n));
+    let mut value = Value::Object(set.clone());
+    if mb_engine::mend_member_names(schema, &resolve, &mut value) > 0 {
+        tracing::debug!(mock = %rt.name, resource_type = %t, "mended member names in an effect");
+    }
+    match value {
+        Value::Object(mended) => mended,
+        _ => set.clone(),
+    }
 }
 
 /// A faker answer standing in for a failed LLM call (an offline mock's
@@ -4141,7 +4279,10 @@ impl<'a> EntityWalk<'a> {
 /// Whether `value` suits resource type `t`: its by-path read would serve it
 /// (stored unservable, a later read would fall to the faker), else its list
 /// items or singleton read accept it. A type with neither has nothing to
-/// check against, so nothing suits it.
+/// check against, so nothing suits it. An object must also show it is one: a
+/// schema requiring nothing would take any object (an acknowledgement for the
+/// settings it updated), so one of its members must be a member the schema
+/// declares, of the type declared (see [`declares_member_of`]).
 fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
     let index = rt.index();
     let bundle = rt.bundle();
@@ -4156,7 +4297,59 @@ fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
     let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
         return false;
     };
-    rt.engine.serve_stored(bundle, op, value, shape).is_some()
+    let schema = shape.or_else(|| op.success_output()?.schema.as_ref());
+    declares_member_of(rt, schema, value)
+        && rt.engine.serve_stored(bundle, op, value, shape).is_some()
+}
+
+/// Whether `value` holds a member `schema` declares, of the JSON type the member is
+/// declared with, and no declared member of another type. True for anything but an
+/// object, and for a schema declaring no member (a map, a free-form object): there
+/// is nothing to tell by.
+fn declares_member_of(rt: &MockRuntime, schema: Option<&Value>, value: &Value) -> bool {
+    let Value::Object(members) = value else {
+        return true;
+    };
+    let place = Place::of(rt, schema);
+    if !place.declares() {
+        return true;
+    }
+    let mut declared = members
+        .iter()
+        .filter_map(|(k, v)| Some((place.property(k)?, v)))
+        .peekable();
+    declared.peek().is_some() && declared.all(|(schema, v)| of_declared_type(rt, schema, v))
+}
+
+/// Whether `value` is of a JSON type a part of `schema` declares (by its `$ref`s and
+/// compositions); true when none declares a type.
+fn of_declared_type(rt: &MockRuntime, schema: &Value, value: &Value) -> bool {
+    let place = Place::of(rt, Some(schema));
+    let mut types = place
+        .parts
+        .iter()
+        .filter_map(|p| p.get("type"))
+        .flat_map(|t| match t {
+            Value::String(t) => vec![t.as_str()],
+            Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        })
+        .peekable();
+    if types.peek().is_none() {
+        return true;
+    }
+    types.any(|t| match (t, value) {
+        ("null", Value::Null)
+        | ("boolean", Value::Bool(_))
+        | ("string", Value::String(_))
+        | ("array", Value::Array(_))
+        | ("object", Value::Object(_))
+        | ("number", Value::Number(_)) => true,
+        ("integer", Value::Number(n)) => {
+            n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        _ => false,
+    })
 }
 
 /// Whether `value`, shaped by `defs`, is a shorter form of resource type `t`:
@@ -6236,6 +6429,9 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     let on = (resource_type, held.as_ref().map(|h| &h.data));
                     write_memory::onto_record(rt, op, on, data, generated.status)
                 }
+                // With nothing held, an answer that does not suit the type (a task
+                // acknowledging the update) is no record of it: nothing is stored.
+                Some(_) if !entity_fits(rt, resource_type, &data) => return,
                 _ => data,
             };
             (id, Some(data))

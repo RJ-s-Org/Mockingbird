@@ -1988,14 +1988,21 @@ async fn declared_and_scenario_headers_are_sent() {
 
 /// Slack's `chat.postMessage` answers `{ok, ts, message: {...}}`: the
 /// message is stored where `conversations.history` lists `messages`, so the
-/// history read after it is generated knowing the message.
+/// history read after it is generated knowing the message. (This contract's
+/// `messages` type is also Twilio's, read by path as `Message`: that schema declares
+/// Slack's members here too, as a record must show a member its type declares.)
 #[tokio::test]
 async fn a_wrapped_created_object_joins_the_list_it_belongs_to() {
     let h = contract_harness(
-        &PATH_IDS.replace(
-            "properties: {ok: {type: boolean}, ts: {type: string}}",
-            "properties: {ok: {type: boolean}, ts: {type: string}, message: {type: object, properties: {ts: {type: string}, text: {type: string}}}}",
-        ),
+        &PATH_IDS
+            .replace(
+                "properties: {ok: {type: boolean}, ts: {type: string}}",
+                "properties: {ok: {type: boolean}, ts: {type: string}, message: {type: object, properties: {ts: {type: string}, text: {type: string}}}}",
+            )
+            .replace(
+                "properties: {sid: {type: string}, body: {type: string}}",
+                "properties: {sid: {type: string}, body: {type: string}, ts: {type: string}, text: {type: string}}",
+            ),
         vec![
             json!({"ok": true, "ts": "2.2", "message": {"ts": "2.2", "text": "Deploy finished"}}),
             json!({"messages": [{"ts": "2.2", "text": "Deploy finished"}]}),

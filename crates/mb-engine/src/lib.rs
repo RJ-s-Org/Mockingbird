@@ -60,6 +60,7 @@ pub mod faker;
 pub mod guards;
 pub mod headers;
 mod media;
+pub mod member_names;
 pub mod message;
 pub mod ndjson;
 pub mod persona;
@@ -76,6 +77,7 @@ pub use faker::{Costs, Faker, FakerHints};
 pub use guards::{
     EngineGuards, GenerationLimiter, TokenBudget, without_effects_schema, without_items_schema,
 };
+pub use member_names::mend_member_names;
 pub use message::{GeneratedMessage, MessageContext};
 pub use prompt::{build_message_messages, build_messages, build_stream_messages};
 pub use scenario::{ScenarioSpec, apply_set};

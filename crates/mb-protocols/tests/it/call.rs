@@ -1941,7 +1941,16 @@ components:
     Booking:
       type: object
       required: [id, status]
-      properties: {id: {type: string}, status: {type: string}, number: {type: integer}}
+      properties:
+        id: {type: string}
+        status: {type: string}
+        number: {type: integer}
+        note: {type: string}
+        memo: {type: string, nullable: true}
+        guest:
+          type: object
+          required: [name]
+          properties: {name: {type: string}, phone: {type: string}}
     Cancellation:
       type: object
       required: [reason]
@@ -2209,6 +2218,100 @@ fn an_effect_on_its_types_own_identity_field_is_rejected() {
 #[test]
 fn an_effect_breaking_the_schema_is_rejected() {
     rejected(json!({"type": "bookings", "id": "b1", "set": {"status": 5}}));
+}
+
+/// One call holding booking `b1` as `held`, answered with `effects`; what is stored of
+/// `b1` after it, and the effects applied and rejected.
+fn after_effects(held: Value, effects: Value) -> (Value, (u64, u64)) {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
+    let seen = std::sync::Arc::clone(&out);
+    let counted = counting_effects(async move {
+        let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        store(&state, "bookings", "b1", held).await;
+        let answer = json!({"response": {"reason": "asked"}, "effects": effects});
+        let api = effects_runtime(
+            true,
+            Arc::clone(&state) as Arc<dyn StateStore>,
+            vec![Ok(answer.to_string())],
+        );
+        let (status, _, _) = api.call("POST", "/bookings/b1/cancel", None).await;
+        assert_eq!(status, StatusCode::OK);
+        *seen.lock().unwrap() = stored_data(&state, "bookings", "b1").await;
+    });
+    let stored = out.lock().unwrap().clone();
+    (stored, counted)
+}
+
+/// A null for an optional member whose schema does not admit it removes the member;
+/// one whose schema does is stored.
+#[test]
+fn a_null_for_an_optional_member_removes_it() {
+    let held = json!({"id": "b1", "status": "held", "note": "late", "memo": "x"});
+    let (stored, counted) = after_effects(
+        held,
+        json!([{"type": "bookings", "id": "b1", "set": {"note": null, "memo": null, "status": "cancelled"}}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "cancelled", "memo": null})
+    );
+    assert_eq!(counted, (1, 0));
+}
+
+/// A null for a required member is not applied; the rest of the effect is.
+#[test]
+fn a_null_for_a_required_member_is_not_applied() {
+    let held = json!({"id": "b1", "status": "held", "note": "late"});
+    let (stored, counted) = after_effects(
+        held.clone(),
+        json!([{"type": "bookings", "id": "b1", "set": {"status": null, "note": "early"}}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "held", "note": "early"})
+    );
+    assert_eq!(counted, (1, 0));
+    // With nothing else to set, the effect is rejected.
+    let (stored, counted) = after_effects(
+        held.clone(),
+        json!([{"type": "bookings", "id": "b1", "set": {"status": null}}]),
+    );
+    assert_eq!((stored, counted), (held, (0, 1)));
+}
+
+/// Inside a value object the same holds: an optional member goes, a required one stays.
+#[test]
+fn a_null_inside_a_value_object_goes_as_its_place_says() {
+    let held = json!({"id": "b1", "status": "held", "guest": {"name": "Ada", "phone": "1"}});
+    let (stored, counted) = after_effects(
+        held,
+        json!([{"type": "bookings", "id": "b1", "set": {"guest": {"name": null, "phone": null}}}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "held", "guest": {"name": "Ada"}})
+    );
+    assert_eq!(counted, (1, 0));
+}
+
+/// An effect's member names written with JSON around them are the declared ones; a
+/// name that mends to none the schema declares is left as it is.
+#[test]
+fn an_effects_corrupted_member_names_are_mended() {
+    let held = json!({"id": "b1", "status": "held", "guest": {"name": "Ada"}});
+    let (stored, counted) = after_effects(
+        held,
+        json!([{"type": "bookings", "id": "b1", "set": {
+            "status:": "cancelled",
+            " note": "late",
+            "guest": {"phone\":\"2\"},": "2"}
+        }}]),
+    );
+    assert_eq!(
+        stored,
+        json!({"id": "b1", "status": "cancelled", "note": "late", "guest": {"name": "Ada", "phone": "2"}})
+    );
+    assert_eq!(counted, (1, 0));
 }
 
 /// One effect's rejection leaves the next alone.
