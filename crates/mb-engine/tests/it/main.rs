@@ -17,6 +17,7 @@ mod guards;
 mod message;
 mod perf;
 mod pii;
+mod repetition;
 mod salvage;
 mod scenario;
 mod seed;

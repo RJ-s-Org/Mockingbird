@@ -47,6 +47,7 @@ limits:
   max_request_bytes: 1048576
   max_response_bytes: 1048576
   output_budget_tokens: 1500
+  repetition_guard: true
 
 pii:
   enabled: true

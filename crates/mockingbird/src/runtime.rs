@@ -842,7 +842,8 @@ async fn openai_provider(
         output_mode: llm_output_mode(profile.output_mode),
         http: deps.http.clone(),
     })
-    .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?;
+    .with_context(|| format!("building the client for LLM profile {:?}", profile.name))?
+    .with_repetition_guard(deps.limits.repetition_guard);
     Ok(Arc::new(provider))
 }
 

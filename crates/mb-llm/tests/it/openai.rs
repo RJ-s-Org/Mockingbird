@@ -1207,3 +1207,242 @@ async fn an_unrelated_400_mentioning_reasoning_keeps_the_setting() {
         assert_eq!(sent, vec![json!({"enabled": false}); 2], "{message}");
     }
 }
+
+/// An SSE body of one content delta per item of `deltas`, then `finish`
+/// (with `usage` when given) and `[DONE]`.
+fn sse_of(deltas: &[&str], finish: &str, usage: Option<Value>) -> String {
+    let mut body = String::new();
+    for d in deltas {
+        let chunk = json!({"provider": "Loopy", "choices": [{"delta": {"content": d}}]});
+        body.push_str(&format!("data: {chunk}\n\n"));
+    }
+    let mut last =
+        json!({"provider": "Loopy", "choices": [{"delta": {}, "finish_reason": finish}]});
+    if let Some(usage) = usage {
+        last["usage"] = usage;
+    }
+    body.push_str(&format!("data: {last}\n\ndata: [DONE]\n\n"));
+    body
+}
+
+/// A reply that loops on one line until `max_tokens`, as recorded.
+fn looping_sse() -> String {
+    let mut deltas = vec!["{\"data\": [{\"type\": \"events\", \"attributes\": {"];
+    deltas.extend(std::iter::repeat_n(
+        "\n\"id\": \"2026-11-04T18:29:32Z\",",
+        2000,
+    ));
+    let usage = json!({"prompt_tokens": 50, "completion_tokens": 16384});
+    sse_of(&deltas, "length", Some(usage))
+}
+
+fn sse(body: String) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(body, "text/event-stream")
+}
+
+/// With the repetition guard (the default), `complete` streams and gathers
+/// the reply: content, finish reason, provider and usage.
+#[tokio::test]
+async fn complete_streams_and_gathers_the_reply() {
+    let server = MockServer::start().await;
+    let usage = json!({"prompt_tokens": 7, "completion_tokens": 4});
+    Mock::given(method("POST"))
+        .respond_with(sse(sse_of(&["{\"a\"", ": 1}"], "stop", Some(usage))))
+        .mount(&server)
+        .await;
+    let resp = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\": 1}");
+    assert_eq!(resp.usage.prompt_tokens, 7);
+    assert_eq!(resp.usage.completion_tokens, 4);
+    let body = wire_body(&server).await;
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"], json!({"include_usage": true}));
+}
+
+/// A streamed reply cut at `max_tokens` is a truncation with its text, as
+/// a plain one is; a reasoning-only streamed answer uses its JSON.
+#[tokio::test]
+async fn a_streamed_reply_is_read_like_a_plain_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse(sse_of(&["{\"a\": [1, ", "2"], "length", None)))
+        .mount(&server)
+        .await;
+    let err = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, LlmError::Truncated { partial, message, .. }
+            if partial == "{\"a\": [1, 2" && message.contains("provider Loopy")),
+        "{err:?}"
+    );
+
+    let server = MockServer::start().await;
+    let chunk = json!({"choices": [{"delta": {"reasoning": "So: {\"a\":1}"}}]});
+    let body = format!(
+        "data: {chunk}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    );
+    Mock::given(method("POST"))
+        .respond_with(sse(body))
+        .mount(&server)
+        .await;
+    let resp = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\":1}");
+}
+
+/// A looping reply is stopped soon after the loop fills the guard's window,
+/// long before `max_tokens`, and retried once; when the retry loops too the
+/// error says so, with the tokens of both attempts.
+#[tokio::test]
+async fn a_looping_reply_is_stopped_and_retried_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse(looping_sse()))
+        .mount(&server)
+        .await;
+    let err = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(5)))
+        .await
+        .unwrap_err();
+    let LlmError::Repeated { usage, .. } = &err else {
+        panic!("expected Repeated, got {err:?}");
+    };
+    // Two attempts, each stopped after about 9 KiB (~2.3k tokens) of a
+    // 64 KiB loop; the usage chunk at the end was never reached.
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert!(
+        usage.completion_tokens > 2 * 2000 && usage.completion_tokens < 2 * 3000,
+        "{usage:?}"
+    );
+    assert!(err.is_retryable());
+    let shown = err.to_string();
+    assert!(
+        shown.starts_with("LLM output repeated itself: provider Loopy, aborted after about "),
+        "{shown}"
+    );
+    assert!(shown.contains("2026-11-04T18:29:32Z"), "{shown}");
+}
+
+#[tokio::test]
+async fn a_looping_reply_retried_into_an_answer_counts_both_attempts() {
+    let server = MockServer::start().await;
+    let usage = json!({"prompt_tokens": 50, "completion_tokens": 4});
+    Mock::given(method("POST"))
+        .respond_with(in_turn(vec![
+            sse(looping_sse()),
+            sse(sse_of(&["{\"a\": 1}"], "stop", Some(usage))),
+        ]))
+        .mount(&server)
+        .await;
+    let resp = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(5)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\": 1}");
+    // The stopped attempt's estimated tokens are added to the answer's.
+    assert!(resp.usage.completion_tokens > 2000, "{:?}", resp.usage);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+/// A loop in the reasoning stops the call too.
+#[tokio::test]
+async fn looping_reasoning_is_stopped() {
+    let server = MockServer::start().await;
+    let mut body = String::new();
+    for _ in 0..3000 {
+        let chunk = json!({"choices": [{"delta": {"reasoning": "Wait, let me check. "}}]});
+        body.push_str(&format!("data: {chunk}\n\n"));
+    }
+    body.push_str("data: [DONE]\n\n");
+    Mock::given(method("POST"))
+        .respond_with(sse(body))
+        .mount(&server)
+        .await;
+    let err = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(5)))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, LlmError::Repeated { message, .. } if message.contains("of the reasoning")),
+        "{err:?}"
+    );
+}
+
+/// Off, `complete` sends a plain request, and a looping reply is only cut
+/// at `max_tokens`.
+#[tokio::test]
+async fn without_the_guard_complete_sends_a_plain_request() {
+    let server = MockServer::start().await;
+    let looped = format!("{{\"a\": \"{}", "0_".repeat(20_000));
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": looped}, "finish_reason": "length"}],
+        })))
+        .mount(&server)
+        .await;
+    let err = client(&server, OutputMode::JsonObject)
+        .with_repetition_guard(false)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LlmError::Truncated { .. }), "{err:?}");
+    let body = wire_body(&server).await;
+    assert!(body.get("stream").is_none(), "{body}");
+}
+
+/// An endpoint rejecting `stream_options` is asked again without it.
+#[tokio::test]
+async fn complete_drops_a_rejected_stream_usage_option() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|r: &Request| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v.get("stream_options").is_some()
+        })
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(sse(sse_of(&["{\"a\": 1}"], "stop", None)))
+        .mount(&server)
+        .await;
+    let resp = client(&server, OutputMode::JsonObject)
+        .complete(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "{\"a\": 1}");
+}
+
+/// `stream` stops a looping stream with an error item, after the deltas
+/// before it.
+#[tokio::test]
+async fn a_looping_stream_ends_with_a_repetition_error() {
+    use futures::StreamExt;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse(looping_sse()))
+        .mount(&server)
+        .await;
+    let items: Vec<_> = client(&server, OutputMode::JsonObject)
+        .stream(req(ResponseFormat::JsonObject, Duration::from_secs(2)))
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    let (last, deltas) = items.split_last().unwrap();
+    assert!(matches!(last, Err(LlmError::Repeated { .. })), "{last:?}");
+    assert!(deltas.iter().all(Result::is_ok));
+    // Stopped about a window in, not after all 2000 lines.
+    assert!(deltas.len() < 400, "{} deltas", deltas.len());
+}

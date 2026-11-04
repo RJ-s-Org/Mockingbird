@@ -288,6 +288,9 @@ pub struct LimitsConfig {
     /// Completion tokens the LLM is asked to write per answer: a larger
     /// response is generated shorter and completed by the faker (0: off).
     pub output_budget_tokens: u32,
+    /// Stop an LLM reply whose text has fallen into a loop, and retry it
+    /// once (see [`mb_llm::repetition`]).
+    pub repetition_guard: bool,
 }
 
 impl Default for LimitsConfig {
@@ -297,6 +300,7 @@ impl Default for LimitsConfig {
             max_request_bytes: 1_048_576,
             max_response_bytes: 1_048_576,
             output_budget_tokens: mb_engine::budget::DEFAULT_OUTPUT_BUDGET,
+            repetition_guard: true,
         }
     }
 }

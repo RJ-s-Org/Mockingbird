@@ -44,3 +44,4 @@ mb-llm = { workspace = true, features = ["testing"] }
 metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+wiremock.workspace = true
