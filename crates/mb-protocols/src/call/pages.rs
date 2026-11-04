@@ -8,8 +8,10 @@
 //! A page the model answered full, at the size asked, with its token absent, `null` or
 //! empty, while the session holds records the query asks for that it does not show, is
 //! a cut too: those records are its rest ([`lists::stored_rest`]), after any the page
-//! size cut. A token the model gave stays, with its count, as it leads to the model's own
-//! next page. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
+//! size cut. So is such a page whose token the model gave: the stored records come
+//! before the model's own next page, and a minted token replaces the model's (its count
+//! stays, raised only as below). With no such records, the model's token stays, with its
+//! count, as it leads to the model's own next page. Such a cut is kept, capped and ended like any other (at most [`MAX_CUTS`]
 //! a session). Its records are stored already, so they are not seeded again. A count of
 //! the list beside the token that counts fewer than the page and its rest (see
 //! [`deleted::with_count_at_least`]) is raised to them. A minted token's more flag
@@ -79,7 +81,8 @@
 //! Prose never ties one (`q`, "sent again with the next request"). None, two, or two
 //! such members, are no place. A URL the model wrote there to another page of the route by anything but the
 //! cursor (`page=2`) stays as it is: there is no place. One carrying the cursor is its
-//! token, and stays too: no cut serves it. The token is written as the URL of its page:
+//! token, and stays too when no cut serves it: a cut the page size made of the model's
+//! own items leaves it, and one holding stored records replaces it, as a token is. The token is written as the URL of its page:
 //! the mock's own, as the request reached it ([`CallPlan::page_url`]: the scheme and
 //! host [`crate::base_url::of`] gives, the mount prefix, and the request's path as sent,
 //! its values encoded as they came), never a host the model wrote, with the request's
@@ -975,8 +978,9 @@ pub(super) async fn mint(
         body,
         &cut.size_param,
     )
-    // A URL the model gave to its own next page stays: no cut serves it.
-    .filter(|slot| slot.url.is_none() || slot.given(body).is_none());
+    // A URL the model gave to its own next page stays, as no cut serves it, unless the
+    // store holds records for a next page: those come first.
+    .filter(|slot| slot.url.is_none() || slot.given(body).is_none() || cut.stored > 0);
     if slot.is_none() && !runs::starts(rt.bundle(), (op, call), &cut.size_param) {
         return false;
     }
@@ -1040,6 +1044,7 @@ pub(super) async fn mint(
                 target_id: None,
                 generated: &seeding,
                 request_body: None,
+                query: None,
                 collection: collection_of(op, call),
                 origin: WriteOrigin::Seeded,
                 held: false,

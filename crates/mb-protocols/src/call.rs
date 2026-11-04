@@ -1431,6 +1431,7 @@ pub(crate) async fn complete(
                         target_id: target_id.clone().filter(|_| !foreign_key),
                         generated: &generated,
                         request_body: state_call.body.as_ref(),
+                        query: Some(&call.query),
                         collection: collection.clone(),
                         origin,
                         held: target.is_some() && !generated.new_record,
@@ -5255,8 +5256,32 @@ struct CollectionRecords {
     /// The resources a top-level create stored, in no collection, until a write puts
     /// them in one.
     top_level: std::collections::HashSet<OwnRead>,
+    /// The query values the create that stored each resource carried (`org=acme`), as
+    /// trimmed text: a list asking them again asks for what the create was made in.
+    scopes: HashMap<OwnRead, Vec<(String, String)>>,
     /// The order of the next record.
     next: u64,
+}
+
+/// The values of `query` as trimmed, non-empty text, each under its parameter: every
+/// element of an array, and nothing of an object.
+fn query_texts(query: &Map<String, Value>) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (name, value) in query {
+        let values = match value {
+            Value::Array(values) => values.iter().collect(),
+            other => vec![other],
+        };
+        for value in values {
+            if let Some(text) = id_string(value) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    pairs.push((name.clone(), text.to_string()));
+                }
+            }
+        }
+    }
+    pairs
 }
 
 /// Where a resource was recorded, its hash then, when, and whether a create put it
@@ -5312,7 +5337,36 @@ impl Collections {
             let key = OwnReads::key(session, r);
             held.records.remove(&key);
             held.top_level.remove(&key);
+            held.scopes.remove(&key);
         }
+    }
+
+    /// Records the query values a create that stored `r` carried (see
+    /// [`CollectionRecords::scopes`]). Nothing is stored.
+    fn note_scope(&self, session: &SessionKey, r: &StoredResource, query: &Map<String, Value>) {
+        let pairs = query_texts(query);
+        let Ok(mut held) = self.0.lock() else {
+            return;
+        };
+        let key = OwnReads::key(session, r);
+        if pairs.is_empty() {
+            held.scopes.remove(&key);
+            return;
+        }
+        if held.scopes.len() >= MAX_COLLECTIONS {
+            held.scopes.clear();
+        }
+        held.scopes.insert(key, pairs);
+    }
+
+    /// Whether the create that stored `r` carried `value` under query parameter `param`,
+    /// as far as this runtime's writes tell.
+    fn carried(&self, session: &SessionKey, r: &StoredResource, param: &str, value: &str) -> bool {
+        self.0.lock().is_ok_and(|held| {
+            held.scopes
+                .get(&OwnReads::key(session, r))
+                .is_some_and(|pairs| pairs.iter().any(|(p, v)| p == param && v == value))
+        })
     }
 
     /// Records that a top-level create stored `r`, in no collection.
@@ -6471,6 +6525,9 @@ struct WriteRequest<'a> {
     target_id: Option<String>,
     generated: &'a GeneratedResponse,
     request_body: Option<&'a Value>,
+    /// The call's query, which a create's record is noted as made under (see
+    /// [`Collections::note_scope`]).
+    query: Option<&'a Map<String, Value>>,
     /// Where the path puts what this writes (see [`collection_of`]).
     collection: Option<Collection>,
     origin: WriteOrigin,
@@ -6489,6 +6546,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         target_id,
         generated,
         request_body,
+        query,
         collection,
         origin,
         held: was_held,
@@ -6604,6 +6662,9 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     (None, None) if created => rt.collections().place_top_level(session, &stored),
                     (None, None) => {}
                 }
+                if created && let Some(query) = query {
+                    rt.collections().note_scope(session, &stored, query);
+                }
             }
         }
         None => {
@@ -6647,6 +6708,32 @@ mod tests {
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn a_create_s_scope_is_noted_and_forgotten() {
+        let collections = Collections::default();
+        let at = SessionKey {
+            workspace: "default".into(),
+            mock: "scopes".into(),
+            session: "s".into(),
+        };
+        let r = StoredResource {
+            resource_type: "invoices".into(),
+            id: "1".into(),
+            data: json!({"id": "1"}),
+        };
+        let mut query = Map::new();
+        query.insert("organization_id".into(), json!(" 42 "));
+        query.insert("tag".into(), json!(["a", "b"]));
+        query.insert("deep".into(), json!({"x": 1}));
+        collections.note_scope(&at, &r, &query);
+        assert!(collections.carried(&at, &r, "organization_id", "42"));
+        assert!(collections.carried(&at, &r, "tag", "b"));
+        assert!(!collections.carried(&at, &r, "organization_id", "43"));
+        assert!(!collections.carried(&at, &r, "tag", "42"));
+        collections.forget(&at, &r);
+        assert!(!collections.carried(&at, &r, "organization_id", "42"));
+    }
 
     #[test]
     fn request_kind_follows_protocol() {

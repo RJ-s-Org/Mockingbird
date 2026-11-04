@@ -660,6 +660,45 @@ fn in_collection(
     })
 }
 
+/// A value of a list read's query that is no filter, page size or list of fields, which
+/// a stored record must show to be served on a next page (see [`stored_rest`]).
+struct Shown<'q> {
+    param: &'q str,
+    texts: Vec<String>,
+    /// Free text (no `enum`, `const`, `format` or `pattern`): a value holding no digit
+    /// is shown by any text holding it, ignoring case.
+    loose: bool,
+}
+
+impl Shown<'_> {
+    /// Whether stored `r` shows every one of the values: the create that stored it
+    /// carried it under the same parameter, or `r` holds it whole, or, for free text,
+    /// as part of a text.
+    fn holds(&self, rt: &MockRuntime, session: &SessionKey, r: &StoredResource) -> bool {
+        self.texts.iter().all(|value| {
+            rt.collections().carried(session, r, self.param, value)
+                || mentions(&r.data, value, 0)
+                || (self.loose && !holds_a_digit(value) && contains_text(&r.data, value, 0))
+        })
+    }
+}
+
+/// Whether `value` holds a text containing `wanted`, ignoring case, at any depth up to
+/// [`MAX_PROJECTED_DEPTH`].
+fn contains_text(value: &Value, wanted: &str, depth: usize) -> bool {
+    if depth >= MAX_PROJECTED_DEPTH || wanted.is_empty() {
+        return false;
+    }
+    match value {
+        Value::Object(members) => members
+            .values()
+            .any(|v| contains_text(v, wanted, depth + 1)),
+        Value::Array(items) => items.iter().any(|v| contains_text(v, wanted, depth + 1)),
+        Value::String(text) => text.to_lowercase().contains(&wanted.to_lowercase()),
+        _ => false,
+    }
+}
+
 /// Records of the list's item type a list read looks at for what a full page left out,
 /// at most.
 const MAX_STORED_REST: usize = 100;
@@ -669,16 +708,27 @@ const MAX_STORED_REST: usize = 100;
 /// type, in the route's collection (see [`in_collection`]), holding what each of the
 /// query's filters asks, and showing the request's every other value, unless the
 /// parameter is an array or free text (no `enum` or `const`) and all of that value's
-/// comma-separated words name members of the items (`fields=name,notes`). A value of a
+/// comma-separated words name members of the items (`fields=name,notes`), or the value
+/// is the parameter's `default` (`type=scheduled`), which asks what leaving it out asks.
+/// A record shows a value when the create that stored it carried the same value under
+/// the same parameter (a scope, `organization_id=…`, as this runtime's writes tell; see
+/// [`Collections::carried`]), when it holds the value whole at any depth, or, for free
+/// text (no `enum`, `const`, `format` or `pattern`) and a value holding no digit, when
+/// one of its texts holds the value, ignoring case (`q=walk` in `Walk the dog`). A value
+/// the mock cannot read (an expression, `filter=any(email,[…])`) is shown by no record
+/// whole, so it keeps every record off the next page, and the next page goes to the
+/// model as before: a debug event names the parameters, as nothing else tells. No
+/// meaning is guessed for such a value. A value of a
 /// number parameter, which could be found anywhere, leaves `cut` as it is, unless it is
 /// the parameter's `default` or `minimum` (`offset=0`), which asks for nothing; so does a
 /// value of any other kind. Each record shows as the items declare it ([`projected`]), and only where it
 /// validates as one; one with no identity, or the identity of an item served or left
 /// out, is not taken. A page is full when it holds as many items as the request's page
 /// size asks. The store is read only when the answer has a place for a token
-/// ([`pages::slot`]), and, with no cut, holds none there that the model gave: a token of
-/// its own goes on to its own next page; or else when the request asks for the first
-/// page of a list paged by number or offset ([`runs::starts`]). A route with no path parameter is read only
+/// ([`pages::slot`]), or else when the request asks for the first page of a list paged
+/// by number or offset ([`runs::starts`]). A token the model gave there is read past:
+/// records the store holds for a next page come before the model's own next page, so
+/// [`pages::mint`] writes a token of the mock's over it. A route with no path parameter is read only
 /// when it is the type's sole list read with none and a write of the type shares its
 /// path ([`BundleIndex::sole_written_list`]). The records go least recently written
 /// first, as the store orders them by their last write. The items' type `t` when their
@@ -732,11 +782,6 @@ pub(super) async fn stored_rest(
     if slot.is_none() && !runs::starts(bundle, (op, call), size_param) {
         return cut;
     }
-    // A token the model gave goes on to its own next page.
-    let given = slot.is_some_and(|slot| slot.given(body).is_some());
-    if cut.is_none() && given {
-        return cut;
-    }
     let Some(item_type) = rt
         .index()
         .item_type(bundle, op, body)
@@ -757,7 +802,7 @@ pub(super) async fn stored_rest(
     let filters = filters_of(bundle, query, &item_parts, call, page);
     let declared = declared_names(&item_parts);
     let declared_params = query.and_then(|q| q.get("properties"));
-    let mut shown: Vec<String> = Vec::new();
+    let mut shown: Vec<Shown<'_>> = Vec::new();
     for (param, raw) in &call.query {
         if param == size_param || filters.iter().any(|(name, _)| name == param) {
             continue;
@@ -781,6 +826,15 @@ pub(super) async fn stored_rest(
         let (param_parts, _) =
             schema_parts(bundle, declared_params.and_then(|d| d.get(param.as_str())));
         let param_types = types_of(&param_parts);
+        // The parameter's `default` asks what leaving it out asks: nothing.
+        let at_default = texts.len() == 1
+            && param_parts
+                .iter()
+                .filter_map(|p| p.get("default").and_then(id_string))
+                .any(|default| default.trim() == texts[0]);
+        if at_default {
+            continue;
+        }
         // A number is found anywhere (a count, a price): such a value is not known, but
         // for the parameter's `default` or `minimum` (`offset=0`), which asks nothing.
         if param_types.contains("integer") || param_types.contains("number") {
@@ -814,7 +868,18 @@ pub(super) async fn stored_rest(
                 })
             });
         if !names_members {
-            shown.extend(texts);
+            // Text the contract says nothing more of is often searched by part.
+            let loose = param_types.iter().eq(["string"].iter())
+                && !param_parts.iter().any(|p| {
+                    ["enum", "const", "format", "pattern"]
+                        .iter()
+                        .any(|at| p.get(*at).is_some())
+                });
+            shown.push(Shown {
+                param: param.as_str(),
+                texts,
+                loose,
+            });
         }
     }
     let field = item_identity(bundle, op, body);
@@ -839,6 +904,8 @@ pub(super) async fn stored_rest(
     // first here, which for records only created is the order they were made in.
     records.reverse();
     let mut missing = Vec::new();
+    // Records withheld only for a value of the request none of them shows.
+    let mut withheld = 0usize;
     for r in &records {
         if !in_collection(rt, (plan, call), &item_type, &field, r) {
             continue;
@@ -851,15 +918,29 @@ pub(super) async fn stored_rest(
             || !filters
                 .iter()
                 .all(|(_, filter)| holds_wanted(&item, filter))
-            || !shown.iter().all(|value| mentions(&r.data, value, 0))
-            || !valid(&item)
         {
+            continue;
+        }
+        if !shown.iter().all(|shown| shown.holds(rt, &plan.session, r)) {
+            withheld += 1;
+            continue;
+        }
+        if !valid(&item) {
             continue;
         }
         known.push(id);
         missing.push(item);
     }
     if missing.is_empty() {
+        if withheld > 0 {
+            let params: Vec<&str> = shown.iter().map(|shown| shown.param).collect();
+            tracing::debug!(
+                operation = %op.id,
+                withheld,
+                ?params,
+                "stored records kept off a next page: no record shows a value of the request"
+            );
+        }
         return cut;
     }
     let stored = missing.len();
@@ -1064,5 +1145,29 @@ pub(super) async fn overlay_stored(
         if valid(&candidate) {
             *body = candidate;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn free_text_is_contained_ignoring_case_at_any_depth() {
+        let record = json!({"name": "Walk the Dog", "updates": [{"body": "Mains outage"}]});
+        assert!(contains_text(&record, "walk", 0));
+        assert!(contains_text(&record, "OUTAGE", 0));
+        assert!(!contains_text(&record, "cat", 0));
+        assert!(!contains_text(&record, "", 0));
+        assert!(!contains_text(&json!({"count": 12}), "12", 0));
+    }
+
+    #[test]
+    fn an_expression_is_held_by_no_record() {
+        let record = json!({"email": "a@x.org"});
+        let expr = r#"any(email,["a@x.org"])"#;
+        assert!(!mentions(&record, expr, 0));
+        assert!(!contains_text(&record, expr, 0));
     }
 }
