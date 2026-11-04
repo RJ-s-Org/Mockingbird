@@ -99,11 +99,15 @@ paths:
     get:
       operationId: conversations_history
       summary: Fetches a conversation's history of messages and events.
+      description: >-
+        Top-level messages only, newest first. A thread reply is not listed here
+        unless it was posted with reply_broadcast; it shows on its parent, whose
+        reply_count counts the thread's replies.
       parameters:
         - { name: channel, in: query, required: true, schema: { $ref: "#/components/schemas/defs_channel" } }
-        - { name: latest, in: query, schema: { $ref: "#/components/schemas/defs_ts" } }
-        - { name: oldest, in: query, schema: { $ref: "#/components/schemas/defs_ts" } }
-        - { name: inclusive, in: query, schema: { type: boolean } }
+        - { name: latest, in: query, description: "Only messages before this timestamp are returned (and the one at it when inclusive is true). Default: now.", schema: { $ref: "#/components/schemas/defs_ts" } }
+        - { name: oldest, in: query, description: "Only messages after this timestamp are returned (and the one at it when inclusive is true). Default: 0.", schema: { $ref: "#/components/schemas/defs_ts" } }
+        - { name: inclusive, in: query, description: "Also return the messages at latest or oldest; by default both bounds are exclusive.", schema: { type: boolean } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 999 } }
         - { name: cursor, in: query, schema: { type: string } }
       responses:
@@ -121,9 +125,9 @@ paths:
               required: [channel]
               properties:
                 channel: { $ref: "#/components/schemas/defs_channel" }
-                latest: { $ref: "#/components/schemas/defs_ts" }
-                oldest: { $ref: "#/components/schemas/defs_ts" }
-                inclusive: { type: boolean }
+                latest: { $ref: "#/components/schemas/defs_ts", description: "Only messages before this timestamp are returned (and the one at it when inclusive is true). Default: now." }
+                oldest: { $ref: "#/components/schemas/defs_ts", description: "Only messages after this timestamp are returned (and the one at it when inclusive is true). Default: 0." }
+                inclusive: { type: boolean, description: "Also return the messages at latest or oldest; by default both bounds are exclusive." }
                 limit: { type: integer, minimum: 1, maximum: 999 }
                 cursor: { type: string }
       responses:
@@ -331,8 +335,8 @@ components:
         text: { type: string }
         blocks: { description: A JSON array of layout blocks (a JSON-encoded string in form bodies). }
         attachments: { description: A JSON array of attachments. }
-        thread_ts: { $ref: "#/components/schemas/defs_ts" }
-        reply_broadcast: { type: boolean }
+        thread_ts: { $ref: "#/components/schemas/defs_ts", description: "Another message's ts: posts this message as a reply in that message's thread." }
+        reply_broadcast: { type: boolean, description: "With thread_ts: also show the reply in the channel's history." }
         mrkdwn: { type: boolean }
         unfurl_links: { type: boolean }
         unfurl_media: { type: boolean }
@@ -356,9 +360,9 @@ components:
         bot_id: { $ref: "#/components/schemas/defs_bot_id" }
         text: { type: string }
         ts: { $ref: "#/components/schemas/defs_ts" }
-        thread_ts: { $ref: "#/components/schemas/defs_ts" }
+        thread_ts: { $ref: "#/components/schemas/defs_ts", description: "The ts of the thread's parent: on each reply, and on the parent once it has a reply." }
         team: { $ref: "#/components/schemas/defs_team" }
-        reply_count: { type: integer, minimum: 0, maximum: 12 }
+        reply_count: { type: integer, minimum: 0, maximum: 12, description: "On a thread's parent: the number of replies in its thread." }
         reactions:
           type: array
           maxItems: 3
