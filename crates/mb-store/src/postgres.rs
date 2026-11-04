@@ -53,10 +53,11 @@ const VERSION_SELECT: &str = "id, mock_id, version, source_digest, source, bundl
 const JOB_SELECT: &str = "id, workspace, mock_id, mock, kind, source_name, status, progress::text AS progress, \
      result_version, error, created_by, created_at, started_at, finished_at, updated_at, mode";
 const PROFILE_COLUMNS: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers, extra_body, output_mode";
+     max_tokens, fallback_profile, source, headers, extra_body, output_mode, repetition_guard";
 /// [`PROFILE_COLUMNS`] with JSON read back as text.
 const PROFILE_SELECT: &str = "workspace, name, base_url, model, secret_ref, json_schema, temperature, timeout_ms, \
-     max_tokens, fallback_profile, source, headers::text AS headers, extra_body::text AS extra_body, output_mode";
+     max_tokens, fallback_profile, source, headers::text AS headers, extra_body::text AS extra_body, output_mode, \
+     repetition_guard";
 const API_KEY_COLUMNS: &str = "key_id, workspace, name, role, scopes, sysadmin, secret_hash, created_by, \
      created_at, expires_at, last_used_at, revoked_at";
 /// [`API_KEY_COLUMNS`] with JSON read back as text.
@@ -411,6 +412,7 @@ fn profile_from_row(row: &PgRow) -> Result<LlmProfile, StoreError> {
         fallback_profile: row.try_get("fallback_profile")?,
         headers: serde_json::from_str(&headers)?,
         extra_body: serde_json::from_str(&extra_body)?,
+        repetition_guard: row.try_get("repetition_guard")?,
         source: ResourceSource::parse(&source)?,
     })
 }
@@ -1228,13 +1230,13 @@ impl ControlStore for PgStore {
     async fn put_profile(&self, p: &LlmProfile) -> Result<(), StoreError> {
         let sql = format!(
             "INSERT INTO llm_profiles ({PROFILE_COLUMNS}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15) \
              ON CONFLICT (workspace, name) DO UPDATE SET base_url = excluded.base_url, model = excluded.model, \
              secret_ref = excluded.secret_ref, json_schema = excluded.json_schema, \
              temperature = excluded.temperature, timeout_ms = excluded.timeout_ms, \
              max_tokens = excluded.max_tokens, fallback_profile = excluded.fallback_profile, \
              source = excluded.source, headers = excluded.headers, extra_body = excluded.extra_body, \
-             output_mode = excluded.output_mode"
+             output_mode = excluded.output_mode, repetition_guard = excluded.repetition_guard"
         );
         let mut tx = self.pool.begin().await?;
         lock_workspace(&mut tx, &p.workspace).await?;
@@ -1254,6 +1256,7 @@ impl ControlStore for PgStore {
             .bind(serde_json::to_string(&p.headers)?)
             .bind(serde_json::to_string(&p.extra_body)?)
             .bind(p.output_mode.as_str())
+            .bind(p.repetition_guard)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

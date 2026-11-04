@@ -8,7 +8,7 @@ import {
 } from "../api/queries";
 import { Drawer } from "../components/Drawer";
 import { ProblemAlert } from "../components/ProblemAlert";
-import { Field as FieldShell, inputClass, primaryButton, secondaryButton } from "../components/ui";
+import { Checkbox, Field as FieldShell, inputClass, primaryButton, secondaryButton } from "../components/ui";
 
 /**
  * What the server's default `server.api_secret_refs` policy accepts from the
@@ -80,6 +80,7 @@ export function ProfileEditor({
   const [timeoutMs, setTimeoutMs] = useState(String(profile?.timeout_ms ?? 3000));
   const [maxTokens, setMaxTokens] = useState(String(profile?.max_tokens ?? 2048));
   const [fallback, setFallback] = useState(profile?.fallback_profile ?? "");
+  const [repetitionGuard, setRepetitionGuard] = useState(profile?.repetition_guard ?? true);
 
   const fallbacks = profiles.map((p) => p.name).filter((n) => n !== (profile?.name ?? name));
   if (fallback && !fallbacks.includes(fallback)) fallbacks.unshift(fallback);
@@ -101,6 +102,7 @@ export function ProfileEditor({
           timeout_ms: Number(timeoutMs),
           max_tokens: Number(maxTokens),
           fallback_profile: fallback || null,
+          repetition_guard: repetitionGuard,
         },
       },
       { onSuccess: onSaved },
@@ -207,6 +209,13 @@ export function ProfileEditor({
             ))}
           </select>
         </FieldShell>
+        <Checkbox
+          id="profile-repetition-guard"
+          label="Stop looping replies"
+          hint="Stop a reply that repeats the same few short pieces on its way to max tokens, and ask once more. Off sends plain, unstreamed requests."
+          checked={repetitionGuard}
+          onChange={setRepetitionGuard}
+        />
         <ProblemAlert error={put.error} focus />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={secondaryButton} onClick={onClose}>

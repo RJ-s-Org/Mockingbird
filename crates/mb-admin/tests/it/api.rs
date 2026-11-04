@@ -988,6 +988,31 @@ async fn profile_extra_body_round_trips_and_rejects_reserved_fields() {
     );
 }
 
+/// `repetition_guard` is on unless a profile turns it off.
+#[tokio::test]
+async fn profile_repetition_guard_round_trips() {
+    let h = harness().await;
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/guarded",
+            json!({"base_url": "https://x", "model": "m"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    assert_eq!(r.json()["repetition_guard"], true);
+    let r = h
+        .json(
+            Method::PUT,
+            "/api/v1/llm-profiles/plain",
+            json!({"base_url": "https://x", "model": "m", "repetition_guard": false}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+    let r = h.get("/api/v1/llm-profiles/plain").await;
+    assert_eq!(r.json()["repetition_guard"], false);
+}
+
 #[tokio::test]
 async fn profiles_never_return_secret_values() {
     // The API never resolves a secret_ref, so no variable needs setting.
@@ -1820,6 +1845,7 @@ async fn file_managed_mock_is_read_only() {
             headers: Default::default(),
             extra_body: Default::default(),
             source: ResourceSource::File,
+            repetition_guard: true,
         })
         .await
         .unwrap();

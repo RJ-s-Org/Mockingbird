@@ -38,6 +38,7 @@ use serde_json::Value;
 pub mod fallback;
 pub mod http;
 pub mod openai;
+pub mod repetition;
 #[cfg(feature = "testing")]
 pub mod scripted;
 
@@ -208,20 +209,60 @@ pub enum LlmError {
     /// with no JSON in it.
     #[error("LLM returned no content: {0}")]
     Empty(String),
+    /// The stream was stopped because the model was looping: the tail of
+    /// its answer (or of its reasoning) had become a few short pieces
+    /// repeated (see [`repetition`]). Nothing of it is kept: unlike a
+    /// [`LlmError::Truncated`] reply there is nothing worth salvaging. The
+    /// same request sampled again usually answers, so it is retryable.
+    #[error("LLM output repeated itself: {message}")]
+    Repeated {
+        /// Who looped, and where the stream was stopped.
+        message: String,
+        /// The tokens spent before the stop: reported by the provider when
+        /// it did, else estimated from the bytes (4 to a token).
+        usage: Usage,
+    },
 }
 
 impl LlmError {
     /// Whether one more attempt may succeed: transport failures, throttling
-    /// and server errors (including errors reported inside a 200 reply), and
-    /// empty replies.
+    /// and server errors (including errors reported inside a 200 reply),
+    /// empty replies and replies stopped for looping.
     pub fn is_retryable(&self) -> bool {
         match self {
-            LlmError::Transport(_) | LlmError::Empty(_) => true,
+            LlmError::Transport(_) | LlmError::Empty(_) | LlmError::Repeated { .. } => true,
             LlmError::Http { status, .. } => *status == 408 || *status == 429 || *status >= 500,
             LlmError::Timeout | LlmError::Decode(_) | LlmError::Truncated { .. } => false,
         }
     }
+
+    /// The tokens a failed call still spent: those of a cut
+    /// ([`LlmError::Truncated`]) or stopped ([`LlmError::Repeated`]) reply;
+    /// none for other errors.
+    #[must_use]
+    pub fn spent(&self) -> Usage {
+        match self {
+            LlmError::Truncated { usage, .. } | LlmError::Repeated { usage, .. } => *usage,
+            _ => Usage::default(),
+        }
+    }
+
+    /// This error with `earlier` (what failed attempts before it spent)
+    /// added to the tokens it reports; errors that report none are kept as
+    /// they are.
+    #[must_use]
+    pub fn with_earlier_spent(mut self, earlier: Usage) -> Self {
+        if let LlmError::Truncated { usage, .. } | LlmError::Repeated { usage, .. } = &mut self {
+            *usage = earlier + *usage;
+        }
+        self
+    }
 }
+
+/// Counts provider replies cut short, labelled `reason`: `max_tokens` (the
+/// provider stopped at the limit) or `repetition` (Mockingbird stopped a
+/// looping stream, see [`repetition`]). Retried attempts count too.
+pub const CUT_REPLIES_METRIC: &str = "mb_llm_cut_replies_total";
 
 /// Text deltas of a streamed completion, in arrival order. A transport or
 /// decode error mid-stream arrives as one `Err` item, after which the stream

@@ -56,6 +56,7 @@ fn profile(workspace: &str, name: &str, timeout_ms: u64, max_tokens: u32) -> Llm
         headers: Default::default(),
         extra_body: Default::default(),
         source: ResourceSource::Api,
+        repetition_guard: true,
     }
 }
 

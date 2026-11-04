@@ -1564,6 +1564,11 @@ export interface components {
             model: string;
             name: string;
             output_mode: components["schemas"]["OutputMode"];
+            /**
+             * @description Whether a looping reply is stopped early and retried (with the
+             *     server's `limits.repetition_guard` on).
+             */
+            repetition_guard: boolean;
             /** @description `env:NAME`, `file:/path` or `vault:<mount>/<path>#<field>`. */
             secret_ref?: string | null;
             source: components["schemas"]["Source"];
@@ -1872,6 +1877,13 @@ export interface components {
             max_tokens: number;
             model: string;
             output_mode?: components["schemas"]["OutputMode"] | null;
+            /**
+             * @description Stop a reply that falls into a loop (the same few short pieces
+             *     repeated) early and retry it once; default on. The server's
+             *     `limits.repetition_guard` must be on too.
+             * @default true
+             */
+            repetition_guard: boolean;
             /**
              * @description A secret reference, never a raw key. Through the API it must match
              *     the server's `server.api_secret_refs` globs; by default

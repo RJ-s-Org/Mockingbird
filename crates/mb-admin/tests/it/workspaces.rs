@@ -291,6 +291,7 @@ async fn force_delete_refuses_file_managed_resources() {
             headers: Default::default(),
             extra_body: Default::default(),
             source: ResourceSource::File,
+            repetition_guard: true,
         })
         .await
         .unwrap();

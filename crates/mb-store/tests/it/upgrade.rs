@@ -97,6 +97,8 @@ async fn check_upgraded(store: &dyn ControlStore, applied: usize) {
         assert_eq!(profile.model, "m");
         // Written before `output_mode`: read from `json_schema`.
         assert_eq!(profile.output_mode, mb_store::OutputMode::JsonObject);
+        // Written before `repetition_guard`: on.
+        assert!(profile.repetition_guard);
     } else {
         assert_eq!(workspaces, ["default"]);
     }

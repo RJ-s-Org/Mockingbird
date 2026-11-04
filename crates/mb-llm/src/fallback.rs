@@ -109,18 +109,15 @@ impl Provider for FallbackProvider {
         }
     }
 
-    /// The primary's tokens on a truncated reply are added to the
-    /// secondary's result; its partial text is not salvaged across hops.
+    /// The primary's tokens on a truncated or stopped reply are added to
+    /// the secondary's result; its partial text is not salvaged across hops.
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
         let primary_req = for_hop(self.primary_settings, req.clone());
         match self.primary.complete(primary_req).await {
             Ok(response) => Ok(response),
             Err(error) => {
                 tracing::warn!(%error, "primary LLM provider failed; trying fallback provider");
-                let spent = match &error {
-                    LlmError::Truncated { usage, .. } => *usage,
-                    _ => crate::Usage::default(),
-                };
+                let spent = error.spent();
                 match self
                     .secondary
                     .complete(for_hop(self.secondary_settings, req))
@@ -130,16 +127,7 @@ impl Provider for FallbackProvider {
                         response.usage = spent + response.usage;
                         Ok(response)
                     }
-                    Err(LlmError::Truncated {
-                        message,
-                        partial,
-                        usage,
-                    }) => Err(LlmError::Truncated {
-                        message,
-                        partial,
-                        usage: spent + usage,
-                    }),
-                    Err(e) => Err(e),
+                    Err(e) => Err(e.with_earlier_spent(spent)),
                 }
             }
         }

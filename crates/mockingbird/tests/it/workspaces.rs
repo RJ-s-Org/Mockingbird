@@ -167,6 +167,7 @@ fn profile(ws: &str, name: &str, base_url: String) -> LlmProfile {
         headers: Default::default(),
         extra_body: Default::default(),
         source: ResourceSource::Api,
+        repetition_guard: true,
     }
 }
 

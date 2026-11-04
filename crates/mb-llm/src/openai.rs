@@ -8,9 +8,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use crate::repetition::RepetitionGuard;
 use crate::{
-    Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError, MeteredStream, Provider,
-    ResponseFormat, StreamUsage, TextStream, Usage,
+    CUT_REPLIES_METRIC, Capabilities, ChatRequest, ChatResponse, HttpOptions, LlmError,
+    MeteredStream, Provider, ResponseFormat, StreamUsage, TextStream, Usage,
 };
 
 /// An OpenAI-compatible endpoint. Its `Debug` output redacts `api_key`, the
@@ -149,6 +150,15 @@ pub struct OpenAiCompatible {
     /// The schemas the endpoint rejected, by name and content, asked for in
     /// JSON mode from then on (see [`MAX_REJECTED_SCHEMAS`]).
     rejected_schemas: Mutex<HashSet<(String, u64)>>,
+    /// Whether streamed text is watched for loops (see
+    /// [`Self::with_repetition_guard`]).
+    repetition_guard: bool,
+    /// How long a loop must run before it is stopped (see
+    /// [`Self::with_repetition_span`]).
+    repetition_span: usize,
+    /// Whether `complete` may stream; cleared for good when the endpoint
+    /// refuses `stream` itself.
+    streaming: AtomicBool,
 }
 
 impl std::fmt::Debug for OpenAiCompatible {
@@ -157,6 +167,9 @@ impl std::fmt::Debug for OpenAiCompatible {
             .field("config", &self.config)
             .field("reasoning", &self.reasoning_setting())
             .field("stream_usage", &self.stream_usage.load(Ordering::Relaxed))
+            .field("repetition_guard", &self.repetition_guard)
+            .field("repetition_span", &self.repetition_span)
+            .field("streaming", &self.streaming.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -181,7 +194,77 @@ impl OpenAiCompatible {
             reasoning: AtomicU8::new(reasoning as u8),
             stream_usage: AtomicBool::new(true),
             rejected_schemas: Mutex::new(HashSet::new()),
+            repetition_guard: true,
+            repetition_span: crate::repetition::DEFAULT_SPAN,
+            streaming: AtomicBool::new(true),
         })
+    }
+
+    /// Whether to stop a reply that has fallen into a loop (on by default):
+    /// the tail of its text has become a few short pieces repeated (see
+    /// [`crate::repetition`]), which goes on until `max_tokens` and is lost
+    /// anyway. The stopped call is an [`LlmError::Repeated`], which
+    /// [`Provider::complete`] retries once, like other retryable errors.
+    ///
+    /// To watch the text as it is written, [`Provider::complete`] then asks
+    /// for a stream (`stream: true`, with `stream_options.include_usage`
+    /// unless the endpoint rejects it) and builds the reply from its chunks;
+    /// an endpoint that answers with a plain JSON reply instead is read as
+    /// one. Off, `complete` sends a plain request and waits for the whole
+    /// reply. [`Provider::stream`] is watched either way when on.
+    ///
+    /// `complete` does not stream, so the guard is off for its calls, when
+    /// `extra_body` sets `stream` or asks for more than one choice (`n`),
+    /// and once the endpoint has refused `stream` (a 4xx naming it): that
+    /// request is sent again plainly, and so are later ones.
+    #[must_use]
+    pub fn with_repetition_guard(mut self, on: bool) -> Self {
+        self.repetition_guard = on;
+        self
+    }
+
+    /// How long the text must have been of low variety before the guard
+    /// stops it, in bytes (default [`crate::repetition::DEFAULT_SPAN`], at
+    /// least [`crate::repetition::WINDOW`]; see [`crate::repetition`]).
+    #[must_use]
+    pub fn with_repetition_span(mut self, bytes: usize) -> Self {
+        self.repetition_span = bytes.max(crate::repetition::WINDOW);
+        self
+    }
+
+    /// Whether `complete` streams (and so guards) its calls: the guard is
+    /// on, `extra_body` sets neither `stream` nor `n` above 1, and the
+    /// endpoint has not refused `stream`.
+    fn streams_complete(&self) -> bool {
+        let extra = &self.config.extra_body;
+        self.repetition_guard
+            && !extra.contains_key("stream")
+            && extra
+                .get("n")
+                .and_then(Value::as_u64)
+                .is_none_or(|n| n <= 1)
+            && self.streaming.load(Ordering::Relaxed)
+    }
+
+    /// Whether `e` refuses `stream` itself (a 4xx naming `stream` but not
+    /// `stream_options`); if so `complete` stops streaming for good.
+    fn rejected_streaming(&self, e: &LlmError) -> bool {
+        let rejected = matches!(e, LlmError::Http { status, body }
+        if (400..500).contains(status) && *status != 408 && *status != 429 && {
+            // `stream` as a word: not `upstream`, nor `stream_options`.
+            let body = body.to_ascii_lowercase();
+            !body.contains("stream_options")
+                && body
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|word| word == "stream")
+        });
+        if rejected && self.streaming.swap(false, Ordering::Relaxed) {
+            tracing::warn!(
+                model = %self.config.model,
+                "the endpoint refuses streamed requests; sending plain ones, without the repetition guard"
+            );
+        }
+        rejected
     }
 
     /// Whether to send `reasoning: {"enabled": false}` (OpenRouter's switch)
@@ -438,11 +521,13 @@ impl OpenAiCompatible {
         // The reasoning setting steps down at most twice and the schema is
         // dropped at most once. An empty answer under a schema (some routes
         // lose it in that mode) is tried once in JSON mode, for this call only.
+        // A streamed request (see `with_repetition_guard`) also drops
+        // stream_options at most once, and streaming itself at most once.
         let mut sent = self.reasoning_setting();
         let mut with_schema = self.sends_schema(req);
         let mut json_only = false;
         let mut result = self.send_once(req, sent, json_only).await;
-        for _ in 0..3 {
+        for _ in 0..5 {
             match result {
                 Err(e)
                     if with_schema
@@ -452,7 +537,11 @@ impl OpenAiCompatible {
                     json_only = true;
                     result = self.send_once(req, sent, json_only).await;
                 }
-                Err(e) if self.rejected_reasoning(&e, sent) => {
+                Err(e)
+                    if self.rejected_reasoning(&e, sent)
+                        || (self.streams_complete()
+                            && (self.rejected_stream_usage(&e) || self.rejected_streaming(&e))) =>
+                {
                     sent = self.reasoning_setting();
                     result = self.send_once(req, sent, json_only).await;
                 }
@@ -468,6 +557,9 @@ impl OpenAiCompatible {
         reasoning: Reasoning,
         json_only: bool,
     ) -> Result<ChatResponse, LlmError> {
+        if self.streams_complete() {
+            return self.send_once_streamed(req, reasoning, json_only).await;
+        }
         let resp = self.post(&self.body(req, reasoning, json_only)).await?;
         let status = resp.status();
         let text = resp
@@ -480,9 +572,80 @@ impl OpenAiCompatible {
                 body: text,
             });
         }
-        let v: Value = serde_json::from_str(&text)
-            .map_err(|e| LlmError::Decode(format!("{e}: {}", excerpt(&text))))?;
-        parse_reply(&v, req.max_tokens)
+        parse_reply_text(&text, req.max_tokens)
+    }
+
+    /// [`Self::send_once`] as a stream, watched for loops: the chunks are
+    /// gathered into the reply a plain request would have got, which is then
+    /// read the same way. A looping answer or reasoning stops the stream
+    /// (dropping the response closes the connection) with
+    /// [`LlmError::Repeated`]. An endpoint that ignores `stream` and answers
+    /// with a plain JSON reply is read as one.
+    async fn send_once_streamed(
+        &self,
+        req: &ChatRequest,
+        reasoning: Reasoning,
+        json_only: bool,
+    ) -> Result<ChatResponse, LlmError> {
+        let resp = self.open_stream_once(req, reasoning, json_only).await?;
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|t| t.trim_start().to_ascii_lowercase());
+        let mut bytes = resp.bytes_stream();
+        // Without a content type, the first bytes say whether it is SSE.
+        let mut first = None;
+        let is_sse = match content_type {
+            Some(t) => t.starts_with("text/event-stream"),
+            None => {
+                first = bytes
+                    .next()
+                    .await
+                    .transpose()
+                    .map_err(|e| LlmError::Transport(e.to_string()))?;
+                first.as_deref().is_some_and(looks_like_sse)
+            }
+        };
+        let mut bytes = futures::stream::iter(first.map(Ok)).chain(bytes);
+        if !is_sse {
+            let mut body = Vec::new();
+            while let Some(chunk) = bytes.next().await {
+                body.extend_from_slice(&chunk.map_err(|e| LlmError::Transport(e.to_string()))?);
+            }
+            return parse_reply_text(&String::from_utf8_lossy(&body), req.max_tokens);
+        }
+        let mut events = bytes.eventsource();
+        let mut reply = GatheredReply::new(prompt_bytes(req), self.repetition_span);
+        let mut done = false;
+        let mut any = false;
+        while let Some(event) = events.next().await {
+            let event = event.map_err(|e| LlmError::Transport(e.to_string()))?;
+            any = true;
+            let data = event.data.trim();
+            if data == "[DONE]" {
+                done = true;
+                break;
+            }
+            let v: Value = serde_json::from_str(data)
+                .map_err(|e| LlmError::Decode(format!("{e}: {}", excerpt(data))))?;
+            if let Some(error) = in_band_error(&v) {
+                return Err(error);
+            }
+            reply.absorb(&v)?;
+        }
+        if !any {
+            // An empty body, as a plain request reads it.
+            return parse_reply_text("", req.max_tokens);
+        }
+        if !done && !reply.finished() {
+            return Err(LlmError::Transport(format!(
+                "{}the stream ended with neither [DONE] nor a finish reason, after {} bytes",
+                reply.provider_prefix(),
+                reply.bytes()
+            )));
+        }
+        parse_reply(&reply.into_reply(), req.max_tokens)
     }
 
     /// [`Self::send`], once more when the first failure is retryable and
@@ -491,11 +654,25 @@ impl OpenAiCompatible {
         &self,
         req: &ChatRequest,
         deadline: tokio::time::Instant,
+        stopped: &Mutex<Option<LlmError>>,
     ) -> Result<ChatResponse, LlmError> {
         match self.send(req).await {
             Err(e) if e.is_retryable() && tokio::time::Instant::now() < deadline => {
                 tracing::debug!(error = %e, "retrying the LLM call once");
-                self.send(req).await
+                let spent = e.spent();
+                if spent != Usage::default()
+                    && let Ok(mut held) = stopped.lock()
+                {
+                    // Read by `complete` if the retry runs out of time.
+                    *held = Some(e);
+                }
+                match self.send(req).await {
+                    Ok(mut response) => {
+                        response.usage = spent + response.usage;
+                        Ok(response)
+                    }
+                    Err(e) => Err(e.with_earlier_spent(spent)),
+                }
             }
             other => other,
         }
@@ -746,6 +923,7 @@ fn parse_reply(v: &Value, max_tokens: u32) -> Result<ChatResponse, LlmError> {
         .filter(|c| !c.trim().is_empty());
     let usage = v.get("usage").map(usage_of).unwrap_or_default();
     if finish == "length" {
+        count_cut(CutReason::MaxTokens);
         let partial = content.unwrap_or_default();
         return Err(LlmError::Truncated {
             message: format!(
@@ -890,6 +1068,223 @@ fn excerpt(text: &str) -> String {
     format!("{}…", &text[..end])
 }
 
+/// Whether the first bytes of a body with no content type are an event
+/// stream: an SSE field (`data:`, `event:`, `id:`, `retry:`) or comment.
+fn looks_like_sse(first: &[u8]) -> bool {
+    let start = first
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map_or(&[][..], |i| &first[i..]);
+    [&b"data:"[..], b"event:", b"id:", b"retry:", b":"]
+        .iter()
+        .any(|field| start.starts_with(field))
+}
+
+/// The last 120 bytes of `text`, cut at a character boundary.
+fn tail_excerpt(text: &str) -> String {
+    const LIMIT: usize = 120;
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+    let mut start = text.len() - LIMIT;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &text[start..])
+}
+
+/// A plain (not streamed) reply body, read by [`parse_reply`].
+fn parse_reply_text(text: &str, max_tokens: u32) -> Result<ChatResponse, LlmError> {
+    let v: Value = serde_json::from_str(text)
+        .map_err(|e| LlmError::Decode(format!("{e}: {}", excerpt(text))))?;
+    parse_reply(&v, max_tokens)
+}
+
+/// The bytes of `req`'s messages, for estimating its prompt tokens.
+fn prompt_bytes(req: &ChatRequest) -> usize {
+    req.messages.iter().map(|m| m.content.len()).sum()
+}
+
+/// `ceil(bytes / 4)`: the estimate of tokens a provider did not report.
+fn estimated_tokens(bytes: usize) -> u32 {
+    u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX)
+}
+
+/// Why a reply was cut short, the `reason` label of [`CUT_REPLIES_METRIC`].
+#[derive(Clone, Copy)]
+enum CutReason {
+    MaxTokens,
+    Repetition,
+}
+
+fn count_cut(reason: CutReason) {
+    let label = match reason {
+        CutReason::MaxTokens => "max_tokens",
+        CutReason::Repetition => "repetition",
+    };
+    metrics::counter!(CUT_REPLIES_METRIC, "reason" => label).increment(1);
+}
+
+/// The [`LlmError::Repeated`] of a stream stopped once `text` (the answer,
+/// or the reasoning when `in_reasoning`) had looped. `usage` is the one the
+/// provider reported, if any; otherwise it is estimated from the prompt's
+/// bytes and the completion bytes received (answer and reasoning), the
+/// reasoning bytes counting as reasoning tokens.
+fn repeated(
+    provider: &str,
+    text: &str,
+    in_reasoning: bool,
+    (prompt_bytes, completion_bytes, reasoning_bytes): (usize, usize, usize),
+    reported: Option<Usage>,
+) -> LlmError {
+    count_cut(CutReason::Repetition);
+    let usage = reported.unwrap_or(Usage {
+        prompt_tokens: estimated_tokens(prompt_bytes),
+        completion_tokens: estimated_tokens(completion_bytes),
+        reasoning_tokens: estimated_tokens(reasoning_bytes),
+    });
+    let what = if in_reasoning { "reasoning" } else { "answer" };
+    LlmError::Repeated {
+        message: format!(
+            "{provider}aborted after about {} tokens: the last {} KiB of the {what} are a few short pieces repeated ({})",
+            usage.completion_tokens,
+            crate::repetition::WINDOW / 1024,
+            tail_excerpt(text),
+        ),
+        usage,
+    }
+}
+
+/// A streamed completion gathered chunk by chunk into the reply a plain
+/// request gets, with its answer and its reasoning each watched for loops.
+struct GatheredReply {
+    provider: Option<Value>,
+    content: String,
+    reasoning: String,
+    finish: Option<Value>,
+    usage: Option<Value>,
+    content_guard: RepetitionGuard,
+    reasoning_guard: RepetitionGuard,
+    prompt_bytes: usize,
+}
+
+impl GatheredReply {
+    fn new(prompt_bytes: usize, span: usize) -> Self {
+        Self {
+            provider: None,
+            content: String::new(),
+            reasoning: String::new(),
+            finish: None,
+            usage: None,
+            content_guard: RepetitionGuard::with_span(span),
+            reasoning_guard: RepetitionGuard::with_span(span),
+            prompt_bytes,
+        }
+    }
+
+    /// Whether a chunk gave a finish reason.
+    fn finished(&self) -> bool {
+        self.finish.is_some()
+    }
+
+    /// The answer and reasoning bytes received.
+    fn bytes(&self) -> usize {
+        self.content.len() + self.reasoning.len()
+    }
+
+    fn provider_prefix(&self) -> String {
+        self.provider
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(|p| format!("provider {p}, "))
+            .unwrap_or_default()
+    }
+
+    /// Adds one chunk; [`LlmError::Repeated`] once the answer or the
+    /// reasoning loops.
+    fn absorb(&mut self, v: &Value) -> Result<(), LlmError> {
+        if let Some(p) = v.get("provider").filter(|p| p.is_string()) {
+            self.provider = Some(p.clone());
+        }
+        if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+            self.usage = Some(u.clone());
+        }
+        if let Some(f) = v
+            .pointer("/choices/0/finish_reason")
+            .filter(|f| f.is_string())
+        {
+            self.finish = Some(f.clone());
+        }
+        let delta = |key: &str| {
+            v.pointer(&format!("/choices/0/delta/{key}"))
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+        };
+        if let Some(text) = delta("content") {
+            self.content.push_str(text);
+            if self.content_guard.push(text) {
+                return Err(self.repeated(false));
+            }
+        }
+        // Some gateways send the reasoning under both names: the first one
+        // present is it.
+        if let Some(text) = delta("reasoning").or_else(|| delta("reasoning_content")) {
+            self.reasoning.push_str(text);
+            if self.reasoning_guard.push(text) {
+                return Err(self.repeated(true));
+            }
+        }
+        Ok(())
+    }
+
+    fn repeated(&self, in_reasoning: bool) -> LlmError {
+        let provider = self.provider_prefix();
+        let text = if in_reasoning {
+            &self.reasoning
+        } else {
+            &self.content
+        };
+        let reported = self.usage.as_ref().map(usage_of);
+        repeated(
+            &provider,
+            text,
+            in_reasoning,
+            (self.prompt_bytes, self.bytes(), self.reasoning.len()),
+            reported,
+        )
+    }
+
+    /// The reply a plain request would have got. Without a usage chunk its
+    /// usage is estimated from the bytes, so a call that produced text never
+    /// reports 0 tokens.
+    fn into_reply(self) -> Value {
+        let usage = self.usage.clone().unwrap_or_else(|| {
+            json!({
+                "prompt_tokens": estimated_tokens(self.prompt_bytes),
+                "completion_tokens": estimated_tokens(self.bytes()),
+                "completion_tokens_details": {
+                    "reasoning_tokens": estimated_tokens(self.reasoning.len()),
+                },
+            })
+        });
+        let mut choice = json!({"message": {
+            "content": (!self.content.is_empty()).then_some(self.content),
+            "reasoning": self.reasoning,
+        }});
+        if let (Some(f), Some(obj)) = (self.finish, choice.as_object_mut()) {
+            obj.insert("finish_reason".into(), f);
+        }
+        let mut reply = json!({"choices": [choice]});
+        if let Some(obj) = reply.as_object_mut() {
+            if let Some(p) = self.provider {
+                obj.insert("provider".into(), p);
+            }
+            obj.insert("usage".into(), usage);
+        }
+        reply
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for OpenAiCompatible {
     fn capabilities(&self) -> Capabilities {
@@ -904,9 +1299,18 @@ impl Provider for OpenAiCompatible {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
         tracing::Span::current().record("llm.model", self.config.model.as_str());
         let deadline = tokio::time::Instant::now() + req.timeout;
-        match tokio::time::timeout_at(deadline, self.send_with_retry(&req, deadline)).await {
+        // A failed attempt that spent tokens, kept outside the timed call:
+        // when the retry runs out of time, that error (and its tokens) is
+        // the answer rather than a bare timeout.
+        let stopped = Mutex::new(None);
+        match tokio::time::timeout_at(deadline, self.send_with_retry(&req, deadline, &stopped))
+            .await
+        {
             Ok(r) => r,
-            Err(_) => Err(LlmError::Timeout),
+            Err(_) => match stopped.lock().ok().and_then(|mut held| held.take()) {
+                Some(e) => Err(e),
+                None => Err(LlmError::Timeout),
+            },
         }
     }
 
@@ -927,15 +1331,21 @@ impl Provider for OpenAiCompatible {
         };
         let events = resp.bytes_stream().eventsource();
         let max_tokens = req.max_tokens;
+        let prompt_bytes = prompt_bytes(&req);
         let usage = StreamUsage::new();
         let reported = usage.clone();
-        // The state is the event source plus an error to yield after the
-        // delta just returned (a truncation marked on a chunk with content);
-        // `None` once the stream has ended.
-        let deltas = futures::stream::unfold(Some((events, None)), move |state| {
+        // Watches the text for loops, with the text received so far.
+        let span = self.repetition_span;
+        let watch = self
+            .repetition_guard
+            .then(|| (RepetitionGuard::with_span(span), String::new(), 0usize));
+        // The state is the event source, an error to yield after the delta
+        // just returned (a truncation marked on a chunk with content) and the
+        // loop watch; `None` once the stream has ended.
+        let deltas = futures::stream::unfold(Some((events, None, watch)), move |state| {
             let reported = reported.clone();
             async move {
-                let (mut events, pending) = state?;
+                let (mut events, pending, mut watch) = state?;
                 if let Some(error) = pending {
                     return Some((Err(error), None));
                 }
@@ -962,6 +1372,7 @@ impl Provider for OpenAiCompatible {
                         reported.set(u);
                     }
                     let truncated = (finish_reason(&v) == "length").then(|| {
+                        count_cut(CutReason::MaxTokens);
                         let usage = reported.get().unwrap_or_default();
                         LlmError::Truncated {
                             message: truncated_message(&provider_prefix(&v), max_tokens, usage),
@@ -973,9 +1384,27 @@ impl Provider for OpenAiCompatible {
                         .pointer("/choices/0/delta/content")
                         .and_then(Value::as_str)
                         .filter(|t| !t.is_empty());
+                    if let (Some(text), Some((guard, seen, received))) = (text, watch.as_mut()) {
+                        seen.push_str(text);
+                        *received += text.len();
+                        if guard.push(text) {
+                            let provider = provider_prefix(&v);
+                            let bytes = (prompt_bytes, *received, 0);
+                            let error = repeated(&provider, seen, false, bytes, reported.get());
+                            return Some((Err(error), None));
+                        }
+                        // Only the tail is ever shown.
+                        if seen.len() > 2 * crate::repetition::WINDOW {
+                            let mut cut = seen.len() - crate::repetition::WINDOW;
+                            while !seen.is_char_boundary(cut) {
+                                cut += 1;
+                            }
+                            seen.drain(..cut);
+                        }
+                    }
                     match (text, truncated) {
                         (Some(text), truncated) => {
-                            return Some((Ok(text.to_string()), Some((events, truncated))));
+                            return Some((Ok(text.to_string()), Some((events, truncated, watch))));
                         }
                         (None, Some(error)) => return Some((Err(error), None)),
                         // Keep-alive, role-only, stop and usage chunks carry nothing.

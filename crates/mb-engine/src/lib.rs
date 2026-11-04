@@ -2275,7 +2275,12 @@ impl Engine {
                     truncated: Some(format!("LLM output truncated: {message}")),
                 })
             }
-            Ok(Err(e)) => Err(e.to_string()),
+            // A reply stopped for looping (`LlmError::Repeated`) still spent
+            // tokens; its text is not kept, so nothing is salvaged or repaired.
+            Ok(Err(e)) => {
+                charge(e.spent());
+                Err(e.to_string())
+            }
             Err(_) => Err("LLM request timed out".into()),
         }
     }

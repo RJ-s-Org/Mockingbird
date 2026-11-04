@@ -814,6 +814,7 @@ pub(crate) async fn profile_crud(store: &Arc<dyn ControlStore>) {
         headers: Default::default(),
         extra_body: Default::default(),
         source: ResourceSource::Api,
+        repetition_guard: true,
     };
     store.put_profile(&p).await.expect("put");
     assert_eq!(
@@ -870,6 +871,21 @@ pub(crate) async fn profile_crud(store: &Arc<dyn ControlStore>) {
             .output_mode,
         mb_store::OutputMode::None,
         "output_mode round-trip"
+    );
+    assert!(p.repetition_guard, "on by default");
+    p.repetition_guard = false;
+    store
+        .put_profile(&p)
+        .await
+        .expect("upsert repetition guard");
+    assert!(
+        !store
+            .get_profile(DEFAULT_WORKSPACE, "fast")
+            .await
+            .expect("get")
+            .expect("present")
+            .repetition_guard,
+        "repetition_guard round-trip"
     );
     let slow = LlmProfile {
         name: "slow".into(),
@@ -1154,6 +1170,7 @@ fn profile(ws: &str, name: &str) -> LlmProfile {
         headers: Default::default(),
         extra_body: Default::default(),
         source: ResourceSource::Api,
+        repetition_guard: true,
     }
 }
 

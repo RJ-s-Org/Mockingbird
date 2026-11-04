@@ -453,6 +453,7 @@ pub fn api_body(profile: &FileProfile, fallback: Option<&str>) -> Value {
         "fallback_profile": fallback.or(profile.fallback.as_deref()),
         "headers": profile.headers,
         "extra_body": profile.extra_body,
+        "repetition_guard": profile.repetition_guard,
     })
 }
 
