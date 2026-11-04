@@ -26,9 +26,8 @@ Suites (contracts are in-repo, so the bench is reproducible):
   booking, cancel) and GitHub (search, repo, issue). One row per check, `case` =
   `<journey>.<check>`; `source` is the `x-mockingbird-source` of the call the check
   judged. A journey that breaks fails its remaining checks. A failure the provider
-  caused (a 5xx, 429 or transport-error fallback; never a timeout) carries
-  `detail.infra`, and a journey it alone ends, before any check passed, is re-run
-  once (`run_one_journey`). Not in the default
+  caused (a 5xx, 429 or transport-error fallback; never a timeout) carries the
+  label `detail.infra`, which changes no row. Not in the default
   suites (it is asked for with `--suite journeys`). Measures remembering entities
   and the effects of writes.
 - journeys_heldout: the same kind of journey over five contracts the engine was not
@@ -438,17 +437,23 @@ def fallback_reason(hdrs):
 
 
 # A fallback answer the provider caused, not the model: the provider answered 5xx or
-# 429 ("no capacity", rate limited), or the connection to it failed. An LLM timeout is
-# not one: it is often the model being slow, so it stays a model failure (aggregate.py
-# counts timeouts on their own) and never causes a re-run.
-INFRA_REASON = re.compile(r"LLM returned HTTP (5\d\d|429)\b|LLM transport error")
+# 429 ("no capacity", rate limited), or the connection to it failed. Anchored, so a
+# reason that starts with the model's own failure (`LLM output truncated: ...; not
+# salvaged: LLM returned HTTP 503`) is not one. An LLM timeout is not one either: it is
+# often the model being slow (aggregate.py counts timeouts on their own). The bench
+# proxy's 424 after repeated upstream 4xx rejections is the request's failure, not the
+# provider's (older runs sent it as a 502, hence the text check).
+# Known limit: a repair call that gets a 503 after an invalid first answer is reported
+# as a bare `LLM returned HTTP 503` and cannot be told apart, so it is labelled infra.
+# That is why the label never changes a row and never causes a re-run.
+INFRA_REASON = re.compile(r"^LLM returned HTTP (5\d\d|429)\b|^LLM transport error")
 
 
 def infra_reason(last):
     """The fallback reason of `last` (a `Journey.last`) when the mock's answer was a
     fallback forced by a clear provider error, else None."""
     reason = str(last.get("fallback_reason") or "")
-    if last.get("source") == "fallback" and INFRA_REASON.search(reason):
+    if last.get("source") == "fallback" and INFRA_REASON.search(reason) and "kept rejecting" not in reason:
         return reason
     return None
 
@@ -1025,27 +1030,19 @@ class Journey:
     """One journey run: a fresh session, calls through `request()`, and checks
     recorded as rows against the latest call.
 
-    A failed check judged on a fallback the provider forced (`infra_reason`) carries
-    `detail.infra` true. Rows are held back until the first check passes, so that a
-    run which fails only on the provider (no check passed, and every failed check so far
-    is infra) can be dropped and run again (`run_one_journey`); after that they are
-    written as they come."""
+    A failed check judged on a call the provider failed (`infra_reason`) carries
+    `detail.infra` true. That is a label only: the row, its `ok` and every other row
+    are what they would be without it, and no run is repeated or dropped. The label
+    goes by the latest call, which is the call a check judges in all but a few steps."""
 
-    def __init__(self, name, srv, sink, args, rep, retry_of=None):
+    def __init__(self, name, srv, sink, args, rep):
         self.name, self.srv, self.sink, self.args, self.rep = name, srv, sink, args, rep
         session = f"bench-{session_slug(args.model)}-{int(time.time())}-{name}-{rep}"
-        if retry_of:
-            session += "-retry"
         self.headers = {"x-mockingbird-session": session}
         self.rng = random.Random(f"{args.model}|{name}|{rep}")
         self.done = set()
         self.last = {"status": None, "source": "?", "ms": None, "fallback_reason": None}
-        self.retry_of = retry_of  # the infra reason that dropped the first run
-        self.passed = False  # a check has passed: rows are no longer held back
-        self.held = []
-        self.infra = None  # the first infra reason a failed check was judged on
-        self.last_infra = False  # the latest check failed on infra
-        self.model_failed = False  # a check failed that was not infra: the run is kept
+        self.last_infra = None  # the infra reason the latest check failed on, if any
 
     def call(self, method, path, query=None, body=None, form=None):
         """The JSON body of the response, or {} when it is not a JSON object."""
@@ -1061,32 +1058,16 @@ class Journey:
         return parsed if isinstance(parsed, (dict, list)) else {}
 
     def check(self, name, ok, infra=None, **detail):
+        """`infra`: None labels the row by the latest call; a reason or False sets it."""
         self.done.add(name)
         detail = dict(detail, **{k: v for k, v in self.last.items() if k not in ("source", "ms") and v is not None})
-        ok = bool(ok)
         if infra is None:
             infra = infra_reason(self.last)
-        self.last_infra = bool(infra) and not ok
+        self.last_infra = infra if infra and not ok else None
         if self.last_infra:
             detail["infra"] = True
-            self.infra = self.infra or infra
-        elif not ok:
-            self.model_failed = True
-        if self.retry_of:
-            detail["retried_after"] = self.retry_of
-        row = (self.sink, self.name, self.rep, name, ok, detail, self.last["source"], self.last["ms"])
-        if self.passed:
-            journey_check(*row)
-            return
-        self.held.append(row)
-        if ok:
-            self.passed = True
-            self.flush()
-
-    def flush(self):
-        held, self.held = self.held, []
-        for row in held:
-            journey_check(*row)
+        journey_check(self.sink, self.name, self.rep, name, bool(ok), detail,
+                      self.last["source"], self.last["ms"])
 
     def stop(self, gate):
         self.check(gate, False)
@@ -1094,42 +1075,24 @@ class Journey:
 
 
 def run_one_journey(name, steps, srv, sink, args, rep):
-    """Runs a journey and records every one of its checks. A journey that ends early
-    on a provider error (`infra_reason`: HTTP 5xx or 429, a transport error; never a
-    timeout) is run once more from the start, in a fresh session, only when no check
-    passed and every check that failed was infra: a model failure anywhere in the first
-    run keeps its rows. Only the second run's rows are kept then, and they name the
-    first run's reason in `detail.retried_after`. Checks left out because the journey
-    ended on such an error carry `detail.infra` too."""
-    retry_of = None
-    while True:
-        j = Journey(name, srv, sink, args, rep, retry_of=retry_of)
-        try:
-            steps(j)
-            reason = None
-        except JourneyStop as e:
-            reason = f"stopped at {e}"
-        except Exception as e:  # noqa: BLE001 - a journey that breaks is recorded, not raised
-            reason = f"{type(e).__name__}: {e}"[:300]
-            if infra_reason(j.last):
-                j.infra, j.last_infra = j.infra or infra_reason(j.last), True
-            else:
-                j.model_failed, j.last_infra = True, False
-        except BaseException:
-            j.flush()  # an interrupt keeps the rows judged so far and pads none
-            raise
-        if reason and j.infra and j.last_infra and not j.passed and not j.model_failed and retry_of is None:
-            retry_of = j.infra
-            print(f"  [re-run] {sink.suite}/{name} #{rep}: {j.infra[:120]}", file=sys.stderr)
-            continue
-        break
-    ended_on_infra = bool(reason) and j.last_infra
+    """Runs a journey once and records every one of its checks. When a gate fails on a
+    provider error (`Journey.check` labels it `detail.infra`), the checks it skips carry
+    the label too. A journey that breaks on an exception is the model's: `call()` never
+    raises, so the exception comes from reading an answer, which may be an earlier one."""
+    j = Journey(name, srv, sink, args, rep)
+    ended_on_infra = None
+    try:
+        steps(j)
+        reason = None
+    except JourneyStop as e:
+        reason = f"stopped at {e}"
+        ended_on_infra = j.last_infra
+    except Exception as e:  # noqa: BLE001 - a journey that breaks is recorded, not raised
+        reason = f"{type(e).__name__}: {e}"[:300]
     for check in JOURNEY_CHECKS[name]:
         if check not in j.done:
             j.last = {"status": None, "source": "skipped", "ms": None, "fallback_reason": None}
-            j.check(check, False, infra=j.infra if ended_on_infra else False,
-                    reason=reason or "journey ended early")
-    j.flush()
+            j.check(check, False, infra=ended_on_infra or False, reason=reason or "journey ended early")
 
 
 def stripe_steps(j):
@@ -1804,7 +1767,7 @@ def discord_steps(j):
     j.check("channels name their guild", bool(channels) and all(eq(c.get("guild_id"), gid) for c in channels))
     # The contract does not promise the guild a text channel (types are an enum and it has
     # no route to make one), so a listed text channel is used when there is one, and else a
-    # DM channel the client was given: `create_message` posts to either.
+    # DM channel id the bench makes up, as it does the guild's: `create_message` posts to either.
     channel = next((c for c in channels if c.get("type") == 0), {})
     cid = channel.get("id") or str(1100000000000000000 + j.rng.randrange(10 ** 17))
     messages = f"/channels/{cid}/messages"

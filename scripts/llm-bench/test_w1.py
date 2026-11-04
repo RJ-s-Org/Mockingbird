@@ -1084,12 +1084,14 @@ class DiscordChannelTest(unittest.TestCase):
         self.assertTrue(rows["discord.message has an id"]["ok"])
         self.assertTrue(rows["discord.message keeps what was sent"]["ok"])
         self.assertTrue(FakeDiscord.posted)
-        # Neither listed channel takes messages, so it posts to a channel it was given.
+        # Neither listed channel takes messages, so it posts to a DM channel id it makes up.
         self.assertFalse(any(p.split("/")[3] in ("7", "8") for p in FakeDiscord.posted), FakeDiscord.posted)
         self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [])
 
 
 class InfraFailureTest(unittest.TestCase):
+    """The provider/model split is a label on rows; it never drops, replaces or re-runs one."""
+
     def run_square(self, fail, out, reason="LLM returned HTTP 503: no capacity"):
         FakeSquare.store, FakeSquare.stale_read = {}, False
         FakeFlakySquare.fail, FakeFlakySquare.reason, FakeFlakySquare.sessions = fail, reason, []
@@ -1105,6 +1107,10 @@ class InfraFailureTest(unittest.TestCase):
         self.assertEqual(written, json.loads(json.dumps(sink.rows)))
         return written
 
+    def square(self, fail, reason="LLM returned HTTP 503: no capacity"):
+        with tempfile.TemporaryDirectory() as out:
+            return self.run_square(fail, out, reason)
+
     def test_infra_reason(self):
         def last(reason, source="fallback"):
             return {"source": source, "fallback_reason": reason}
@@ -1112,42 +1118,68 @@ class InfraFailureTest(unittest.TestCase):
         for reason in ("LLM returned HTTP 503: no capacity", "LLM returned HTTP 502: x",
                        "LLM returned HTTP 429: slow down", "LLM transport error: connection reset"):
             self.assertEqual(server_suites.infra_reason(last(reason)), reason)
-        # A timeout is often the model being slow: it stays the model's.
-        for reason in ("LLM request timed out", "LLM returned HTTP 400: bad", "repaired output still invalid",
-                       "stopped at max_tokens", "timed out waiting for a generation slot", None):
+        for reason in (
+            # A timeout is often the model being slow: it stays the model's.
+            "LLM request timed out",
+            # The model's answer was cut short, then the repair call failed: the model's.
+            "LLM output truncated: stopped at max_tokens; not salvaged: LLM returned HTTP 503: no capacity",
+            # The bench proxy after repeated upstream 4xx: the request's failure (424 now, 502 before).
+            'LLM returned HTTP 424: {"error":{"message":"upstream kept rejecting the request"}}',
+            'LLM returned HTTP 502: {"error":{"message":"upstream kept rejecting the request"}}',
+            "LLM returned HTTP 400: bad", "repaired output still invalid", "stopped at max_tokens",
+            "timed out waiting for a generation slot", None,
+        ):
             self.assertIsNone(server_suites.infra_reason(last(reason)), reason)
         self.assertIsNone(server_suites.infra_reason(last("LLM returned HTTP 503: x", source="llm")))
+        # Known limit: a repair call that gets a 503 after an invalid first answer is reported
+        # as a bare `LLM returned HTTP 503`, the same as a first call's 503, so it is labelled
+        # infra. That is why the label is only a label: it never changes a row or re-runs one.
+        self.assertIsNotNone(server_suites.infra_reason(last("LLM returned HTTP 503: repair call")))
 
-    def test_a_provider_failure_at_the_gate_reruns_the_journey_once(self):
-        with tempfile.TemporaryDirectory() as out:
-            rows = self.run_square("once", out)
+    def test_a_provider_failure_at_the_gate_is_labelled_and_never_rerun(self):
+        rows = self.square("once")
         checks = server_suites.JOURNEY_CHECKS["square"]
-        self.assertEqual(sorted(r["case"] for r in rows), sorted(f"square.{c}" for c in checks))
-        self.assertEqual([r["case"] for r in rows if not r["ok"]], [])
-        self.assertTrue(all(r["detail"].get("retried_after") == "LLM returned HTTP 503: no capacity" for r in rows))
-        self.assertFalse(any(r["detail"].get("infra") for r in rows))
-        self.assertEqual(len(FakeFlakySquare.sessions), 2)
-        self.assertTrue(FakeFlakySquare.sessions[1].endswith("-retry"))
-        block = aggregate.journeys_block(rows)["journeys_heldout"]
-        self.assertEqual((block["n"], block["ok"], block["failed_infra"], block["reruns"]), (len(checks), len(checks), 0, 1))
-
-    def test_a_provider_failure_that_repeats_is_reported_as_infra(self):
-        with tempfile.TemporaryDirectory() as out:
-            rows = self.run_square("always", out)
-        checks = server_suites.JOURNEY_CHECKS["square"]
-        self.assertEqual(len(FakeFlakySquare.sessions), 2)  # one re-run, no more
+        self.assertEqual(len(FakeFlakySquare.sessions), 1)  # one run, no re-run
         self.assertEqual(sorted(r["case"] for r in rows), sorted(f"square.{c}" for c in checks))
         self.assertFalse(any(r["ok"] for r in rows))
         self.assertTrue(all(r["detail"].get("infra") is True for r in rows), rows)
+        self.assertFalse(any("retried_after" in r["detail"] for r in rows))
         gate = next(r for r in rows if r["case"] == "square.payment has an id")
         self.assertEqual(gate["source"], "fallback")
         self.assertEqual(sum(1 for r in rows if r["source"] == "skipped"), len(checks) - 1)
         block = aggregate.journeys_block(rows + [{"suite": "consistency", "case": "stripe", "ok": False}])
         self.assertEqual(list(block), ["journeys_heldout"])
         self.assertEqual(block["journeys_heldout"], {"n": len(checks), "ok": 0, "ok_rate": 0.0, "failed_model": 0,
-                                                     "failed_timeout": 0, "failed_infra": len(checks), "reruns": 1})
+                                                     "failed_timeout": 0, "failed_infra": len(checks)})
 
-    def test_a_model_failure_at_the_gate_is_not_rerun_or_infra(self):
+    def test_rows_are_those_of_a_run_without_infra_but_for_the_label(self):
+        labelled = self.square("once")
+        plain = self.square("once", reason="repaired output still invalid")  # the model's failure
+
+        def unlabelled(rows):
+            out = []
+            for r in rows:
+                detail = {k: v for k, v in r["detail"].items() if k not in ("infra", "fallback_reason")}
+                out.append(dict({k: v for k, v in r.items() if k != "latency_ms"}, detail=detail))
+            return out
+
+        self.assertFalse(any(r["detail"].get("infra") for r in plain))
+        self.assertEqual(unlabelled(labelled), unlabelled(plain))
+        a = aggregate.journeys_block(labelled)["journeys_heldout"]
+        b = aggregate.journeys_block(plain)["journeys_heldout"]
+        self.assertEqual((a["n"], a["ok"], a["ok_rate"]), (b["n"], b["ok"], b["ok_rate"]))  # the label changes no rate
+        self.assertEqual((a["failed_model"], a["failed_infra"]), (0, a["n"]))
+        self.assertEqual((b["failed_model"], b["failed_infra"]), (b["n"], 0))
+
+    def test_a_timeout_at_the_gate_is_a_model_failure(self):
+        rows = self.square("once", reason="LLM request timed out")
+        checks = server_suites.JOURNEY_CHECKS["square"]
+        self.assertEqual(len(FakeFlakySquare.sessions), 1)
+        self.assertFalse(any(r["ok"] or r["detail"].get("infra") for r in rows))
+        block = aggregate.journeys_block(rows)["journeys_heldout"]
+        self.assertEqual((block["failed_model"], block["failed_timeout"], block["failed_infra"]), (len(checks), 1, 0))
+
+    def test_a_model_failure_at_the_gate_is_not_infra(self):
         with tempfile.TemporaryDirectory() as out:
             sink = server_suites.Sink(out, "m/x", "journeys_heldout")
             srv = serve(FakeEmpty, self)
@@ -1156,67 +1188,52 @@ class InfraFailureTest(unittest.TestCase):
                 model, timeout, repeat = "m/x", 10, 1
 
             server_suites.run_one_journey("square", server_suites.square_steps, srv, sink, Args, 0)
-        self.assertFalse(any(r["ok"] for r in sink.rows))
-        self.assertFalse(any(r["detail"].get("infra") or r["detail"].get("retried_after") for r in sink.rows))
+        self.assertFalse(any(r["ok"] or r["detail"].get("infra") for r in sink.rows))
         block = aggregate.journeys_block(sink.rows)["journeys_heldout"]
-        self.assertEqual((block["failed_model"], block["failed_infra"], block["reruns"]), (len(sink.rows), 0, 0))
+        self.assertEqual((block["failed_model"], block["failed_infra"]), (len(sink.rows), 0))
 
-    def test_a_timeout_at_the_gate_is_a_model_failure_and_not_rerun(self):
-        with tempfile.TemporaryDirectory() as out:
-            rows = self.run_square("once", out, reason="LLM request timed out")
-        checks = server_suites.JOURNEY_CHECKS["square"]
-        self.assertEqual(len(FakeFlakySquare.sessions), 1)  # no re-run
-        self.assertEqual(sorted(r["case"] for r in rows), sorted(f"square.{c}" for c in checks))
-        self.assertFalse(any(r["ok"] for r in rows))
-        self.assertFalse(any(r["detail"].get("infra") or r["detail"].get("retried_after") for r in rows))
-        block = aggregate.journeys_block(rows)["journeys_heldout"]
-        self.assertEqual((block["failed_model"], block["failed_timeout"], block["failed_infra"], block["reruns"]),
-                         (len(checks), 1, 0, 0))
-
-    def run_scripted(self, *kinds):
+    def run_scripted(self, steps, checks):
         FakeScripted.calls = []
         srv = serve(FakeScripted, self)
 
         class Args:
             model, timeout, repeat = "m/x", 10, 1
 
-        checks = [f"check {i}" for i in range(len(kinds))] + ["rest"]
         with mock.patch.dict(server_suites.JOURNEY_CHECKS, {"scripted": checks}):
             with tempfile.TemporaryDirectory() as out:
                 sink = server_suites.Sink(out, "m/x", "journeys_heldout")
-                server_suites.run_one_journey("scripted", scripted_steps(*kinds), srv, sink, Args, 0)
+                server_suites.run_one_journey("scripted", steps, srv, sink, Args, 0)
         rows = {r["case"].split(".", 1)[1]: r for r in sink.rows}
         self.assertEqual(sorted(rows), sorted(checks))
-        return rows, len({session for session, _ in FakeScripted.calls})
+        self.assertEqual(len({session for session, _ in FakeScripted.calls}), 1)  # never re-run
+        return rows
 
-    def test_the_rerun_cannot_hide_a_model_failure(self):
-        # The first run is dropped only when every failed check so far is infra and none passed.
-        rows, sessions = self.run_scripted("infra", "infra")
-        self.assertEqual(sessions, 2)
-        self.assertTrue(all(r["detail"].get("retried_after") and r["detail"].get("infra") for r in rows.values()))
+    def test_each_row_is_labelled_by_its_own_call(self):
+        def gated(*kinds):
+            return self.run_scripted(scripted_steps(*kinds), [f"check {i}" for i in range(len(kinds))] + ["rest"])
 
-        # A model failure before an infra gate: the first run's rows are kept as they are.
-        rows, sessions = self.run_scripted("model", "infra")
-        self.assertEqual(sessions, 1)
-        self.assertFalse(any(r["detail"].get("retried_after") for r in rows.values()))
+        rows = gated("model", "infra")
         self.assertFalse(rows["check 0"]["detail"].get("infra"))
-        self.assertTrue(rows["check 1"]["detail"].get("infra"))
-        self.assertTrue(rows["rest"]["detail"].get("infra"))
-
-        # A model failure at the gate after an infra failure: kept, and the skipped checks are the model's.
-        rows, sessions = self.run_scripted("infra", "model")
-        self.assertEqual(sessions, 1)
+        self.assertTrue(rows["check 1"]["detail"].get("infra") and rows["rest"]["detail"].get("infra"))
+        rows = gated("infra", "model")
         self.assertTrue(rows["check 0"]["detail"].get("infra"))
         self.assertFalse(rows["check 1"]["detail"].get("infra") or rows["rest"]["detail"].get("infra"))
-        self.assertFalse(any(r["detail"].get("retried_after") for r in rows.values()))
+        rows = gated("infra", "timeout")
+        self.assertTrue(rows["check 0"]["detail"].get("infra"))
+        self.assertFalse(rows["check 1"]["detail"].get("infra") or rows["rest"]["detail"].get("infra"))
 
-        # A timeout, before an infra gate or as the gate: kept, and never infra.
-        for kinds in (("timeout", "infra"), ("timeout",), ("infra", "timeout")):
-            rows, sessions = self.run_scripted(*kinds)
-            self.assertEqual(sessions, 1, kinds)
-            self.assertFalse(any(r["detail"].get("retried_after") for r in rows.values()), kinds)
-            self.assertFalse(rows["check 0" if kinds[0] == "timeout" else "check 1"]["detail"].get("infra"), kinds)
+    def test_an_exception_after_an_infra_call_is_the_models(self):
+        # `call()` never raises, so an exception comes from reading an answer, which may be
+        # an earlier one: the checks it skips are not labelled infra.
+        def steps(j):
+            first = j.call("GET", "/model")
+            j.call("GET", "/infra")
+            first["missing"]  # noqa: B018 - reading the earlier answer raises KeyError
 
+        rows = self.run_scripted(steps, ["check 0", "rest"])
+        self.assertTrue(all(r["source"] == "skipped" and not r["ok"] for r in rows.values()))
+        self.assertFalse(any(r["detail"].get("infra") for r in rows.values()), rows)
+        self.assertIn("KeyError", rows["rest"]["detail"]["reason"])
 
 
 if __name__ == "__main__":
