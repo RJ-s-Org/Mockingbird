@@ -139,6 +139,22 @@ impl Api {
         body
     }
 
+    /// [`Api::get`] in session `session`.
+    async fn get_in(&self, session: &str, uri: &str) -> Value {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("x-mockingbird-session", session)
+            .body(Body::empty())
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     fn prompt(&self, call: usize) -> String {
         self.provider.requests()[call].messages[1].content.clone()
     }
@@ -2022,4 +2038,667 @@ async fn a_number_at_its_minimum_constrains_nothing() {
         "{body}"
     );
     assert_eq!(api.get("/tasks?limit=1&offset=3").await, page);
+}
+
+/// Zoho's shape: a page number from 1 beside `per_page`, and a `page_context` that
+/// echoes them and says whether more pages follow.
+const BY_PAGE: &str = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 200}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: status, in: query, schema: {type: string, enum: [open, done]}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, data, page_context]
+                properties:
+                  code: {type: integer}
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  page_context:
+                    type: object
+                    required: [page, per_page, has_more_page]
+                    properties:
+                      page: {type: integer}
+                      per_page: {type: integer}
+                      has_more_page: {type: boolean}"##;
+
+/// A page of `tasks` in [`BY_PAGE`]'s shape.
+fn zoho_page(tasks: &[Value], page: u64, more: bool) -> Value {
+    json!({
+        "code": 0,
+        "data": tasks,
+        "page_context": {"page": page, "per_page": 1, "has_more_page": more},
+    })
+}
+
+/// Page 1 of one, while the session holds another task: page 1 is as the model
+/// answered it, and page 2 is the other task, served from the store, saying it is page
+/// 2. The model saw one full page, so its `has_more_page` says nothing of the store's
+/// records: it stays as given.
+#[tokio::test]
+async fn page_two_by_number_is_the_stored_rest() {
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, true).to_string()
+    ));
+    let api = cached_api_of(&stored_pages(BY_PAGE), script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(first, zoho_page(&[stored_task("t1", "A", "open")], 1, true));
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(
+        second,
+        zoho_page(&[stored_task("t2", "B", "open")], 2, true),
+        "{second}"
+    );
+    // The first page again is the same page.
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, first);
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A page past what the run holds, and a page with other filter values, are the
+/// model's.
+#[tokio::test]
+async fn a_page_past_the_run_or_of_other_filters_is_the_model_s() {
+    let mut script = created("open");
+    let first = zoho_page(&[stored_task("t1", "A", "open")], 1, false);
+    let past = zoho_page(&[], 3, false);
+    let other = zoho_page(&[stored_task("t9", "Z", "open")], 2, false);
+    script.push(Ok(first.to_string()));
+    script.push(Ok(past.to_string()));
+    script.push(Ok(other.to_string()));
+    let api = api_of(&stored_pages(BY_PAGE), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1").await;
+    assert_eq!(api.get("/tasks?per_page=1&page=3").await, past);
+    assert_eq!(api.get("/tasks?per_page=1&page=2&status=open").await, other);
+    assert_eq!(api.provider.requests().len(), 5);
+}
+
+/// WooCommerce's shape, a bare array: a page cut to its size leaves the rest for later
+/// pages, and a larger page size starts where it says.
+#[tokio::test]
+async fn a_cut_page_by_number_serves_the_rest() {
+    let list = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 10}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Task"}}"##;
+    let answer = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "done"),
+    ]);
+    let api = api_of(&stored_pages(list), true, vec![Ok(answer.to_string())]);
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(first, json!([stored_task("t1", "A", "open")]));
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(second, json!([stored_task("t2", "B", "open")]));
+    let third = api.get("/tasks?page=3&per_page=1").await;
+    assert_eq!(third, json!([stored_task("t3", "C", "done")]));
+    // Two to a page, the second starts at the third item.
+    let wide = api.get("/tasks?per_page=2&page=2").await;
+    assert_eq!(wide, json!([stored_task("t3", "C", "done")]));
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// Box's shape: an offset from 0 beside `limit`, with a total and an echo of both.
+const BY_OFFSET: &str = r##"    get:
+      operationId: listTasks
+      parameters:
+        - {name: offset, in: query, schema: {type: integer, format: int64, minimum: 0, default: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_count, entries, offset, limit]
+                properties:
+                  total_count: {type: integer}
+                  entries: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  offset: {type: integer}
+                  limit: {type: integer}"##;
+
+/// An offset past the first page is the stored rest, and the total counts both.
+#[tokio::test]
+async fn an_offset_reaches_the_stored_rest() {
+    let mut script = created("open");
+    let page = json!({
+        "total_count": 1,
+        "entries": [stored_task("t1", "A", "open")],
+        "offset": 0,
+        "limit": 1,
+    });
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(BY_OFFSET), true, script);
+    two_tasks(&api).await;
+    let first = api.get("/tasks?offset=0&limit=1").await;
+    assert_eq!(ids_in(&first, "entries"), ["t1"], "{first}");
+    assert_eq!(first["total_count"], 2, "{first}");
+    let next = api.get("/tasks?offset=1&limit=1").await;
+    assert_eq!(
+        next,
+        json!({
+            "total_count": 2,
+            "entries": [stored_task("t2", "B", "open")],
+            "offset": 1,
+            "limit": 1,
+        }),
+        "{next}"
+    );
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// Page 2 of `list` by its page parameter `param` is the model's: the parameter is not
+/// known by its schema.
+async fn page_two_is_generated(list: &str, param: &str) {
+    let mut script = created("open");
+    let first = zoho_page(&[stored_task("t1", "A", "open")], 1, false);
+    let second = zoho_page(&[stored_task("t1", "A", "open")], 2, false);
+    script.push(Ok(first.to_string()));
+    script.push(Ok(second.to_string()));
+    let api = api_of(&stored_pages(list), true, script);
+    two_tasks(&api).await;
+    assert_eq!(
+        api.get(&format!("/tasks?per_page=1&{param}=1")).await,
+        first
+    );
+    assert_eq!(
+        api.get(&format!("/tasks?per_page=1&{param}=2")).await,
+        second
+    );
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A page number with a `minimum` but no `default` is not known to be one.
+#[tokio::test]
+async fn a_page_with_no_default_is_unchanged() {
+    let list = BY_PAGE.replace(
+        "{type: integer, minimum: 1, default: 1}",
+        "{type: integer, minimum: 1}",
+    );
+    page_two_is_generated(&list, "page").await;
+}
+
+/// A `page` whose schema counts from 0 (Trello's) says two things: nothing changes.
+#[tokio::test]
+async fn a_page_counting_from_zero_is_unchanged() {
+    let list = BY_PAGE.replace(
+        "{type: integer, minimum: 1, default: 1}",
+        "{type: integer, minimum: 0, default: 0}",
+    );
+    page_two_is_generated(&list, "page").await;
+}
+
+/// A second parameter that could be the page number (`copies`).
+const COPIES: &str = "        - {name: copies, in: query, schema: {type: integer, minimum: 1, default: 1}}\n        - {name: status,";
+
+/// Two parameters that could each be the page number, neither named so: which one is
+/// not known, and nothing changes.
+#[tokio::test]
+async fn two_page_numbers_are_unchanged() {
+    let list = BY_PAGE
+        .replace("name: page,", "name: sheet,")
+        .replace("        - {name: status,", COPIES);
+    page_two_is_generated(&list, "sheet").await;
+}
+
+/// Of two parameters that could be the page number, the one named `page` is.
+#[tokio::test]
+async fn the_one_named_page_is_the_page_number() {
+    let list = BY_PAGE.replace("        - {name: status,", COPIES);
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, false).to_string()
+    ));
+    let api = api_of(&stored_pages(&list), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1&page=1").await;
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// With consistency off, page 2 is the model's.
+#[tokio::test]
+async fn consistency_off_serves_no_page_number() {
+    let answer = json!({
+        "code": 0,
+        "data": [stored_task("t1", "A", "open"), stored_task("t2", "B", "open")],
+        "page_context": {"page": 1, "per_page": 1, "has_more_page": false},
+    });
+    let second = zoho_page(&[stored_task("t1", "A", "open")], 2, false);
+    let api = api_of(
+        &stored_pages(BY_PAGE),
+        false,
+        vec![Ok(answer.to_string()), Ok(second.to_string())],
+    );
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, answer);
+    assert_eq!(api.get("/tasks?per_page=1&page=2").await, second);
+}
+
+/// A list of tasks under `per_page` and `params`, answering `schema`.
+fn list_of(params: &str, schema: &str) -> String {
+    format!(
+        r##"    get:
+      operationId: listTasks
+      parameters:
+        - {{name: per_page, in: query, schema: {{type: integer, minimum: 1, maximum: 100, default: 10}}}}
+{params}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {schema}"##
+    )
+}
+
+const TASK_ARRAY: &str = r##"{type: array, items: {$ref: "#/components/schemas/Task"}}"##;
+
+/// A bare array of three, cut to one, then asked again with `query`: an integer with
+/// page-like bounds but no evidence it is a page is no page, so the model answers.
+async fn a_bounded_integer_is_no_page(param: &str, query: &str) {
+    let three = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "open"),
+    ]);
+    let other = json!([stored_task("t9", "Z", "open")]);
+    let api = api_of(
+        &stored_pages(&list_of(param, TASK_ARRAY)),
+        true,
+        vec![Ok(three.to_string()), Ok(other.to_string())],
+    );
+    assert_eq!(
+        api.get("/tasks?per_page=1").await,
+        json!([stored_task("t1", "A", "open")])
+    );
+    assert_eq!(api.get(&format!("/tasks?per_page=1&{query}")).await, other);
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// `min_rating` from 0 is no offset.
+#[tokio::test]
+async fn a_minimum_from_zero_is_no_offset() {
+    a_bounded_integer_is_no_page(
+        "        - {name: min_rating, in: query, schema: {type: integer, minimum: 0, default: 0}}",
+        "min_rating=2",
+    )
+    .await;
+}
+
+/// `depth` from 1 is no page number.
+#[tokio::test]
+async fn a_depth_from_one_is_no_page_number() {
+    a_bounded_integer_is_no_page(
+        "        - {name: depth, in: query, schema: {type: integer, minimum: 1, default: 1}}",
+        "depth=2",
+    )
+    .await;
+}
+
+const PAGE_PARAM: &str =
+    "        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}";
+
+/// Page 1 of a cut answer `answer` to `schema`, then page 2: both as `first` and
+/// `second`, with one model call.
+async fn pages_of(schema: &str, answer: Value, first: Value, second: Value) {
+    let api = api_of(
+        &stored_pages(&list_of(PAGE_PARAM, schema)),
+        true,
+        vec![Ok(answer.to_string())],
+    );
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, first);
+    assert_eq!(api.get("/tasks?per_page=1&page=2").await, second);
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A boolean beside the list with no echo of the page beside it (`success`) is no more
+/// flag: neither page changes it.
+#[tokio::test]
+async fn a_boolean_with_no_page_echo_is_no_more_flag() {
+    let schema = r##"
+                type: object
+                properties:
+                  success: {type: boolean}
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}"##;
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    pages_of(
+        schema,
+        json!({"success": true, "data": [t1, t2]}),
+        json!({"success": true, "data": [t1]}),
+        json!({"success": true, "data": [t2]}),
+    )
+    .await;
+}
+
+/// A boolean in another object than the page's echo (`filters.include_archived`) is no
+/// more flag; the echo says the page served.
+#[tokio::test]
+async fn a_boolean_away_from_the_echo_is_no_more_flag() {
+    let schema = r##"
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  page: {type: integer}
+                  filters:
+                    type: object
+                    properties: {include_archived: {type: boolean}}"##;
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    let filters = json!({"include_archived": true});
+    pages_of(
+        schema,
+        json!({"data": [t1, t2], "page": 1, "filters": filters}),
+        json!({"data": [t1], "page": 1, "filters": filters}),
+        json!({"data": [t2], "page": 2, "filters": filters}),
+    )
+    .await;
+}
+
+/// A flag beside the echo that says the other way (`isLast`): page 1 keeps the
+/// model's `false`, and the last page, as page 1 never said `true`, keeps it too.
+#[tokio::test]
+async fn an_inverted_flag_is_never_flipped() {
+    let schema = r##"
+                type: object
+                properties:
+                  values: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  page_context:
+                    type: object
+                    properties: {page: {type: integer}, isLast: {type: boolean}}"##;
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    pages_of(
+        schema,
+        json!({"values": [t1, t2], "page_context": {"page": 1, "isLast": false}}),
+        json!({"values": [t1], "page_context": {"page": 1, "isLast": false}}),
+        json!({"values": [t2], "page_context": {"page": 2, "isLast": false}}),
+    )
+    .await;
+}
+
+/// An offset that is no multiple of the page size starts where it says.
+#[tokio::test]
+async fn an_offset_off_the_page_grid_starts_where_it_says() {
+    let tasks: Vec<Value> = ["t1", "t2", "t3", "t4"]
+        .iter()
+        .map(|id| stored_task(id, "T", "open"))
+        .collect();
+    let answer = json!({"total_count": 4, "entries": tasks, "offset": 0, "limit": 2});
+    let api = api_of(&stored_pages(BY_OFFSET), true, vec![Ok(answer.to_string())]);
+    let first = api.get("/tasks?offset=0&limit=2").await;
+    assert_eq!(ids_in(&first, "entries"), ["t1", "t2"], "{first}");
+    let shifted = api.get("/tasks?offset=1&limit=2").await;
+    assert_eq!(ids_in(&shifted, "entries"), ["t2", "t3"], "{shifted}");
+    assert_eq!(shifted["offset"], 1, "{shifted}");
+    assert_eq!(shifted["total_count"], 4, "{shifted}");
+    let tail = api.get("/tasks?offset=3&limit=2").await;
+    assert_eq!(ids_in(&tail, "entries"), ["t4"], "{tail}");
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A run is the session's: another session's page 2 is the model's.
+#[tokio::test]
+async fn another_session_s_page_two_is_the_model_s() {
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, true).to_string()
+    ));
+    let theirs = zoho_page(&[stored_task("x1", "X", "open")], 2, false);
+    script.push(Ok(theirs.to_string()));
+    let api = api_of(&stored_pages(BY_PAGE), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(
+        api.get_in("other", "/tasks?per_page=1&page=2").await,
+        theirs
+    );
+    let ours = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(ids_in(&ours, "data"), ["t2"], "{ours}");
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A new page 1 that keeps nothing (here, one not full) ends the run: page 2 is the
+/// model's again.
+#[tokio::test]
+async fn a_new_first_page_with_no_rest_ends_the_run() {
+    let api = api_of(
+        &stored_pages(&list_of(PAGE_PARAM, TASK_ARRAY)),
+        true,
+        vec![
+            Ok(json!([
+                stored_task("t1", "A", "open"),
+                stored_task("t2", "B", "open")
+            ])
+            .to_string()),
+            Ok(json!([]).to_string()),
+            Ok(json!([stored_task("t7", "G", "open")]).to_string()),
+        ],
+    );
+    api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(api.get("/tasks?page=1&per_page=1").await, json!([]));
+    assert_eq!(
+        api.get("/tasks?per_page=1&page=2").await,
+        json!([stored_task("t7", "G", "open")])
+    );
+}
+
+/// [`BY_PAGE`]'s tasks, which can also be updated and deleted.
+fn editable_pages() -> String {
+    stored_pages(BY_PAGE).replace(
+        "    get:\n      operationId: getTask",
+        r##"    patch:
+      operationId: updateTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+    delete:
+      operationId: deleteTask
+      responses:
+        "204": {description: gone}
+    get:
+      operationId: getTask"##,
+    )
+}
+
+/// A task deleted between page 1 and page 2 is not on page 2, which starts with the
+/// next; one updated meanwhile shows its update.
+#[tokio::test]
+async fn page_two_sees_a_delete_and_an_update_since_page_one() {
+    let mut script = created("open");
+    script.push(Ok(stored_task("t3", "C", "open").to_string()));
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, true).to_string()
+    ));
+    script.push(Ok(stored_task("t3", "C2", "done").to_string()));
+    let api = api_of(&editable_pages(), true, script);
+    two_tasks(&api).await;
+    let (status, _) = api
+        .call("POST", "/tasks", Some(json!({"title": "C"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(ids_in(&first, "data"), ["t1"], "{first}");
+    let (status, _) = api
+        .call(
+            "PATCH",
+            "/tasks/t3",
+            Some(json!({"title": "C2", "status": "done"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = api.call("DELETE", "/tasks/t2", None).await;
+    assert!(status.is_success(), "{status}");
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(
+        second,
+        zoho_page(&[stored_task("t3", "C2", "done")], 2, true),
+        "{second}"
+    );
+    // The delete needs no model call.
+    assert_eq!(api.provider.requests().len(), 5);
+}
+
+const PROJECT_NUMBERED: &str = r##"
+openapi: 3.1.0
+info: {title: Project pages, version: "1"}
+paths:
+  /projects/{project_id}/tasks:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listTasks
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 10}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Task"}}
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, project_id, title]
+      properties: {id: {type: string}, project_id: {type: string}, title: {type: string}}
+"##;
+
+/// Page 2 of a project's tasks is its own other task, not another project's; another
+/// project's page 2 is the model's.
+#[tokio::test]
+async fn page_two_is_of_the_page_s_parent() {
+    let theirs = json!([task("t8", "p2", "H")]);
+    let api = api_of(
+        PROJECT_NUMBERED,
+        true,
+        vec![
+            Ok(task("t1", "p1", "A").to_string()),
+            Ok(task("t2", "p2", "B").to_string()),
+            Ok(task("t3", "p1", "C").to_string()),
+            Ok(json!([task("t1", "p1", "A")]).to_string()),
+            Ok(theirs.to_string()),
+        ],
+    );
+    for (project, title) in [("p1", "A"), ("p2", "B"), ("p1", "C")] {
+        let (status, _) = api
+            .call(
+                "POST",
+                &format!("/projects/{project}/tasks"),
+                Some(json!({"title": title})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    api.get("/projects/p1/tasks?per_page=1&page=1").await;
+    assert_eq!(
+        api.get("/projects/p1/tasks?per_page=1&page=2").await,
+        json!([task("t3", "p1", "C")])
+    );
+    assert_eq!(
+        api.get("/projects/p2/tasks?per_page=1&page=2").await,
+        theirs
+    );
+    assert_eq!(api.provider.requests().len(), 5);
+}
+
+/// A page the model answered longer than its size, saying there is more: the last page
+/// says there is none.
+#[tokio::test]
+async fn a_cut_page_s_more_flag_ends_on_the_last_page() {
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    let answer = json!({
+        "code": 0,
+        "data": [t1, t2],
+        "page_context": {"page": 1, "per_page": 1, "has_more_page": true},
+    });
+    let api = api_of(&stored_pages(BY_PAGE), true, vec![Ok(answer.to_string())]);
+    let first = api.get("/tasks?per_page=1&page=1").await;
+    assert_eq!(first, zoho_page(std::slice::from_ref(&t1), 1, true));
+    let last = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(last, zoho_page(&[t2], 2, false));
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// C2: a boolean in the envelope beside a top-level echo of the page (`success`) is no
+/// more flag, even on the last page of a cut.
+#[tokio::test]
+async fn a_boolean_beside_a_top_level_echo_is_no_more_flag() {
+    let schema = r##"
+                type: object
+                properties:
+                  success: {type: boolean}
+                  page: {type: integer}
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}"##;
+    let (t1, t2) = (
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+    );
+    pages_of(
+        schema,
+        json!({"success": true, "page": 1, "data": [t1, t2]}),
+        json!({"success": true, "page": 1, "data": [t1]}),
+        json!({"success": true, "page": 2, "data": [t2]}),
+    )
+    .await;
+}
+
+/// C3: of a run the store's records made, the model saw one full page, so the flag
+/// beside the echo (`meta.isLast`, which the model set `true`) stays as given.
+#[tokio::test]
+async fn a_stored_run_leaves_the_flag_as_given() {
+    let schema = r##"
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Task"}}
+                  meta:
+                    type: object
+                    properties: {page: {type: integer}, isLast: {type: boolean}}"##;
+    let mut script = created("open");
+    let page =
+        json!({"data": [stored_task("t1", "A", "open")], "meta": {"page": 1, "isLast": true}});
+    script.push(Ok(page.to_string()));
+    let api = api_of(&stored_pages(&list_of(PAGE_PARAM, schema)), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?per_page=1&page=1").await, page);
+    assert_eq!(
+        api.get("/tasks?per_page=1&page=2").await,
+        json!({"data": [stored_task("t2", "B", "open")], "meta": {"page": 2, "isLast": true}})
+    );
+    assert_eq!(api.provider.requests().len(), 3);
 }
