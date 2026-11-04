@@ -82,21 +82,23 @@ pub(crate) struct ById {
 
 /// The record `op`, an update or a delete, acts on by its `id` argument
 /// (`issueUpdate(id:, input:)`, `commentDelete(id:)`), whatever its
-/// payload selects: an `id` of the operation's resource type, when that
-/// type has an `id` key and the name says it writes that record
-/// ([`mb_mcm::write_nouns`]: `issueUpdate`, `deleteComment`; not
-/// `updateTeamMember` returning a `Team`). An update whose resource type
-/// has none (a
-/// payload's, `setIssuePriority`'s `IssuePayload`) acts on the one type
-/// with an `id` among its payload's object members (`IssuePayload.issue`);
-/// a delete never does, as a payload's other object is the parent that
-/// stays (`productVariantDelete`'s `product`). `None` for any other
+/// payload selects: an `id` of a type with an `id` key that the name says
+/// it writes ([`mb_mcm::write_nouns`]: `issueUpdate`, `deleteComment`).
+/// That is the operation's resource type; for an update whose resource
+/// type has no `id` key, the one type with one among its payload's object
+/// members. A delete never takes a payload's member: another object there
+/// is the parent that stays (`productVariantDelete`'s `product`). A record
+/// the name does not name is never written (`updateTeamMember` returning
+/// its `Team`, or a `TeamMemberPayload` holding it). `None` for any other
 /// mutation, or with no `id`.
 pub(crate) fn by_id(bundle: &Bundle, op: &Operation, args: &Map<String, Value>) -> Option<ById> {
     let delete = match op.kind {
         OperationKind::Command(Effect::Delete) => true,
         OperationKind::Command(Effect::Update) => false,
         _ => return None,
+    };
+    let Binding::Graphql { field, .. } = &op.binding else {
+        return None;
     };
     let id = match args.get("id")? {
         Value::String(s) if !s.is_empty() => s.clone(),
@@ -111,17 +113,21 @@ pub(crate) fn by_id(bundle: &Bundle, op: &Operation, args: &Map<String, Value>) 
             .and_then(|(_, def)| def.get("properties")?.as_object())
             .is_some_and(|p| p.contains_key("id"))
     };
+    let nouns = mb_mcm::write_nouns(field);
+    let named = |t: &str| {
+        let t = t.replace('_', "");
+        nouns
+            .iter()
+            .any(|(effect, noun)| OperationKind::Command(*effect) == op.kind && *noun == t)
+    };
+    let target = |t: &str| {
+        named(t).then(|| ById {
+            resource_type: t.to_string(),
+            id: id.clone(),
+        })
+    };
     if let Some(own) = op.resource_type.as_deref().filter(|t| keyed(t)) {
-        // Only the record the name names: `updateTeamMember` returning its
-        // `Team` updates no team.
-        let named = matches!(&op.binding, Binding::Graphql { field, .. }
-        if mb_mcm::write_nouns(field).iter().any(|(effect, noun)| {
-            OperationKind::Command(*effect) == op.kind && *noun == own.replace('_', "")
-        }));
-        return named.then(|| ById {
-            resource_type: own.to_string(),
-            id,
-        });
+        return target(own);
     }
     if delete {
         return None;
@@ -141,10 +147,7 @@ pub(crate) fn by_id(bundle: &Bundle, op: &Operation, args: &Map<String, Value>) 
         }
     }
     match members.as_slice() {
-        [one] => Some(ById {
-            resource_type: one.clone(),
-            id,
-        }),
+        [one] => target(one),
         _ => None,
     }
 }
@@ -455,6 +458,8 @@ type IssuePayload { success: Boolean! issue: Issue }
 type VariantDeletePayload { deletedId: ID product: Product }
 type PairPayload { issue: Issue product: Product }
 type NotePayload { note: Note }
+type Team { id: ID! role: String }
+type TeamMemberPayload { team: Team }
 input IssueInput { title: String priority: Int stateId: String }
 type Query { issue(id: ID!): Issue }
 type Mutation {
@@ -465,6 +470,7 @@ type Mutation {
   cancelOrder(id: ID!): IssuePayload!
   setNote(id: ID!, input: IssueInput!): NotePayload!
   issueBulkUpdate(input: IssueInput!): IssuePayload!
+  updateTeamMember(id: ID!, input: IssueInput!): TeamMemberPayload!
 }
 "#;
 
@@ -512,12 +518,25 @@ type Mutation {
     }
 
     #[test]
-    fn an_update_falls_back_to_its_payload_s_one_keyed_member() {
-        // `IssuePayload` has no `id`: its one keyed member, the issue.
+    fn an_update_falls_back_to_its_payload_s_one_keyed_member_it_names() {
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        // An `issueUpdate` whose resource type is its payload's: the
+        // payload's one keyed member, the issue its name names.
+        let mut op = bundle
+            .operations
+            .iter()
+            .find(|o| o.id == "Mutation.issueUpdate")
+            .unwrap()
+            .clone();
+        op.resource_type = Some("issuepayload".into());
+        let args = json!({"id": "i-1"});
         assert_eq!(
-            by_id_of("setIssuePriority", json!({"id": "i-1"})),
+            by_id(&bundle, &op, args.as_object().unwrap()),
             target("issue", "i-1")
         );
+        // A member the name does not name: nothing.
+        assert_eq!(by_id_of("setIssuePriority", json!({"id": "i-1"})), None);
+        assert_eq!(by_id_of("updateTeamMember", json!({"id": "t-1"})), None);
         // Two keyed members: which one is unknown.
         assert_eq!(by_id_of("setPair", json!({"id": "i-1"})), None);
         // A member type with no `id` key is none (`keyed`).

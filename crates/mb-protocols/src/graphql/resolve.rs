@@ -632,6 +632,12 @@ async fn write_by_id(
 /// Whether an answer of `status` from `source` makes [`write_by_id`]'s
 /// write: a 2xx one generated now, not one from state or the cache, which
 /// wrote when it was first answered.
+///
+/// No update or delete reaches here otherwise today: state and the response
+/// cache answer only queries (`call::prepare`), and a forced non-2xx status
+/// fails before generation. The guard stays as defence in depth, like
+/// [`store_answer`]'s, so a later path that serves a write from either
+/// cannot apply it twice.
 fn writes_by_id(status: u16, source: Source) -> bool {
     (200..300).contains(&status) && !matches!(source, Source::State | Source::Cache)
 }

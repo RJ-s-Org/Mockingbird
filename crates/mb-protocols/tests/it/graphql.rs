@@ -2683,3 +2683,52 @@ async fn an_update_writes_by_id_only_the_record_its_name_names() {
     );
     assert_eq!(read.body["data"]["team"]["role"], "team", "{}", read.body);
 }
+
+/// An update whose payload's one keyed object is a record its name does not
+/// name (`updateTeamMember` answering a `TeamMemberPayload { team }`) writes
+/// no input onto it: the team keeps its own `role`.
+#[tokio::test]
+async fn a_payload_s_record_the_name_does_not_name_is_not_updated() {
+    const SDL: &str = r#"
+type Team { id: ID! name: String! role: String }
+type TeamMemberPayload { team: Team }
+input TeamMemberInput { role: String }
+type Query { team(id: ID!): Team }
+type Mutation {
+  createTeam(name: String!, role: String!): Team
+  updateTeamMember(id: ID!, input: TeamMemberInput!): TeamMemberPayload!
+}
+"#;
+    let provider = scripted(vec![
+        json!({"__typename": "Team", "id": "t-1", "name": "Core", "role": "team"}),
+        json!({"__typename": "TeamMemberPayload"}),
+    ]);
+    let base = serve(sdl_runtime(SDL, Some(provider))).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({"query": "mutation { createTeam(name: \"Core\", role: \"team\") { id name role } }"}),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let updated = post(
+        &base,
+        json!({"query": "mutation { updateTeamMember(id: \"t-1\", input: {role: \"admin\"}) { __typename } }"}),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    let read = post(
+        &base,
+        json!({"query": "{ team(id: \"t-1\") { id name role } }"}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(read.body["data"]["team"]["role"], "team", "{}", read.body);
+}
