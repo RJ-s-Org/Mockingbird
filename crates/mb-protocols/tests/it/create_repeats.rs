@@ -609,6 +609,13 @@ async fn a_taken_id_counts_only_under_the_same_parent() {
     assert!(!prompt.contains("same_values"), "{prompt}");
     assert!(!prompt.contains("\"refusal\""), "{prompt}");
     assert_eq!(body["color"], "blue", "{body}");
+    // Not stored over repository a's label, which still reads from state.
+    assert_eq!(h.held("labels", "bug").await["color"], "red");
+    let calls = h.provider.requests().len();
+    let (status, read) = h.send("GET", "/repos/a/labels/bug", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["color"], "red", "{read}");
+    assert_eq!(h.provider.requests().len(), calls, "served from state");
 }
 
 /// An `id` the request's schema does not declare is no client's choice: a payment sent
@@ -682,8 +689,9 @@ async fn a_put_create_still_upserts() {
 }
 
 /// A create may change a sibling its request names by a number or under a nested
-/// identity member, even with what it asks for itself, and may change one it does not
-/// name in a way the request does not say (the old default stops being the default).
+/// identity member, repeating the very member that names it, and may change one it
+/// does not name in a way the request does not say (the old default stops being the
+/// default).
 #[tokio::test]
 async fn a_create_s_effects_on_named_or_unrepeated_siblings_apply() {
     let h = harness(
@@ -692,11 +700,11 @@ async fn a_create_s_effects_on_named_or_unrepeated_siblings_apply() {
             payment("1234567", 25.0, "Order X-1"),
             payment("tr_000001", 30.0, "Order X-2"),
             json!({
-                "effects": [{"type": "payments", "id": "1234567", "set": {"amount": 1.0}}],
+                "effects": [{"type": "payments", "id": "1234567", "set": {"in_reply_to": 1_234_567, "replies": 1}}],
                 "response": payment("tr_000002", 1.0, "Reply"),
             }),
             json!({
-                "effects": [{"type": "payments", "id": "tr_000001", "set": {"amount": 2.0}}],
+                "effects": [{"type": "payments", "id": "tr_000001", "set": {"fields": {"parent": {"id": "tr_000001"}}, "replies": 2}}],
                 "response": payment("tr_000003", 2.0, "Child"),
             }),
             json!({
@@ -716,8 +724,8 @@ async fn a_create_s_effects_on_named_or_unrepeated_siblings_apply() {
     )
     .await;
     assert_eq!(
-        h.held("payments", "1234567").await["amount"],
-        1.0,
+        h.held("payments", "1234567").await["replies"],
+        1,
         "{}",
         h.prompt(2)
     );
@@ -727,8 +735,8 @@ async fn a_create_s_effects_on_named_or_unrepeated_siblings_apply() {
     )
     .await;
     assert_eq!(
-        h.held("payments", "tr_000001").await["amount"],
-        2.0,
+        h.held("payments", "tr_000001").await["replies"],
+        2,
         "{}",
         h.prompt(3)
     );
@@ -792,4 +800,32 @@ async fn a_repeat_s_wrapped_record_is_not_stored_either() {
     assert_eq!(status, StatusCode::OK, "{body} {}", h.prompt(1));
     assert_eq!(body["data"], ana, "{body}");
     assert_eq!(h.held("customers", ANA).await, ana, "{}", h.prompt(1));
+}
+
+/// Mollie's shape with a small id: a second payment whose amount equals the first
+/// payment's id, and whose answer copies its request onto that payment, leaves it as it
+/// was. The amount naming it excuses nothing beside the description copied too.
+#[tokio::test]
+async fn a_small_id_a_copied_amount_equals_is_no_name() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("1", 25.0, "Order X-1"),
+            json!({
+                "effects": [{"type": "payments", "id": "1", "set": {"amount": 1, "description": "Order X-2"}}],
+                "response": payment("2", 1.0, "Order X-2"),
+            }),
+        ],
+    );
+    let uri = "/ledgers/lg_000001/payments";
+    h.post(uri, json!({"amount": 25.0, "description": "Order X-1"}))
+        .await;
+    let (status, body) = h
+        .post(uri, json!({"amount": 1, "description": "Order X-2"}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body} {}", h.prompt(1));
+    assert!(h.prompt(1).contains("\"effects\""), "{}", h.prompt(1));
+    let first = h.held("payments", "1").await;
+    assert_eq!(first["amount"], 25.0, "{first}");
+    assert_eq!(first["description"], "Order X-1", "{first}");
 }

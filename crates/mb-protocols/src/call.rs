@@ -1269,9 +1269,20 @@ pub(crate) async fn complete(
                 // refusal the prompt offered on that record, when it did; otherwise (a
                 // forced status, a scenario, no refusal declared or offered) the held
                 // record, under the status answered, as an idempotent create answers.
-                if let Some(held) =
-                    repeated_record(&mut state, (session, op, t, state_call), &generated).await
-                {
+                let repeated =
+                    repeated_record(&mut state, (session, op, t, state_call), &generated).await;
+                // Held in another collection (another parent's label of the same name):
+                // the answer is served, but stored over that record it is not.
+                if let Some(Repeated::Elsewhere(id)) = &repeated {
+                    unstored = true;
+                    tracing::info!(
+                        mock = %rt.name,
+                        operation = %op.id,
+                        id = %log_capped(id),
+                        "create not stored: its id is held in another collection"
+                    );
+                }
+                if let Some(Repeated::Here(held)) = repeated {
                     unstored = true;
                     drop_all_effects(rt, op, &held.id, &mut generated);
                     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
@@ -1484,14 +1495,9 @@ pub(crate) async fn complete(
                     .as_ref()
                     .and_then(|b| b.get(field))
                     .and_then(id_string);
-                let named = named_values(op, state_call);
                 let effects = std::mem::take(&mut generated.effects);
-                let (kept, dropped) = sibling_effects(
-                    t,
-                    created.as_deref(),
-                    (&named, state_call.body.as_ref()),
-                    effects,
-                );
+                let (kept, dropped) =
+                    sibling_effects(t, created.as_deref(), state_call.body.as_ref(), effects);
                 generated.effects = kept;
                 generated.dropped_effects += dropped.len();
                 generated
@@ -2553,11 +2559,12 @@ fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
     out
 }
 
-/// The record held under the id of a create's answer when that id is the one the
+/// What the session holds under the id of a create's answer when that id is the one the
 /// request asked for by its body's identity field ([`mb_engine::guards::asked_identity`],
-/// a member the request declares) and the record is in the collection the create runs
-/// in ([`in_create_collection`]): a create answered as a success for a client-chosen id
-/// that is taken. Storing it would replace that record, which no create does. A create
+/// a member the request declares): the record, when it is in the collection the create
+/// runs in ([`in_create_collection`]), so that the create repeats it; else that a record
+/// elsewhere holds the id. Storing the answer would replace that record either way, which
+/// no create does. A create
 /// sent with a declared idempotency key may be a retry the API answers as the first, and
 /// an HTTP `PUT` is an upsert by its method: neither is one. (A create naming its id in
 /// its path gets a fresh one drawn first, see [`unique_create_id`].)
@@ -2565,7 +2572,7 @@ async fn repeated_record(
     state: &mut StateAccess<'_>,
     (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
     generated: &GeneratedResponse,
-) -> Option<StoredResource> {
+) -> Option<Repeated> {
     let rt = state.rt;
     if !matches!(op.kind, OperationKind::Command(Effect::Create))
         || matches!(
@@ -2585,7 +2592,21 @@ async fn repeated_record(
         return None;
     }
     let held = state.get(session, resource_type, &id).await?;
-    in_create_collection(rt, session, op, call, &held).then_some(held)
+    Some(if in_create_collection(rt, session, op, call, &held) {
+        Repeated::Here(held)
+    } else {
+        Repeated::Elsewhere(id)
+    })
+}
+
+/// What [`repeated_record`] found under the id a create asked for.
+enum Repeated {
+    /// The record, in the collection the create runs in: the create repeats it.
+    Here(StoredResource),
+    /// A record under that id the create does not repeat, in another collection (or
+    /// placed nowhere known, of a type also created under a parent): the create is new
+    /// there, but storing it would replace that record, so it is served unstored.
+    Elsewhere(String),
 }
 
 /// Drops every effect of `generated`, a create's answer that is not stored as it
@@ -2611,79 +2632,59 @@ fn drop_all_effects(rt: &MockRuntime, op: &Operation, id: &str, generated: &mut 
     );
 }
 
-/// The values a create's request names records by: its path's, and every string and
-/// number of its body at any depth (`{"in_reply_to": 12345}`, `{"fields": {"parent":
-/// {"id": "10000"}}}`), but the id it asks for its own record under its top-level
-/// identity member.
-fn named_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
-    fn values(value: &Value, depth: usize, out: &mut HashSet<String>) {
-        match value {
-            Value::String(s) if !s.is_empty() => {
-                out.insert(s.clone());
-            }
-            Value::Number(n) => {
-                out.insert(n.to_string());
-            }
-            Value::Array(items) if depth < 8 => {
-                for item in items {
-                    values(item, depth + 1, out);
-                }
-            }
-            Value::Object(members) if depth < 8 => {
-                for member in members.values() {
-                    values(member, depth + 1, out);
-                }
-            }
-            _ => {}
+/// Whether `value`, what a request gives one member, names the record `id`: a string or
+/// a number equal to it, at any depth (`1234567`, `{"parent": {"id": "10000"}}`).
+fn names_record(value: &Value, id: &str, depth: usize) -> bool {
+    match value {
+        Value::String(s) => s == id,
+        Value::Number(n) => n.to_string() == id,
+        Value::Array(items) if depth < 8 => items.iter().any(|v| names_record(v, id, depth + 1)),
+        Value::Object(members) if depth < 8 => {
+            members.values().any(|v| names_record(v, id, depth + 1))
         }
+        _ => false,
     }
-    let mut out: HashSet<String> = call.path_params.values().filter_map(id_string).collect();
-    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    if let Some(body) = &call.body {
-        match body {
-            Value::Object(members) => {
-                for (_, member) in members.iter().filter(|(name, _)| *name != field) {
-                    values(member, 1, &mut out);
-                }
-            }
-            other => values(other, 0, &mut out),
-        }
-    }
-    out
 }
 
-/// Whether `set`, what an effect sets, repeats a value the request `body` gives the same
-/// top-level member (numbers by value): the request copied onto a record.
-fn copies_request(set: &Map<String, Value>, body: Option<&Value>) -> bool {
-    let Some(Value::Object(body)) = body else {
-        return false;
-    };
-    set.iter().any(|(k, v)| {
-        body.get(k).is_some_and(|asked| match (v, asked) {
+/// The members of `set`, what an effect sets, that repeat the value the request `body`
+/// gives the same top-level member (numbers by value): the request copied onto a record.
+fn copied_members<'a>(
+    set: &'a Map<String, Value>,
+    body: &'a Map<String, Value>,
+) -> impl Iterator<Item = (&'a String, &'a Value)> {
+    set.iter().filter_map(|(k, v)| {
+        let asked = body.get(k)?;
+        let same = match (v, asked) {
             (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
             _ => v == asked,
-        })
+        };
+        same.then_some((k, asked))
     })
 }
 
 /// Splits `effects`, those of a create of `resource_type` whose answer's record is
 /// `created`, into those it may apply and those that copy its request (`body`, see
-/// [`copies_request`]) onto another record of its own type the request does not name
-/// (`named`, see [`named_values`]): Mollie's second payment setting the first one's
-/// amount. A create makes one record; it may still change others of its type it names
-/// (the message a reply is in a thread of), any other way (clearing `is_default` on the
-/// old default), and records of other types (a parent's count).
+/// [`copied_members`]) onto another record of its own type: Mollie's second payment
+/// setting the first one's amount and description. A member copied is excused only when
+/// the request's value of it is what names that record (`{"in_reply_to": 1234567}` set
+/// on payment `1234567`); a small id a copied amount happens to equal names nothing. A
+/// create may still change others of its type any other way (a reply's count on its
+/// thread, clearing `is_default` on the old default), and records of other types.
 fn sibling_effects(
     resource_type: &str,
     created: Option<&str>,
-    (named, body): (&HashSet<String>, Option<&Value>),
+    body: Option<&Value>,
     effects: Vec<ResourceEffect>,
 ) -> (Vec<ResourceEffect>, Vec<ResourceEffect>) {
+    let empty = Map::new();
+    let body = match body {
+        Some(Value::Object(members)) => members,
+        _ => &empty,
+    };
     effects.into_iter().partition(|e| {
         e.resource_type != resource_type
             || created == Some(e.id.as_str())
-            || named.contains(&e.id)
-            || !copies_request(&e.set, body)
+            || copied_members(&e.set, body).all(|(_, asked)| names_record(asked, &e.id, 0))
     })
 }
 
@@ -6328,34 +6329,30 @@ mod tests {
     }
 
     #[test]
-    fn a_create_s_effects_copy_its_request_onto_no_sibling_it_does_not_name() {
+    fn a_create_s_effects_copy_its_request_onto_no_sibling() {
         let effect = |t: &str, id: &str, set: Value| ResourceEffect {
             resource_type: t.into(),
             id: id.into(),
             set: set.as_object().cloned().unwrap_or_default(),
         };
-        let body = json!({"amount": 9.99, "description": "Order X-2", "is_default": true});
-        let named: HashSet<String> = HashSet::from(["pay_named".to_string()]);
-        let effects = vec![
-            effect("payments", "pay_sibling", json!({"amount": 9.99})),
-            effect("payments", "pay_sibling", json!({"is_default": false})),
-            effect("payments", "pay_new", json!({"amount": 9.99})),
-            effect("payments", "pay_named", json!({"amount": 9.99})),
-            effect("customers", "cus_1", json!({"amount": 9.99})),
-        ];
-        let (kept, dropped) =
-            sibling_effects("payments", Some("pay_new"), (&named, Some(&body)), effects);
         let sets = |v: &[ResourceEffect]| {
             v.iter()
                 .map(|e| format!("{}:{}", e.id, Value::Object(e.set.clone())))
                 .collect::<Vec<_>>()
         };
+        let body = json!({"amount": 9.99, "description": "Order X-2", "is_default": true});
+        let effects = vec![
+            effect("payments", "pay_sibling", json!({"amount": 9.99})),
+            effect("payments", "pay_sibling", json!({"is_default": false})),
+            effect("payments", "pay_new", json!({"amount": 9.99})),
+            effect("customers", "cus_1", json!({"amount": 9.99})),
+        ];
+        let (kept, dropped) = sibling_effects("payments", Some("pay_new"), Some(&body), effects);
         assert_eq!(
             sets(&kept),
             [
                 "pay_sibling:{\"is_default\":false}",
                 "pay_new:{\"amount\":9.99}",
-                "pay_named:{\"amount\":9.99}",
                 "cus_1:{\"amount\":9.99}",
             ]
         );
@@ -6364,7 +6361,7 @@ mod tests {
         let (_, dropped) = sibling_effects(
             "payments",
             None,
-            (&HashSet::new(), Some(&json!({"amount": 9.99}))),
+            Some(&json!({"amount": 9.99})),
             vec![effect(
                 "payments",
                 "pay_1",
@@ -6375,38 +6372,38 @@ mod tests {
     }
 
     #[test]
-    fn a_create_names_records_by_numbers_and_nested_members_but_not_its_own_id() {
-        let bundle = compile(
-            br#"
-openapi: 3.0.0
-info: {title: t, version: "1"}
-paths:
-  /ledgers/{ledger}/notes:
-    post:
-      operationId: createNote
-      parameters: [{name: ledger, in: path, required: true, schema: {type: string}}]
-      responses:
-        "201": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
-"#,
-        )
-        .unwrap();
-        let op = bundle.operation("createNote").unwrap();
-        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
-        let call = OperationCall {
-            path_params: Map::from_iter([("ledger".to_string(), json!("lg_1"))]),
-            body: Some(json!({
-                "id": "own_1",
-                "in_reply_to": 12345,
-                "fields": {"parent": {"id": "10000"}},
-                "tags": ["tg_1"],
-            })),
-            ..OperationCall::default()
+    fn a_copied_member_is_excused_only_when_its_value_names_the_record() {
+        let effect = |id: &str, set: Value| ResourceEffect {
+            resource_type: "payments".into(),
+            id: id.into(),
+            set: set.as_object().cloned().unwrap_or_default(),
         };
-        let named = named_values(op, &call);
-        for id in ["lg_1", "12345", "10000", "tg_1"] {
-            assert!(named.contains(id), "{id}: {named:?}");
-        }
-        assert!(!named.contains("own_1"), "{named:?}");
+        let kept = |body: Value, e: ResourceEffect| {
+            !sibling_effects("payments", Some("new"), Some(&body), vec![e])
+                .0
+                .is_empty()
+        };
+        // Named by a number, or under a nested identity member, the member naming it is
+        // excused, and a member the request does not set too.
+        assert!(kept(
+            json!({"amount": 1.0, "in_reply_to": 1_234_567}),
+            effect("1234567", json!({"in_reply_to": 1_234_567, "replies": 1})),
+        ));
+        assert!(kept(
+            json!({"fields": {"parent": {"id": "10000"}}}),
+            effect("10000", json!({"fields": {"parent": {"id": "10000"}}})),
+        ));
+        // A small id a copied amount equals names nothing beside what else it copies:
+        // Mollie's second payment onto payment `1`.
+        assert!(!kept(
+            json!({"amount": 1, "description": "Order X-2"}),
+            effect("1", json!({"amount": 1, "description": "Order X-2"})),
+        ));
+        // A copied value that names another record excuses nothing.
+        assert!(!kept(
+            json!({"amount": 1.0, "in_reply_to": 1_234_567}),
+            effect("1234567", json!({"amount": 1.0})),
+        ));
     }
 
     #[test]
