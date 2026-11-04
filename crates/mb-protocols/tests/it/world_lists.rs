@@ -2915,6 +2915,22 @@ paths:
                   data: {type: array, items: {$ref: "#/components/schemas/User"}}
                   self: {type: string, format: uri}
                   next: {type: string, format: uri}
+  /keyed:
+    get:
+      operationId: listKeyed
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: from, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/User"}}
+                  next: {type: string, format: uri, description: "The next page, as in ?prefrom=x."}
   /notfirst:
     get:
       operationId: listNotFirst
@@ -3202,6 +3218,18 @@ async fn ordinary_filters_are_no_cursor() {
             json!({"data": users(3), "self": "https://api.example.org/filtered?limit=2&status=open"}),
         ),
         ("notfirst", json!({"data": users(3)})),
+        // A next link is another page's: what it carries empty ties nothing.
+        (
+            "filtered",
+            json!({"data": users(3), "next": "https://api.example.org/filtered?limit=2&status="}),
+        ),
+        // A link that does not show the request's values (`limit=2`) is not its own.
+        (
+            "filtered",
+            json!({"data": users(3), "self": "https://api.example.org/filtered?status="}),
+        ),
+        // `from=` inside a longer name (`prefrom=`) is no query key.
+        ("keyed", json!({"data": users(3)})),
     ];
     let mut taken = Vec::new();
     for (route, answer) in cases {
@@ -3223,6 +3251,20 @@ async fn a_one_word_parameter_is_not_the_page_size_s() {
     let answer = json!({
         "data": users(3),
         "links": {"self": "https://a.example.org/paged?page=&page%5Bcursor%5D=&page%5Bsize%5D=2", "next": null},
+    });
+    let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
+    let first = api.get("/paged?page%5Bsize%5D=2").await;
+    let next = first["links"]["next"].as_str().unwrap_or_default();
+    assert!(next.contains("page%5Bcursor%5D="), "{first}");
+}
+
+/// With no link of the request carrying it, `page[cursor]` is the cursor as the one
+/// parameter of several words sharing the page size's first word.
+#[tokio::test]
+async fn the_page_size_s_first_word_picks_the_cursor() {
+    let answer = json!({
+        "data": users(3),
+        "links": {"self": "https://a.example.org/paged?page%5Bsize%5D=2", "next": null},
     });
     let api = api_of(LINKED, true, vec![Ok(answer.to_string())]);
     let first = api.get("/paged?page%5Bsize%5D=2").await;

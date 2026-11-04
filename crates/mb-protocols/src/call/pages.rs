@@ -395,9 +395,11 @@ fn url_slot(
     let next_name = &names[at];
     // The `next` member as its own parent declares it, not a shared schema it refers to.
     let next_own = own_description(path[at].1);
-    // The URLs of this very request the model wrote outside the list (its `self`).
+    // The URLs of this very request the model wrote outside the list (its `self`), but
+    // the `next` member itself: a next link is another page's, whatever it carries.
+    let without_next = placed(body, &names[..=at], None)?;
     let mut shown = Vec::new();
-    urls_in(body, Some(list), &own, 0, &mut shown);
+    urls_in(&without_next, Some(list), &own, 0, &mut shown);
     shown.retain(|url| same_route(url, &own, segments) && shows_request(url, call));
     let declared = op.input.query.as_ref().and_then(|q| q.get("properties"));
     // No format or pattern shapes a cursor (`since`, a date-time).
