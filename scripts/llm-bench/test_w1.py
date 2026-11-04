@@ -295,6 +295,21 @@ class HeldOutJourneyTest(unittest.TestCase):
             self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), want, name)
             self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), want, name)
 
+    def test_journeys_blind7_is_a_suite(self):
+        self.assertIn("journeys_blind7", server_suites.SUITES)
+        self.assertNotIn("journeys_blind7", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind7"]
+        self.assertIs(runner, server_suites.run_journeys_blind7)
+        self.assertEqual(sorted(mocks), ["bitbucket", "chargebee", "cloudflare", "linear", "mollie"])
+        self.assertEqual(sorted(server_suites.BLIND7_JOURNEYS), sorted(mocks))
+        self.assertTrue(mocks["linear"][0].endswith("/linear.graphql"))
+        for contract, prefix, persona in mocks.values():
+            self.assertIsNone(persona)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+            self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
@@ -405,6 +420,40 @@ class MissingIdTest(unittest.TestCase):
         self.assertFalse(listed["ok"])
         self.assertNotEqual(listed["source"], "skipped")
         self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [])
+
+
+class FakeEmpty(FakeStripe):
+    """An API that answers every call with an empty JSON object."""
+
+    def answer(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.reply({})
+
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = answer
+
+
+class EmptyAnswersTest(unittest.TestCase):
+    def test_each_blind7_journey_records_every_check_on_empty_answers(self):
+        # Every check runs and fails on its own: none gates the rest and none raises.
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeEmpty)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        for name, steps in server_suites.BLIND7_JOURNEYS.items():
+            with tempfile.TemporaryDirectory() as out:
+                sink = server_suites.Sink(out, "m/x", "journeys_blind7")
+                server_suites.run_one_journey(name, steps, Srv, sink, Args, 0)
+            rows = {r["case"]: r for r in sink.rows}
+            self.assertEqual(sorted(rows), sorted(f"{name}.{c}" for c in server_suites.JOURNEY_CHECKS[name]), name)
+            self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [], name)
+            self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
 
 
 if __name__ == "__main__":
