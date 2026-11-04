@@ -43,7 +43,8 @@ pub struct Bundle {
     pub title: String,
     /// The contract's `info.version`.
     pub version: String,
-    /// The contract's API-level description (`info.description`), where it
+    /// The contract's API-level description (`info.description`; a WSDL's
+    /// `wsdl:documentation` of its `definitions` and services), where it
     /// often states rules that hold across operations; absent when it has none
     /// and in bundles compiled before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -488,7 +489,8 @@ pub struct Operation {
     pub binding: Binding,
     /// What the operation does.
     pub kind: OperationKind,
-    /// The contract's summary.
+    /// The contract's summary (a WSDL operation's `wsdl:documentation`, of
+    /// its portType operation then its binding operation).
     pub summary: Option<String>,
     /// The request schemas.
     pub input: InputSchemas,

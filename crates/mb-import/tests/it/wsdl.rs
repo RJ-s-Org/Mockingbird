@@ -1070,3 +1070,360 @@ fn several_wsdl_roots_are_named() {
         "{err:?}"
     );
 }
+
+fn library() -> Bundle {
+    compile(&read("library-documented.wsdl")).unwrap()
+}
+
+/// `text` without its blocks from `open` through `close`.
+fn without_blocks(text: &str, open: &str, close: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(open) {
+        out.push_str(&rest[..start]);
+        let end = rest[start..].find(close).unwrap() + start + close.len();
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every string `description` member in `value`, at any depth, by JSON pointer.
+fn descriptions(value: &Value, at: &str, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map {
+                let here = format!("{at}/{k}");
+                match v {
+                    Value::String(d) if k == "description" => out.push((here, d.clone())),
+                    other => descriptions(other, &here, out),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                descriptions(v, &format!("{at}/{i}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_descriptions(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|k, v| !(k == "description" && v.is_string()));
+            map.values_mut().for_each(strip_descriptions);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_descriptions),
+        _ => {}
+    }
+}
+
+/// The `wsdl:documentation` of `definitions` and of the served service
+/// become the bundle's API description, whitespace collapsed.
+#[test]
+fn wsdl_documentation_becomes_the_api_description() {
+    let b = library();
+    assert_eq!(
+        b.description.as_deref(),
+        Some(
+            "A lending library catalog. Books are never deleted; a withdrawn book keeps its record. \
+Partners authenticate with api_key: lib_9fQ2xW7mLp4Rt8Zb3Nc6Vd1K.\n\nThe public lending endpoint."
+        )
+    );
+}
+
+/// The portType operation's documentation (XHTML markup flattened to its
+/// text), then the binding operation's, become the operation's summary.
+#[test]
+fn operation_documentation_becomes_the_summary() {
+    let b = library();
+    let op = b.operation("GetBook").unwrap();
+    assert_eq!(
+        op.summary.as_deref(),
+        Some(
+            "Returns a book by its catalog id. A withdrawn book is still returned, with status \
+withdrawn. Served from the read replica; send Authorization: Bearer q8W3eR5tY7uI9oP1aS2dF4gH."
+        )
+    );
+}
+
+/// `xs:annotation/xs:documentation` of complexTypes, simpleTypes, global and
+/// local elements and attributes becomes the converted schema's
+/// `description`; `xs:appinfo` is not documentation.
+#[test]
+fn xsd_documentation_becomes_schema_descriptions() {
+    let b = library();
+    let book = &b.defs["Book"];
+    assert_eq!(
+        book["description"],
+        json!("A book in the catalog. One record per edition.")
+    );
+    let props = &book["properties"];
+    assert_eq!(
+        props["id"],
+        json!({"type": "string", "description": "Catalog id, such as BK-000123."})
+    );
+    assert_eq!(
+        props["isbn"],
+        json!({
+            "type": "string",
+            "pattern": "^(?:[0-9]{13})$",
+            "description": "A 13-digit ISBN, digits only."
+        })
+    );
+    assert_eq!(props["title"], json!({"type": "string"}));
+    assert_eq!(
+        props["authors"],
+        json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "description": "Authors in credit order."
+        })
+    );
+    assert_eq!(
+        props["@status"]["description"],
+        json!("available, on_loan or withdrawn; admin token=lib_7Hh2Kk9Mm4Nn6Pp8Qq1Rr3Ss.")
+    );
+    assert_eq!(
+        b.defs["GetBookResponse"],
+        json!({"$ref": "#/$defs/Book", "description": "The book found."})
+    );
+    assert_eq!(
+        b.defs["GetBook"]["description"],
+        json!("Looks up one book.")
+    );
+    let valid = json!({
+        "id": "BK-1", "isbn": "9780000000001", "title": "T", "authors": ["A"],
+        "@status": "available"
+    });
+    let out = b.operation("GetBook").unwrap().outputs[0]
+        .schema
+        .clone()
+        .unwrap();
+    assert_eq!(validate(&b, &out, &valid), Vec::<String>::new());
+}
+
+/// With its documentation removed, the same WSDL compiles to a bundle with no
+/// description, summary or schema description, and otherwise the same.
+#[test]
+fn a_wsdl_without_documentation_is_unchanged() {
+    let text = String::from_utf8(read("library-documented.wsdl")).unwrap();
+    let bare = without_blocks(&text, "<wsdl:documentation", "</wsdl:documentation>");
+    let bare = without_blocks(&bare, "<xs:annotation", "</xs:annotation>");
+    assert!(!bare.contains("documentation"), "{bare}");
+    let plain = compile(bare.as_bytes()).unwrap();
+    assert_eq!(plain.description, None);
+    assert!(plain.operations.iter().all(|op| op.summary.is_none()));
+    let mut found = Vec::new();
+    descriptions(&json!(plain.defs), "", &mut found);
+    descriptions(&json!(plain.operations), "", &mut found);
+    assert_eq!(found, Vec::<(String, String)>::new());
+
+    let mut documented = library();
+    documented.description = None;
+    for op in &mut documented.operations {
+        op.summary = None;
+    }
+    let mut defs = json!(documented.defs);
+    strip_descriptions(&mut defs);
+    assert_eq!(defs, json!(plain.defs));
+    assert_eq!(json!(documented.operations), json!(plain.operations));
+}
+
+/// An rpc part's `wsdl:documentation` describes its member of the wrapper.
+#[test]
+fn rpc_part_documentation_describes_the_member() {
+    let wsdl = r#"<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:rpc" targetNamespace="urn:rpc">
+  <wsdl:message name="EchoIn">
+    <wsdl:part name="text" type="xs:string">
+      <wsdl:documentation>What to echo.</wsdl:documentation>
+    </wsdl:part>
+  </wsdl:message>
+  <wsdl:message name="EchoOut"><wsdl:part name="text" type="xs:string"/></wsdl:message>
+  <wsdl:portType name="P">
+    <wsdl:operation name="Echo">
+      <wsdl:input message="tns:EchoIn"/><wsdl:output message="tns:EchoOut"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="B" type="tns:P">
+    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Echo">
+      <wsdl:input><soap:body use="literal" namespace="urn:rpc"/></wsdl:input>
+      <wsdl:output><soap:body use="literal" namespace="urn:rpc"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S">
+    <wsdl:port name="Port" binding="tns:B"><soap:address location="http://h/echo"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#;
+    let b = compile(wsdl.as_bytes()).unwrap();
+    let op = b.operation("Echo").unwrap();
+    let body = op.input.body.as_ref().unwrap();
+    assert_eq!(
+        body["properties"]["text"],
+        json!({"type": "string", "description": "What to echo."})
+    );
+    assert_eq!(
+        op.outputs[0].schema.as_ref().unwrap()["properties"]["text"],
+        json!({"type": "string"})
+    );
+    assert_eq!(b.description, None);
+    assert_eq!(op.summary, None);
+}
+
+/// A document/literal WSDL whose `definitions`, service, portType operation and
+/// binding operation documentation are `docs` in that order (none when empty),
+/// with `types` as its schema.
+fn rules_wsdl(docs: [&str; 4], types: &str) -> String {
+    let doc = |d: &str| {
+        if d.is_empty() {
+            String::new()
+        } else {
+            format!("<wsdl:documentation>{d}</wsdl:documentation>")
+        }
+    };
+    format!(
+        r#"<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:rules" targetNamespace="urn:rules">
+  {}
+  <wsdl:types>
+    <xs:schema elementFormDefault="qualified" targetNamespace="urn:rules">{types}</xs:schema>
+  </wsdl:types>
+  <wsdl:message name="In"><wsdl:part name="p" element="tns:Req"/></wsdl:message>
+  <wsdl:message name="Out"><wsdl:part name="p" element="tns:Res"/></wsdl:message>
+  <wsdl:portType name="P">
+    <wsdl:operation name="Op">{}<wsdl:input message="tns:In"/><wsdl:output message="tns:Out"/></wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="B" type="tns:P">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Op">{}
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="S">{}
+    <wsdl:port name="Port" binding="tns:B"><soap:address location="http://h/rules"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>"#,
+        doc(docs[0]),
+        doc(docs[2]),
+        doc(docs[3]),
+        doc(docs[1]),
+    )
+}
+
+const RULE_TYPES: &str = r#"
+<xs:simpleType name="Code">
+  <xs:annotation><xs:documentation>The type's words.</xs:documentation></xs:annotation>
+  <xs:restriction base="xs:string"><xs:maxLength value="8"/></xs:restriction>
+</xs:simpleType>
+<xs:simpleType name="Tags">
+  <xs:annotation><xs:documentation>Space-separated tags.</xs:documentation></xs:annotation>
+  <xs:list itemType="xs:string"/>
+</xs:simpleType>
+<xs:simpleType name="Either">
+  <xs:annotation><xs:documentation>A number or a word.</xs:documentation></xs:annotation>
+  <xs:union memberTypes="xs:int xs:string"/>
+</xs:simpleType>
+<xs:attribute name="lang" type="xs:string">
+  <xs:annotation><xs:documentation>The global attribute's words.</xs:documentation></xs:annotation>
+</xs:attribute>
+<xs:element name="Req">
+  <xs:complexType>
+    <xs:annotation><xs:documentation>The inline type's words.</xs:documentation></xs:annotation>
+    <xs:sequence>
+      <xs:element name="plain" type="tns:Code"/>
+      <xs:element name="own" type="tns:Code">
+        <xs:annotation><xs:documentation>The element's words.</xs:documentation></xs:annotation>
+      </xs:element>
+      <xs:element name="tags" type="tns:Tags"/>
+      <xs:element name="either" type="tns:Either"/>
+    </xs:sequence>
+    <xs:attribute ref="tns:lang"/>
+  </xs:complexType>
+</xs:element>
+<xs:element name="Res">
+  <xs:annotation><xs:documentation>The global element's words.</xs:documentation></xs:annotation>
+  <xs:complexType>
+    <xs:annotation><xs:documentation>Replaced.</xs:documentation></xs:annotation>
+    <xs:sequence>
+      <xs:element name="x" type="xs:string"/>
+    </xs:sequence>
+    <xs:attribute ref="tns:lang">
+      <xs:annotation><xs:documentation>The reference's words.</xs:documentation></xs:annotation>
+    </xs:attribute>
+  </xs:complexType>
+</xs:element>
+"#;
+
+/// A declaration's own documentation replaces its type's; an attribute `ref`
+/// takes the global attribute's documentation unless it has its own; `list`
+/// and `union` simpleTypes keep theirs.
+#[test]
+fn schema_documentation_rules() {
+    let b = compile(rules_wsdl(["", "", "", ""], RULE_TYPES).as_bytes()).unwrap();
+    let req = &b.defs["Req"];
+    assert_eq!(req["description"], json!("The inline type's words."));
+    let props = &req["properties"];
+    assert_eq!(
+        props["plain"],
+        json!({"type": "string", "maxLength": 8, "description": "The type's words."})
+    );
+    assert_eq!(
+        props["own"],
+        json!({"type": "string", "maxLength": 8, "description": "The element's words."})
+    );
+    assert_eq!(
+        props["tags"],
+        json!({"type": "string", "description": "Space-separated tags."})
+    );
+    assert_eq!(
+        props["either"],
+        json!({"type": "string", "description": "A number or a word."})
+    );
+    assert_eq!(
+        props["@lang"],
+        json!({"type": "string", "description": "The global attribute's words."})
+    );
+    let res = &b.defs["Res"];
+    assert_eq!(res["description"], json!("The global element's words."));
+    assert_eq!(
+        res["properties"]["@lang"],
+        json!({"type": "string", "description": "The reference's words."})
+    );
+}
+
+/// Documentation repeated word for word is shown once; texts that differ in
+/// any way, even only in case or punctuation, are all kept, in order.
+#[test]
+fn repeated_documentation_is_shown_once() {
+    let compiled = |docs| compile(rules_wsdl(docs, RULE_TYPES).as_bytes()).unwrap();
+    let same = compiled(["Same.", "Same.", "Twice.", "Twice."]);
+    assert_eq!(same.description.as_deref(), Some("Same."));
+    assert_eq!(
+        same.operation("Op").unwrap().summary.as_deref(),
+        Some("Twice.")
+    );
+    let differ = compiled(["Same.", "Same!", "One.", "one."]);
+    assert_eq!(differ.description.as_deref(), Some("Same.\n\nSame!"));
+    assert_eq!(
+        differ.operation("Op").unwrap().summary.as_deref(),
+        Some("One. one.")
+    );
+    let binding_only = compiled(["", "Svc.", "", "Bound."]);
+    assert_eq!(binding_only.description.as_deref(), Some("Svc."));
+    assert_eq!(
+        binding_only.operation("Op").unwrap().summary.as_deref(),
+        Some("Bound.")
+    );
+}

@@ -76,6 +76,11 @@ pub(crate) struct Element {
     pub children: Vec<Element>,
     /// The element's own character data, concatenated.
     pub text: String,
+    /// For a `documentation` element (of any namespace), its whole text
+    /// content in document order, its descendants' included, with a space
+    /// at each boundary of an element inside it other than an inline one
+    /// (see [`INLINE`]); empty for other elements.
+    pub content: String,
     scope: Scope,
 }
 
@@ -130,6 +135,14 @@ impl Element {
             local: local.to_owned(),
         })
     }
+}
+
+/// The text of `docs` (`documentation` elements, see
+/// [`Element::content`]) with its whitespace collapsed to single spaces,
+/// joined by a space; `None` when there is none.
+pub(crate) fn documentation_text<'a>(docs: impl Iterator<Item = &'a Element>) -> Option<String> {
+    let words: Vec<&str> = docs.flat_map(|d| d.content.split_whitespace()).collect();
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 #[derive(Debug, PartialEq)]
@@ -219,8 +232,37 @@ fn open(e: &BytesStart<'_>, parent: &Scope, declared: &mut usize) -> Result<Elem
         attrs,
         children: Vec::new(),
         text: String::new(),
+        content: String::new(),
         scope,
     })
+}
+
+/// The local name of the elements whose whole text content is gathered
+/// (see [`Element::content`]).
+const DOCUMENTATION: &str = "documentation";
+
+/// Elements (XHTML phrasing markup, by local name) whose boundaries
+/// inside a `documentation` element are not word breaks.
+const INLINE: &[&str] = &[
+    "a", "abbr", "b", "big", "cite", "code", "del", "dfn", "em", "i", "ins", "kbd", "mark", "q",
+    "s", "samp", "small", "span", "strong", "sub", "sup", "tt", "u", "var",
+];
+
+/// The separator an element boundary adds to `documentation` content.
+fn boundary(el: &Element) -> &'static str {
+    if INLINE.contains(&el.name.local.as_str()) {
+        ""
+    } else {
+        " "
+    }
+}
+
+/// Append `text` to the content of the open `documentation` element at
+/// `doc_at` in `stack`, if any.
+fn gather(stack: &mut [Element], doc_at: Option<usize>, text: &str) {
+    if let Some(el) = doc_at.and_then(|i| stack.get_mut(i)) {
+        el.content.push_str(text);
+    }
 }
 
 /// Parse `text` into its root element.
@@ -232,6 +274,8 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
     let mut declared = 0usize;
     let mut stack: Vec<Element> = Vec::new();
     let mut root: Option<Element> = None;
+    // The stack index of the outermost open `documentation` element.
+    let mut doc_at: Option<usize> = None;
     loop {
         match reader.read_event()? {
             Event::DocType(_) => return Err(XmlError::Doctype),
@@ -246,11 +290,16 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
                 if root.is_some() && stack.is_empty() {
                     return Err(XmlError::Syntax("more than one root element".into()));
                 }
+                gather(&mut stack, doc_at, boundary(&el));
+                if doc_at.is_none() && el.name.local == DOCUMENTATION {
+                    doc_at = Some(stack.len());
+                }
                 stack.push(el);
             }
             Event::Empty(e) => {
                 let scope = stack.last().map_or(&root_scope, |p| &p.scope);
                 let el = open(&e, scope, &mut declared)?;
+                gather(&mut stack, doc_at, boundary(&el));
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(el),
                     None if root.is_none() => root = Some(el),
@@ -261,6 +310,10 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
                 let el = stack
                     .pop()
                     .ok_or_else(|| XmlError::Syntax("unmatched end tag".into()))?;
+                if doc_at == Some(stack.len()) {
+                    doc_at = None;
+                }
+                gather(&mut stack, doc_at, boundary(&el));
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(el),
                     None => root = Some(el),
@@ -268,6 +321,7 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
             }
             Event::Text(t) => {
                 let content = t.xml10_content();
+                gather(&mut stack, doc_at, &content);
                 match stack.last_mut() {
                     Some(el) => el.text.push_str(&content),
                     None if content.trim().is_empty() => {}
@@ -275,8 +329,10 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
                 }
             }
             Event::CData(t) => {
+                let content = t.xml10_content();
+                gather(&mut stack, doc_at, &content);
                 if let Some(el) = stack.last_mut() {
-                    el.text.push_str(&t.xml10_content());
+                    el.text.push_str(&content);
                 }
             }
             Event::GeneralRef(r) => {
@@ -291,6 +347,7 @@ pub(crate) fn parse(text: &str) -> Result<Element, XmlError> {
                             .to_owned()
                     }
                 };
+                gather(&mut stack, doc_at, &resolved);
                 if let Some(el) = stack.last_mut() {
                     el.text.push_str(&resolved);
                 }
@@ -323,6 +380,24 @@ mod tests {
         assert_eq!(c.name, QName::new("urn:d", "c"));
         assert_eq!(c.attr("k"), Some("<1A"));
         assert_eq!(c.text, "x & y<z>");
+        assert_eq!(c.content, "");
+    }
+
+    #[test]
+    fn documentation_content_keeps_nested_text_in_order() {
+        let doc = parse(
+            r#"<r><d:documentation xmlns:d="urn:d">One <b>bold</b>, &amp; <![CDATA[<raw>]]><p>Two</p><p>Three<br/>Four</p></d:documentation><x>not this</x></r>"#,
+        )
+        .unwrap();
+        let d = &doc.children[0];
+        assert_eq!(d.content, "One bold, & <raw> Two  Three Four ");
+        assert_eq!(
+            documentation_text(std::iter::once(d)).as_deref(),
+            Some("One bold, & <raw> Two Three Four")
+        );
+        assert_eq!(doc.content, "");
+        assert_eq!(doc.children[1].content, "");
+        assert_eq!(documentation_text(doc.children[1..].iter()), None);
     }
 
     /// Namespace bindings stored across the tree, each shared scope

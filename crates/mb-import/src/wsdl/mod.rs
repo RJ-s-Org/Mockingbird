@@ -19,8 +19,8 @@ use mb_mcm::{
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use xml::{Element, QName, XmlError};
-use xsd::{SchemaDoc, XSD_NS, Xsd};
+use xml::{Element, QName, XmlError, documentation_text};
+use xsd::{SchemaDoc, XSD_NS, Xsd, described};
 
 const WSDL_NS: &str = "http://schemas.xmlsoap.org/wsdl/";
 const WSDL20_NS: &str = "http://www.w3.org/ns/wsdl";
@@ -30,6 +30,32 @@ const SOAP12_NS: &str = "http://schemas.xmlsoap.org/wsdl/soap12/";
 const MAIN_FILE: &str = "main.wsdl";
 const DEFAULT_TITLE: &str = "SOAP API";
 const CONTENT_TYPE: &str = "text/xml";
+
+/// The `wsdl:documentation` text of a WSDL element.
+fn documentation(el: &Element) -> Option<String> {
+    documentation_text(el.children_named(WSDL_NS, "documentation"))
+}
+
+/// `docs` that are present, each once, joined into one text by `sep`;
+/// `None` when there are none.
+fn joined(docs: impl IntoIterator<Item = Option<String>>, sep: &str) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for doc in docs.into_iter().flatten() {
+        if !seen.contains(&doc) {
+            seen.push(doc);
+        }
+    }
+    (!seen.is_empty()).then(|| seen.join(sep))
+}
+
+/// The API description of a WSDL: the `wsdl:documentation` of its
+/// `definitions`, then of each served `wsdl:service`.
+fn api_description(root: &Element, services: &[Service<'_>]) -> Option<String> {
+    joined(
+        std::iter::once(documentation(root)).chain(services.iter().map(|s| s.doc.clone())),
+        "\n\n",
+    )
+}
 
 fn xml_error(e: XmlError, file: &str) -> ImportError {
     match e {
@@ -283,7 +309,7 @@ fn compile_root(
         id: slug(&title),
         title,
         version: "0".into(),
-        description: None,
+        description: api_description(root, &wsdl_doc.services),
         source_digest,
         operations,
         defs,
@@ -579,6 +605,8 @@ struct Service<'a> {
     soap_ns: &'static str,
     version: SoapVersion,
     address_path: String,
+    /// The service's `wsdl:documentation`.
+    doc: Option<String>,
 }
 
 struct Wsdl<'a> {
@@ -685,6 +713,7 @@ fn services<'a>(root: &'a Element, bindings: &Named<'a>) -> Vec<Service<'a>> {
             tns,
             soap_ns,
             version,
+            doc: documentation(service),
         });
     }
     out
@@ -857,7 +886,8 @@ impl<'a> Wsdl<'a> {
             let Some(name) = part.attr("name") else {
                 continue;
             };
-            props.insert(name.to_owned(), self.part_type(xsd, part)?);
+            let schema = described(self.part_type(xsd, part)?, documentation(part));
+            props.insert(name.to_owned(), schema);
             order.push(name.to_owned());
         }
         let mut out = Map::new();
@@ -1004,7 +1034,7 @@ impl<'a> Wsdl<'a> {
                 address_path: service.address_path.clone(),
             },
             kind: kind_from_name(name, OperationKind::Query),
-            summary: None,
+            summary: joined([documentation(op), binding_op.and_then(documentation)], " "),
             input: InputSchemas {
                 path: None,
                 query: None,

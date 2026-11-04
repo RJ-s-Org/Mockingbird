@@ -4,7 +4,7 @@
 //! Named complexTypes and top-level elements become `$defs` entries;
 //! named simpleTypes are inlined where they are used.
 
-use super::xml::{Element, QName};
+use super::xml::{Element, QName, documentation_text};
 use crate::ImportError;
 use crate::openapi3::invalid;
 use serde_json::{Map, Number, Value, json};
@@ -148,6 +148,24 @@ fn nodes(v: &Value) -> usize {
         Value::Object(map) => map.values().map(nodes).sum(),
         _ => 0,
     }
+}
+
+/// The `xs:annotation/xs:documentation` text of a schema component.
+fn annotation(el: &Element) -> Option<String> {
+    documentation_text(
+        el.children_named(XSD_NS, "annotation")
+            .flat_map(|a| a.children_named(XSD_NS, "documentation")),
+    )
+}
+
+/// `schema` with `doc`, when there is one, as its `description` (replacing
+/// one its type gave it: a declaration's own documentation is the more
+/// specific).
+pub(crate) fn described(mut schema: Value, doc: Option<String>) -> Value {
+    if let (Some(doc), Some(obj)) = (doc, schema.as_object_mut()) {
+        obj.insert("description".into(), Value::String(doc));
+    }
+    schema
 }
 
 fn def_ref(name: &str) -> Value {
@@ -365,7 +383,7 @@ impl<'a> Xsd<'a> {
                 }
                 DefKind::Element => {
                     let c = self.elements[q];
-                    self.element_type(c.el, c.schema, 0)?
+                    described(self.element_type(c.el, c.schema, 0)?, annotation(c.el))
                 }
             };
             defs.insert(name.clone(), schema);
@@ -456,7 +474,7 @@ impl<'a> Xsd<'a> {
         self.check_depth(depth, s)?;
         let Some(r) = st.child(XSD_NS, "restriction") else {
             // `list` and `union` are carried as text.
-            return Ok(json!({"type": "string"}));
+            return Ok(described(json!({"type": "string"}), annotation(st)));
         };
         let mut base = if let Some(b) = r.attr("base") {
             let q = self.resolve(r, b, s)?;
@@ -467,14 +485,14 @@ impl<'a> Xsd<'a> {
             json!({"type": "string"})
         };
         apply_facets(&mut base, r);
-        Ok(base)
+        Ok(described(base, annotation(st)))
     }
 
     /// The object schema of a complexType.
     fn object(&self, ct: &Element, s: usize, depth: usize) -> Result<Value, ImportError> {
         let mut obj = Obj::default();
         self.content(ct, s, &mut obj, depth)?;
-        Ok(obj.finish(&self.schemas[s]))
+        Ok(described(obj.finish(&self.schemas[s]), annotation(ct)))
     }
 
     /// Add the content model and attributes of `el` (a complexType, or an
@@ -616,6 +634,7 @@ impl<'a> Xsd<'a> {
             }
             Value::Object(array)
         };
+        let schema = described(schema, annotation(el));
         obj.element(name, schema, !optional && min >= 1, in_choice);
         Ok(())
     }
@@ -634,7 +653,10 @@ impl<'a> Xsd<'a> {
         let (name, schema) = if let Some(r) = el.attr("ref") {
             let q = self.resolve(el, r, s)?;
             let schema = match self.attributes.get(&q) {
-                Some(a) => self.attribute_type(a.el, a.schema, depth + 1)?,
+                Some(a) => described(
+                    self.attribute_type(a.el, a.schema, depth + 1)?,
+                    annotation(a.el),
+                ),
                 None => json!({"type": "string"}),
             };
             (q.local, schema)
@@ -644,6 +666,7 @@ impl<'a> Xsd<'a> {
             };
             (name.to_owned(), self.attribute_type(el, s, depth + 1)?)
         };
+        let schema = described(schema, annotation(el));
         obj.add(format!("@{name}"), schema, usage == Some("required"));
         Ok(())
     }
