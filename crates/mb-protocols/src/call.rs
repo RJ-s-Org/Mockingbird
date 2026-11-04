@@ -1263,6 +1263,14 @@ pub(crate) async fn complete(
                 )
                 .await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
+                // A create answered for the id of a record held already does not replace
+                // it: nothing comes of it.
+                if let Some(id) =
+                    repeated_record(&mut state, (session, op, t, state_call), &generated).await
+                {
+                    unstored = true;
+                    drop_all_effects(rt, op, &id, &mut generated);
+                }
             }
             // An action's new record goes under its own id, not over another's.
             if generated.new_record {
@@ -1358,6 +1366,7 @@ pub(crate) async fn complete(
         }
         if matches!(op.kind, OperationKind::Command(Effect::Create))
             && (200..300).contains(&generated.status)
+            && !unstored
         {
             // The record an envelope holds is stored already, under its identity.
             let wrapped = answered.as_ref().map(|answer| GeneratedResponse {
@@ -1445,6 +1454,34 @@ pub(crate) async fn complete(
             let shown = shown_types(rt, target.as_ref(), &related, &created_since);
             resolve_effect_types(&mut state, session, rt, &shown, &mut generated.effects).await;
             write_memory::effects_on_target(&earlier, target.as_ref(), &mut generated.effects);
+            if let Some(t) =
+                resource_type.filter(|_| op.kind == OperationKind::Command(Effect::Create))
+            {
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                let created = generated
+                    .body
+                    .as_ref()
+                    .and_then(|b| b.get(field))
+                    .and_then(id_string);
+                let carried = request_values(op, state_call);
+                let effects = std::mem::take(&mut generated.effects);
+                let (kept, dropped) = sibling_effects(t, created.as_deref(), &carried, effects);
+                generated.effects = kept;
+                generated.dropped_effects += dropped.len();
+                generated
+                    .effect_outcomes
+                    .extend(dropped.into_iter().map(|effect| {
+                        EffectOutcome {
+                            effect,
+                            rejected: Some(
+                                "a create changes no other record of its type it does not name"
+                                    .to_string(),
+                            ),
+                            merged: None,
+                            applied: Vec::new(),
+                        }
+                    }));
+            }
             let outcomes = apply_effects(
                 &mut state,
                 session,
@@ -2481,6 +2518,87 @@ fn request_values(op: &Operation, call: &OperationCall) -> HashSet<String> {
         strings(body, field, 0, &mut out);
     }
     out
+}
+
+/// The id of a create's answer when it is the one the request asked for, by its body's
+/// identity field ([`mb_engine::guards::asked_identity`]) or by the path parameter of its
+/// identity, and the session holds a record of the type under it already: a create
+/// answered as a success for a client-chosen id that is taken. Storing it would replace
+/// that record, which no create does. A create sent with a declared idempotency key may
+/// be a retry the API answers as the first, and an HTTP `PUT` is an upsert by its
+/// method: neither is one.
+async fn repeated_record(
+    state: &mut StateAccess<'_>,
+    (session, op, resource_type, call): (&SessionKey, &Operation, &str, &OperationCall),
+    generated: &GeneratedResponse,
+) -> Option<String> {
+    if !matches!(op.kind, OperationKind::Command(Effect::Create))
+        || matches!(
+            op.binding,
+            Binding::Http {
+                method: mb_mcm::HttpMethod::Put,
+                ..
+            }
+        )
+        || mb_engine::guards::carries_an_idempotency_key(state.rt.bundle(), op, call)
+    {
+        return None;
+    }
+    let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
+    let in_path = op
+        .identity
+        .as_ref()
+        .and_then(|i| i.path_param.as_deref())
+        .and_then(|p| call.path_params.get(p))
+        .and_then(id_string);
+    let asked = mb_engine::guards::asked_identity(op, call).or(in_path);
+    if asked.as_deref() != Some(id.as_str()) {
+        return None;
+    }
+    state.get(session, resource_type, &id).await.map(|_| id)
+}
+
+/// Drops every effect of `generated`, a create's answer that is not stored as it
+/// repeats the record held under `id` (see [`repeated_record`]), and says so in its
+/// outcomes: a duplicate changes nothing.
+fn drop_all_effects(rt: &MockRuntime, op: &Operation, id: &str, generated: &mut GeneratedResponse) {
+    const REASON: &str = "the create repeats a stored record's id: nothing is stored";
+    let dropped = std::mem::take(&mut generated.effects);
+    generated.dropped_effects += dropped.len();
+    generated
+        .effect_outcomes
+        .extend(dropped.into_iter().map(|effect| EffectOutcome {
+            effect,
+            rejected: Some(REASON.to_string()),
+            merged: None,
+            applied: Vec::new(),
+        }));
+    tracing::info!(
+        mock = %rt.name,
+        operation = %op.id,
+        id = %log_capped(id),
+        "create not stored: its id is a stored record's"
+    );
+}
+
+/// Splits `effects`, those of a create of `resource_type` whose answer's record is
+/// `created`, into those it may apply and those on another record of its own type that
+/// the request does not refer to (`carried`, see [`request_values`]). A create makes one
+/// record: it may change others it names (the message a reply is in a thread of) and
+/// records of other types (a parent's count), never a sibling it only resembles, which
+/// is the request copied onto another record.
+fn sibling_effects(
+    resource_type: &str,
+    created: Option<&str>,
+    carried: &HashSet<String>,
+    effects: Vec<ResourceEffect>,
+) -> (Vec<ResourceEffect>, Vec<ResourceEffect>) {
+    effects.into_iter().partition(|e| {
+        e.resource_type != resource_type
+            || created == Some(e.id.as_str())
+            || carried.contains(&e.id)
+    })
 }
 
 /// Gives a create's answer a fresh identity when its generated one is taken (see
@@ -6102,6 +6220,35 @@ mod tests {
         // Two shown types of one stem: no guess.
         let both: Vec<String> = vec!["entries".into(), "entry".into()];
         assert_eq!(stem_type(&both, "Entry", &[]), None);
+    }
+
+    #[test]
+    fn a_create_s_effects_reach_no_sibling_it_does_not_name() {
+        let effect = |t: &str, id: &str| ResourceEffect {
+            resource_type: t.into(),
+            id: id.into(),
+            set: Map::from_iter([("amount".to_string(), json!(1))]),
+        };
+        let carried: HashSet<String> = HashSet::from(["pay_named".to_string()]);
+        let effects = vec![
+            effect("payments", "pay_sibling"),
+            effect("payments", "pay_new"),
+            effect("payments", "pay_named"),
+            effect("customers", "cus_1"),
+        ];
+        let (kept, dropped) = sibling_effects("payments", Some("pay_new"), &carried, effects);
+        let ids = |v: &[ResourceEffect]| v.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&kept), ["pay_new", "pay_named", "cus_1"]);
+        assert_eq!(ids(&dropped), ["pay_sibling"]);
+        // With no id of its own, only what it names or another type is kept.
+        let (kept, dropped) = sibling_effects(
+            "payments",
+            None,
+            &HashSet::new(),
+            vec![effect("payments", "pay_new"), effect("customers", "cus_1")],
+        );
+        assert_eq!(ids(&kept), ["cus_1"]);
+        assert_eq!(ids(&dropped), ["pay_new"]);
     }
 
     #[test]

@@ -1,0 +1,452 @@
+//! A create that repeats a record of its own type by identity, or whose effects reach
+//! one: a second `POST /customers` asking for the client-chosen `id` of a stored
+//! customer, and a second payment whose answer copies its request onto the first. The
+//! create is shown the record it repeats and offered its declared refusal; answered as
+//! a success anyway, it stores nothing over the record. A create's effects never change
+//! another record of its own type that its request does not name. Driven over HTTP with
+//! a scripted LLM, asserting the prompts it was sent and what the store holds.
+#![cfg(test)]
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use mb_engine::{Engine, EngineConfig};
+use mb_import::compile;
+use mb_llm::{Provider, ScriptedProvider};
+use mb_protocols::{MockRuntime, http_rest};
+use mb_state::{MemoryStore, SessionKey, StateStore};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+/// Customers created under an id the client chooses, whose create declares a 400, and
+/// payments whose ids the API mints.
+const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Billing, version: "1"}
+paths:
+  /customers:
+    post:
+      operationId: createCustomer
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {id: {type: string}, first_name: {type: string}, email: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+        "400": {description: The request is invalid., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /customers/{customer_id}:
+    get:
+      operationId: getCustomer
+      parameters: [{name: customer_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+  /payments:
+    post:
+      operationId: createPayment
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {amount: {type: number}, description: {type: string}, reply_to: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+  /payments/{payment_id}:
+    get:
+      operationId: getPayment
+      parameters: [{name: payment_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+  /ledgers/{ledger_id}:
+    get:
+      operationId: getLedger
+      parameters: [{name: ledger_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ledger"}}}}
+  /ledgers/{ledger_id}/payments:
+    post:
+      operationId: createLedgerPayment
+      parameters: [{name: ledger_id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {amount: {type: number}, description: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+components:
+  schemas:
+    Customer:
+      type: object
+      required: [id, first_name]
+      properties:
+        id: {type: string}
+        first_name: {type: string}
+        email: {type: string}
+    Payment:
+      type: object
+      required: [id, amount]
+      properties:
+        id: {type: string}
+        amount: {type: number}
+        description: {type: string}
+        reply_to: {type: string}
+        replies: {type: integer}
+    Ledger:
+      type: object
+      required: [id, total]
+      properties:
+        id: {type: string}
+        total: {type: number}
+    Error:
+      type: object
+      required: [message]
+      properties: {message: {type: string}}
+"##;
+
+struct Harness {
+    router: axum::Router,
+    provider: Arc<ScriptedProvider>,
+    store: Arc<dyn StateStore>,
+}
+
+fn session() -> SessionKey {
+    SessionKey {
+        workspace: "default".into(),
+        mock: "m".into(),
+        session: "default".into(),
+    }
+}
+
+fn harness(contract: &str, script: Vec<Value>) -> Harness {
+    let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let rt = MockRuntime::new(
+        "m",
+        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::clone(&store),
+    );
+    Harness {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+        store,
+    }
+}
+
+impl Harness {
+    async fn send(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap();
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.send("POST", uri, Some(body), &[]).await
+    }
+
+    /// The user message of the `n`th LLM call.
+    fn prompt(&self, n: usize) -> String {
+        let requests = self.provider.requests();
+        requests[n].messages.last().unwrap().content.clone()
+    }
+
+    fn format_schema(&self, n: usize) -> Value {
+        match &self.provider.requests()[n].response_format {
+            mb_llm::ResponseFormat::JsonSchema { schema, .. } => schema.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn held(&self, t: &str, id: &str) -> Value {
+        self.store
+            .get(&session(), t, id)
+            .await
+            .unwrap()
+            .map_or(Value::Null, |r| r.data)
+    }
+
+    async fn count(&self, t: &str) -> usize {
+        self.store
+            .export(&session())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.resource_type == t)
+            .count()
+    }
+}
+
+/// The text between a block's tags, or `None` without one.
+fn block<'a>(prompt: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = prompt.find(&open)? + open.len();
+    let end = prompt.find(&format!("</{tag}>"))?;
+    Some(&prompt[start..end])
+}
+
+fn customer(id: &str, first_name: &str, email: &str) -> Value {
+    json!({"id": id, "first_name": first_name, "email": email})
+}
+
+const ANA: &str = "cust_000001";
+
+/// A second create asking for the id of a stored customer is shown that customer under
+/// its identity member, and offered the declared 400; refused, it stores nothing.
+#[tokio::test]
+async fn a_create_asking_for_a_taken_id_is_shown_its_holder_and_offered_the_refusal() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            json!({"effects": [], "response": null, "refusal": 400}),
+        ],
+    );
+    let (status, _) = h
+        .post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!h.prompt(0).contains("refusal"), "{}", h.prompt(0));
+
+    let (status, body) = h
+        .post("/customers", customer(ANA, "Rui", "rui@example.com"))
+        .await;
+    let prompt = h.prompt(1);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body} {prompt}");
+    let same = block(&prompt, "same_values").unwrap_or_default();
+    assert!(
+        same.contains(&format!("\"id\": \"{ANA}\"")) && same.contains("\"member\": \"id\""),
+        "{prompt}"
+    );
+    assert!(prompt.contains("its type's identity"), "{prompt}");
+    assert_eq!(
+        h.format_schema(1)["properties"]["refusal"],
+        json!({"type": "integer", "enum": [400]})
+    );
+    assert_eq!(h.held("customers", ANA).await["first_name"], "Ana");
+    assert_eq!(h.count("customers").await, 1);
+}
+
+/// Answered as a success for the taken id anyway, the create does not replace the stored
+/// customer: a read still serves Ana, and a later create with Ana's email is shown Ana,
+/// not a customer that took Rui's.
+#[tokio::test]
+async fn a_success_for_a_taken_id_never_replaces_the_stored_record() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            json!({"effects": [], "response": customer(ANA, "Rui", "rui@example.com")}),
+            customer("cust_000002", "Rui", "rui@example.com"),
+        ],
+    );
+    h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    let (status, _) = h
+        .post("/customers", customer(ANA, "Rui", "rui@example.com"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        h.held("customers", ANA).await,
+        customer(ANA, "Ana", "ana@example.com"),
+        "the stored record is kept"
+    );
+    assert_eq!(h.count("customers").await, 1);
+    let (status, read) = h.send("GET", &format!("/customers/{ANA}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["first_name"], "Ana", "{read}");
+
+    // Rui's email is no stored customer's: a create with it is shown no holder.
+    let (status, _) = h
+        .post(
+            "/customers",
+            customer("cust_000002", "Rui", "rui@example.com"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let prompt = h.prompt(2);
+    assert!(
+        block(&prompt, "same_values").is_none_or(|s| !s.contains(ANA)),
+        "{prompt}"
+    );
+    assert_eq!(h.count("customers").await, 2);
+}
+
+/// Ordinary creates are as they were: a create asking for a new id, or for none, is
+/// stored, and offered no refusal.
+#[tokio::test]
+async fn creates_of_new_ids_are_stored_as_before() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            customer("cust_000002", "Rui", "rui@example.com"),
+            customer("cust_000003", "Eva", "eva@example.com"),
+        ],
+    );
+    h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    h.post(
+        "/customers",
+        customer("cust_000002", "Rui", "rui@example.com"),
+    )
+    .await;
+    h.post(
+        "/customers",
+        json!({"first_name": "Eva", "email": "eva@example.com"}),
+    )
+    .await;
+    for n in 1..3 {
+        assert!(!h.prompt(n).contains("same_values"), "{}", h.prompt(n));
+    }
+    assert_eq!(
+        h.held("customers", "cust_000002").await["first_name"],
+        "Rui"
+    );
+    assert_eq!(
+        h.held("customers", "cust_000003").await["first_name"],
+        "Eva"
+    );
+    assert_eq!(h.count("customers").await, 3);
+}
+
+/// A create carrying a declared idempotency key may be a retry the API answers as the
+/// first: it is offered no refusal, and is shown nothing under its identity.
+#[tokio::test]
+async fn an_idempotent_retry_of_a_client_chosen_id_is_as_before() {
+    let contract = CONTRACT.replacen(
+        "      operationId: createCustomer\n",
+        "      operationId: createCustomer\n      parameters:\n        - {name: Idempotency-Key, in: header, schema: {type: string}}\n",
+        1,
+    );
+    assert_ne!(contract, CONTRACT);
+    let h = harness(
+        &contract,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            customer(ANA, "Ana", "ana.retry@example.com"),
+        ],
+    );
+    let key = [("Idempotency-Key", "key-000001")];
+    let body = customer(ANA, "Ana", "ana@example.com");
+    h.send("POST", "/customers", Some(body.clone()), &key).await;
+    let (status, _) = h.send("POST", "/customers", Some(body), &key).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!h.prompt(1).contains("refusal"), "{}", h.prompt(1));
+    assert!(!h.prompt(1).contains("same_values"), "{}", h.prompt(1));
+    assert_eq!(h.count("customers").await, 1);
+}
+
+fn payment(id: &str, amount: f64, description: &str) -> Value {
+    json!({"id": id, "amount": amount, "description": description})
+}
+
+/// A second payment's answer whose effects copy its request onto the first payment
+/// changes nothing on it: a create makes its own record, not a sibling's. The effect is
+/// told rejected, and the new payment is stored.
+#[tokio::test]
+async fn a_create_s_effect_never_rewrites_a_sibling_it_does_not_name() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("tr_000001", 25.0, "Order X-1"),
+            json!({
+                "effects": [{"type": "payments", "id": "tr_000001", "set": {"amount": 9.99, "description": "Order X-2"}}],
+                "response": payment("tr_000002", 9.99, "Order X-2"),
+            }),
+        ],
+    );
+    h.post(
+        "/ledgers/lg_000001/payments",
+        json!({"amount": 25.0, "description": "Order X-1"}),
+    )
+    .await;
+    let (status, body) = h
+        .post(
+            "/ledgers/lg_000001/payments",
+            json!({"amount": 9.99, "description": "Order X-2"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body} {}", h.prompt(1));
+    let first = h.held("payments", "tr_000001").await;
+    assert_eq!(first["amount"], 25.0, "{first}");
+    assert_eq!(first["description"], "Order X-1", "{first}");
+    assert_eq!(
+        h.held("payments", "tr_000002").await["amount"],
+        9.99,
+        "{body} {}",
+        h.prompt(1)
+    );
+}
+
+/// A create may still change a record of its own type its request names (the payment
+/// it replies to), and a record of another type (the ledger its path names).
+#[tokio::test]
+async fn a_create_s_effects_on_what_it_names_still_apply() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("tr_000001", 25.0, "Order X-1"),
+            json!({
+                "effects": [{"type": "payments", "id": "tr_000001", "set": {"replies": 1}}],
+                "response": payment("tr_000002", 1.0, "Reply"),
+            }),
+            json!({"id": "lg_000001", "total": 0}),
+            json!({
+                "effects": [{"type": "ledgers", "id": "lg_000001", "set": {"total": 5}}],
+                "response": payment("tr_000003", 5.0, "Ledger"),
+            }),
+        ],
+    );
+    h.post(
+        "/payments",
+        json!({"amount": 25.0, "description": "Order X-1"}),
+    )
+    .await;
+    h.post(
+        "/payments",
+        json!({"amount": 1.0, "description": "Reply", "reply_to": "tr_000001"}),
+    )
+    .await;
+    assert_eq!(
+        h.held("payments", "tr_000001").await["replies"],
+        1,
+        "{}",
+        h.prompt(1)
+    );
+    h.send("GET", "/ledgers/lg_000001", None, &[]).await;
+    let (status, _) = h
+        .post(
+            "/ledgers/lg_000001/payments",
+            json!({"amount": 5.0, "description": "Ledger"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{}", h.prompt(3));
+    assert_eq!(
+        h.held("ledgers", "lg_000001").await["total"],
+        5,
+        "{}",
+        h.prompt(3)
+    );
+}

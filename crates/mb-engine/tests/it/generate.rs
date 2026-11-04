@@ -2660,6 +2660,71 @@ async fn a_create_declaring_only_a_400_is_offered_it() {
     );
 }
 
+/// The id a create's body asks for under its identity field is its asked identity, a
+/// string or a number; nothing else is, and no other operation has one.
+#[test]
+fn a_create_s_asked_identity_is_its_body_s_identity_field() {
+    let bundle = inline(TEAMS);
+    let op = bundle.operation("createTeam").unwrap();
+    let call = |body: Value| OperationCall {
+        operation_id: "createTeam".into(),
+        body: Some(body),
+        ..OperationCall::default()
+    };
+    let asked = |body: Value| mb_engine::guards::asked_identity(op, &call(body));
+    assert_eq!(
+        asked(json!({"id": "t1", "slug": "core"})).as_deref(),
+        Some("t1")
+    );
+    assert_eq!(asked(json!({"id": 42})).as_deref(), Some("42"));
+    assert_eq!(asked(json!({"slug": "core"})), None);
+    assert_eq!(asked(json!({"id": ""})), None);
+    assert_eq!(asked(json!({"id": {"nested": "t1"}})), None);
+    let read = bundle.operation("getTeam").unwrap();
+    assert_eq!(
+        mb_engine::guards::asked_identity(read, &call(json!({"id": "t1"}))),
+        None
+    );
+}
+
+/// A create shown the record its body's id already names, under that identity member,
+/// is offered its refusal and told that a second record cannot take the id. Shown a
+/// record holding another member's value, it is not told so.
+#[tokio::test]
+async fn a_create_repeating_a_held_id_is_told_the_id_is_taken() {
+    let bundle = inline(TEAMS);
+    let op = bundle.operation("createTeam").unwrap();
+    let answer = json!({"effects": [], "response": {"id": "t1", "slug": "core"}}).to_string();
+    let (provider, engine) = scripted(vec![Ok(answer.clone()), Ok(answer)]);
+    let c = OperationCall {
+        operation_id: "createTeam".into(),
+        path_params: Map::from_iter([("org".to_string(), json!("acme"))]),
+        body: Some(json!({"id": "t1", "slug": "other"})),
+        ..OperationCall::default()
+    };
+    let related = [StoredResource {
+        resource_type: "teams".into(),
+        id: "t1".into(),
+        data: json!({"id": "t1", "slug": "core"}),
+    }];
+    for (i, member) in ["id", "slug"].into_iter().enumerate() {
+        let same = [("teams".to_string(), "t1".to_string(), member.to_string())];
+        let ctx = GenerationContext {
+            related: &related,
+            same_values: &same,
+            ..ctx()
+        };
+        engine.generate(&bundle, op, &c, ctx).await.unwrap();
+        let user = provider.requests()[i].messages[1].content.clone();
+        assert!(user.contains("\"refusal\""), "{member}: {user}");
+        assert_eq!(
+            user.contains("its type's identity"),
+            member == "id",
+            "{member}: {user}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn runaway_strings_are_truncated_unless_a_max_length_allows_them() {
     let bundle = inline(
