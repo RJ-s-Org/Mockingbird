@@ -40,6 +40,8 @@ A create whose own type has no `GET` by path stores its record as the type that 
 
 A segment shaped like a version (`v1`, `v1beta2`, `3.0`, `1`, `2024-01-01`) followed by another static segment is never a type: Mailchimp's `GET /3.0/search-members` is `search-members`, and Spotify's `GET /v1/search` is `search`. One the path ends in (`/reports/2024-01-01`) or a parameter follows (`/v2/{id}/cancel`) is a resource like any other.
 
+A key inside a segment reads as whole-segment parameters would. An OData key names the type before its `(` and is keyed by the parameters inside: `/companies({company_id})/customers({customer_id})` reads as `/companies/{company_id}/customers/{customer_id}`, a `customers` record by `customer_id`, as do `customers('{id}')` and `entity(k1={a},k2={b})` (as `/entity/{a}/{b}`). A named key, `/carts/key={key}`, is an alternate key of the collection before it, read as `/carts/{key}`: a cart found by its `key`. A format suffix (`/files/{name}.json`) changes nothing. Other text around a parameter (`/items/{id}:archive`, `v{version}`, `{a}-{b}`) keeps the segment one static segment, as before.
+
 A `GET` below a record's read (`/playlists/{id}/items` below `/playlists/{id}`) that answers exactly the schema of one of that record's members (`tracks`) is answered by that member of the stored record, at runtime, when the session holds it and the request has no query. While a write the record does not show yet is remembered for it or for that path, the read generates as before, and is told of the write.
 
 ## How a `POST` under a resource is read
