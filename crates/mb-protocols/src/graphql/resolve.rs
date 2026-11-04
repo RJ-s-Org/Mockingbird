@@ -625,7 +625,8 @@ async fn write_by_id(
         return;
     };
     if op.kind == OperationKind::Command(mb_mcm::Effect::Delete) {
-        call::delete_resource(rt, plan, call, held).await;
+        let marks = !payload_contradicts(generated.body.as_ref(), &held.id);
+        call::delete_resource(rt, plan, call, held, marks).await;
         return;
     }
     let update = super::state::update_of(&rt.bundle, &held, args);
@@ -637,6 +638,29 @@ async fn write_by_id(
         };
         call::store_resources(rt, &plan.session, vec![resource], true).await;
     }
+}
+
+/// Whether a delete's payload says the record `id` was not deleted: it holds a
+/// non-empty `userErrors` or `errors` list, or an id member (`id`, `deletedId`,
+/// `entityId`) that is `null` or another id. A delete so answered is no evidence
+/// the record is gone, and leaves no marker.
+fn payload_contradicts(payload: Option<&Value>, id: &str) -> bool {
+    let Some(Value::Object(members)) = payload else {
+        return false;
+    };
+    members.iter().any(|(name, value)| {
+        let errors = matches!(name.as_str(), "userErrors" | "errors")
+            && value.as_array().is_some_and(|list| !list.is_empty());
+        let names_id = mb_mcm::is_generic_id(name) || name.ends_with("Id") || name.ends_with("_id");
+        let other_id = names_id
+            && match value {
+                Value::Null => true,
+                Value::String(text) => text != id,
+                Value::Number(n) => n.to_string() != id,
+                _ => false,
+            };
+        errors || other_id
+    })
 }
 
 /// Whether an answer of `status` from `source` makes [`write_by_id`]'s
@@ -775,6 +799,20 @@ pub(crate) fn project(value: Value, ty: &Type, shapes: &Shapes) -> Option<FieldV
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_payload_contradicting_the_delete_leaves_no_marker() {
+        use serde_json::json;
+        let marks = |payload: Value| !payload_contradicts(Some(&payload), "c-1");
+        assert!(marks(json!({"success": true, "entityId": "c-1"})));
+        assert!(marks(json!({"deletedId": "c-1", "userErrors": []})));
+        assert!(!marks(json!({"deletedId": null})));
+        assert!(!marks(json!({"deletedId": "c-2"})));
+        assert!(!marks(
+            json!({"deletedId": "c-1", "userErrors": [{"message": "no"}]})
+        ));
+        assert!(!marks(json!({"errors": [{"message": "no"}]})));
+    }
 
     #[test]
     fn only_a_generated_2xx_answer_writes_by_id() {

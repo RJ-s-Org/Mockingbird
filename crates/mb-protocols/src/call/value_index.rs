@@ -71,8 +71,10 @@
 //! store other processes may write to (a SQLite file, Postgres, Redis, a bus to other
 //! nodes), a member match the index finds also asks the store ([`held_once`]): the
 //! session's records of the holder's type, and of each type whose read declares the
-//! member, must show no other holder, in listings within [`MAX_SCAN`] and the
-//! request's [`MAX_READS`]. A listing cut short, or a type left unread, is no match.
+//! member, must show no other holder, and the holder's own type must show the hit
+//! holding the value, in listings of fewer than [`MAX_SCAN`] (500) records each and
+//! within the request's [`MAX_READS`]. A listing that may be cut short (500 records or
+//! more of a type), or a type left unread, is no match.
 //! Records are keyed by session (workspace, mock and session), on the index and in the
 //! store, so neither another tenant's nor another session's records ever match.
 
@@ -787,14 +789,17 @@ pub(super) async fn matched(
     out
 }
 
-/// Whether `value`, which `hit` holds under `member`, is held by no other record the
-/// store shows: of `hit`'s type, then of each other type whose read declares
-/// `member`, in one listing of at most [`MAX_SCAN`] each, newest first. `Some(false)`
-/// when another holds it, or a listing was cut short or is past [`MAX_READS`] (the
-/// value cannot be told unique); `None` when the store failed or the breaker held it
-/// off, which decides nothing more this call. On a store other processes write to,
-/// they may have stored the same value, so what the index found is checked so; on a
-/// store only this process writes to, the index sees every write and needs no listing.
+/// Whether `value`, which `hit` holds under `member`, is held by `hit` alone among the
+/// records the store shows: of `hit`'s type, whose complete listing must show `hit`
+/// holding it, then of each other type whose read declares `member`, in one listing
+/// each. `Some(false)` when another holds it, `hit` is not listed holding it, a
+/// listing reaches [`MAX_SCAN`] (500) records, so it may be cut short, or the checks
+/// would pass [`MAX_READS`]: the value cannot be told unique. A session holding 500 or
+/// more records of a type that declares `member` therefore matches nothing by that
+/// member on such a store. `None` when the store failed or the breaker held it off,
+/// which decides nothing more this call. On a store other processes write to, they may
+/// have stored the same value, so what the index found is checked so; on a store only
+/// this process writes to, the index sees every write and needs no listing.
 async fn held_once(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -827,11 +832,12 @@ async fn held_once(
         if listed.len() >= MAX_SCAN {
             return Some(false);
         }
-        let others = listed.iter().any(|r| {
-            !(r.resource_type == hit.resource_type && r.id == hit.id)
-                && r.data.get(member).and_then(Value::as_str) == Some(value)
-        });
-        if others {
+        let holds = |r: &StoredResource| r.data.get(member).and_then(Value::as_str) == Some(value);
+        let is_hit = |r: &StoredResource| r.resource_type == hit.resource_type && r.id == hit.id;
+        if t == hit.resource_type && !listed.iter().any(|r| is_hit(r) && holds(r)) {
+            return Some(false);
+        }
+        if listed.iter().any(|r| !is_hit(r) && holds(r)) {
             return Some(false);
         }
     }

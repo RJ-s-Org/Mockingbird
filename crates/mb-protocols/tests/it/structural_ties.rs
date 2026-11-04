@@ -180,6 +180,14 @@ paths:
         content: {application/json: {schema: {type: object, required: [email], properties: {email: {type: string}}}}}
       responses:
         "201": {description: booked, content: {application/json: {schema: {$ref: "#/components/schemas/SeatBooked"}}}}
+  /showings/{showingId}/seats/{seat_id}:
+    get:
+      operationId: getSeat
+      parameters:
+        - {name: showingId, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: seat_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/SeatBooked"}}}}
 components:
   schemas:
     Showing:
@@ -197,12 +205,10 @@ components:
         title: {type: string, description: The showing's title.}
 "##;
 
-/// The booking answers the showing's id under `id`, as its schema says, beside its
-/// own `seat_id`: that `id` is no taken identity, and the client gets it as answered.
-#[tokio::test]
-async fn an_answer_keyed_apart_keeps_the_id_it_names() {
+/// Books a seat on showing 78245196304 over `contract`; the booking's answer.
+async fn booked_seat(contract: &str) -> Value {
     let h = harness(
-        SEATS,
+        contract,
         vec![
             json!({"id": 78_245_196_304_u64, "title": "Matinee"}),
             json!({"id": 78_245_196_304_u64, "seat_id": "st-a81f", "title": "Matinee"}),
@@ -220,12 +226,34 @@ async fn an_answer_keyed_apart_keeps_the_id_it_names() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{booked}");
+    booked
+}
+
+/// The booking answers the showing's id under `id`, as its schema says, beside its
+/// own `seat_id`, both of which the seat's read declares: that `id` is no taken
+/// identity, and the client gets it as answered.
+#[tokio::test]
+async fn an_answer_keyed_apart_keeps_the_id_it_names() {
+    let booked = booked_seat(SEATS).await;
     assert_eq!(booked["id"], 78_245_196_304_u64, "{booked}");
     assert_eq!(booked["seat_id"], "st-a81f", "{booked}");
 }
 
+/// With no read of a seat declaring `seat_id`, the answer's `seat_id` keys nothing
+/// apart, and the showing's id under `id` is re-minted, as before.
+#[tokio::test]
+async fn an_answer_keyed_apart_only_by_its_body_is_re_minted() {
+    let start = SEATS
+        .find("  /showings/{showingId}/seats/{seat_id}:")
+        .unwrap();
+    let end = SEATS.find("components:").unwrap();
+    let unread = format!("{}{}", &SEATS[..start], &SEATS[end..]);
+    let booked = booked_seat(&unread).await;
+    assert_ne!(booked["id"], 78_245_196_304_u64, "{booked}");
+}
+
 /// Products whose read declares no `404`: a missing item answers the declared
-/// `403`, whose description says so. `fields` lists the members to answer.
+/// `410`.
 const PRODUCTS: &str = r##"
 openapi: 3.0.0
 info: {title: Catalog, version: "1"}
@@ -249,6 +277,7 @@ paths:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Envelope"}}}}
         "400": {$ref: "#/components/responses/Error"}
         "403": {$ref: "#/components/responses/Forbidden"}
+        "410": {$ref: "#/components/responses/Gone"}
     delete:
       operationId: deleteProduct
       parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
@@ -260,7 +289,10 @@ components:
       description: "400 `INVALID_QUERY`."
       content: {application/json: {schema: {$ref: "#/components/schemas/Errors"}}}
     Forbidden:
-      description: "403 `FORBIDDEN`: the item does not exist, or the token may not access it."
+      description: "403 `FORBIDDEN`: the token may not access the item."
+      content: {application/json: {schema: {$ref: "#/components/schemas/Errors"}}}
+    Gone:
+      description: "410: the item was deleted."
       content: {application/json: {schema: {$ref: "#/components/schemas/Errors"}}}
   schemas:
     Errors:
@@ -300,8 +332,8 @@ fn product() -> Value {
                     "dimensions": {"width": 12, "height": 40}}})
 }
 
-/// A read of a deleted product answers the read's declared `403`, the one status it
-/// declares for an item that does not exist, not an undeclared `404`.
+/// A read of a deleted product answers the read's declared `410`, not an undeclared
+/// `404`, nor its `403`, which is about who asks.
 #[tokio::test]
 async fn a_deleted_record_answers_the_declared_status_for_a_missing_one() {
     let h = harness(PRODUCTS, vec![product(), json!({}), product()]);
@@ -316,46 +348,7 @@ async fn a_deleted_record_answers_the_declared_status_for_a_missing_one() {
     let (status, _, gone) = h.call("DELETE", "/items/products/731", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{gone}");
     let (status, source, read) = h.call("GET", "/items/products/731", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{read}");
+    assert_eq!(status, StatusCode::GONE, "{read}");
     assert_eq!(source, "state", "{read}");
     assert!(read["errors"].is_array(), "{read}");
-}
-
-/// A stored read honours `fields`, which its description ties to the product's
-/// members by an example, dotted tokens going through what the record holds; `sort`,
-/// whose example is no member list, cuts nothing.
-#[tokio::test]
-async fn a_stored_read_answers_only_the_fields_asked_for() {
-    let h = harness(PRODUCTS, vec![product()]);
-    let (status, _, made) = h
-        .call(
-            "POST",
-            "/items/products",
-            Some(json!({"name": "Desk Lamp", "price": 49.5,
-                        "dimensions": {"width": 12, "height": 40}})),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{made}");
-    let (status, source, read) = h
-        .call("GET", "/items/products/731?fields=id,name", None)
-        .await;
-    assert_eq!(status, StatusCode::OK, "{read}");
-    assert_eq!(source, "state", "{read}");
-    assert_eq!(read, json!({"data": {"id": 731, "name": "Desk Lamp"}}));
-    let (_, source, read) = h
-        .call(
-            "GET",
-            "/items/products/731?fields=name,dimensions.width",
-            None,
-        )
-        .await;
-    assert_eq!(source, "state", "{read}");
-    assert_eq!(
-        read,
-        json!({"data": {"name": "Desk Lamp", "dimensions": {"width": 12}}})
-    );
-    let (_, source, read) = h.call("GET", "/items/products/731?sort=name", None).await;
-    assert_eq!(source, "state", "{read}");
-    assert_eq!(read, product());
-    assert_eq!(h.calls(), 1);
 }

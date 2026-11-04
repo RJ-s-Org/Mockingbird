@@ -660,6 +660,87 @@ fn in_collection(
     })
 }
 
+/// The fewest characters a free-text value holds to be found as part of a text: a
+/// shorter one (`q=a`) is in almost any.
+const MIN_CONTAINED: usize = 3;
+
+/// A value of a list read's query that is no filter, page size or list of fields, which
+/// a stored record must show to be served on a next page (see [`stored_rest`]).
+struct Shown<'q> {
+    param: &'q str,
+    texts: Vec<String>,
+    /// Free text (no `enum`, `const`, `format` or `pattern`): a value holding no digit
+    /// is shown by a declared text of the item holding it, ignoring case.
+    loose: bool,
+    /// For a value at the parameter's `default`, the words a record could hold for the
+    /// choice: the `default` and the parameter's `enum`. When no item served and no
+    /// stored record holds any of them whole, the value asks nothing of the records.
+    choices: Option<Vec<String>>,
+}
+
+impl Shown<'_> {
+    /// Whether stored `r`, shown as `item`, shows every one of the values. When the
+    /// create that stored it carried the parameter, that alone decides: the same value
+    /// shows, another excludes it. Once noted, a scope this runtime no longer knows to
+    /// hold ([`ScopeOf::Noted`]) still keeps the parameter from being found by part.
+    /// Otherwise `r` holds the value whole, or, for free text of at least
+    /// [`MIN_CONTAINED`] characters holding no digit, one of `texts`, the item's
+    /// declared text members, holds it, ignoring case.
+    fn holds(
+        &self,
+        rt: &MockRuntime,
+        session: &SessionKey,
+        (r, item): (&StoredResource, &Value),
+        texts: &[&str],
+    ) -> bool {
+        let carried = rt.collections().carried(session, r, self.param);
+        self.texts.iter().all(|value| match &carried {
+            ScopeOf::Carried(values) => values.contains(value),
+            ScopeOf::Noted => mentions(&r.data, value, 0),
+            ScopeOf::Unknown => {
+                mentions(&r.data, value, 0)
+                    || (self.loose
+                        && value.chars().count() >= MIN_CONTAINED
+                        && !holds_a_digit(value)
+                        && contains_text(item, texts, value))
+            }
+        })
+    }
+}
+
+/// Whether one of `members` of `item`, each text, holds `wanted`, ignoring case.
+fn contains_text(item: &Value, members: &[&str], wanted: &str) -> bool {
+    let wanted = wanted.to_lowercase();
+    !wanted.is_empty()
+        && members.iter().any(|member| {
+            item.get(*member)
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.to_lowercase().contains(&wanted))
+        })
+}
+
+/// The members of the items `item_parts` describe that hold free text a search may find
+/// part of: text with no `format` (not a URL, an email or a date), and not `field`, the
+/// items' identity.
+fn text_members<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    item_parts: &[&'a Value],
+    field: &str,
+) -> Vec<&'a str> {
+    declared_names(item_parts)
+        .into_iter()
+        .filter(|name| *name != field)
+        .filter(|name| {
+            let schema = item_parts
+                .iter()
+                .find_map(|p| p.get("properties")?.get(*name));
+            let (parts, _) = schema_parts(bundle, schema);
+            types_of(&parts).into_iter().eq(["string"])
+                && !parts.iter().any(|p| p.get("format").is_some())
+        })
+        .collect()
+}
+
 /// Records of the list's item type a list read looks at for what a full page left out,
 /// at most.
 const MAX_STORED_REST: usize = 100;
@@ -669,16 +750,33 @@ const MAX_STORED_REST: usize = 100;
 /// type, in the route's collection (see [`in_collection`]), holding what each of the
 /// query's filters asks, and showing the request's every other value, unless the
 /// parameter is an array or free text (no `enum` or `const`) and all of that value's
-/// comma-separated words name members of the items (`fields=name,notes`). A value of a
+/// comma-separated words name members of the items (`fields=name,notes`), or the value
+/// is the parameter's `default` (`type=scheduled`) and neither an item served nor a
+/// record of the collection holds the `default` or another of the parameter's `enum`
+/// whole, as then the value asks what leaving it out asks (`show=open` beside records
+/// holding `open` or `done` is a choice they show). When the create that stored a
+/// record carried the parameter, as this runtime's writes tell and the record is as it
+/// was then (see [`Collections::carried`]), that alone decides: the same value shows,
+/// another excludes the record whatever it holds (`org=other` is no record of `acme`).
+/// Otherwise a record shows a value it holds whole at any depth, or, for free text (no
+/// `enum`, `const`, `format` or `pattern`) and a value of at least [`MIN_CONTAINED`]
+/// characters holding no digit, one that a declared text member of the item holds,
+/// ignoring case: no identity, and none with a `format` (a URL, an email, a date), so
+/// `q=walk` finds `Walk the dog`. A value the mock cannot read (an expression,
+/// `filter=any(email,[…])`) is shown by no record whole, so it keeps every record off
+/// the next page, and the next page goes to the model as before: a debug event names
+/// the parameters that kept records off. No meaning is guessed for such a value. The
+/// records of the collection are read once, as before, for all of this. A value of a
 /// number parameter, which could be found anywhere, leaves `cut` as it is, unless it is
 /// the parameter's `default` or `minimum` (`offset=0`), which asks for nothing; so does a
 /// value of any other kind. Each record shows as the items declare it ([`projected`]), and only where it
 /// validates as one; one with no identity, or the identity of an item served or left
 /// out, is not taken. A page is full when it holds as many items as the request's page
 /// size asks. The store is read only when the answer has a place for a token
-/// ([`pages::slot`]), and, with no cut, holds none there that the model gave: a token of
-/// its own goes on to its own next page; or else when the request asks for the first
-/// page of a list paged by number or offset ([`runs::starts`]). A route with no path parameter is read only
+/// ([`pages::slot`]), or else when the request asks for the first page of a list paged
+/// by number or offset ([`runs::starts`]). A token the model gave there is read past:
+/// records the store holds for a next page come before the model's own next page, so
+/// [`pages::mint`] writes a token of the mock's over it. A route with no path parameter is read only
 /// when it is the type's sole list read with none and a write of the type shares its
 /// path ([`BundleIndex::sole_written_list`]). The records go least recently written
 /// first, as the store orders them by their last write. The items' type `t` when their
@@ -732,11 +830,6 @@ pub(super) async fn stored_rest(
     if slot.is_none() && !runs::starts(bundle, (op, call), size_param) {
         return cut;
     }
-    // A token the model gave goes on to its own next page.
-    let given = slot.is_some_and(|slot| slot.given(body).is_some());
-    if cut.is_none() && given {
-        return cut;
-    }
     let Some(item_type) = rt
         .index()
         .item_type(bundle, op, body)
@@ -757,7 +850,7 @@ pub(super) async fn stored_rest(
     let filters = filters_of(bundle, query, &item_parts, call, page);
     let declared = declared_names(&item_parts);
     let declared_params = query.and_then(|q| q.get("properties"));
-    let mut shown: Vec<String> = Vec::new();
+    let mut shown: Vec<Shown<'_>> = Vec::new();
     for (param, raw) in &call.query {
         if param == size_param || filters.iter().any(|(name, _)| name == param) {
             continue;
@@ -798,6 +891,26 @@ pub(super) async fn stored_rest(
             }
             return cut;
         }
+        // The parameter's `default` asks what leaving it out asks, unless records hold
+        // it as a choice (see [`Shown::choices`]).
+        let defaults: Vec<String> = param_parts
+            .iter()
+            .filter_map(|p| p.get("default").and_then(id_string))
+            .map(|d| d.trim().to_string())
+            .collect();
+        let choices = (texts.len() == 1 && defaults.contains(&texts[0])).then(|| {
+            let mut words = defaults.clone();
+            words.extend(
+                param_parts
+                    .iter()
+                    .filter_map(|p| p.get("enum").and_then(Value::as_array))
+                    .flatten()
+                    .filter_map(id_string)
+                    .map(|w| w.trim().to_string()),
+            );
+            words.retain(|w| !w.is_empty());
+            words
+        });
         // Only an array or free text lists fields: an `enum` value is a choice.
         let may_project = !param_parts
             .iter()
@@ -814,10 +927,23 @@ pub(super) async fn stored_rest(
                 })
             });
         if !names_members {
-            shown.extend(texts);
+            // Text the contract says nothing more of is often searched by part.
+            let loose = param_types.iter().eq(["string"].iter())
+                && !param_parts.iter().any(|p| {
+                    ["enum", "const", "format", "pattern"]
+                        .iter()
+                        .any(|at| p.get(*at).is_some())
+                });
+            shown.push(Shown {
+                param: param.as_str(),
+                texts,
+                loose,
+                choices,
+            });
         }
     }
     let field = item_identity(bundle, op, body);
+    let texts = text_members(bundle, &item_parts, &field);
     let identity = |item: &Value| item.get(&field).and_then(id_string);
     let mut known: Vec<String> = served.iter().filter_map(identity).collect();
     if let Some(cut) = &cut {
@@ -838,11 +964,21 @@ pub(super) async fn stored_rest(
     // The store gives the most recently written first; the least recently written go
     // first here, which for records only created is the order they were made in.
     records.reverse();
+    records.retain(|r| in_collection(rt, (plan, call), &item_type, &field, r));
+    // A value at its `default` that neither the page nor a record holds as a choice
+    // asks nothing of the records.
+    shown.retain(|shown| {
+        shown.choices.as_ref().is_none_or(|words| {
+            words.iter().any(|word| {
+                served.iter().any(|item| mentions(item, word, 0))
+                    || records.iter().any(|r| mentions(&r.data, word, 0))
+            })
+        })
+    });
     let mut missing = Vec::new();
+    // The parameters whose values kept records off, none of which showed them.
+    let mut withheld: BTreeSet<&str> = BTreeSet::new();
     for r in &records {
-        if !in_collection(rt, (plan, call), &item_type, &field, r) {
-            continue;
-        }
         let item = projected(bundle, Some(items_schema), &r.data, 0);
         let Some(id) = identity(&item) else {
             continue;
@@ -851,15 +987,32 @@ pub(super) async fn stored_rest(
             || !filters
                 .iter()
                 .all(|(_, filter)| holds_wanted(&item, filter))
-            || !shown.iter().all(|value| mentions(&r.data, value, 0))
-            || !valid(&item)
         {
+            continue;
+        }
+        let failed: Vec<&str> = shown
+            .iter()
+            .filter(|shown| !shown.holds(rt, &plan.session, (r, &item), &texts))
+            .map(|shown| shown.param)
+            .collect();
+        if !failed.is_empty() {
+            withheld.extend(failed);
+            continue;
+        }
+        if !valid(&item) {
             continue;
         }
         known.push(id);
         missing.push(item);
     }
     if missing.is_empty() {
+        if !withheld.is_empty() {
+            tracing::debug!(
+                operation = %op.id,
+                params = ?withheld,
+                "stored records kept off a next page: no record shows a value of the request"
+            );
+        }
         return cut;
     }
     let stored = missing.len();
@@ -1064,5 +1217,42 @@ pub(super) async fn overlay_stored(
         if valid(&candidate) {
             *body = candidate;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn free_text_is_contained_ignoring_case_in_the_members_named() {
+        let item = json!({"name": "Walk the Dog", "email": "walk@example.org", "n": 12});
+        assert!(contains_text(&item, &["name"], "walk"));
+        assert!(contains_text(&item, &["name"], "DOG"));
+        assert!(!contains_text(&item, &["name"], "example"));
+        assert!(!contains_text(&item, &["name"], ""));
+        assert!(!contains_text(&item, &["n"], "12"));
+    }
+
+    #[test]
+    fn only_plain_text_members_are_searched() {
+        let contract = "openapi: 3.0.0\ninfo: {title: t, version: '1'}\npaths: {}\n";
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        let item = json!({"properties": {
+            "id": {"type": "string"},
+            "title": {"type": "string"},
+            "email": {"type": "string", "format": "email"},
+            "count": {"type": "integer"},
+        }});
+        assert_eq!(text_members(&bundle, &[&item], "id"), ["title"]);
+    }
+
+    #[test]
+    fn an_expression_is_held_by_no_record() {
+        let record = json!({"email": "a@x.org"});
+        let expr = r#"any(email,["a@x.org"])"#;
+        assert!(!mentions(&record, expr, 0));
+        assert!(!contains_text(&record, &["email"], expr));
     }
 }

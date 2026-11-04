@@ -2494,6 +2494,44 @@ async fn a_noun_first_delete_removes_the_stored_record() {
     assert_eq!(provider.requests().len(), 3);
 }
 
+/// A delete whose payload names another id leaves no marker: the record is
+/// gone from the store, and a later read is generated, not refused.
+#[tokio::test]
+async fn a_delete_whose_payload_contradicts_it_leaves_no_marker() {
+    let (provider, rt) = noun_first(scripted(vec![
+        json!({"__typename": "CommentPayload", "success": true,
+               "comment": {"__typename": "Comment", "id": "c-1", "body": "Hi"}}),
+        json!({"__typename": "DeletePayload", "success": true, "entityId": "c-9"}),
+        json!({"__typename": "Comment", "id": "c-1", "body": "Still here"}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    post(
+        &base,
+        json!({"query": "mutation { commentCreate(input: {body: \"Hi\"}) { success comment { id body } } }"}),
+        &session,
+    )
+    .await;
+    post(
+        &base,
+        json!({"query": "mutation { commentDelete(id: \"c-1\") { success entityId } }"}),
+        &session,
+    )
+    .await;
+    let read = post(
+        &base,
+        json!({"query": "query($id: ID!) { comment(id: $id) { id body } }", "variables": {"id": "c-1"}}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.body["data"]["comment"]["body"], "Still here",
+        "{}",
+        read.body
+    );
+    assert_eq!(provider.requests().len(), 3);
+}
+
 /// `productVariantDelete(id: "1")` deletes a variant: the stored product
 /// `1` its payload holds stays.
 #[tokio::test]
