@@ -38,11 +38,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import proxy as bench_proxy  # noqa: E402  (load_provider_pins; proxy.py runs nothing on import)
 OPENROUTER_API = "https://openrouter.ai/api/v1"
 DEFAULT_OUT = os.path.join("docs", "benchmarks", "2026-10-29")
 DEFAULT_MANIFEST = os.path.join("docs", "benchmarks", "workloads.json")
 DEFAULT_MB_EVALS = os.path.join("target", "release", "mb-evals")
 DEFAULT_SERVER_SUITES = os.path.join("scripts", "llm-bench", "server_suites.py")
+DEFAULT_PROVIDER_PINS = os.path.join("scripts", "llm-bench", "providers.json")
 DUMMY_KEY = "bench-dummy"
 DEFAULT_MAX_OPS = 10  # mb-evals' --max-ops-per-contract default
 # Assumed tokens per call when a model has no pilot measurement yet.
@@ -202,6 +206,11 @@ def preflight(args: argparse.Namespace) -> int:
                 "reasoning": "reasoning" in params,
             }
         )
+    # Record the provider pin the proxy will send with each model (providers.json).
+    pins_path = getattr(args, "provider_pins", DEFAULT_PROVIDER_PINS)
+    pins = bench_proxy.load_provider_pins(abspath(pins_path) if pins_path else None)
+    for r in roster:
+        r["provider_pin"] = pins.get(r["id"]) or pins.get(r["id"].split("@", 1)[0])
     path = os.path.join(out, "roster.json")
     write_json(path, {"fetched_at": utc_now(), "source": args.openrouter_api + "/models", "models": roster,
                       "missing": missing})
@@ -296,6 +305,8 @@ class ProxyProc:
         for p in list(prior) + list(args.prior_ledger or []):
             if os.path.exists(p):
                 cmd += ["--prior-ledger", p]
+        pins = getattr(args, "provider_pins", DEFAULT_PROVIDER_PINS)
+        cmd += ["--provider-pins", abspath(pins) if pins else ""]
         # The engine steps down from a rejected schema itself; let it.
         cmd.append("--no-format-fallback")
         if args.no_stream_upgrade:
@@ -612,6 +623,25 @@ def projections(args: argparse.Namespace, models: List[str]) -> Dict[str, Tuple[
     return proj
 
 
+def model_providers(stats: Dict[str, Any], model: str) -> Dict[str, int]:
+    """Calls per serving provider for `model`, most first, from the proxy's /stats."""
+    pre = slug(model) + "~"
+    counts: Dict[str, int] = {}
+    for k, v in (stats.get("per_label") or {}).items():
+        if k.startswith(pre):
+            for p, n in (v.get("providers") or {}).items():
+                counts[p] = counts.get(p, 0) + int(n or 0)
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def provider_mix(counts: Dict[str, int]) -> str:
+    """`Fireworks 2089 (98.8%), Darkbloom 24 (1.1%)`, or `none recorded`."""
+    total = sum(counts.values())
+    if not total:
+        return "none recorded"
+    return ", ".join(f"{p} {n} ({100.0 * n / total:.1f}%)" for p, n in counts.items())
+
+
 def model_spent(stats: Dict[str, Any], model: str) -> float:
     pre = slug(model) + "~"
     return sum(float(v.get("cost_usd") or 0.0) for k, v in (stats.get("per_label") or {}).items()
@@ -754,9 +784,11 @@ def full(args: argparse.Namespace) -> int:
         spent = model_spent(st, m)
         why = stopped()
         status = "done" if engine_ok(rc) and srv_rc in (None, 0) and not why else ("partial" if why else "failed")
+        providers = model_providers(st, m)
         setm(m, status=status, server_exit=srv_rc, spent_usd=round(spent, 6), wall_s=round(time.time() - t0, 1),
-             finished=utc_now(), stop_reason=why)
-        log(f"{m}: {status}, spent ${spent:.4f} (total ${st.get('spent_usd', 0):.4f})")
+             finished=utc_now(), stop_reason=why, providers=providers)
+        log(f"{m}: {status}, spent ${spent:.4f} (total ${st.get('spent_usd', 0):.4f}); "
+            f"providers: {provider_mix(providers)}")
 
     def skip_rest(queue: List[str], why: str) -> None:
         for m in queue:
@@ -874,11 +906,15 @@ def main() -> int:
         p.add_argument("--repeat", type=int, default=3, help="calls per target in the full run")
         p.add_argument("--server-calls", type=int, default=40, help="estimated server-suite LLM calls per model")
         p.add_argument("--no-stream-upgrade", action="store_true")
+        p.add_argument("--provider-pins", default=DEFAULT_PROVIDER_PINS,
+                       help="per-model OpenRouter provider pins for the proxy (default %(default)s; '' for none)")
         p.add_argument("--upstream", help=argparse.SUPPRESS)  # tests: a fake OpenRouter
 
     p = sub.add_parser("preflight", help="write roster.json and key-before.json")
     common(p)
     p.add_argument("--strict", action="store_true", help="exit 1 when a roster model is missing")
+    p.add_argument("--provider-pins", default=DEFAULT_PROVIDER_PINS,
+                   help="pins to record in roster.json as provider_pin (default %(default)s; '' for none)")
 
     p = sub.add_parser("pilot", help="small engine slice per model; project the full run's cost")
     common(p)
