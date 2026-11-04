@@ -239,7 +239,7 @@ Rules (each failing entry is dropped from `applied` and listed once):
 - Consumes: Tasks 1–4.
 - Produces:
   - `pub struct EffectiveWorld { pub world: World, pub authors: BTreeMap<String, Author>, pub revision: i64, pub refused: Vec<Refusal>, pub gaps: Vec<Gap> }`. `authors` maps each entry pointer set by the overlay (at the granularity of `/types/{t}/{field}` and `/operations/{op}/{field}`) to the author of the newest revision that set it. Every other entry is `heuristic`.
-  - `pub async fn effective_world(store: &dyn ControlStore, mock_id: Uuid, version: i64, bundle: &Bundle) -> Result<EffectiveWorld, StoreError>`: `tier0(bundle)` overlaid with the latest revision's document, validated, plus `gaps`. When there is no revision, `revision = 0`.
+  - `pub async fn effective_world(store: &dyn ControlStore, mock_id: Uuid, version: i64, bundle: &Bundle) -> Result<EffectiveWorld, StoreError>`: `overlay(tier0(bundle), validate(latest revision's document, bundle).applied)` plus `gaps`: the overlay is validated before it is laid over tier 0 (not after), so a stale, refused or emptied overlay entry falls back to tier 0's value instead of removing it. When there is no revision, `revision = 0`.
   - `pub async fn carry_forward(store: &dyn ControlStore, mock_id: Uuid, from: i64, to: i64, to_bundle: &Bundle) -> Result<Option<WorldRevision>, StoreError>`: copies `from`'s latest overlay, keeping only the entries `validate` applies against `to_bundle`, as revision 1 of `to`. It does nothing when `from` has no revision. It is called right after every new contract version is added.
 
 - [ ] **Step 1:** write the failing tests:
@@ -284,7 +284,7 @@ Rules (each failing entry is dropped from `applied` and listed once):
 **Interfaces:**
 - Consumes: Task 5's `effective_world`; Task 4's `add_world_revision`.
 - Produces:
-  - `PUT /mocks/{m}/contracts/{v}/world`: the body is an overlay `World`, and it replaces the overlay. It takes an optional `If-Match: <revision>`. `check_size` failures give 413/422. The answer is `201 WorldWriteResult { revision, applied: World, refused: Vec<Refusal> }`. Only `applied` is stored, so refused entries aren't saved. The author comes from the `author` query parameter (`agent`|`llm`|`user`, default `user`); `heuristic` is refused.
+  - `PUT /mocks/{m}/contracts/{v}/world`: the body is an overlay `World`, and it replaces the overlay. It takes an optional `If-Match: <revision>`. `check_size` failures give 413 (`RefusalCode::TooLarge`) or 422 (`invalid`, too deep). The answer is `201 WorldWriteResult { revision, applied: World, refused: Vec<Refusal> }`. Only `applied` is stored, so refused entries aren't saved. The author comes from the `author` query parameter (`agent`|`llm`|`user`, default `user`); `heuristic` is refused.
   - `PATCH` (same path, `application/merge-patch+json`): merges into the current overlay with `json_patch::merge`, then behaves as PUT.
   - `GET .../world/revisions` → `[WorldRevisionInfo]`; `GET .../world/revisions/{r}` → `WorldRevision`.
   - `POST .../world/revisions/{r}/restore`: adds a new revision whose document is `r`'s, validated again. The answer is `WorldWriteResult`.

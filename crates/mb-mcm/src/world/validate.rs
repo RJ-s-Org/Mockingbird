@@ -37,7 +37,7 @@ pub struct Validation {
 pub struct Refusal {
     /// A JSON pointer into the description naming the entry, e.g.
     /// `/operations/MoveFolder/target/path_param`. Empty for the whole
-    /// document (a [`check_size`] refusal of its size).
+    /// document (a [`RefusalCode::TooLarge`] refusal).
     pub path: String,
     /// Why it was refused.
     pub code: RefusalCode,
@@ -58,9 +58,12 @@ pub enum RefusalCode {
     /// GraphQL operation.
     NotApplicable,
     /// It is malformed: a pointer that doesn't parse, a pattern without
-    /// exactly one `{id}`, a state not among the states, a document too large
-    /// or too deep.
+    /// exactly one `{id}`, a state not among the states, a document nested
+    /// too deep.
     Invalid,
+    /// The whole document is over [`MAX_BYTES`] ([`check_size`]); its path
+    /// is empty.
+    TooLarge,
 }
 
 impl RefusalCode {
@@ -71,6 +74,7 @@ impl RefusalCode {
             Self::Unresolved => "unresolved",
             Self::NotApplicable => "not_applicable",
             Self::Invalid => "invalid",
+            Self::TooLarge => "too_large",
         }
     }
 }
@@ -93,14 +97,15 @@ impl fmt::Display for Refusal {
 
 /// Checks a description document's raw bytes before it is parsed: at most
 /// [`MAX_BYTES`] long, and arrays and objects nested at most [`MAX_DEPTH`]
-/// deep. A too-large document is refused with an empty path; a too-deep one
-/// names the path of the first array or object past the limit. Both are
-/// [`RefusalCode::Invalid`]. It does not check that the bytes are JSON.
+/// deep. A too-large document is refused as [`RefusalCode::TooLarge`] with an
+/// empty path; a too-deep one as [`RefusalCode::Invalid`], naming the path of
+/// the first array or object past the limit. It does not check that the bytes
+/// are JSON.
 pub fn check_size(bytes: &[u8]) -> Result<(), Refusal> {
     if bytes.len() > MAX_BYTES {
         return Err(Refusal {
             path: String::new(),
-            code: RefusalCode::Invalid,
+            code: RefusalCode::TooLarge,
             message: format!(
                 "the description is {} bytes; at most {MAX_BYTES} are accepted",
                 bytes.len()
@@ -530,7 +535,7 @@ impl<'a> Ctx<'a> {
             );
             return false;
         }
-        if declares_header(op, header) {
+        if declares_header(self.bundle, op, header) {
             return true;
         }
         self.refuse(
@@ -641,7 +646,7 @@ impl<'a> Ctx<'a> {
         if self
             .writes_of(t)
             .iter()
-            .any(|o| is_http(o) && declares_header(o, header))
+            .any(|o| is_http(o) && declares_header(self.bundle, o, header))
         {
             return true;
         }
@@ -1216,34 +1221,13 @@ impl<'a> Ctx<'a> {
 }
 
 /// `applied`, unless filtering left it empty although `authored` was not: a
-/// sub-object whose every entry was refused is dropped (as `transition`
-/// is), so it cannot stand over a lower tier's value in an overlay.
-fn unless_emptied<T: Clone + Default + PartialEq + HasExtra>(
-    authored: &T,
-    applied: T,
-) -> Option<T> {
-    let mut bare = authored.clone();
-    bare.clear_extra();
+/// sub-object whose every entry was refused (unknown keys included) is
+/// dropped (as `transition` is), so it cannot stand over a lower tier's value
+/// in an overlay. One authored empty (`{}`) is kept.
+fn unless_emptied<T: Default + PartialEq>(authored: &T, applied: T) -> Option<T> {
     let empty = T::default();
-    (applied != empty || bare == empty).then_some(applied)
+    (applied != empty || *authored == empty).then_some(applied)
 }
-
-/// The sub-objects [`unless_emptied`] compares, without their unknown keys.
-trait HasExtra {
-    fn clear_extra(&mut self);
-}
-
-macro_rules! has_extra {
-    ($($t:ty),*) => {$(
-        impl HasExtra for $t {
-            fn clear_extra(&mut self) {
-                self.extra = Extra::new();
-            }
-        }
-    )*};
-}
-
-has_extra!(ConcurrencyDesc, TargetDesc, RecordsAt, AnswerDesc);
 
 // ---- schema lookups ----
 
@@ -1353,24 +1337,37 @@ fn at_pointer<'a>(b: &'a Bundle, schema: &'a Value, tokens: &[String]) -> Option
     })
 }
 
-fn object_keys<'a>(b: &'a Bundle, schema: Option<&'a Value>) -> impl Iterator<Item = &'a String> {
-    schema
-        .map(|s| b.resolve(s))
-        .and_then(|s| s.get("properties"))
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|m| m.keys())
+/// Whether `schema` (through `$ref`s and branches) has a property whose
+/// name `matches`.
+fn has_property(b: &Bundle, schema: Option<&Value>, matches: impl Fn(&str) -> bool) -> bool {
+    fn walk(
+        b: &Bundle,
+        schema: &Value,
+        matches: &dyn Fn(&str) -> bool,
+        seen: &mut Seen,
+        depth: usize,
+    ) -> bool {
+        let Some(schema) = visit(b, schema, seen, depth) else {
+            return false;
+        };
+        let here = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.keys().any(|k| matches(k)));
+        here || branches(schema).any(|s| walk(b, s, matches, seen, depth + 1))
+    }
+    schema.is_some_and(|s| walk(b, s, &matches, &mut Seen::new(), 0))
 }
 
 fn declares_path_param(b: &Bundle, op: &Operation, name: &str) -> bool {
-    object_keys(b, op.input.path.as_ref()).any(|k| k == name)
+    has_property(b, op.input.path.as_ref(), |k| k == name)
 }
 
 /// A path or query parameter, or a top-level request body member (RPC-style
 /// and non-HTTP operations take their parameters in the body).
 fn declares_param(b: &Bundle, op: &Operation, name: &str) -> bool {
     declares_path_param(b, op, name)
-        || object_keys(b, op.input.query.as_ref()).any(|k| k == name)
+        || has_property(b, op.input.query.as_ref(), |k| k == name)
         || op
             .input
             .body
@@ -1380,19 +1377,13 @@ fn declares_param(b: &Bundle, op: &Operation, name: &str) -> bool {
 
 /// A declared request header or a header of any declared response, ignoring
 /// case.
-fn declares_header(op: &Operation, name: &str) -> bool {
-    let request = op
-        .input
-        .headers
-        .as_ref()
-        .and_then(|s| s.get("properties"))
-        .and_then(Value::as_object)
-        .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(name)));
-    request
-        || op
-            .outputs
-            .iter()
-            .any(|o| o.headers.keys().any(|k| k.eq_ignore_ascii_case(name)))
+fn declares_header(b: &Bundle, op: &Operation, name: &str) -> bool {
+    has_property(b, op.input.headers.as_ref(), |k| {
+        k.eq_ignore_ascii_case(name)
+    }) || op
+        .outputs
+        .iter()
+        .any(|o| o.headers.keys().any(|k| k.eq_ignore_ascii_case(name)))
 }
 
 fn declares_status(op: &Operation, code: u16) -> bool {
@@ -1834,8 +1825,77 @@ mod tests {
         assert_eq!(folder.identity.as_ref().unwrap().member, "name");
         assert!(folder.identity.as_ref().unwrap().extra.is_empty());
         let get = &v.applied.operations["GetFolder"];
-        assert!(get.target.as_ref().unwrap().extra.is_empty());
+        // `target` held only a typo: refused, it is dropped, not kept empty.
+        assert!(get.target.is_none());
         assert!(get.paging.as_ref().unwrap().extra.is_empty());
+    }
+
+    #[test]
+    fn validate_drops_sub_objects_with_only_unknown_keys() {
+        let w = world(json!({
+            "types": {"folder": {"concurrency": {"bogus": 1}}},
+            "operations": {
+                "GetFolder": {
+                    "target": {"path_parm": "name"},
+                    "answer": {"bogus": 2}
+                },
+                "CreateFolder": {"request": {"bogus": 3}}
+            }
+        }));
+        let v = validate(&w, &folders());
+        assert_eq!(
+            paths(&v),
+            vec![
+                ("/types/folder/concurrency/bogus", RefusalCode::UnknownKey),
+                (
+                    "/operations/CreateFolder/request/bogus",
+                    RefusalCode::UnknownKey
+                ),
+                (
+                    "/operations/GetFolder/target/path_parm",
+                    RefusalCode::UnknownKey
+                ),
+                (
+                    "/operations/GetFolder/answer/bogus",
+                    RefusalCode::UnknownKey
+                ),
+            ]
+        );
+        assert!(v.applied.types["folder"].concurrency.is_none());
+        let get = &v.applied.operations["GetFolder"];
+        assert_eq!(get.target, None);
+        assert!(get.answer.is_none());
+        assert!(v.applied.operations["CreateFolder"].request.is_none());
+    }
+
+    #[test]
+    fn validate_finds_parameters_and_headers_in_composed_inputs() {
+        let mut b = folders();
+        b.defs.insert(
+            "NamePath".into(),
+            json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+        );
+        op(&mut b, "GetFolder").input.path = Some(json!({"allOf": [{"$ref": "#/$defs/NamePath"}]}));
+        op(&mut b, "ListFolders").input.query = Some(json!({"allOf": [
+            {"type": "object", "properties": {"parent": {"type": "string"}}},
+            {"oneOf": [{"type": "object", "properties": {"pageToken": {"type": "string"}}}]}
+        ]}));
+        op(&mut b, "CreateFolder").input.headers = Some(json!({"anyOf": [
+            {"type": "object", "properties": {"idempotency-key": {"type": "string"}}}
+        ]}));
+        let w = world(json!({
+            "operations": {
+                "GetFolder": {"target": {"path_param": "name"}},
+                "ListFolders": {
+                    "scope": {"param": "parent", "member": "parent"},
+                    "filters": [{"param": "pageToken", "kind": "flag"}]
+                },
+                "CreateFolder": {"idempotency": {"header": "Idempotency-Key"}}
+            }
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+        assert_eq!(v.applied, w);
     }
 
     #[test]
@@ -2042,7 +2102,9 @@ mod tests {
     fn check_size_rejects_over_256k_and_depth_33() {
         let big = vec![b' '; MAX_BYTES + 1];
         let err = check_size(&big).unwrap_err();
-        assert_eq!(err.code, RefusalCode::Invalid);
+        // Too large is its own code (an API answers 413), too deep is `invalid` (422).
+        assert_eq!(err.code, RefusalCode::TooLarge);
+        assert_eq!(err.code.as_str(), "too_large");
         assert_eq!(err.path, "");
         assert!(check_size(&vec![b' '; MAX_BYTES]).is_ok());
 
