@@ -27,6 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use mb_mcm::Bundle;
+use mb_mcm::world::Author;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
@@ -146,6 +147,55 @@ pub trait ControlStore: Send + Sync {
         Err(StoreError::Invalid(
             "this control store cannot delete contract versions".to_string(),
         ))
+    }
+    /// Adds a revision of `version`'s world description, numbered the
+    /// version's newest revision plus one (1 for the first). `Conflict` when
+    /// `r.expect` is set and is not the newest revision (`0` for none),
+    /// `NotFound` when the mock or the version does not exist. It does not
+    /// publish a change: nothing at runtime reads it. The default refuses
+    /// with `Invalid`, for stores written before this method existed.
+    async fn add_world_revision(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        r: NewWorldRevision,
+    ) -> Result<WorldRevision, StoreError> {
+        let _ = (mock_id, version, r);
+        Err(StoreError::Invalid(
+            "this control store cannot store world revisions".to_string(),
+        ))
+    }
+    /// `version`'s world revisions without their documents, newest first.
+    /// The default has none.
+    async fn list_world_revisions(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<Vec<WorldRevisionInfo>, StoreError> {
+        let _ = (mock_id, version);
+        Ok(Vec::new())
+    }
+    /// Revision `revision` of `version`'s world description; `NotFound` when
+    /// there is none.
+    async fn get_world_revision(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        revision: i64,
+    ) -> Result<WorldRevision, StoreError> {
+        let _ = mock_id;
+        Err(StoreError::NotFound(format!(
+            "world revision {revision} of contract version {version}"
+        )))
+    }
+    /// `version`'s newest world revision, if any. The default has none.
+    async fn latest_world_revision(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<Option<WorldRevision>, StoreError> {
+        let _ = (mock_id, version);
+        Ok(None)
     }
     /// The mock's `Active` version, if any.
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError>;
@@ -919,6 +969,25 @@ pub(crate) fn require_draft_status(v: &NewContractVersion) -> Result<(), StoreEr
             v.status.as_str()
         )))
     }
+}
+
+/// The [`Author`] stored as `s` ([`Author::as_str`]).
+pub(crate) fn parse_author(s: &str) -> Result<Author, StoreError> {
+    match s {
+        "heuristic" => Ok(Author::Heuristic),
+        "agent" => Ok(Author::Agent),
+        "llm" => Ok(Author::Llm),
+        "user" => Ok(Author::User),
+        other => Err(StoreError::Db(format!("unknown world author {other:?}"))),
+    }
+}
+
+/// The `Conflict` for a revision write whose `expect` is not the newest
+/// revision `current` of `version`.
+pub(crate) fn world_revision_conflict(version: i64, expect: i64, current: i64) -> StoreError {
+    StoreError::Conflict(format!(
+        "world revision conflict on contract version {version}: expected revision {expect}, the newest is {current}"
+    ))
 }
 
 /// Error for a draft-only write to a version that is not a draft.
