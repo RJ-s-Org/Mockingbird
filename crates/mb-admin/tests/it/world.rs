@@ -557,6 +557,15 @@ async fn carry_forward_runs_on_an_import_job() {
         .unwrap()
         .unwrap();
     assert!(second.version > first.version);
+    // Nothing is carried into a draft: it is carried when it is approved.
+    assert!(
+        st.store
+            .latest_world_revision(mock.id, second.version)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    approve(&app, second.version).await;
     let carried = st
         .store
         .latest_world_revision(mock.id, second.version)
@@ -566,4 +575,303 @@ async fn carry_forward_runs_on_an_import_job() {
     assert_eq!(carried.revision, 1);
     assert_eq!(carried.author, Author::Agent);
     assert_eq!(carried.document, doc);
+}
+
+async fn approve(app: &Router, version: i64) -> Value {
+    send(
+        app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts/{version}/approve"),
+        "application/json",
+        Vec::new(),
+    )
+    .await
+}
+
+async fn widgets_mock(st: &AdminState) -> Uuid {
+    st.store
+        .get_mock(DEFAULT_WORKSPACE, "widgets")
+        .await
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn carry_forward_keeps_each_entrys_author() {
+    let (store, mock) = store_with_mock().await;
+    let (from, _) = add_version(store.as_ref(), mock, V1).await;
+    // A person sets `not_found`; an assistant keeps it and adds the order.
+    revise(
+        store.as_ref(),
+        mock,
+        from,
+        Author::User,
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}}),
+    )
+    .await;
+    revise(
+        store.as_ref(),
+        mock,
+        from,
+        Author::Agent,
+        json!({
+            "version": 1,
+            "operations": {
+                "getWidget": {"not_found": 404},
+                "listWidgets": {"order": {"member": "name"}},
+            },
+        }),
+    )
+    .await;
+    let (to, b2) = add_version(store.as_ref(), mock, V1).await;
+    carry_forward(store.as_ref(), mock, from, to, &b2)
+        .await
+        .unwrap()
+        .unwrap();
+    let eff = effective_world(store.as_ref(), mock, to, &b2)
+        .await
+        .unwrap();
+    let expected: BTreeMap<String, Author> = [
+        ("/operations/getWidget/not_found", Author::User),
+        ("/operations/listWidgets/order", Author::Agent),
+    ]
+    .into_iter()
+    .map(|(k, a)| (k.to_string(), a))
+    .collect();
+    assert_eq!(eff.authors, expected);
+    assert_eq!(eff.world.operations["getWidget"].not_found, Some(404));
+    assert!(eff.world.operations["listWidgets"].order.is_some());
+
+    // Carried on again, the authors still hold.
+    let (next, b3) = add_version(store.as_ref(), mock, V1).await;
+    carry_forward(store.as_ref(), mock, to, next, &b3)
+        .await
+        .unwrap()
+        .unwrap();
+    let eff = effective_world(store.as_ref(), mock, next, &b3)
+        .await
+        .unwrap();
+    assert_eq!(eff.authors, expected);
+}
+
+#[tokio::test]
+async fn carry_forward_runs_when_a_draft_is_approved_after_an_edit() {
+    let (st, app) = admin().await;
+    let uri = format!("{BASE}/widgets/contracts");
+    let first = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let from = first["version"].as_i64().unwrap();
+    let mock = widgets_mock(&st).await;
+    let t = widget_type(&compile(V1));
+    revise(
+        st.store.as_ref(),
+        mock,
+        from,
+        Author::User,
+        json!({"version": 1, "types": {t.clone(): {"unique": [{"members": ["color"]}]}}}),
+    )
+    .await;
+    // A draft without `color`, as an import may produce.
+    let meta = mb_import::smart::run_import(
+        mb_import::smart::ImportInput::Bytes {
+            kind: mb_import::smart::ImportKind::Har,
+            name: Some("petstore.har".into()),
+            bytes: std::fs::read(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../fixtures/smart/petstore.har"),
+            )
+            .unwrap(),
+        },
+        None,
+        &mb_import::smart::ImportOptions::default(),
+        &mb_import::smart::NoopObserver,
+    )
+    .await
+    .unwrap()
+    .meta;
+    let source = v2();
+    let draft = st
+        .store
+        .add_draft_contract_version(
+            mock,
+            NewContractVersion {
+                source: source.clone().into_bytes(),
+                bundle: compile(&source),
+                status: ContractStatus::Draft,
+                created_by: Some("editor".into()),
+            },
+            serde_json::to_value(&meta).unwrap(),
+        )
+        .await
+        .unwrap()
+        .version;
+    // The draft is edited to put `color` back, then approved.
+    let document = mb_import::parse_document(V1.as_bytes()).unwrap();
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("{uri}/{draft}/draft"))
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"document": document}).to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    approve(&app, draft).await;
+    let approved = st
+        .store
+        .get_contract_version(mock, draft)
+        .await
+        .unwrap()
+        .unwrap();
+    let eff = effective_world(st.store.as_ref(), mock, draft, &approved.bundle)
+        .await
+        .unwrap();
+    assert_eq!(eff.revision, 1);
+    assert_eq!(eff.authors[&format!("/types/{t}/unique")], Author::User);
+}
+
+#[tokio::test]
+async fn carry_forward_on_approve_takes_the_source_as_revised_since_the_draft() {
+    let (st, app) = admin().await;
+    let uri = format!("{BASE}/widgets/contracts");
+    let first = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let from = first["version"].as_i64().unwrap();
+    let mock = widgets_mock(&st).await;
+    revise(
+        st.store.as_ref(),
+        mock,
+        from,
+        Author::User,
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}}),
+    )
+    .await;
+    // An import job merges a HAR into the active version as a draft.
+    let har = std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/smart/petstore.har"),
+    )
+    .unwrap();
+    let (ctype, body) = multipart("petstore.har", &har);
+    send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/imports"),
+        &ctype,
+        body,
+    )
+    .await;
+    assert!(run_next_import(&st).await.unwrap());
+    let draft = st
+        .store
+        .latest_contract_version(mock, &[ContractStatus::Draft])
+        .await
+        .unwrap()
+        .unwrap();
+    // The source is revised after the draft was made.
+    revise(
+        st.store.as_ref(),
+        mock,
+        from,
+        Author::Agent,
+        json!({
+            "version": 1,
+            "operations": {
+                "getWidget": {"not_found": 404},
+                "listWidgets": {"order": {"member": "name"}},
+            },
+        }),
+    )
+    .await;
+    approve(&app, draft.version).await;
+    let eff = effective_world(st.store.as_ref(), mock, draft.version, &draft.bundle)
+        .await
+        .unwrap();
+    assert!(eff.refused.is_empty(), "{:?}", eff.refused);
+    let expected: BTreeMap<String, Author> = [
+        ("/operations/getWidget/not_found", Author::User),
+        ("/operations/listWidgets/order", Author::Agent),
+    ]
+    .into_iter()
+    .map(|(k, a)| (k.to_string(), a))
+    .collect();
+    assert_eq!(eff.authors, expected);
+}
+
+#[tokio::test]
+async fn carry_forward_prefers_a_version_that_is_not_a_draft() {
+    let (st, app) = admin().await;
+    let uri = format!("{BASE}/widgets/contracts");
+    let first = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let from = first["version"].as_i64().unwrap();
+    let mock = widgets_mock(&st).await;
+    let active_doc = json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}});
+    revise(
+        st.store.as_ref(),
+        mock,
+        from,
+        Author::User,
+        active_doc.clone(),
+    )
+    .await;
+    // An abandoned draft with a description of its own.
+    let abandoned = st
+        .store
+        .add_draft_contract_version(
+            mock,
+            NewContractVersion {
+                source: V1.as_bytes().to_vec(),
+                bundle: compile(V1),
+                status: ContractStatus::Draft,
+                created_by: None,
+            },
+            json!({}),
+        )
+        .await
+        .unwrap()
+        .version;
+    revise(
+        st.store.as_ref(),
+        mock,
+        abandoned,
+        Author::Agent,
+        json!({"version": 1, "operations": {"listWidgets": {"order": {"member": "name"}}}}),
+    )
+    .await;
+    let next = send(
+        &app,
+        Method::POST,
+        &uri,
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let carried = st
+        .store
+        .latest_world_revision(mock, next["version"].as_i64().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.document, active_doc);
+    assert_eq!(carried.author, Author::User);
 }

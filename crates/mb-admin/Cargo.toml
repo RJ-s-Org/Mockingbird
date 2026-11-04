@@ -19,6 +19,7 @@ async-trait.workspace = true
 axum = { workspace = true, features = ["macros", "multipart"] }
 base64.workspace = true
 chrono.workspace = true
+futures.workspace = true
 mb-auth.workspace = true
 mb-engine.workspace = true
 mb-ext.workspace = true

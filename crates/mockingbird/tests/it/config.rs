@@ -702,6 +702,50 @@ async fn reconcile_new_contract_digest_new_version() {
     );
 }
 
+#[tokio::test]
+async fn reconcile_carries_the_world_description_to_a_new_version() {
+    let ws = Workspace::new();
+    let cfg = ws.load(BASIC);
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let doc = json!({"version": 1, "operations": {"getOrder": {"not_found": 404}}});
+    store
+        .add_world_revision(
+            mock.id,
+            1,
+            mb_store::NewWorldRevision {
+                author: mb_mcm::world::Author::User,
+                document: doc.clone(),
+                created_by: Some("editor".into()),
+                expect: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut source = std::fs::read_to_string(fixture()).unwrap();
+    source.push_str("\n# edited\n");
+    std::fs::write(ws.dir.path().join("orders.yaml"), source).unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.new_versions, [("orders".to_string(), 2)]);
+    let carried = store
+        .latest_world_revision(mock.id, 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.document, doc);
+    assert_eq!(carried.author, mb_mcm::world::Author::User);
+}
+
 async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
     let mock = store
         .create_mock(

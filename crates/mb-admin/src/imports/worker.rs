@@ -422,8 +422,8 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         .await;
     let version = match completed {
         Ok(Some(v)) => {
-            crate::world::carry_forward_logged(st.store.as_ref(), mock.id, v.version, &v.bundle)
-                .await;
+            // The world description is carried when the draft is approved,
+            // from the source and the draft as they are then.
             if !compile_warnings.is_empty() {
                 let stored = match serde_json::to_value(&compile_warnings) {
                     Ok(value) => {
