@@ -511,3 +511,143 @@ async fn a_record_held_as_an_envelope_s_one_item_goes_by_the_item_s_key() {
     assert_eq!(again["Things"][0]["Name"], "Beta", "{again}");
     assert_eq!(again["Things"].as_array().map(Vec::len), Some(1), "{again}");
 }
+
+const PARENTED: &str = r##"
+openapi: 3.0.0
+info: {title: Parented, version: "1"}
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {type: object}}}}
+  /folders:
+    post:
+      operationId: createFolder
+      requestBody: {content: {application/json: {schema: {type: object}}}}
+      responses:
+        "204": {description: created}
+  /folders/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getFolder
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}
+  /widgets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getWidget
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        color: {type: string}
+    Folder:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        color: {type: string}
+"##;
+
+/// A create whose answer lacks the new record's key but mentions a held record of the
+/// same type (its parent), holding nothing the request sent, leaves that record be.
+#[tokio::test]
+async fn a_create_s_envelope_never_replaces_a_held_record_it_mentions() {
+    let h = harness(
+        PARENTED,
+        vec![
+            json!({"id": "w1", "name": "parent", "color": "red"}),
+            json!({"ok": true, "parent": {"id": "w1", "name": "parent"}}),
+        ],
+    );
+    let (status, _) = h.call("GET", "/widgets/w1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        h.held("widgets", "w1").await,
+        Some(json!({"id": "w1", "name": "parent", "color": "red"}))
+    );
+    let (status, body) = h
+        .call(
+            "POST",
+            "/widgets",
+            Some(json!({"name": "child", "parent_id": "w1"})),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        h.held("widgets", "w1").await,
+        Some(json!({"id": "w1", "name": "parent", "color": "red"})),
+        "the parent must not be overwritten by a create of another record"
+    );
+}
+
+/// A bodyless create stores nothing of a record its request names: the envelope
+/// fallback reads only an answer.
+#[tokio::test]
+async fn a_bodyless_create_stores_nothing_the_request_mentions() {
+    let h = harness(
+        PARENTED,
+        vec![json!({"id": "f1", "name": "root", "color": "blue"})],
+    );
+    let (status, _) = h.call("GET", "/folders/f1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = h
+        .call(
+            "POST",
+            "/folders",
+            Some(json!({"name": "child", "parent": {"id": "f1", "name": "stub"}})),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        h.held("folders", "f1").await,
+        Some(json!({"id": "f1", "name": "root", "color": "blue"})),
+        "a request's reference to the parent must not replace it"
+    );
+}
+
+const ORDERS: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders/{order_id}:
+    parameters: [{name: order_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getOrder
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      properties:
+        id: {type: string}
+        total: {type: number}
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              order_id: {type: string}
+              sku: {type: string}
+"##;
+
+/// An order with one line, which refers back to it, is stored as the order.
+#[tokio::test]
+async fn an_order_with_one_line_is_stored_as_the_order() {
+    let order = json!({"id": "o1", "total": 9.5, "lines": [{"order_id": "o1", "sku": "S-1"}]});
+    let h = harness(ORDERS, vec![order.clone(), order.clone()]);
+    let (status, body) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let held = h.held("orders", "o1").await;
+    assert_eq!(held, Some(order));
+}

@@ -2520,7 +2520,7 @@ fn reflected(
 
 /// [`overlay_request`] onto an answer no stored record settled: a member the request
 /// sends as a list of objects, where the answer holds as many, goes item by item
-/// ([`echo_item`]), so the request's items never take away what the answer's say
+/// ([`echo_items`]), so the request's items never take away what the answer's say
 /// beside them (an id, a status, a time the server assigned).
 fn echo_request(
     validator: &SchemaValidator,
@@ -2533,55 +2533,86 @@ fn echo_request(
     };
     let mut fields = fields.clone();
     for (name, sent) in &mut fields {
-        if let Some(answered) = answer.get(name)
-            && let Some(items) = echo_items(answered, sent, answer_wins)
-        {
-            *sent = items;
+        let Some(answered) = answer.get(name) else {
+            continue;
+        };
+        match echo_items(answered, sent, answer_wins) {
+            Echo::Paired(items) => *sent = items,
+            // The LLM's list stands as it answered it.
+            Echo::Conflict if answer_wins => *sent = answered.clone(),
+            Echo::Conflict | Echo::NotLists => {}
         }
     }
     overlay_request(validator, base, Some(&Value::Object(fields)))
 }
 
+/// What [`echo_items`] made of two lists.
+enum Echo {
+    /// The request's items, each on the answer's item it pairs with.
+    Paired(Value),
+    /// Lists of as many objects, but an item pair disagrees on a value both name.
+    Conflict,
+    /// Not two lists of as many objects.
+    NotLists,
+}
+
 /// `sent`'s objects onto `answered`'s, item by item ([`echo_item`]), when both are
-/// lists of as many objects.
-fn echo_items(answered: &Value, sent: &Value, answer_wins: bool) -> Option<Value> {
+/// lists of as many objects and each pair agrees on every single value both name:
+/// items listed in another order, or another item, are not paired.
+fn echo_items(answered: &Value, sent: &Value, answer_wins: bool) -> Echo {
     let (Value::Array(answered), Value::Array(sent)) = (answered, sent) else {
-        return None;
+        return Echo::NotLists;
     };
     let objects = |items: &[Value]| items.iter().all(Value::is_object);
     if answered.len() != sent.len() || !objects(answered) || !objects(sent) {
-        return None;
+        return Echo::NotLists;
     }
-    let items = answered.iter().zip(sent);
-    Some(Value::Array(
-        items.map(|(a, s)| echo_item(a, s, answer_wins)).collect(),
-    ))
+    let mut items = Vec::with_capacity(answered.len());
+    for (a, s) in answered.iter().zip(sent) {
+        match echo_item(a, s, answer_wins) {
+            Some(item) => items.push(item),
+            None => return Echo::Conflict,
+        }
+    }
+    Echo::Paired(Value::Array(items))
 }
 
-/// The members a request's item sends, onto the answer's item: each it lacks or holds
-/// as `null`, and, for a faker's answer (`!answer_wins`), which knows nothing of the
-/// request, each the request names. An LLM's answer was told the request and keeps its
-/// own. An object or a list of as many objects goes member by member, item by item.
-fn echo_item(answered: &Value, sent: &Value, answer_wins: bool) -> Value {
+/// Whether a value is a single one: neither an object, a list nor `null`.
+fn is_single(value: &Value) -> bool {
+    !value.is_object() && !value.is_array() && !value.is_null()
+}
+
+/// The members a request's item sends, onto the answer's item it pairs with: each the
+/// answer's lacks or holds as `null`; an object or a list of as many objects member by
+/// member, item by item. `None` when the two disagree on a single value both name, or
+/// inside: they are not one item. A list inside that is not paired is the LLM's own
+/// (`answer_wins`), or a faker's answer takes the request's.
+fn echo_item(answered: &Value, sent: &Value, answer_wins: bool) -> Option<Value> {
     let (Value::Object(answered), Value::Object(sent)) = (answered, sent) else {
-        return answered.clone();
+        return None;
     };
     let mut item = answered.clone();
     for (name, value) in sent {
         let merged = match item.get(name) {
             None | Some(Value::Null) => value.clone(),
+            Some(held) if is_single(held) && is_single(value) => {
+                if held != value {
+                    return None;
+                }
+                held.clone()
+            }
             Some(held @ Value::Object(_)) if value.is_object() => {
-                echo_item(held, value, answer_wins)
+                echo_item(held, value, answer_wins)?
             }
             Some(held) => match echo_items(held, value, answer_wins) {
-                Some(items) => items,
-                None if answer_wins || value.is_null() => held.clone(),
-                None => value.clone(),
+                Echo::Paired(items) => items,
+                Echo::Conflict | Echo::NotLists if answer_wins || value.is_null() => held.clone(),
+                Echo::Conflict | Echo::NotLists => value.clone(),
             },
         };
         item.insert(name.clone(), merged);
     }
-    Value::Object(item)
+    Some(Value::Object(item))
 }
 
 /// The top-level members of an update's stored target its LLM answer advances (see
@@ -3444,6 +3475,7 @@ mod tests {
         let item = json!({"type": "object", "properties": {
             "key": {"type": ["string", "null"]},
             "name": {"type": "string"},
+            "email": {"type": "string"},
             "state": {"type": ["string", "null"]},
             "tags": {"type": "array", "items": {"type": "object"}},
         }});
@@ -3453,29 +3485,30 @@ mod tests {
         }))
         .unwrap();
         let answer = json!({"count": 1, "items": [{
-            "key": "k-1", "name": "Answered", "state": "ACTIVE", "tags": [{"id": "t1", "label": "x"}],
+            "key": "k-1", "name": "Alpha", "state": "ACTIVE", "tags": [{"id": "t1", "label": "x"}],
         }]});
         let sent = json!({"items": [{
-            "name": "Sent", "state": null, "key": null, "tags": [{"label": "y", "note": "n"}],
+            "name": "Alpha", "email": "a@x", "state": null, "key": null,
+            "tags": [{"label": "x", "note": "n"}],
         }]});
+        let merged = json!({"count": 1, "items": [{
+            "key": "k-1", "name": "Alpha", "email": "a@x", "state": "ACTIVE",
+            "tags": [{"id": "t1", "label": "x", "note": "n"}],
+        }]});
+        for answer_wins in [true, false] {
+            let out = echo_request(&v, answer.clone(), Some(&sent), answer_wins);
+            assert_eq!(out, merged, "{answer_wins}");
+        }
+        // Items in another order disagree on `name`: an LLM's list stands, a faker's is
+        // replaced by the request's.
+        let answer = json!({"items": [{"key": "1", "name": "B"}, {"key": "2", "name": "A"}]});
+        let sent = json!({"items": [{"name": "A", "email": "a@x"}, {"name": "B", "email": "b@x"}]});
         let llm = echo_request(&v, answer.clone(), Some(&sent), true);
-        assert_eq!(
-            llm,
-            json!({"count": 1, "items": [{
-                "key": "k-1", "name": "Answered", "state": "ACTIVE",
-                "tags": [{"id": "t1", "label": "x", "note": "n"}],
-            }]})
-        );
+        assert_eq!(llm["items"], answer["items"]);
         let faker = echo_request(&v, answer.clone(), Some(&sent), false);
-        assert_eq!(
-            faker,
-            json!({"count": 1, "items": [{
-                "key": "k-1", "name": "Sent", "state": "ACTIVE",
-                "tags": [{"id": "t1", "label": "y", "note": "n"}],
-            }]})
-        );
+        assert_eq!(faker["items"], sent["items"]);
         // As many items or none: the request's list replaces the answer's, as before.
-        let two = json!({"items": [{"name": "a"}, {"name": "b"}]});
+        let two = json!({"items": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
         let out = echo_request(&v, answer, Some(&two), true);
         assert_eq!(out["items"], two["items"]);
     }

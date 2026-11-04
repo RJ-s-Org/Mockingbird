@@ -5975,66 +5975,27 @@ impl<'a> StateAccess<'a> {
     }
 
     /// [`StateAccess::insert_seeded`] of each of `resources` as one write, so they
-    /// list in their order (see [`mb_state::StateStore::insert_seeded_all`]); whether each was
-    /// stored, in their order.
+    /// list in their order (as [`mb_state::StateStore::insert_seeded_all`] does): the
+    /// last is inserted first, each settled on its own, so what a store failing midway
+    /// took is still known. The first of two of one id is the one stored. Whether each
+    /// was stored, in their order.
     pub(crate) async fn insert_seeded_all(
         &mut self,
         s: &SessionKey,
         resources: Vec<StoredResource>,
     ) -> Vec<bool> {
         let mut stored = vec![false; resources.len()];
-        if !self.open() {
-            return stored;
-        }
-        let mut kept: Vec<(usize, StoredResource)> = Vec::with_capacity(resources.len());
+        let mut firsts: Vec<(usize, StoredResource)> = Vec::with_capacity(resources.len());
         for (at, r) in resources.into_iter().enumerate() {
-            // The first of two of one id is the one stored, as one at a time.
             let again = |(_, k): &(usize, StoredResource)| {
                 k.resource_type == r.resource_type && k.id == r.id
             };
-            if kept.iter().any(again) {
-                continue;
+            if !firsts.iter().any(again) {
+                firsts.push((at, r));
             }
-            if self.tracks_deleted
-                && deleted::mention_is_deleted(self, s, &r.resource_type, &r.id).await
-            {
-                continue;
-            }
-            kept.push((at, r));
         }
-        if kept.is_empty() || !self.open() {
-            return stored;
-        }
-        let rt = self.rt;
-        let mut notes = Vec::with_capacity(kept.len());
-        let mut batch = Vec::with_capacity(kept.len());
-        for (at, r) in kept {
-            let values = path_values(rt.index().path_fields(&r.resource_type), &r.data);
-            let named = (!values.is_empty()).then(|| (r.resource_type.clone(), r.id.clone()));
-            notes.push((
-                at,
-                r.resource_type.clone(),
-                value_index::Indexed::of(rt, &r),
-                named,
-                values,
-            ));
-            batch.push(r);
-        }
-        let result = rt.state.insert_seeded_all(s, batch).await;
-        let Some(results) = self.settle(result) else {
-            return stored;
-        };
-        for ((at, t, indexed, named, values), ok) in notes.into_iter().zip(results) {
-            self.wrote |= ok;
-            stored[at] = ok;
-            if !ok {
-                continue;
-            }
-            rt.written_types().remember(s, &t);
-            rt.value_index().remember_indexed(s, indexed);
-            if let Some((t, id)) = named {
-                rt.path_aliases().remember(s, &t, &id, values);
-            }
+        for (at, r) in firsts.into_iter().rev() {
+            stored[at] = self.insert_seeded(s, r).await;
         }
         stored
     }
@@ -6722,14 +6683,23 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
             match data.get(field).and_then(id_string) {
                 Some(id) => (id, Some(data)),
                 // An envelope the contract does not say holds the record: the one
-                // member of it that is a record of the type is.
+                // member of the answer that is a record of the type and holds what
+                // the request sent is, when nothing is held under its id.
                 None => {
-                    let Some(record) = fitting_member(rt, resource_type, &data, None) else {
+                    let (Some(answer), Some(sent)) = (generated.body.as_ref(), request_body) else {
+                        return;
+                    };
+                    let want = Holding::Sent(sent);
+                    let on = (op, generated.status);
+                    let Some(record) = fitting_member(rt, on, resource_type, answer, want) else {
                         return;
                     };
                     let Some(id) = record.get(field).and_then(id_string) else {
                         return;
                     };
+                    if state.get(session, resource_type, &id).await.is_some() {
+                        return;
+                    }
                     (id, Some(record))
                 }
             }
@@ -6750,7 +6720,9 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                 // unless it is an envelope holding the record, the one member of it
                 // that suits the type and carries the target's id.
                 Some(_) if !entity_fits(rt, resource_type, &data) => {
-                    match fitting_member(rt, resource_type, &data, Some((op, id.as_str()))) {
+                    let want = Holding::Target(id.as_str());
+                    let on = (op, generated.status);
+                    match fitting_member(rt, on, resource_type, &data, want) {
                         Some(record) => record,
                         None => return,
                     }
@@ -6807,37 +6779,70 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
     }
 }
 
-/// The one member of an object `answer`, one level down, that is a record of type
-/// `t` ([`entity_fits`]): the record an envelope the contract does not describe
-/// holds (`{result: {...}, success}`). With a `target` id, a member must also carry
-/// it: as its identity's key or the member the path names, or, with no identity, as
-/// any of its single values. `None` when no member or several are such records.
+/// What the record [`fitting_member`] finds must hold.
+#[derive(Clone, Copy)]
+enum Holding<'a> {
+    /// An update's target id: as its identity's key or the member the path names, or,
+    /// with no identity, as any of its single values.
+    Target(&'a str),
+    /// A create's request: a single value it sent, under the same member name.
+    Sent(&'a Value),
+}
+
+/// The one member of an object `answer` (`op`'s, of `status`), one level down, that is
+/// a record of type `t` ([`entity_fits`]) and holds what `want` says: the record an
+/// envelope the contract does not describe holds (`{result: {...}, success}`). A member
+/// the answer's schema declares as another type's definition is not one. `None` when no
+/// member or several are such records.
 fn fitting_member(
     rt: &MockRuntime,
+    (op, status): (&Operation, u16),
     t: &str,
     answer: &Value,
-    target: Option<(&Operation, &str)>,
+    want: Holding<'_>,
 ) -> Option<Value> {
     let Value::Object(members) = answer else {
         return None;
     };
-    let carries = |record: &Value| {
-        let Some((op, id)) = target else {
-            return true;
-        };
-        let is_id = |v: &Value| id_string(v).is_some_and(|v| v == id);
-        match &op.identity {
-            Some(identity) => [identity.field.as_str(), identity.path_member()]
-                .iter()
-                .any(|f| record.get(*f).is_some_and(is_id)),
-            None => record.as_object().is_some_and(|r| r.values().any(is_id)),
+    let holds = |record: &Value| match want {
+        Holding::Target(id) => {
+            let is_id = |v: &Value| id_string(v).is_some_and(|v| v == id);
+            match &op.identity {
+                Some(identity) => [identity.field.as_str(), identity.path_member()]
+                    .iter()
+                    .any(|f| record.get(*f).is_some_and(is_id)),
+                None => record.as_object().is_some_and(|r| r.values().any(is_id)),
+            }
+        }
+        Holding::Sent(sent) => {
+            let (Some(record), Some(sent)) = (record.as_object(), sent.as_object()) else {
+                return false;
+            };
+            sent.iter().any(|(name, value)| {
+                !value.is_null()
+                    && !value.is_object()
+                    && !value.is_array()
+                    && record.get(name) == Some(value)
+            })
         }
     };
-    let mut fitting = members
-        .values()
-        .filter(|v| v.is_object() && carries(v) && entity_fits(rt, t, v));
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let schema = op.output_for_status(status).and_then(|o| o.schema.as_ref());
+    let another_type = |member: &str| {
+        let Some(declared) = schema.and_then(|s| property_schema(bundle, s, member)) else {
+            return false;
+        };
+        let (_, defs) = schema_parts(bundle, Some(&declared));
+        defs.iter()
+            .filter_map(|d| index.types_by_def.get(*d))
+            .any(|of| of != t)
+    };
+    let mut fitting = members.iter().filter(|(member, v)| {
+        v.is_object() && holds(v) && !another_type(member) && entity_fits(rt, t, v)
+    });
     match (fitting.next(), fitting.next()) {
-        (Some(record), None) => Some(record.clone()),
+        (Some((_, record)), None) => Some(record.clone()),
         _ => None,
     }
 }
