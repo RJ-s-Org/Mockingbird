@@ -173,11 +173,17 @@ class PinRefused(Exception):
 
 
 class ClientClosed(Exception):
-    """Relaying a stream to the client failed (broken pipe or reset): the client is gone."""
+    """The client hung up on a stream mid-generation: stop reading from the provider."""
 
 
-# Lowest-level errors of a write to a client that went away.
-CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+# The error_kind of a call the client hung up on mid-generation (status 499). It is
+# neither a success nor an error: every count of errors leaves it out.
+CLIENT_CLOSED = "client_closed"
+
+
+def is_error(rec: Dict[str, Any]) -> bool:
+    """Whether a ledger record is an error: any error_kind except a client hang-up."""
+    return bool(rec.get("error_kind")) and rec.get("error_kind") != CLIENT_CLOSED
 
 
 def load_provider_pins(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
@@ -287,16 +293,18 @@ class Ledger:
         self.calls += 1
         label = rec.get("label") or "?"
         s = self.per_label.setdefault(
-            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
-                    "providers": {}}
+            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "client_closed": 0, "prompt_tokens": 0,
+                    "completion_tokens": 0, "providers": {}}
         )
         s["calls"] += 1
         prov = rec.get("provider")
         if prov and live:
             s["providers"][prov] = s["providers"].get(prov, 0) + 1
         s["cost_usd"] += cost
-        if rec.get("error_kind"):
+        if is_error(rec):
             s["errors"] += 1
+        if rec.get("error_kind") == CLIENT_CLOSED:
+            s["client_closed"] += 1
         s["prompt_tokens"] += as_int(rec.get("prompt_tokens")) or 0
         s["completion_tokens"] += as_int(rec.get("completion_tokens")) or 0
 
@@ -384,6 +392,7 @@ class Outcome:
         self.reasoning: List[str] = []
         self.refusal: Optional[str] = None
         self.finish_reason: Optional[str] = None
+        self.client_gone_after_end = False  # the client hung up after the answer ended
         self.usage: Optional[Dict[str, Any]] = None
         self.provider: Optional[str] = None
         self.model: Optional[str] = None
@@ -907,16 +916,21 @@ class Handler(BaseHTTPRequestHandler):
         """Relays the stream. Nothing (not even the 200 head) goes out before the
         first chunk has been checked against the pin; keep-alives before it wait."""
         held: List[bytes] = []
+        client_gone = [False]
+        done = [False]
 
         def write(raw: bytes) -> None:
-            # A failed write means the client is gone: stop the read loop (ClientClosed),
-            # so nothing more is read from, and billed by, the provider.
+            # This touches only the client socket, so any OSError (broken pipe, reset,
+            # macOS EPROTOTYPE) means the client is gone. Relaying stops there; whether
+            # reading stops too is decided once the event being relayed has been read.
+            if client_gone[0]:
+                return
             try:
                 self.wfile.write(raw)
                 if raw in (b"\n", b"\r\n"):
                     self.wfile.flush()
-            except CLIENT_GONE as e:
-                raise ClientClosed(str(e)) from e
+            except OSError:
+                client_gone[0] = True
 
         def start() -> None:
             self.close_connection = True
@@ -927,8 +941,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
                 self.end_headers()
-            except CLIENT_GONE as e:
-                raise ClientClosed(str(e)) from e
+            except OSError:
+                client_gone[0] = True
             for raw in held:
                 write(raw)
             held.clear()
@@ -939,26 +953,40 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 held.append(raw)
 
+        def check_gone() -> None:
+            # A client gone mid-generation: stop reading (ClientClosed), so the provider
+            # generates and bills no more. A client gone after the answer ended (a
+            # finish_reason, an in-band error, [DONE]; Mockingbird drops a stream right
+            # after a `length` chunk) costs nothing more: keep reading, unrelayed, so the
+            # usage that comes last still arrives, and record the call as usual.
+            if client_gone[0] and not (done[0] or out.finish_reason or out.error_kind):
+                raise ClientClosed("client closed the stream mid-generation")
+
         for data in sse_events(resp, on_line=relay, deadline=out.started + UPSTREAM_TIMEOUT_S):
             if data.strip() == "[DONE]":
+                done[0] = True
                 if not self.stream_started:
                     start()
                 continue
             try:
                 chunk = json.loads(data)
             except ValueError:
+                check_gone()
                 continue
             if isinstance(chunk, dict):
                 out.take_chunk(chunk)
                 if not self.stream_started:
                     self.check_first_chunk(out, pinned)
                     start()
+            check_gone()
         if not self.stream_started:
             start()
-        try:
-            self.wfile.flush()
-        except CLIENT_GONE:
-            pass  # the whole stream was read already: nothing left to stop
+        if not client_gone[0]:
+            try:
+                self.wfile.flush()
+            except OSError:
+                client_gone[0] = True
+        out.client_gone_after_end = client_gone[0]
 
     def fail(self, rec: Dict[str, Any], out: Outcome, kind: str, status: int, msg: str, received: float) -> None:
         rec.update(status=status, error_kind=kind, error_excerpt=excerpt(msg))
@@ -986,6 +1014,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             rec["status"] = 200
         rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
+        if out.client_gone_after_end:
+            rec["client_gone_after_end"] = True  # recorded as usual: the answer had ended
         if client_stream and self.stream_started:
             if out.error_kind:
                 rec["status"] = 200  # the 200 head is already sent; the error went through in-stream
@@ -1021,12 +1051,14 @@ class Handler(BaseHTTPRequestHandler):
         received: float,
         prompt_est: float,
     ) -> None:
-        """Records a stream the client hung up on: what was received so far, charged as
-        usage when the provider had sent it, else as the prompt plus the output seen.
-        Status 499 (client closed request) and `error_kind: client_closed`: neither a
-        success nor a provider error. Nothing is sent: the client is gone."""
+        """Records a stream the client hung up on mid-generation: what was received so
+        far (generation_id included), charged as usage when the provider had sent it,
+        else as the prompt plus the output seen. That cost is a lower bound: a provider
+        that does not support cancellation keeps generating, and billing. Status 499
+        (client closed request), `error_kind: client_closed`: neither a success nor an
+        error. Nothing is sent: the client is gone."""
         self.fill_record(px, model, rec, out, prompt_est)
-        rec.update(status=499, error_kind="client_closed", client_closed=True,
+        rec.update(status=499, error_kind=CLIENT_CLOSED, client_closed=True,
                    error_excerpt="client closed the stream; upstream read stopped",
                    received_chars=len(out.text()) + len(out.reasoning_text()))
         rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
