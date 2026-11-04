@@ -311,6 +311,27 @@ pub enum OpKind {
     Action,
 }
 
+impl OpKind {
+    /// The kind the contract gives `op`: a query with an identity reads one
+    /// record, one without lists; a create, update or delete command is the
+    /// same; any other command is an action. A streaming operation has none.
+    #[must_use]
+    pub fn of(op: &crate::Operation) -> Option<OpKind> {
+        use crate::{Effect, OperationKind};
+        match op.kind {
+            OperationKind::Query if op.identity.is_some() => Some(OpKind::Read),
+            OperationKind::Query => Some(OpKind::List),
+            OperationKind::Command(Effect::Create) => Some(OpKind::Create),
+            OperationKind::Command(Effect::Update) => Some(OpKind::Update),
+            OperationKind::Command(Effect::Delete) => Some(OpKind::Delete),
+            OperationKind::Command(Effect::Other) => Some(OpKind::Action),
+            OperationKind::StreamServer
+            | OperationKind::StreamClient
+            | OperationKind::StreamBidi => None,
+        }
+    }
+}
+
 /// Where the request names the record an operation acts on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct TargetDesc {

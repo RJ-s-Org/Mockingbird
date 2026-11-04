@@ -20,7 +20,7 @@ use super::{
     PagingDesc, ParamValue, ParentDesc, Pointer, RecordsAt, ScopeDesc, SoftDelete, TargetDesc,
     TypeDesc, UniqueDesc, VERSION, World,
 };
-use crate::{Binding, Bundle, Effect, Operation, OperationKind, RecordAt, StatusSelector};
+use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
 /// What [`validate`] kept of a description and what it refused.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -208,8 +208,9 @@ impl Path {
 ///
 /// The record schema of a type, which its members must be properties of, is
 /// the success answer of the type's read operation (else its first
-/// operation), taken at that operation's `answer.record` (or the item of
-/// `answer.records`, or the bundle's own record location) and through
+/// operation with an identity, else its first operation), taken at that
+/// operation's `answer.record` (or the item of `answer.records`, or the
+/// bundle's own record location) and through
 /// `$ref`s into the bundle's definitions; a type that is only a definition's
 /// name uses that definition. A member is a dotted path through nested
 /// properties, looking through `allOf`, `anyOf` and `oneOf`.
@@ -345,17 +346,7 @@ impl<'a> Ctx<'a> {
             .operations
             .get(&op.id)
             .and_then(|d| d.kind)
-            .or(match op.kind {
-                OperationKind::Query if op.identity.is_some() => Some(OpKind::Read),
-                OperationKind::Query => Some(OpKind::List),
-                OperationKind::Command(Effect::Create) => Some(OpKind::Create),
-                OperationKind::Command(Effect::Update) => Some(OpKind::Update),
-                OperationKind::Command(Effect::Delete) => Some(OpKind::Delete),
-                OperationKind::Command(Effect::Other) => Some(OpKind::Action),
-                OperationKind::StreamServer
-                | OperationKind::StreamClient
-                | OperationKind::StreamBidi => None,
-            })
+            .or_else(|| OpKind::of(op))
     }
 
     fn ops_of(&self, t: &str) -> Vec<&'a Operation> {
@@ -390,6 +381,7 @@ impl<'a> Ctx<'a> {
         let source = ops
             .iter()
             .find(|o| self.op_kind(o) == Some(OpKind::Read))
+            .or_else(|| ops.iter().find(|o| o.identity.is_some()))
             .or(ops.first());
         source
             .and_then(|op| self.answer_record(op))
@@ -1273,6 +1265,9 @@ fn visit<'a>(b: &'a Bundle, schema: &'a Value, seen: &mut Seen, depth: usize) ->
 }
 
 /// The schema of property `name` of `schema`, through `$ref`s and branches.
+/// When several branches declare it, the first that constrains it wins over
+/// one that allows anything (an envelope's `result: {}` beside the branch
+/// that says what `result` is).
 fn property<'a>(b: &'a Bundle, schema: &'a Value, name: &str) -> Option<&'a Value> {
     fn walk<'a>(
         b: &'a Bundle,
@@ -1282,12 +1277,25 @@ fn property<'a>(b: &'a Bundle, schema: &'a Value, name: &str) -> Option<&'a Valu
         depth: usize,
     ) -> Option<&'a Value> {
         let schema = visit(b, schema, seen, depth)?;
-        if let Some(p) = schema.get("properties").and_then(|p| p.get(name)) {
-            return Some(p);
+        let mut found = schema.get("properties").and_then(|p| p.get(name));
+        for branch in branches(schema) {
+            if found.is_some_and(|p| !allows_anything(p)) {
+                break;
+            }
+            if let Some(p) = walk(b, branch, name, seen, depth + 1)
+                && found.is_none_or(allows_anything)
+            {
+                found = Some(p);
+            }
         }
-        branches(schema).find_map(|s| walk(b, s, name, seen, depth + 1))
+        found
     }
     walk(b, schema, name, &mut Seen::new(), 0)
+}
+
+/// Whether a schema is `{}` or `true`.
+fn allows_anything(schema: &Value) -> bool {
+    schema.as_object().is_some_and(serde_json::Map::is_empty) || schema == &Value::Bool(true)
 }
 
 /// The item schema of an array `schema`, through `$ref`s and branches.
@@ -1743,6 +1751,43 @@ mod tests {
         );
         op(&mut b, "GetFolder").outputs[0].schema = Some(json!({"$ref": "#/$defs/Wrapped"}));
         let w = world(json!({"types": {"folder": {"unique": [{"members": ["m.created"]}]}}}));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+    }
+
+    #[test]
+    fn validate_prefers_the_branch_that_says_what_a_member_is() {
+        let mut b = folders();
+        b.defs.insert(
+            "Envelope".into(),
+            json!({"type": "object", "properties": {"ok": {"type": "boolean"}, "result": {}}}),
+        );
+        op(&mut b, "GetFolder").outputs[0].schema = Some(json!({"allOf": [
+            {"$ref": "#/$defs/Envelope"},
+            {"properties": {"result": {"$ref": "#/$defs/Folder"}}}
+        ]}));
+        let w = world(json!({
+            "types": {"folder": {"identity": {"member": "name"}}},
+            "operations": {"GetFolder": {"answer": {"record": "/result"}}}
+        }));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+    }
+
+    #[test]
+    fn validate_takes_the_record_of_an_identified_operation_before_a_list() {
+        // No read: the record is where the identified create answers it,
+        // not the first operation's list envelope.
+        let mut b = folders();
+        b.operations.retain(|o| o.id != "GetFolder");
+        op(&mut b, "CreateFolder").identity = Some(Identity {
+            path_param: None,
+            field: "name".into(),
+            input_field: None,
+            path_field: None,
+            record: None,
+        });
+        let w = world(json!({"types": {"folder": {"identity": {"member": "name"}}}}));
         let v = validate(&w, &b);
         assert_eq!(v.refused, vec![]);
     }

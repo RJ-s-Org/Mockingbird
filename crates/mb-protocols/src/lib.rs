@@ -102,6 +102,7 @@ mod record;
 #[cfg(feature = "soap")]
 pub mod soap;
 pub mod webhooks;
+pub mod world_gaps;
 #[cfg(feature = "websocket")]
 pub mod ws;
 
