@@ -172,6 +172,14 @@ class PinRefused(Exception):
     """The first streamed chunk came from a provider the pin does not allow."""
 
 
+class ClientClosed(Exception):
+    """Relaying a stream to the client failed (broken pipe or reset): the client is gone."""
+
+
+# Lowest-level errors of a write to a client that went away.
+CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
 def load_provider_pins(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
     """OpenRouter `provider` objects by model id, from `providers.json`.
 
@@ -585,7 +593,9 @@ class Proxy:
             conn.connect()
             out.started = time.monotonic()
             conn.request("POST", self.up_path, body=data, headers=headers)
-            return conn.getresponse()
+            resp = conn.getresponse()
+            resp.bench_conn = conn  # closed with the response, so a cut stream drops the socket at once
+            return resp
         except BaseException:
             conn.close()
             raise
@@ -824,6 +834,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         assert resp is not None
+        client_closed = False
         try:
             if client_stream:
                 self.pass_through(resp, out, pinned)
@@ -835,6 +846,11 @@ class Handler(BaseHTTPRequestHandler):
                 out.take_message(doc if isinstance(doc, dict) else {})
         except PinRefused:
             pass  # refused below, before anything reached the client
+        except ClientClosed:
+            # The client hung up mid-stream (Mockingbird aborts a looping answer). Stop
+            # reading: closing the upstream connection below stops the generation, so
+            # the provider bills no more tokens than it had sent.
+            client_closed = True
         except (socket.timeout, TimeoutError) as e:
             out.error_kind = out.error_kind or "timeout"
             out.error_excerpt = out.error_excerpt or excerpt(f"upstream timeout mid-response: {e}")
@@ -843,6 +859,9 @@ class Handler(BaseHTTPRequestHandler):
             out.error_excerpt = out.error_excerpt or excerpt(f"bad upstream response: {e}")
         finally:
             resp.close()
+            conn = getattr(resp, "bench_conn", None)
+            if conn is not None:
+                conn.close()
         if pinned and not out.error_kind and not pin_allows(pinned, out.provider):
             # allow_fallbacks false should make this impossible. The provider is checked
             # on the first chunk, before anything is relayed, so the answer is refused
@@ -856,7 +875,11 @@ class Handler(BaseHTTPRequestHandler):
                 out.error_body = json.dumps({"error": {"message": msg, "code": 503}}).encode()
         p_in, _ = px.price(model)
         prompt_est = len(json.dumps(body.get("messages", []), ensure_ascii=False)) / 3.0 * p_in
-        self.complete(px, model, rec, out, client_stream, received, prompt_est)
+        if client_closed:
+            self.close_connection = True
+            self.client_closed(px, model, rec, out, received, prompt_est)
+        else:
+            self.complete(px, model, rec, out, client_stream, received, prompt_est)
         px.dump(rec, body, out)
 
     @staticmethod
@@ -884,26 +907,28 @@ class Handler(BaseHTTPRequestHandler):
         """Relays the stream. Nothing (not even the 200 head) goes out before the
         first chunk has been checked against the pin; keep-alives before it wait."""
         held: List[bytes] = []
-        client_gone = [False]
 
         def write(raw: bytes) -> None:
-            if client_gone[0]:
-                return
+            # A failed write means the client is gone: stop the read loop (ClientClosed),
+            # so nothing more is read from, and billed by, the provider.
             try:
                 self.wfile.write(raw)
                 if raw in (b"\n", b"\r\n"):
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                client_gone[0] = True
+            except CLIENT_GONE as e:
+                raise ClientClosed(str(e)) from e
 
         def start() -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
             self.close_connection = True
             self.stream_started = True
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            except CLIENT_GONE as e:
+                raise ClientClosed(str(e)) from e
             for raw in held:
                 write(raw)
             held.clear()
@@ -932,8 +957,8 @@ class Handler(BaseHTTPRequestHandler):
             start()
         try:
             self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except CLIENT_GONE:
+            pass  # the whole stream was read already: nothing left to stop
 
     def fail(self, rec: Dict[str, Any], out: Outcome, kind: str, status: int, msg: str, received: float) -> None:
         rec.update(status=status, error_kind=kind, error_excerpt=excerpt(msg))
@@ -950,36 +975,7 @@ class Handler(BaseHTTPRequestHandler):
         received: float,
         prompt_est: float,
     ) -> None:
-        usage = out.usage or {}
-        pt = as_int(usage.get("prompt_tokens"))
-        ct = as_int(usage.get("completion_tokens"))
-        details = usage.get("completion_tokens_details") or {}
-        pdetails = usage.get("prompt_tokens_details") or {}
-        cost = as_float(usage.get("cost"))
-        if cost is not None:
-            rec["cost_usd"], rec["cost_source"] = cost, "usage"
-        else:
-            p_in, p_out = px.price(model)
-            if pt is not None or ct is not None:
-                rec["cost_usd"] = (pt or 0) * p_in + (ct or 0) * p_out
-            else:
-                # No usage (stream cut, timeout): charge what was probably
-                # used, the prompt plus the output seen so far.
-                seen = len(out.text()) + len(out.reasoning_text())
-                rec["cost_usd"] = prompt_est + seen / 3.0 * p_out
-            rec["cost_source"] = "estimate"
-        rec.update(
-            model_served=out.model,
-            provider=out.provider,
-            generation_id=out.gen_id,
-            ttft_ms=out.ttft_ms,
-            ttfr_ms=out.ttfr_ms,
-            prompt_tokens=pt,
-            completion_tokens=ct,
-            reasoning_tokens=as_int(details.get("reasoning_tokens")),
-            cached_tokens=as_int(pdetails.get("cached_tokens")),
-            finish_reason=out.finish_reason,
-        )
+        usage = self.fill_record(px, model, rec, out, prompt_est)
         err_status = 503 if out.error_kind == "provider_unavailable" else 502
         if out.error_kind:
             rec.update(status=err_status, error_kind=out.error_kind, error_excerpt=out.error_excerpt)
@@ -1015,6 +1011,66 @@ class Handler(BaseHTTPRequestHandler):
             "usage": usage or None,
         }
         self.send_json(200, doc)
+
+    def client_closed(
+        self,
+        px: Proxy,
+        model: str,
+        rec: Dict[str, Any],
+        out: Outcome,
+        received: float,
+        prompt_est: float,
+    ) -> None:
+        """Records a stream the client hung up on: what was received so far, charged as
+        usage when the provider had sent it, else as the prompt plus the output seen.
+        Status 499 (client closed request) and `error_kind: client_closed`: neither a
+        success nor a provider error. Nothing is sent: the client is gone."""
+        self.fill_record(px, model, rec, out, prompt_est)
+        rec.update(status=499, error_kind="client_closed", client_closed=True,
+                   error_excerpt="client closed the stream; upstream read stopped",
+                   received_chars=len(out.text()) + len(out.reasoning_text()))
+        rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
+
+    def fill_record(
+        self,
+        px: Proxy,
+        model: str,
+        rec: Dict[str, Any],
+        out: Outcome,
+        prompt_est: float,
+    ) -> Dict[str, Any]:
+        """Fills `rec` with the answer's provider, timings, tokens and cost; returns its usage."""
+        usage = out.usage or {}
+        pt = as_int(usage.get("prompt_tokens"))
+        ct = as_int(usage.get("completion_tokens"))
+        details = usage.get("completion_tokens_details") or {}
+        pdetails = usage.get("prompt_tokens_details") or {}
+        cost = as_float(usage.get("cost"))
+        if cost is not None:
+            rec["cost_usd"], rec["cost_source"] = cost, "usage"
+        else:
+            p_in, p_out = px.price(model)
+            if pt is not None or ct is not None:
+                rec["cost_usd"] = (pt or 0) * p_in + (ct or 0) * p_out
+            else:
+                # No usage (stream cut, timeout): charge what was probably
+                # used, the prompt plus the output seen so far.
+                seen = len(out.text()) + len(out.reasoning_text())
+                rec["cost_usd"] = prompt_est + seen / 3.0 * p_out
+            rec["cost_source"] = "estimate"
+        rec.update(
+            model_served=out.model,
+            provider=out.provider,
+            generation_id=out.gen_id,
+            ttft_ms=out.ttft_ms,
+            ttfr_ms=out.ttfr_ms,
+            prompt_tokens=pt,
+            completion_tokens=ct,
+            reasoning_tokens=as_int(details.get("reasoning_tokens")),
+            cached_tokens=as_int(pdetails.get("cached_tokens")),
+            finish_reason=out.finish_reason,
+        )
+        return usage
 
 
 def main() -> int:

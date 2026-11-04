@@ -98,6 +98,7 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 - If the upstream rejects `reasoning: {"enabled": false}` (400/404/422 with "reasoning" in the body), the proxy retries once without it and remembers that for the model. It does the same for `response_format` (400/422 that mentions response_format or JSON mode).
 - When there is no usage chunk (cut stream or timeout), cost is estimated from the prompt plus the output seen so far, with `cost_source: "estimate"`. A model the roster does not price is reserved at deliberately high fallback prices.
 - `error_kind: empty` means both content and reasoning were empty. `refusal` means `finish_reason == "content_filter"` or a non-null `refusal`.
+- When a streaming client hangs up mid-answer (broken pipe or reset on a relay write, as when Mockingbird aborts a looping answer), the proxy stops reading from the provider at once and closes that connection, so no more tokens are generated for it. The call is recorded with what was received so far: `status: 499`, `error_kind: client_closed`, `client_closed: true` and `received_chars`. Cost follows the rule above: usage if it had arrived, else the prompt plus the output seen, and the reservation is released. `aggregate.py` counts such a call as neither a success nor an error. A client that drops a non-streamed call is only noticed when the answer is sent, after the provider has finished.
 
 ## Provider pins
 

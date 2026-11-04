@@ -2,6 +2,7 @@
 """A tiny fake OpenAI-compatible chat server, for testing the bench without spend.
 
     python3 scripts/llm-bench/fake_llm.py --port 18999 [--log calls.jsonl] [--delay 0.05]
+        [--chunk-delay 0.05 --stream-chunks 200]
 
 Answers `POST <anything>/chat/completions` (so it stands in for the proxy at
 `http://127.0.0.1:P/r/<label>/api/v1`) with schema-shaped JSON built from the
@@ -196,15 +197,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("connection", "close")
             self.end_headers()
             chunks = [content[i:i + 40] for i in range(0, len(content), 40)] or [""]
-            for piece in chunks:
-                event = {"id": "fake", "object": "chat.completion.chunk", "model": body.get("model"),
-                         "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]}
-                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+            # --stream-chunks pads a short answer with whitespace pieces, so a slow
+            # stream (--chunk-delay) can run long, like a looping model.
+            chunks += [" "] * max(0, (ARGS.stream_chunks or 0) - len(chunks))
+            sent, gone = 0, False
+            try:
+                for piece in chunks:
+                    event = {"id": "fake", "object": "chat.completion.chunk", "model": body.get("model"),
+                             "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}]}
+                    self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                    self.wfile.flush()
+                    sent += 1
+                    if ARGS.chunk_delay:
+                        time.sleep(ARGS.chunk_delay)
+                final = {"id": "fake", "object": "chat.completion.chunk", "model": body.get("model"),
+                         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage}
+                self.wfile.write(f"data: {json.dumps(final)}\n\ndata: [DONE]\n\n".encode())
                 self.wfile.flush()
-            final = {"id": "fake", "object": "chat.completion.chunk", "model": body.get("model"),
-                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage}
-            self.wfile.write(f"data: {json.dumps(final)}\n\ndata: [DONE]\n\n".encode())
-            self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                gone = True  # the caller closed the connection mid-stream
+            if ARGS.log:
+                with LOCK, open(ARGS.log, "a") as f:
+                    f.write(json.dumps({"stream_end": True, "chunks": len(chunks), "chunks_sent": sent,
+                                        "caller_closed": gone}) + "\n")
             self.close_connection = True
             return
         out = json.dumps({
@@ -225,6 +240,9 @@ def main():
     p.add_argument("--port", type=int, required=True)
     p.add_argument("--log", help="append one JSON line per call (path, model, kind; never headers)")
     p.add_argument("--delay", type=float, default=0.0, help="seconds to sleep before answering")
+    p.add_argument("--chunk-delay", type=float, default=0.0, help="seconds to sleep after each streamed chunk")
+    p.add_argument("--stream-chunks", type=int, default=0,
+                   help="stream at least this many content chunks, padding with whitespace")
     ARGS = p.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler)
     server.daemon_threads = True

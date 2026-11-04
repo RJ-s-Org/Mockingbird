@@ -1609,5 +1609,129 @@ class ProviderPinProxyTest(unittest.TestCase):
         self.assertEqual(server_suites.provider_mix(args, "test"), "Fireworks 1 (100.0%)")
 
 
+class ClientDisconnectTest(unittest.TestCase):
+    """A client that hangs up mid-stream (Mockingbird aborting a looping answer) stops
+    the proxy reading from the provider. Offline: fake_llm streams slowly, no key."""
+
+    CHUNKS, DELAY = 200, 0.02  # the whole stream would take 4 s
+
+    def wait_for(self, what, timeout=10.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            got = what()
+            if got:
+                return got
+            time.sleep(0.02)
+        self.fail("timed out waiting")
+
+    def setUp(self):
+        import socket
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.fake_log = os.path.join(self.dir, "fake.jsonl")
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
+        fake = subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_llm.py"),
+             "--port", str(port), "--log", self.fake_log, "--chunk-delay", str(self.DELAY),
+             "--stream-chunks", str(self.CHUNKS)], env=env)
+        self.addCleanup(fake.wait, 5)
+        self.addCleanup(fake.terminate)
+
+        def up():
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    return True
+            except OSError:
+                return False
+
+        self.wait_for(up)
+        self.ledger = os.path.join(self.dir, "calls.jsonl")
+        args = argparse.Namespace(
+            upstream=f"http://127.0.0.1:{port}/api/v1/chat/completions",
+            no_stream_upgrade=True, dump=None, ledger=self.ledger, budget_usd=5.0, prior_ledger=[],
+            prices=None, provider_pins="", no_format_fallback=True)
+        patch = mock.patch.dict(os.environ, {}, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("OPENROUTER_API_KEY", None)  # the fake upstream never sees a key
+        self.px = proxy.Proxy(args)
+        self.addCleanup(self.px.ledger.fh.close)
+        handler = type("DisconnectHandler", (proxy.Handler,), {"proxy": self.px})
+        self.port = int(serve(handler, self).data.rsplit(":", 1)[1])
+
+    def rows(self):
+        if not os.path.exists(self.ledger):
+            return []
+        with open(self.ledger) as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def fake_ends(self):
+        if not os.path.exists(self.fake_log):
+            return []
+        with open(self.fake_log) as f:
+            return [r for r in map(json.loads, f) if r.get("stream_end")]
+
+    def test_a_client_that_hangs_up_stops_the_upstream_read(self):
+        import socket
+        import struct
+        body = json.dumps({"model": "m/x", "stream": True, "max_tokens": 1000,
+                           "messages": [{"role": "user", "content": "hi"}]}).encode()
+        started = time.monotonic()
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        sock.sendall(b"POST /r/m__x~test/api/v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                     b"Content-Type: application/json\r\nContent-Length: " + str(len(body)).encode()
+                     + b"\r\n\r\n" + body)
+        seen = b""
+        while seen.count(b"data: ") < 3:
+            part = sock.recv(4096)
+            self.assertTrue(part, seen)
+            seen += part
+        self.assertTrue(seen.startswith(b"HTTP/1.1 200"), seen[:80])
+        # Hang up hard (RST), as a client dropping an aborted stream does.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+
+        rec = self.wait_for(self.rows)[-1]
+        end = self.wait_for(self.fake_ends)[-1]
+        took = time.monotonic() - started
+        self.assertLess(took, self.CHUNKS * self.DELAY / 2)  # well before the stream would end
+        # The proxy closed the upstream connection: the provider stopped mid-stream.
+        self.assertTrue(end["caller_closed"], end)
+        self.assertLess(end["chunks_sent"], self.CHUNKS // 4, end)
+        self.assertEqual((rec["status"], rec["error_kind"], rec["client_closed"]), (499, "client_closed", True))
+        self.assertGreater(rec["received_chars"], 0)
+        self.assertIsNone(rec["finish_reason"])
+        self.assertIsNotNone(rec["ttft_ms"])
+        # No usage arrived (it comes last), so the cost is the prompt plus the output seen,
+        # far below the reservation for 1000 tokens; the reservation is released.
+        estimate = self.px.estimate("m/x", json.loads(body))
+        self.assertEqual(rec["cost_source"], "estimate")
+        self.assertGreater(rec["cost_usd"], 0.0)
+        self.assertLess(rec["cost_usd"], estimate / 10)
+        st = self.px.ledger.stats()
+        self.assertEqual((st["reserved_usd"], st["in_flight"], st["calls"]), (0.0, 0, 1))
+        self.assertAlmostEqual(st["ledger_spent_usd"], round(rec["cost_usd"], 6), places=6)
+        # Neither a success nor a provider error in the aggregate.
+        self.assertFalse(aggregate.is_success(rec))
+        self.assertNotIn(rec["error_kind"], aggregate.ERROR_KINDS)
+
+    def test_a_client_that_reads_to_the_end_is_not_marked(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/r/m__x~test/api/v1/chat/completions",
+            data=json.dumps({"model": "m/x", "stream": True,
+                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+        self.assertIn(b"[DONE]", raw)
+        rec = self.wait_for(self.rows)[-1]
+        self.assertEqual((rec["status"], rec["error_kind"]), (200, None))
+        self.assertNotIn("client_closed", rec)
+        self.assertFalse(self.wait_for(self.fake_ends)[-1]["caller_closed"])
+
+
 if __name__ == "__main__":
     unittest.main()
