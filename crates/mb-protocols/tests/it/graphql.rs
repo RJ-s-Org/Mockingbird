@@ -2180,6 +2180,8 @@ type Notification { id: ID! readAt: String }
 type Item { id: ID! name: String! }
 type Run { id: ID! }
 type Search { id: ID! }
+type Team { id: ID! name: String! role: String }
+input TeamMemberInput { role: String }
 type IssuePayload { success: Boolean! issue: Issue }
 type CommentPayload { success: Boolean! comment: Comment }
 type ProductPayload { product: Product }
@@ -2196,6 +2198,7 @@ type Query {
   product(id: ID!): Product
   order(id: ID!): Order
   issueUpdate(id: ID!): IssuePayload
+  team(id: ID!): Team
 }
 type Mutation {
   issueCreate(input: IssueCreateInput!): IssuePayload!
@@ -2226,6 +2229,11 @@ type Mutation {
   itemsToDelete(id: ID!): Boolean
   autoCreate(id: ID!): Boolean
   bulkDelete(id: ID!): Boolean
+  issuedelete(id: ID!): Boolean
+  Issuedelete(id: ID!): Boolean
+  issue_delete(id: ID!): Boolean
+  createTeam(name: String!, role: String!): Team
+  updateTeamMember(id: ID!, userId: ID!, input: TeamMemberInput!): Team
 }
 "#;
 
@@ -2283,6 +2291,8 @@ fn noun_first_mutations_take_their_kind_from_a_verb_suffix() {
         ("issuesUpdate", update, "issue"),
         ("commentDelete", delete, "comment"),
         ("productVariantDelete", delete, "productvariant"),
+        // `_` is a word boundary too.
+        ("issue_delete", delete, "issue"),
         // Verb-first, as before; a payload with no `id` takes the record
         // the name names.
         ("updateIssue", update, "issue"),
@@ -2336,6 +2346,9 @@ fn a_verb_suffix_after_no_record_gives_no_kind() {
         "itemsToDelete",
         "autoCreate",
         "bulkDelete",
+        // No word boundary before the verb.
+        "issuedelete",
+        "Issuedelete",
         "issueArchive",
     ] {
         let op = noun_first_op(&bundle, &format!("Mutation.{name}"));
@@ -2628,4 +2641,45 @@ async fn a_verb_first_update_by_id_changes_the_stored_record() {
         read.body["data"]["issue"],
         json!({"id": "i-1", "title": "Renamed", "priority": 3})
     );
+}
+
+/// A verb-first update returning a record its name does not name
+/// (`updateTeamMember` answers the `Team`) writes no input onto that
+/// record: the team keeps its own `role`.
+#[tokio::test]
+async fn an_update_writes_by_id_only_the_record_its_name_names() {
+    let team =
+        |role: &str| json!({"__typename": "Team", "id": "t-1", "name": "Core", "role": role});
+    let (_, rt) = noun_first(scripted(vec![
+        team("team"),
+        json!({"__typename": "Team", "id": "t-1"}),
+    ]));
+    let base = serve(rt).await;
+    let session = [("x-mockingbird-session", "s1")];
+    let created = post(
+        &base,
+        json!({"query": "mutation { createTeam(name: \"Core\", role: \"team\") { id name role } }"}),
+        &session,
+    )
+    .await;
+    assert!(created.body.get("errors").is_none(), "{}", created.body);
+    let updated = post(
+        &base,
+        json!({"query": "mutation { updateTeamMember(id: \"t-1\", userId: \"u-1\", input: {role: \"admin\"}) { id } }"}),
+        &session,
+    )
+    .await;
+    assert!(updated.body.get("errors").is_none(), "{}", updated.body);
+    let read = post(
+        &base,
+        json!({"query": "{ team(id: \"t-1\") { id name role } }"}),
+        &session,
+    )
+    .await;
+    assert_eq!(
+        read.headers["x-mockingbird-source"], "state",
+        "{}",
+        read.body
+    );
+    assert_eq!(read.body["data"]["team"]["role"], "team", "{}", read.body);
 }

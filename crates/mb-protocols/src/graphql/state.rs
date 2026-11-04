@@ -7,7 +7,7 @@
 //! `cartLinesAdd` answers is the cart now); a query's are only added when
 //! the session holds none under their id, like a list read's seeded items.
 
-use mb_mcm::{Bundle, Effect, Operation, OperationKind};
+use mb_mcm::{Binding, Bundle, Effect, Operation, OperationKind};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
 
@@ -83,7 +83,10 @@ pub(crate) struct ById {
 /// The record `op`, an update or a delete, acts on by its `id` argument
 /// (`issueUpdate(id:, input:)`, `commentDelete(id:)`), whatever its
 /// payload selects: an `id` of the operation's resource type, when that
-/// type has an `id` key. An update whose resource type has none (a
+/// type has an `id` key and the name says it writes that record
+/// ([`mb_mcm::write_nouns`]: `issueUpdate`, `deleteComment`; not
+/// `updateTeamMember` returning a `Team`). An update whose resource type
+/// has none (a
 /// payload's, `setIssuePriority`'s `IssuePayload`) acts on the one type
 /// with an `id` among its payload's object members (`IssuePayload.issue`);
 /// a delete never does, as a payload's other object is the parent that
@@ -109,7 +112,13 @@ pub(crate) fn by_id(bundle: &Bundle, op: &Operation, args: &Map<String, Value>) 
             .is_some_and(|p| p.contains_key("id"))
     };
     if let Some(own) = op.resource_type.as_deref().filter(|t| keyed(t)) {
-        return Some(ById {
+        // Only the record the name names: `updateTeamMember` returning its
+        // `Team` updates no team.
+        let named = matches!(&op.binding, Binding::Graphql { field, .. }
+        if mb_mcm::write_nouns(field).iter().any(|(effect, noun)| {
+            OperationKind::Command(*effect) == op.kind && *noun == own.replace('_', "")
+        }));
+        return named.then(|| ById {
             resource_type: own.to_string(),
             id,
         });
