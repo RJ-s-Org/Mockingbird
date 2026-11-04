@@ -640,6 +640,14 @@ impl SchemaValidator {
         node
     }
 
+    /// `instance` with its corrupted member names mended against this schema
+    /// (see [`crate::mend_member_names`]); how many it mended.
+    pub fn mend_member_names(&self, instance: &mut Value) -> usize {
+        let root = &self.schema;
+        let resolve = |r: &str| r.strip_prefix('#').and_then(|p| root.pointer(p));
+        crate::mend_member_names(root, &resolve, instance)
+    }
+
     /// The schema at `location`.
     fn at(&self, location: &str) -> Option<&Value> {
         self.schema.pointer(location)

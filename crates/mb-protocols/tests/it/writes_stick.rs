@@ -2414,3 +2414,135 @@ async fn a_delete_with_an_extension_stays_under_its_parent() {
     let (status, _, other) = h.call("GET", "/x/2/docs/5.json", None).await;
     assert_eq!(status, StatusCode::OK, "{other}");
 }
+
+/// Settings read and updated by path, whose schema requires nothing, and an update
+/// answered by a task acknowledging it.
+const SETTINGS: &str = r##"
+openapi: 3.0.0
+info: {title: Settings, version: "1"}
+paths:
+  /indexes/{uid}/settings:
+    parameters: [{name: uid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getSettings
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Settings"}}}}
+    patch:
+      operationId: updateSettings
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Settings"}}}}
+      responses:
+        "202": {description: queued, content: {application/json: {schema: {$ref: "#/components/schemas/Task"}}}}
+components:
+  schemas:
+    Settings:
+      type: object
+      properties:
+        displayedAttributes: {type: array, items: {type: string}}
+        searchableAttributes: {type: array, items: {type: string}}
+    Task:
+      type: object
+      required: [taskUid, status]
+      properties:
+        taskUid: {type: integer}
+        indexUid: {type: string}
+        status: {type: string}
+        type: {type: string}
+"##;
+
+/// A schema requiring nothing does not take any object: the task answering a
+/// settings update holds no member of `Settings`, so it is never stored as the
+/// settings record, and the read after it is not served the task.
+#[tokio::test]
+async fn an_acknowledgement_is_not_stored_as_a_record_requiring_nothing() {
+    let task =
+        json!({"taskUid": 7, "indexUid": "movies", "status": "enqueued", "type": "settingsUpdate"});
+    let settings = json!({"displayedAttributes": ["title"], "searchableAttributes": ["title"]});
+    let h = harness_with(
+        SETTINGS.as_bytes(),
+        vec![task.clone(), settings.clone()],
+        |rt| rt.consistency = true,
+    );
+    let (status, _, answer) = h
+        .call(
+            "PATCH",
+            "/indexes/movies/settings",
+            Some(json!({"displayedAttributes": ["title"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
+    assert_eq!(answer, task);
+    for r in h.store.export(&session()).await.unwrap() {
+        assert!(r.data.get("taskUid").is_none(), "{r:?}");
+    }
+    let (status, _, read) = h.call("GET", "/indexes/movies/settings", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert!(read.get("taskUid").is_none(), "{read}");
+}
+
+/// Widgets read by `sku` declare none of `{id, size}`; an order's `widget` member is
+/// `WIDGET_AT` (an inline object, or a `$ref` to another definition).
+const WIDGET_IN_ORDER: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /widgets/{sku}:
+    get:
+      operationId: getWidget
+      parameters: [{name: sku, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  widget: WIDGET_AT
+components:
+  schemas:
+    Widget:
+      type: object
+      properties: {sku: {type: string}, color: {type: string}}
+    Gadget:
+      type: object
+      properties: {id: {type: string}, size: {type: integer}}
+"##;
+
+/// Whether reading an order whose `widget` is at `widget_at` stores that widget.
+async fn stores_the_widget(widget_at: &str) -> bool {
+    let contract = WIDGET_IN_ORDER.replace("WIDGET_AT", widget_at);
+    let h = harness_with(
+        contract.as_bytes(),
+        vec![json!({"id": "o1", "widget": {"id": "w1", "size": 3}})],
+        |rt| rt.consistency = true,
+    );
+    let (status, _, body) = h.call("GET", "/orders/o1", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    h.store
+        .export(&session())
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.resource_type == "widgets" && r.id == "w1")
+}
+
+/// An object found in an answer shows its type by what its own inline place declares,
+/// though the type's schema declares none of it; a `$ref` place is its definition's,
+/// which says nothing of the type the member names.
+#[tokio::test]
+async fn a_found_object_shows_its_type_by_its_inline_place_only() {
+    assert!(
+        stores_the_widget(
+            "{type: object, properties: {id: {type: string}, size: {type: integer}}}"
+        )
+        .await
+    );
+    assert!(!stores_the_widget(r##"{$ref: "#/components/schemas/Gadget"}"##).await);
+}

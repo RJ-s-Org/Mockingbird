@@ -1988,7 +1988,9 @@ async fn declared_and_scenario_headers_are_sent() {
 
 /// Slack's `chat.postMessage` answers `{ok, ts, message: {...}}`: the
 /// message is stored where `conversations.history` lists `messages`, so the
-/// history read after it is generated knowing the message.
+/// history read after it is generated knowing the message. (This contract's
+/// `messages` type is also Twilio's, read by path as `Message {sid, body}`: the
+/// message shows its type by the members its own place in the answer declares.)
 #[tokio::test]
 async fn a_wrapped_created_object_joins_the_list_it_belongs_to() {
     let h = contract_harness(
@@ -2023,6 +2025,34 @@ async fn a_wrapped_created_object_joins_the_list_it_belongs_to() {
         .nth(1)
         .unwrap_or_default();
     assert!(related.contains("Deploy finished"), "{prompt}");
+}
+
+/// A wrapped member that is a `$ref` to another type's definition (here Jira's issue)
+/// shows nothing of the `messages` type it is stored as: what that definition declares
+/// is no evidence, and an object holding none of `Message`'s members is not stored.
+#[tokio::test]
+async fn a_wrapped_object_at_another_definition_is_not_stored_by_it() {
+    let h = contract_harness(
+        &PATH_IDS.replace(
+            "properties: {ok: {type: boolean}, ts: {type: string}}",
+            r##"properties: {ok: {type: boolean}, ts: {type: string}, message: {$ref: "#/components/schemas/JiraIssue"}}"##,
+        ),
+        vec![json!({"ok": true, "ts": "2.2", "message": {"ts": "2.2", "key": "K-1", "summary": "Deploy"}})],
+    );
+    send(
+        &h,
+        post_json(
+            "/chat.postMessage",
+            r#"{"channel":"C1","text":"Deploy finished"}"#,
+        ),
+    )
+    .await;
+    let stored =
+        h.rt.state
+            .get(&session_of(&h, "default"), "messages", "2.2")
+            .await
+            .unwrap();
+    assert!(stored.is_none(), "{stored:?}");
 }
 
 fn session_of(h: &Harness, id: &str) -> SessionKey {

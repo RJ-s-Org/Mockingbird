@@ -1894,6 +1894,8 @@ pub(super) struct SettleGuard<'a> {
     pub(super) plan: &'a CallPlan<'a>,
     pub(super) call: &'a OperationCall,
     pub(super) held: &'a StoredResource,
+    /// The concurrency tokens the update advances (see [`tokens`]).
+    pub(super) advancing: &'a [String],
 }
 
 impl std::fmt::Debug for SettleGuard<'_> {
@@ -1920,6 +1922,10 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 
     fn keeps_owner(&self, candidate: &Value) -> bool {
         keeps_owner(self.rt, self.plan, self.call, self.held, candidate)
+    }
+
+    fn advances(&self, member: &str) -> bool {
+        self.advancing.iter().any(|m| m == member)
     }
 }
 

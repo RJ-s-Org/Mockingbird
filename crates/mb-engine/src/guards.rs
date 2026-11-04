@@ -216,7 +216,8 @@ impl Engine {
     /// Parse LLM output, unwrap the envelope `checks` asked for, if any
     /// (`{"items": [...]}`, or `{"effects": [...], "response": ...}`, whose
     /// effects come back beside the verdict on the answer), enforce the size
-    /// cap, scrub PII, fill what the output budget left out (see
+    /// cap, scrub PII, mend member names written with JSON around them (see
+    /// [`crate::member_names`]), fill what the output budget left out (see
     /// [`crate::budget`]), then validate. A value breaking an asserted format
     /// (see [`SchemaValidator::for_output`]) is refilled locally unless
     /// `echoes` holds it; a format error alone never makes the answer
@@ -348,6 +349,7 @@ impl Engine {
             }
         }
         self.scrub(&mut value);
+        validator.mend_member_names(&mut value);
         if let Some(fill) = fill
             && let Some(filled) = self.fill(validator, &value, fill)
         {
