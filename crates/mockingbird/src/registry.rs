@@ -1046,9 +1046,13 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
         },
     };
     let served = match protocol {
-        Protocol::Http => http_rest::try_router(runtime)
-            .map(http)
-            .map_err(|e| e.to_string()),
+        Protocol::Http => {
+            let (router, skipped) = http_rest::router_and_skipped(runtime);
+            for error in &skipped {
+                tracing::warn!(mock = %label, operation = error.operation(), %error, "HTTP route skipped; the other operations are served");
+            }
+            Ok(http(router))
+        }
         Protocol::Graphql => graphql::try_router(runtime)
             .map(http)
             .map_err(|e| e.to_string()),

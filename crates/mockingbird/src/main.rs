@@ -344,5 +344,9 @@ fn validate(path: &std::path::Path) -> Result<(), Failure> {
     for w in &warnings {
         println!("warning: {}", w.message);
     }
+    // An operation the REST router cannot register is not served.
+    for e in mb_protocols::http_rest::RouteTable::new(&bundle).skipped() {
+        println!("warning: {e}; it is not served");
+    }
     Ok(())
 }
