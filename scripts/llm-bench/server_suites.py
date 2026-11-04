@@ -223,41 +223,89 @@ def free_ports(n):
 # Held from picking a server's ports until it answers /readyz, so another bench
 # process or thread (`run.py full --parallel`, one process per suite,
 # --suites-parallel) cannot pick a port that is free only because our server has
-# not bound it yet: once it is bound, the OS no longer hands it out.
+# not bound it yet: once it is bound, the OS no longer hands it out. Processes
+# coordinate only when they share a temp directory (TMPDIR).
 PORT_LOCK_PATH = os.path.join(tempfile.gettempdir(), "mb-bench-ports.lock")
 _PORT_THREAD_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
-def port_reservation():
-    with _PORT_THREAD_LOCK, open(PORT_LOCK_PATH, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+def port_reservation(timeout):
+    """Holds the port lock, waiting at most `timeout` seconds for it. A holder
+    that is stopped (SIGSTOP, a debugger) then delays the others but cannot block
+    them forever: past the timeout we go on without the lock, and a port taken
+    under us shows up as a server that exits, which `Server` retries."""
+    deadline = time.monotonic() + timeout
+    got_thread = _PORT_THREAD_LOCK.acquire(timeout=max(0.0, timeout))
+    f = None
+    try:
+        f = open(PORT_LOCK_PATH, "a")
+        locked = False
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        if not (got_thread and locked):
+            print(f"  port lock {PORT_LOCK_PATH} still held after {timeout:.0f}s; going on without it",
+                  file=sys.stderr)
         try:
             yield
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            if locked:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        if f:
+            f.close()
+        if got_thread:
+            _PORT_THREAD_LOCK.release()
 
 
-def run_units(units, args):
-    """Runs independent zero-argument callables: in order when --jobs is 1 (the
-    default), else on a pool of --jobs threads against the same server. Each
-    unit owns its session and writes its own rows, so the rows are the same in
-    either mode up to order and latency. After a unit raises, units not started
-    yet are dropped and the first error (in unit order) is raised once the
-    running ones finish, as sequential mode stops at it."""
-    jobs = max(1, int(getattr(args, "jobs", 1) or 1))
+class Stopped(BaseException):
+    """Raised by calls made after a parallel run was interrupted. A
+    BaseException, so the journeys' `except Exception` records no row for it."""
+
+
+# Set when a parallel run is interrupted: units still running stop at their next call.
+STOP = threading.Event()
+
+
+def run_units(units, args, jobs=None):
+    """Runs independent zero-argument callables and returns their results in
+    unit order: in order when --jobs is 1 (the default), else on a pool of
+    --jobs threads against the same server. Each unit owns its session and
+    writes its own rows, so the rows are the same in either mode up to order
+    and latency. After a unit raises, units not started yet are dropped and the
+    first error (in unit order) is raised once the running ones finish, as
+    sequential mode stops at it. On Ctrl-C (or any BaseException in the
+    waiting thread) queued units are cancelled, running ones stop at their next
+    call (`STOP`), and the interrupt is raised at once."""
+    if jobs is None:
+        jobs = max(1, int(getattr(args, "jobs", 1) or 1))
     if jobs == 1 or len(units) <= 1:
-        for unit in units:
-            unit()
-        return
-    with ThreadPoolExecutor(max_workers=min(jobs, len(units)), thread_name_prefix="bench-unit") as pool:
-        futures = [pool.submit(unit) for unit in units]
-        _, pending = wait(futures, return_when=FIRST_EXCEPTION)
-        for f in pending:
-            f.cancel()
+        return [unit() for unit in units]
+    pool = ThreadPoolExecutor(max_workers=min(jobs, len(units)), thread_name_prefix="bench-unit")
+    futures = [pool.submit(unit) for unit in units]
+    try:
+        # A timed wait, so a signal reaches this thread even where a blocking wait would not wake for it.
+        pending = futures
+        while pending:
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_EXCEPTION)
+            if any(not f.cancelled() and f.exception() is not None for f in done):
+                break
+    except BaseException:
+        STOP.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True, cancel_futures=True)
     for f in futures:
         if not f.cancelled() and f.exception() is not None:
             raise f.exception()
+    return [f.result() for f in futures]
 
 
 def slug_of(model):
@@ -352,6 +400,8 @@ def wait_ready(admin, proc, timeout):
 
 def request(url, method="GET", headers=None, json_body=None, form=None, data=None, timeout=180):
     """(elapsed_ms, status, headers, parsed body or None, raw bytes)."""
+    if STOP.is_set():
+        raise Stopped(url)
     headers = dict(headers or {})
     if json_body is not None:
         data = json.dumps(json_body).encode()
@@ -440,7 +490,8 @@ class Server:
         self.log = open(self.log_path, "w")
         for attempt in range(self.START_ATTEMPTS):
             try:
-                with port_reservation():
+                # The lock waits as long as its holder may take to get ready, and a margin.
+                with port_reservation(self.args.ready_timeout + 30):
                     self.use_ports(free_ports(3))
                     self.proc = subprocess.Popen([self.args.binary, "serve", "-c", self.config], cwd=self.dir,
                                                  stdout=self.log, stderr=self.log, env=env)
@@ -625,6 +676,8 @@ def basic_violations(value, schema):
 
 def read_sse(url, headers, want, timeout):
     """Reads `want` events (or until timeout / end); returns (status, ttfe_ms, total_ms, events, error)."""
+    if STOP.is_set():
+        raise Stopped(url)
     parts = urllib.parse.urlsplit(url)
     started = time.monotonic()
     conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
@@ -4661,8 +4714,8 @@ def main():
     if args.suites_parallel:
         # A suite's server log is named by model and suite, so each runs once.
         suites = list(dict.fromkeys(suites))
-        with ThreadPoolExecutor(max_workers=len(suites), thread_name_prefix="bench-suite") as pool:
-            failed = any(list(pool.map(lambda suite: run_suite(suite, args), suites)))
+        failed = any(run_units([functools.partial(run_suite, suite, args) for suite in suites], args,
+                               jobs=len(suites)))
     else:
         failed = any([run_suite(suite, args) for suite in suites])
     sys.exit(1 if failed else 0)

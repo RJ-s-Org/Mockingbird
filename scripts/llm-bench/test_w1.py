@@ -2,14 +2,24 @@
 header-safe session ids. Run: python3 -m unittest scripts/llm-bench/test_w1.py"""
 
 import argparse
+import builtins
+import contextlib
+import fcntl
+import io
 import json
 import os
+import random
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 import urllib.parse
+import urllib.request
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -660,11 +670,53 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(ran, [0, 1])
 
 
+class InterruptTest(unittest.TestCase):
+    def setUp(self):
+        server_suites.STOP.clear()
+        self.addCleanup(server_suites.STOP.clear)
+        old = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, old)
+
+    def test_ctrl_c_cancels_the_queued_units(self):
+        started = []
+
+        def unit():
+            started.append(1)
+            time.sleep(0.2)
+
+        timer = threading.Timer(0.3, signal.pthread_kill, (threading.main_thread().ident, signal.SIGINT))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        t0 = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt):
+            server_suites.run_units([unit] * 20, argparse.Namespace(jobs=2))
+        self.assertLess(time.monotonic() - t0, 1.0)
+        time.sleep(0.3)  # the units that were running finish; nothing queued starts
+        self.assertLessEqual(len(started), 6)
+        # Units still running stop at their next call.
+        self.assertTrue(server_suites.STOP.is_set())
+        with self.assertRaises(server_suites.Stopped):
+            server_suites.request("http://127.0.0.1:1/")
+
+    def test_suites_parallel_goes_through_the_same_pool(self):
+        with open(server_suites.__file__) as f:
+            source = f.read()
+        self.assertIn("run_units([functools.partial(run_suite, suite, args) for suite in suites]", source)
+
+
+# A stand-in for `mockingbird serve`: binds the three ports of its config after a
+# delay (a slow start widens the window a port lock must cover), exits 98 when
+# one is taken, then answers every GET. MODE "fail-once" exits 3 on its first
+# start in a directory, "fail-always" on every start.
 FAKE_BINARY = """#!/usr/bin/env python3
-import re, sys, time
+import os, re, socket, sys, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+MODE = "@MODE@"
+if MODE == "fail-always" or (MODE == "fail-once" and not os.path.exists("tried")):
+    open("tried", "w").close()
+    sys.exit(3)
 config = open(sys.argv[sys.argv.index("-c") + 1]).read()
-port = int(re.search(r"admin_port: (\\d+)", config).group(1))
+ports = [int(re.search(name + r": (\\d+)", config).group(1)) for name in (" port", "admin_port", "grpc_port")]
 
 class Ready(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -674,43 +726,236 @@ class Ready(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
-time.sleep(0.2)  # a server that takes a while to bind its ports
-HTTPServer(("127.0.0.1", port), Ready).serve_forever()
+time.sleep(0.3)
+servers = []
+try:
+    for port in ports:
+        servers.append(HTTPServer(("127.0.0.1", port), Ready))
+except OSError:
+    sys.exit(98)
+for s in servers[:-1]:
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+servers[-1].serve_forever()
+"""
+
+# Runs in its own process, so the flock path between processes is what is tested.
+# "server": starts a Server with a port picker that always offers the lowest free
+# ports from `base`, so two servers picking before either binds collide for sure.
+# "sink": appends large rows whose writes are split in two with a pause between.
+CHILD = """
+import argparse, builtins, contextlib, json, socket, sys, time, types
+sys.path.insert(0, @BENCH@)
+import server_suites as ss
+cfg = json.loads(sys.argv[1])
+ss.PORT_LOCK_PATH = cfg["lock"]
+if cfg.get("no_lock"):
+    ss.port_reservation = lambda timeout: contextlib.nullcontext()
+    ss.fcntl = types.SimpleNamespace(flock=lambda *a: None, LOCK_EX=0, LOCK_UN=0, LOCK_NB=0)
+
+def lowest_free(n):
+    out, port = [], cfg.get("base", 0)
+    while len(out) < n:
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                out.append(port)
+            except OSError:
+                pass
+        port += 1
+    return tuple(out)
+
+class SplitFile:
+    def __init__(self, path, mode):
+        self.f = builtins.open(path, mode)
+    def fileno(self):
+        return self.f.fileno()
+    def write(self, data):
+        half = len(data) // 2
+        self.f.write(data[:half]); self.f.flush(); time.sleep(0.002); self.f.write(data[half:])
+        return len(data)
+    def flush(self):
+        self.f.flush()
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        self.f.close()
+
+while time.time() < cfg["at"]:
+    time.sleep(0.001)
+if cfg["mode"] == "server":
+    ss.free_ports = lowest_free
+    ss.Server.START_ATTEMPTS = 1
+    args = argparse.Namespace(model="m/x", proxy_base="http://127.0.0.1:1", out=cfg["out"], binary=cfg["binary"],
+                              ready_timeout=20, keep=False)
+    try:
+        with ss.Server(args, cfg["suite"], {}) as srv:
+            print(json.dumps({"ports": srv.ports}), flush=True)
+            time.sleep(cfg["hold"])
+    except ss.ServerExited as e:
+        print(json.dumps({"error": str(e)}), flush=True)
+else:
+    ss.open = SplitFile
+    sink = ss.Sink(cfg["out"], cfg["model"], "journeys")
+    for i in range(cfg["rows"]):
+        sink.add(f"case{i}", 0, True, 1.0, "llm", {"blob": "x" * 50000, "i": i})
 """
 
 
+def write_binary(directory, mode="ok"):
+    path = os.path.join(directory, f"fake-mockingbird-{mode}")
+    with open(path, "w") as f:
+        f.write(FAKE_BINARY.replace("/usr/bin/env python3", sys.executable, 1).replace("@MODE@", mode))
+    os.chmod(path, 0o755)
+    return path
+
+
+def run_children(directory, configs):
+    """Starts one CHILD per config at the same moment; their stdout JSON lines."""
+    script = os.path.join(directory, "child.py")
+    with open(script, "w") as f:
+        f.write(CHILD.replace("@BENCH@", repr(os.path.dirname(os.path.abspath(__file__)))))
+    at = time.time() + 1.5
+    procs = [subprocess.Popen([sys.executable, script, json.dumps(dict(c, at=at))], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, text=True) for c in configs]
+    out = []
+    for p in procs:
+        stdout, _ = p.communicate(timeout=60)
+        out += [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    return out
+
+
 class ServerPortsTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="mb-ports-test-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.lock = os.path.join(self.dir, "ports.lock")  # not the real one: a live bench may hold that
+
+    def start_at_once(self, no_lock):
+        binary = write_binary(self.dir)
+        base = random.randint(21000, 29000)
+        return run_children(self.dir, [
+            {"mode": "server", "lock": self.lock, "no_lock": no_lock, "base": base, "out": self.dir,
+             "binary": binary, "suite": f"suite{i}", "hold": 4} for i in range(4)])
+
     def test_free_ports_are_distinct(self):
         self.assertEqual(len(set(server_suites.free_ports(8))), 8)
 
-    def test_servers_started_at_once_get_their_own_ports_and_dirs(self):
+    def test_servers_started_at_once_in_separate_processes_get_their_own_ports(self):
+        got = self.start_at_once(no_lock=False)
+        self.assertEqual([g for g in got if "error" in g], [])
+        ports = [p for g in got for p in g["ports"]]
+        self.assertEqual((len(ports), len(set(ports))), (12, 12))
+
+    def test_without_the_port_lock_the_same_start_collides(self):
+        # The control for the test above: the picker and timing do force a collision.
+        got = self.start_at_once(no_lock=True)
+        ports = [p for g in got for p in g.get("ports", ())]
+        self.assertTrue(any("error" in g for g in got) or len(set(ports)) < len(ports), got)
+
+    def test_a_server_that_exits_before_ready_is_retried_on_new_ports(self):
+        args = argparse.Namespace(model="m/x", proxy_base="http://127.0.0.1:1", out=self.dir,
+                                  binary=write_binary(self.dir, "fail-once"), ready_timeout=20, keep=False)
+        with mock.patch.object(server_suites, "PORT_LOCK_PATH", self.lock):
+            with server_suites.Server(args, "journeys", {}) as srv:
+                with urllib.request.urlopen(f"{srv.admin}/readyz", timeout=5) as r:
+                    self.assertEqual(r.status, 200)
+                log_path = srv.log_path
+        with open(log_path) as f:
+            self.assertEqual(f.read().count("retrying on new ports"), 1)
+
+    def test_a_server_that_never_gets_ready_fails_after_its_attempts(self):
+        args = argparse.Namespace(model="m/x", proxy_base="http://127.0.0.1:1", out=self.dir,
+                                  binary=write_binary(self.dir, "fail-always"), ready_timeout=20, keep=False)
+        with mock.patch.object(server_suites, "PORT_LOCK_PATH", self.lock):
+            with self.assertRaises(server_suites.ServerExited):
+                with server_suites.Server(args, "journeys", {}):
+                    pass
+        with open(os.path.join(self.dir, "server-logs", "m__x~journeys.log")) as f:
+            self.assertEqual(f.read().count("retrying on new ports"), server_suites.Server.START_ATTEMPTS - 1)
+
+    def test_a_held_port_lock_is_waited_for_only_until_its_timeout(self):
+        with open(self.lock, "a") as held, mock.patch.object(server_suites, "PORT_LOCK_PATH", self.lock), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            t0 = time.monotonic()
+            with server_suites.port_reservation(0.5):
+                waited = time.monotonic() - t0
+        self.assertGreaterEqual(waited, 0.45)
+        self.assertLess(waited, 3)
+        self.assertIn("going on without it", err.getvalue())
+
+
+class SlowCloseFile:
+    """A file whose writes are split in two and whose close pauses, so threads
+    that do not hold the sink's lock across write and record reorder."""
+
+    def __init__(self, path, mode):
+        self.f = builtins.open(path, mode)
+
+    def fileno(self):
+        return self.f.fileno()
+
+    def write(self, data):
+        half = len(data) // 2
+        self.f.write(data[:half])
+        self.f.flush()
+        time.sleep(0.0005)
+        self.f.write(data[half:])
+        return len(data)
+
+    def flush(self):
+        self.f.flush()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.f.close()
+        time.sleep(random.random() * 0.002)
+
+
+class SinkConcurrencyTest(unittest.TestCase):
+    def test_threads_write_whole_rows_in_the_order_the_sink_records(self):
         with tempfile.TemporaryDirectory() as out:
-            binary = os.path.join(out, "fake-mockingbird")
-            with open(binary, "w") as f:
-                f.write(FAKE_BINARY.replace("/usr/bin/env python3", sys.executable, 1))
-            os.chmod(binary, 0o755)
-            args = argparse.Namespace(model="m/x", proxy_base="http://127.0.0.1:1", out=out, binary=binary,
-                                      ready_timeout=20, keep=False)
-            seen, errors = [], []
+            sink = server_suites.Sink(out, "m/x", "journeys")
 
-            def start(suite):
-                try:
-                    with server_suites.Server(args, suite, {}) as srv:
-                        seen.append((srv.ports, srv.dir, srv.log_path))
-                        time.sleep(0.3)  # all up at the same time
-                except Exception as e:  # noqa: BLE001
-                    errors.append(e)
+            def writer(t):
+                for i in range(25):
+                    sink.add(f"case{t}-{i}", t, True, 1.0, "llm", {"blob": "x" * 20000})
 
-            threads = [threading.Thread(target=start, args=(s,)) for s in ("journeys", "sse", "consistency", "journeys")]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-        self.assertEqual(errors, [])
-        ports = [p for ps, _, _ in seen for p in ps]
-        self.assertEqual(len(ports), 12)
-        self.assertEqual(len(set(ports)), 12)
-        self.assertEqual(len({d for _, d, _ in seen}), 4)
+            with mock.patch.object(server_suites, "open", SlowCloseFile, create=True), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                threads = [threading.Thread(target=writer, args=(t,)) for t in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            with open(os.path.join(out, "server.jsonl")) as f:
+                written = [json.loads(line) for line in f]
+        self.assertEqual(len(written), 200)
+        self.assertEqual([r["case"] for r in written], [r["case"] for r in sink.rows])
+
+    def run_writers(self, no_lock):
+        with tempfile.TemporaryDirectory() as out:
+            run_children(out, [{"mode": "sink", "lock": os.path.join(out, "unused.lock"), "no_lock": no_lock,
+                                "out": out, "model": f"m/{n}", "rows": 30} for n in range(4)])
+            bad, good = 0, 0
+            with open(os.path.join(out, "server.jsonl")) as f:
+                for line in f:
+                    try:
+                        json.loads(line)
+                        good += 1
+                    except ValueError:
+                        bad += 1
+            return good, bad
+
+    def test_processes_appending_large_rows_never_interleave(self):
+        self.assertEqual(self.run_writers(no_lock=False), (120, 0))
+
+    def test_without_the_flock_the_same_writers_interleave(self):
+        # The control for the test above.
+        good, bad = self.run_writers(no_lock=True)
+        self.assertGreater(bad, 0)
 
 
 if __name__ == "__main__":
