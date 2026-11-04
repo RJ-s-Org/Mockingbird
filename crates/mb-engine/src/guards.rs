@@ -319,6 +319,30 @@ impl Engine {
         (checked, effects)
     }
 
+    /// The effects `text` lists, as an answer with no body has them (see
+    /// [`crate::Engine::generate`]): its `effects` member, with what is beside it
+    /// ignored, scrubbed and fitted under the size cap as an answer's are. None when
+    /// `text` holds no object.
+    pub(crate) fn effects_only(&self, text: &str) -> AnswerEffects {
+        let Some(Value::Object(mut map)) = crate::extract_json(text) else {
+            return AnswerEffects::default();
+        };
+        let mut effects = map
+            .remove(EFFECTS_KEY)
+            .map_or_else(AnswerEffects::default, parse_effects);
+        for effect in &mut effects.kept {
+            let mut set = Value::Object(std::mem::take(&mut effect.set));
+            self.scrub(&mut set);
+            if let Value::Object(scrubbed) = set {
+                effect.set = scrubbed;
+            }
+        }
+        if let Some(cap) = self.guards.max_response_bytes {
+            effects.fit(0, cap);
+        }
+        effects
+    }
+
     /// Replaces the PII in `value`, counting it. Nothing without a scrubber.
     pub fn scrub(&self, value: &mut Value) {
         if let Some(scrubber) = &self.guards.scrubber {
@@ -693,6 +717,11 @@ that change, never an id, and nothing it does not change. Nested objects are mer
 member: to replace one, give the whole object, and give a map's full new contents (an object's \
 members its schema does not declare can be added but never removed). Leave it empty \
 when the call changes nothing there. Add no other members.";
+
+/// What a write answering no body is told after [`EFFECTS_ENVELOPE_NOTE`] (see
+/// [`crate::Engine::generate`]): only its effects are asked for.
+pub(crate) const BODYLESS_NOTE: &str = "This call's response has no body: \"response\" is null, and \
+\"effects\" is all there is to decide.";
 
 /// The error of output that holds no JSON value.
 pub(crate) const NOT_JSON: &str = "output is not valid JSON";
@@ -1635,6 +1664,21 @@ fn unwrap_envelope(validator: &SchemaValidator, value: &Value) -> Option<Value> 
 #[cfg(test)]
 mod tests {
     use super::words;
+
+    #[test]
+    fn effects_only_takes_the_list_and_nothing_else() {
+        let engine = crate::Engine::new(None, crate::EngineConfig::default());
+        let effects = engine.effects_only(
+            r#"{"effects": [{"type": "books", "id": "b-1", "set": {"racked": true}}, {"type": "x"}], "response": {"made": "up"}}"#,
+        );
+        assert_eq!(effects.kept.len(), 1);
+        assert_eq!(effects.kept[0].id, "b-1");
+        assert_eq!(effects.dropped, 1);
+        for text in ["not json", "[1, 2]", r#"{"response": null}"#] {
+            let none = engine.effects_only(text);
+            assert!(none.kept.is_empty() && none.dropped == 0, "{text}");
+        }
+    }
 
     #[test]
     fn words_split_on_case_and_separators() {
