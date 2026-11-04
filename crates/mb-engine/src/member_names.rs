@@ -335,7 +335,11 @@ mod tests {
             json!({"name\u{3000}": "x"}),
             json!({"\u{a0}id:": "x"}),
         ] {
-            assert_eq!(mended(&schema, value.clone()), (value.clone(), 0), "{value}");
+            assert_eq!(
+                mended(&schema, value.clone()),
+                (value.clone(), 0),
+                "{value}"
+            );
         }
     }
 

@@ -2255,7 +2255,13 @@ fn after_effects_on(t: &str, id: &str, held: Value, effects: Value) -> (Value, (
     let counted = counting_effects(async move {
         let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
         if t != "bookings" {
-            store(&state, "bookings", "b1", json!({"id": "b1", "status": "held"})).await;
+            store(
+                &state,
+                "bookings",
+                "b1",
+                json!({"id": "b1", "status": "held"}),
+            )
+            .await;
         }
         store(&state, &t, &id, held).await;
         let answer = json!({"response": {"reason": "asked"}, "effects": effects});
@@ -2292,7 +2298,10 @@ fn a_null_for_an_optional_member_removes_it() {
 #[test]
 fn a_null_for_a_required_member_rejects_the_effect() {
     let held = json!({"id": "b1", "status": "held", "note": "late"});
-    for set in [json!({"status": null, "note": "early"}), json!({"status": null})] {
+    for set in [
+        json!({"status": null, "note": "early"}),
+        json!({"status": null}),
+    ] {
         let (stored, counted) = after_effects(
             held.clone(),
             json!([{"type": "bookings", "id": "b1", "set": set}]),
