@@ -41,7 +41,6 @@ mod world;
 
 pub(crate) use value_index::{ValueFeed, ValueIndex};
 mod write_memory;
-pub(crate) use write_memory::LastWrites;
 
 const SESSION_HEADER: &str = "x-mockingbird-session";
 const STATUS_HEADER: &str = "x-mockingbird-status";
@@ -709,9 +708,12 @@ pub(crate) async fn generate_pending(
             held,
             advancing: &pending.tokens.advancing,
         });
-    // A retried write answering no body is shown nothing beyond its target, so it is
-    // asked for no effects a second time (see [`write_memory::repeats_last_write`]).
-    let repeat = write_memory::repeats_last_write(rt, plan, call);
+    // A client's retry of a write answering no body is shown nothing beyond its target,
+    // so it is asked for no effects a second time (see [`write_memory::is_retry`]).
+    pending.retry = write_memory::is_retry(&mut pending.state, plan, call)
+        .instrument(state_span())
+        .await;
+    let repeat = pending.retry && write_memory::answers_no_body(plan);
     let (related, created_since): (&[StoredResource], &[StoredResource]) = if repeat {
         (&[], &[])
     } else {
@@ -812,6 +814,9 @@ pub(crate) struct Pending<'a> {
     same_values: Vec<(String, String, String)>,
     /// What a write found of its target's concurrency tokens (see [`tokens`]).
     tokens: tokens::Tokens,
+    /// The write is a client's retry of the session's latest (see
+    /// [`write_memory::is_retry`]).
+    retry: bool,
 }
 
 /// Reads the call's state and answers what needs no generation: an unknown
@@ -1132,6 +1137,7 @@ pub(crate) async fn prepare<'a>(
         alongside,
         same_values,
         tokens,
+        retry: false,
     }))
 }
 
@@ -1238,6 +1244,7 @@ pub(crate) async fn complete(
         unlisted,
         same_values,
         tokens,
+        retry,
         ..
     } = pending;
     let acted_on = target_id.clone();
@@ -1649,6 +1656,7 @@ pub(crate) async fn complete(
                 foreign_key,
                 unstored,
                 earlier: &earlier,
+                retry,
             },
         )
         .await;
@@ -1657,7 +1665,7 @@ pub(crate) async fn complete(
             plan,
             call,
             &generated,
-            foreign_key || unstored,
+            (foreign_key || unstored, retry),
         )
         .await;
         // Served as it was answered, holding the record as state now has it.

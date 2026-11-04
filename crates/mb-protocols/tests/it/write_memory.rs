@@ -672,7 +672,8 @@ impl Harness {
     /// The memory's documents: not the deleted markers kept under the same type.
     async fn memory(&self) -> Vec<StoredResource> {
         let mut held = self.store.list(&session(), MEMORY, 100).await.unwrap();
-        held.retain(|doc| !doc.id.starts_with("#deleted"));
+        // Bookkeeping beside the memory: deleted markers and the latest retryable write.
+        held.retain(|doc| !doc.id.starts_with("#deleted") && doc.id != "#last-write");
         held
     }
 }

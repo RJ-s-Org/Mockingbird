@@ -194,7 +194,20 @@ fn harness(script: Vec<Value>) -> Harness {
 
 impl Harness {
     async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -510,7 +523,8 @@ async fn a_childs_delete_under_no_held_parent_tells_nothing() {
         .await
         .unwrap();
     assert!(
-        kept.iter().all(|d| d.id.starts_with("#deleted")),
+        kept.iter()
+            .all(|d| d.id.starts_with("#deleted") || d.id == "#last-write"),
         "only the delete's own markers: {kept:?}"
     );
     assert_eq!(h.calls(), 0);
@@ -609,8 +623,8 @@ async fn a_member_on_a_sibling_route_is_not_told() {
 
 // Repeats.
 
-/// A retried bodyless write, the same operation, path and body, asks for its effects
-/// once, and is remembered once.
+/// A client's retry of a bodyless `POST`, the same operation, path, body and
+/// `Idempotency-Key`, asks for its effects once, and is remembered once.
 #[tokio::test]
 async fn a_retried_bodyless_write_asks_for_effects_once() {
     let h = harness(vec![no_effects(), json!([])]);
@@ -625,7 +639,12 @@ async fn a_retried_bodyless_write_asks_for_effects_once() {
     let links = json!({"data": [{"type": "book", "id": "bk-4711"}]});
     for _ in 0..3 {
         let (status, _) = h
-            .call("POST", "/racks/s-1/links/books", Some(links.clone()))
+            .call_with(
+                "POST",
+                "/racks/s-1/links/books",
+                Some(links.clone()),
+                &[("Idempotency-Key", "retry-1")],
+            )
             .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
@@ -655,4 +674,83 @@ async fn a_bodyless_write_after_another_is_asked_again() {
         .await;
     h.call("POST", "/racks/s-1/links/books", Some(links)).await;
     assert_eq!(h.calls(), 2, "link, then link again after the unlink");
+}
+
+/// Two `POST`s with no `Idempotency-Key` are two writes, whatever they say: each is asked
+/// for its effects, and both are told.
+#[tokio::test]
+async fn a_deliberate_repeat_is_two_writes() {
+    let h = harness(vec![no_effects(), no_effects(), json!([])]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.hold(
+        "books",
+        "bk-4711",
+        json!({"id": "bk-4711", "title": "Dune"}),
+    )
+    .await;
+    let links = json!({"data": [{"type": "book", "id": "bk-4711"}]});
+    h.call("POST", "/racks/s-1/links/books", Some(links.clone()))
+        .await;
+    h.call("POST", "/racks/s-1/links/books", Some(links)).await;
+    assert_eq!(h.calls(), 2, "each is asked");
+    h.call("GET", "/racks/s-1/books", None).await;
+    let prompt = h.prompt(h.calls() - 1);
+    let told = block(&prompt, "earlier_writes").unwrap_or_else(|| panic!("{prompt}"));
+    assert_eq!(told.matches("linkBooks").count(), 2, "{told}");
+}
+
+/// Another `Idempotency-Key` is another write.
+#[tokio::test]
+async fn another_idempotency_key_is_another_write() {
+    let h = harness(vec![no_effects(), no_effects()]);
+    h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+        .await;
+    h.hold(
+        "books",
+        "bk-4711",
+        json!({"id": "bk-4711", "title": "Dune"}),
+    )
+    .await;
+    let links = json!({"data": [{"type": "book", "id": "bk-4711"}]});
+    for key in ["k-1", "k-2"] {
+        h.call_with(
+            "POST",
+            "/racks/s-1/links/books",
+            Some(links.clone()),
+            &[("Idempotency-Key", key)],
+        )
+        .await;
+    }
+    assert_eq!(h.calls(), 2);
+}
+
+/// What a retry is told apart by goes with the session: after a reset, the same write is
+/// asked again, and its effect applies.
+#[tokio::test]
+async fn the_latest_write_goes_with_a_session_reset() {
+    let effect = json!({"effects": [{"type": "books", "id": "bk-4711", "set": {"racked": true}}], "response": null});
+    let h = harness(vec![effect.clone(), effect]);
+    let links = json!({"data": [{"type": "book", "id": "bk-4711"}]});
+    for round in 1..=2 {
+        h.hold("racks", "s-1", json!({"id": "s-1", "name": "Fiction"}))
+            .await;
+        h.hold(
+            "books",
+            "bk-4711",
+            json!({"id": "bk-4711", "title": "Dune"}),
+        )
+        .await;
+        h.call_with(
+            "POST",
+            "/racks/s-1/links/books",
+            Some(links.clone()),
+            &[("Idempotency-Key", "retry-1")],
+        )
+        .await;
+        assert_eq!(h.calls(), round, "after a reset the write is asked again");
+        let book = h.held("books", "bk-4711").await.unwrap();
+        assert_eq!(book["racked"], json!(true), "{book}");
+        h.store.reset(&session()).await.unwrap();
+    }
 }

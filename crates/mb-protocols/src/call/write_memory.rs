@@ -108,6 +108,8 @@ pub(super) struct Written<'a> {
     /// A new record that could not be stored.
     pub(super) unstored: bool,
     pub(super) earlier: &'a Earlier,
+    /// The write is a client's retry (see [`is_retry`]).
+    pub(super) retry: bool,
 }
 
 /// Where a resource's memory is kept. By its stored id when there is one; a value
@@ -1192,7 +1194,7 @@ async fn parent_of(
 }
 
 /// Adds `entry` to a memory, within the caps, with what it said of the resource
-/// itself in place of any older own body. A new request is worth trying for, so the
+/// itself in place of any older own body; `retry`: the write is a client's retry. A new request is worth trying for, so the
 /// count of failed catch-ups starts over.
 async fn remember(
     state: &mut StateAccess<'_>,
@@ -1200,14 +1202,16 @@ async fn remember(
     key: &str,
     entry: &Value,
     own: Option<Value>,
+    retry: bool,
 ) {
     let mut memory = read_memory(state, session, key).await;
-    // A repeat of the newest request (a client's retry) is one request, kept as the
-    // later, so that repeats push no other out.
-    if memory
-        .requests
-        .last()
-        .is_some_and(|newest| same_request(newest, entry))
+    // A client's retry of the newest request (see [`is_retry`]) is one request, kept as
+    // the later, so that retries push no other out. A deliberate repeat is two.
+    if retry
+        && memory
+            .requests
+            .last()
+            .is_some_and(|newest| same_request(newest, entry))
     {
         memory.requests.pop();
     }
@@ -1508,6 +1512,7 @@ pub(super) async fn after_write(
             &key,
             &memory_entry(op, tell.body, None),
             tell.own,
+            w.retry,
         )
         .await;
         if tell.publish
@@ -1529,7 +1534,7 @@ pub(super) async fn after_write(
     }
     if let Some(parent) = &parent {
         let key = memory_key(&parent.resource_type, &parent.id, true);
-        remember(state, session, &key, &entry, None).await;
+        remember(state, session, &key, &entry, None, w.retry).await;
     }
     // What it only refers to is told so, and changes by effects alone (see
     // [`Earlier::by_effects`]): what an older body says of it still stands.
@@ -1539,7 +1544,7 @@ pub(super) async fn after_write(
     for related in &referenced {
         let key = memory_key(&related.resource_type, &related.id, true);
         let own = read_memory(state, session, &key).await.own;
-        remember(state, session, &key, &entry, own).await;
+        remember(state, session, &key, &entry, own, w.retry).await;
     }
 }
 
@@ -1741,7 +1746,7 @@ pub(super) async fn after_route_write(
     plan: &CallPlan<'_>,
     call: &OperationCall,
     generated: &GeneratedResponse,
-    refused: bool,
+    (refused, retry): (bool, bool),
 ) {
     let rt = state.rt;
     let op = plan.op;
@@ -1752,11 +1757,11 @@ pub(super) async fn after_route_write(
     {
         return;
     }
-    note_last_write(rt, plan, call);
+    note_last_write(state, plan, call).await;
     if op.kind == OperationKind::Command(Effect::Delete) {
         forget_deleted_route(state, plan, call).await;
     }
-    tell_siblings(state, plan, call, generated).await;
+    tell_siblings(state, plan, call, generated, retry).await;
     let (Some(key), Some(list)) = (
         route_memory_key(rt, op, call),
         rt.index().written_lists.get(&route(op)),
@@ -1773,71 +1778,105 @@ pub(super) async fn after_route_write(
         .as_ref()
         .and_then(|body| told_to_list(rt, plan, list, body, op.input.body.as_ref()));
     let entry = memory_entry(op, body, None);
-    remember(state, &plan.session, &key, &entry, None).await;
+    remember(state, &plan.session, &key, &entry, None, retry).await;
 }
 
-/// Sessions [`LastWrites`] holds at most; it is emptied when full.
-const MAX_LAST_WRITE_SESSIONS: usize = 1024;
+/// Where the session's latest write a client may retry is kept (see [`retry_hash`]),
+/// beside its other memory: resets, TTLs and every node see it.
+const LAST_WRITE: &str = "#last-write";
 
-/// Each session's latest 2xx write through this runtime, by a hash of its operation,
-/// the path it was made to and its body (a hash, as those may hold a secret), for
-/// [`repeats_last_write`]. Per process: a retry reaching another node, or coming after a
-/// reset of the session, is asked again.
-#[derive(Debug, Default)]
-pub(crate) struct LastWrites(std::sync::Mutex<HashMap<SessionKey, String>>);
+/// How long after a write its repeat counts as a client's retry, in milliseconds.
+const RETRY_WINDOW_MS: i64 = 30_000;
 
-impl LastWrites {
-    fn note(&self, session: &SessionKey, hash: String) {
-        let Ok(mut last) = self.0.lock() else {
-            return;
-        };
-        if last.len() >= MAX_LAST_WRITE_SESSIONS && !last.contains_key(session) {
-            last.clear();
-        }
-        last.insert(session.clone(), hash);
-    }
+/// The header a `POST` names its retries by.
+const IDEMPOTENCY_KEY: &str = "idempotency-key";
 
-    fn is(&self, session: &SessionKey, hash: &str) -> bool {
-        self.0
-            .lock()
-            .ok()
-            .is_some_and(|last| last.get(session).map(String::as_str) == Some(hash))
-    }
-}
-
-/// What makes a write the same write: its operation, the path it was made to and its
-/// body, hashed.
-fn last_write(op: &Operation, call: &OperationCall) -> Option<String> {
-    let Binding::Http { path, .. } = &op.binding else {
+/// A hash of what makes a write one a client retries: a `PUT` or a `DELETE`, which
+/// HTTP makes idempotent, or a `POST` sending an `Idempotency-Key` header, by its
+/// method, operation, filled path, body and that key. A hash, as those may hold a
+/// secret. `None` for any other write: two such are two writes.
+fn retry_hash(op: &Operation, call: &OperationCall) -> Option<String> {
+    let Binding::Http { method, path } = &op.binding else {
         return None;
     };
+    let key = call
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(IDEMPOTENCY_KEY))
+        .and_then(|(_, value)| value.as_str());
+    match (method, key) {
+        (mb_mcm::HttpMethod::Put | mb_mcm::HttpMethod::Delete, _)
+        | (mb_mcm::HttpMethod::Post, Some(_)) => {}
+        _ => return None,
+    }
     let filled = fill_path(call, &path_segments(path))?;
     let body = call.body.as_ref().map(Value::to_string).unwrap_or_default();
-    let digest = Sha256::digest(format!("{}\n{}\n{body}", op.id, filled.path).as_bytes());
+    let key = key.unwrap_or_default();
+    let text = format!("{method:?}\n{}\n{}\n{body}\n{key}", op.id, filled.path);
+    let digest = Sha256::digest(text.as_bytes());
     Some(digest[..16].iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Keeps the session's latest 2xx write, for [`repeats_last_write`].
-fn note_last_write(rt: &MockRuntime, plan: &CallPlan<'_>, call: &OperationCall) {
-    if let Some(hash) = last_write(plan.op, call) {
-        rt.last_writes().note(&plan.session, hash);
+/// Keeps the session's latest 2xx write, when a client may retry it, for [`is_retry`];
+/// any other write ends what was kept, as a retry repeats the latest write.
+async fn note_last_write(state: &mut StateAccess<'_>, plan: &CallPlan<'_>, call: &OperationCall) {
+    match retry_hash(plan.op, call) {
+        Some(hash) => {
+            let at = chrono::Utc::now().timestamp_millis();
+            state
+                .upsert(
+                    &plan.session,
+                    StoredResource {
+                        resource_type: INTERNAL_TYPE.to_string(),
+                        id: LAST_WRITE.to_string(),
+                        data: serde_json::json!({ "write": hash, "at": at }),
+                    },
+                )
+                .await;
+        }
+        None => {
+            state.delete(&plan.session, INTERNAL_TYPE, LAST_WRITE).await;
+        }
     }
 }
 
-/// Whether a write answering no body repeats the session's latest 2xx write, the same
-/// operation, path and body (a client's retry): it is then asked for no effects, which
-/// were asked for already and could apply twice. A write with an answer to generate is
-/// never one.
-pub(super) fn repeats_last_write(
-    rt: &MockRuntime,
+/// Whether `call` is a client's retry of the session's latest 2xx write: one a client
+/// may retry (see [`retry_hash`]), the same, within [`RETRY_WINDOW_MS`]. A retried write
+/// answering no body is asked for no effects again, which could apply twice, and the
+/// request it repeats is remembered once.
+pub(super) async fn is_retry(
+    state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
 ) -> bool {
+    if !applies(state.rt, plan) || !matches!(plan.op.kind, OperationKind::Command(_)) {
+        return false;
+    }
+    let Some(hash) = retry_hash(plan.op, call) else {
+        return false;
+    };
+    let Some(doc) = state.get(&plan.session, INTERNAL_TYPE, LAST_WRITE).await else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    doc.data.get("write").and_then(Value::as_str) == Some(hash.as_str())
+        && doc
+            .data
+            .get("at")
+            .and_then(Value::as_i64)
+            .is_some_and(|at| (0..=RETRY_WINDOW_MS).contains(&(now - at)))
+}
+
+/// Whether the answer the engine serves `plan` has no body to generate: the variant of
+/// its forced status, else its success, declares no schema (see
+/// [`mb_engine::Engine::generate`]).
+pub(super) fn answers_no_body(plan: &CallPlan<'_>) -> bool {
     let op = plan.op;
-    applies(rt, plan)
-        && matches!(op.kind, OperationKind::Command(_))
-        && op.success_output().is_some_and(|o| o.schema.is_none())
-        && last_write(op, call).is_some_and(|hash| rt.last_writes().is(&plan.session, &hash))
+    let variant = match plan.forced_status {
+        Some(status) => op.output_for_status(status),
+        None => op.success_output(),
+    };
+    variant.is_some_and(|v| v.schema.is_none())
 }
 
 /// How deep a write's body is looked into for a member naming a sibling list: the
@@ -1864,6 +1903,7 @@ async fn tell_siblings(
     plan: &CallPlan<'_>,
     call: &OperationCall,
     generated: &GeneratedResponse,
+    retry: bool,
 ) {
     let rt = state.rt;
     let op = plan.op;
@@ -1914,6 +1954,7 @@ async fn tell_siblings(
             &key,
             &memory_entry(op, body, None),
             None,
+            retry,
         )
         .await;
     }
