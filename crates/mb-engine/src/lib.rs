@@ -1263,9 +1263,9 @@ impl Engine {
     }
 
     /// The refusal a create answered as a success for a record held already deserves: the
-    /// declared status its refusal offer would name (see [`guards::refusal_codes`]), a
-    /// `409` first, rendered as an LLM's refusal is, with `answered`'s source and usage.
-    /// `None` when `op` declares none of them.
+    /// declared status its refusal offer would name first (see [`guards::refusal_codes`]:
+    /// a `409` before a `412` or a `422`, a `400` only alone), rendered as an LLM's
+    /// refusal is, with `answered`'s source and usage. `None` when `op` declares none.
     #[must_use]
     pub fn refuse_repeat(
         &self,
@@ -1274,12 +1274,7 @@ impl Engine {
         call: &OperationCall,
         answered: &GeneratedResponse,
     ) -> Option<GeneratedResponse> {
-        let codes = guards::refusal_codes(op);
-        let code = codes
-            .iter()
-            .copied()
-            .find(|c| *c == 409)
-            .or_else(|| codes.first().copied())?;
+        let code = guards::refusal_codes(op).first().copied()?;
         Some(self.refused(bundle, op, call, code, answered.source, answered.usage))
     }
 

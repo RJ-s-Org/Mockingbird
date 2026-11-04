@@ -919,19 +919,40 @@ fn shows_a_conflict(
 }
 
 /// The id a create's request asks for its record: what its top-level body sets under
-/// the identity field of `op` (`id` when it declares none), a string or a number.
-/// `None` for an operation that is no create, or a body that sets none.
+/// the identity field of `op` (`id` when it declares none), a string or a number, when
+/// the request's body schema declares that member and not as `readOnly` (at its top
+/// level or in an `allOf` part): a client-chosen id. `None` for an operation that is
+/// no create, a body that sets none, or a member the request does not declare, which
+/// the API mints whatever the body says.
 #[must_use]
-pub fn asked_identity(op: &mb_mcm::Operation, call: &crate::OperationCall) -> Option<String> {
+pub fn asked_identity(
+    bundle: &mb_mcm::Bundle,
+    op: &mb_mcm::Operation,
+    call: &crate::OperationCall,
+) -> Option<String> {
     if op.kind != mb_mcm::OperationKind::Command(mb_mcm::Effect::Create) {
         return None;
     }
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    match call.body.as_ref()?.get(field)? {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
+    let asked = match call.body.as_ref()?.get(field)? {
+        Value::String(s) if !s.is_empty() => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    let schema = crate::consistency::deref(bundle, op.input.body.as_ref()?);
+    let parts = schema
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|part| crate::consistency::deref(bundle, part));
+    let writable = std::iter::once(schema).chain(parts).any(|part| {
+        part.get("properties")
+            .and_then(|p| p.get(field))
+            .map(|member| crate::consistency::deref(bundle, member))
+            .is_some_and(|member| member.get("readOnly") != Some(&Value::Bool(true)))
+    });
+    writable.then_some(asked)
 }
 
 /// What a create's refusal note adds when a resource it is shown already has the id

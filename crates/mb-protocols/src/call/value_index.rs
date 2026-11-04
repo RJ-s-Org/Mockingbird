@@ -836,8 +836,9 @@ fn repeated_by(
 ///
 /// First of all, a create whose body asks for its record's id under the identity field
 /// ([`mb_engine::guards::asked_identity`], a client-chosen `id`) is shown the record the
-/// session holds under that id, under that member: the one record it can only repeat,
-/// read by its key on any store, whatever the shape of its value or where it is.
+/// session holds under that id, under that member, when it is in the collection the
+/// create runs in (as below): the one record it can only repeat, read by its key on any
+/// store, whatever the shape of its value.
 ///
 /// The store is asked, whatever it is: the session's records of the type, at most
 /// [`MAX_SCAN`], newest first, in one listing. A listing the store failed, or the breaker
@@ -876,11 +877,12 @@ pub(super) async fn same_values(
     }
     let session = &plan.session;
     let mut out: Vec<(StoredResource, String)> = Vec::new();
-    // The id the request asks for, held already: the record a create can only repeat,
-    // wherever it is, whatever its shape.
-    if let Some(id) = mb_engine::guards::asked_identity(op, call)
+    // The id the request asks for, held already in the collection the create runs in:
+    // the record a create can only repeat, whatever its shape.
+    if let Some(id) = mb_engine::guards::asked_identity(rt.bundle(), op, call)
         && !known(own, &id)
         && let Some(hit) = state.get(session, own, &id).await
+        && in_create_collection(rt, session, op, call, &hit)
     {
         let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
         out.push((hit, field.to_string()));
@@ -906,12 +908,7 @@ pub(super) async fn same_values(
         return out;
     }
     let whole = listed.len() < MAX_SCAN;
-    let collection = collection_of(op, call);
-    let placed = created_in_collections(rt.bundle(), own);
-    let in_collection = |hit: &StoredResource| match rt.collections().placement(session, hit) {
-        Some(at) => at == collection,
-        None => !placed && collection.is_none(),
-    };
+    let in_collection = |hit: &StoredResource| in_create_collection(rt, session, op, call, hit);
     for (name, text, kind) in asked {
         if out.len() >= MAX_SAME_VALUES {
             break;

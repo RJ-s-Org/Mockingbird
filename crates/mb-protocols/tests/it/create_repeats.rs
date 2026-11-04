@@ -19,8 +19,9 @@ use mb_state::{MemoryStore, SessionKey, StateStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-/// Customers created under an id the client chooses, whose create declares a 400, and
-/// payments whose ids the API mints.
+/// Customers created under an id the client chooses, whose create declares a 400 (and
+/// that a `PUT` the tests make a create upserts), payments whose ids the API mints, and
+/// labels a repository names by a name its create chooses.
 const CONTRACT: &str = r##"
 openapi: 3.0.0
 info: {title: Billing, version: "1"}
@@ -66,9 +67,35 @@ paths:
       parameters: [{name: ledger_id, in: path, required: true, schema: {type: string}}]
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, properties: {amount: {type: number}, description: {type: string}}}}}
+        content: {application/json: {schema: {type: object, properties: {amount: {type: number}, description: {type: string}, is_default: {type: boolean}, in_reply_to: {type: integer}, fields: {type: object, properties: {parent: {type: object, properties: {id: {type: string}}}}}}}}}
       responses:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Payment"}}}}
+  /profiles:
+    put:
+      operationId: upsertCustomer
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {id: {type: string}, first_name: {type: string}, email: {type: string}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Customer"}}}}
+  /repos/{repo}/labels:
+    post:
+      operationId: createLabel
+      parameters: [{name: repo, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}, color: {type: string}}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
+        "422": {description: Validation failed., content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /repos/{repo}/labels/{name}:
+    get:
+      operationId: getLabel
+      parameters:
+        - {name: repo, in: path, required: true, schema: {type: string}}
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Label"}}}}
 components:
   schemas:
     Customer:
@@ -87,6 +114,15 @@ components:
         description: {type: string}
         reply_to: {type: string}
         replies: {type: integer}
+        is_default: {type: boolean}
+        in_reply_to: {type: integer}
+        fields: {type: object, properties: {parent: {type: object, properties: {id: {type: string}}}}}
+    Label:
+      type: object
+      required: [name, color]
+      properties:
+        name: {type: string}
+        color: {type: string}
     Ledger:
       type: object
       required: [id, total]
@@ -114,12 +150,23 @@ fn session() -> SessionKey {
 }
 
 fn harness(contract: &str, script: Vec<Value>) -> Harness {
+    harness_with(contract, script, |_| {})
+}
+
+/// A harness over `contract` compiled, then changed by `change`.
+fn harness_with(
+    contract: &str,
+    script: Vec<Value>,
+    change: impl FnOnce(&mut mb_mcm::Bundle),
+) -> Harness {
     let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
+    let mut bundle = compile(contract.as_bytes()).unwrap();
+    change(&mut bundle);
     let rt = MockRuntime::new(
         "m",
-        Arc::new(compile(contract.as_bytes()).unwrap()),
+        Arc::new(bundle),
         Arc::new(Engine::new(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -468,7 +515,10 @@ async fn a_success_for_a_taken_id_with_no_refusal_answers_the_held_record() {
         &contract,
         vec![
             customer(ANA, "Ana", "ana@example.com"),
-            customer(ANA, "Rui", "rui@example.com"),
+            json!({
+                "effects": [{"type": "customers", "id": ANA, "set": {"email": "rui@example.com"}}],
+                "response": customer(ANA, "Rui", "rui@example.com"),
+            }),
         ],
     );
     h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
@@ -476,11 +526,270 @@ async fn a_success_for_a_taken_id_with_no_refusal_answers_the_held_record() {
     let (status, body) = h
         .post("/customers", customer(ANA, "Rui", "rui@example.com"))
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body} {}", h.prompt(1));
+    assert!(h.prompt(1).contains("\"effects\""), "{}", h.prompt(1));
     assert_eq!(body, customer(ANA, "Ana", "ana@example.com"));
     assert_eq!(
         h.held("customers", ANA).await,
         customer(ANA, "Ana", "ana@example.com")
     );
     assert_eq!(h.count("customers").await, 1);
+}
+
+/// Declaring several refusal statuses, a repeated create answered as a success answers
+/// the `409`, before the `422`, never the `400`.
+#[tokio::test]
+async fn a_repeat_answers_the_409_first() {
+    let contract = CONTRACT.replacen(
+        "        \"400\": {description: The request is invalid., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n",
+        "        \"400\": {description: The request is invalid., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n        \"422\": {description: Validation failed., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n        \"409\": {description: Conflict., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n",
+        1,
+    );
+    assert_ne!(contract, CONTRACT);
+    let h = harness(
+        &contract,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            json!({"effects": [], "response": customer(ANA, "Rui", "rui@example.com")}),
+        ],
+    );
+    h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    let (status, body) = h
+        .post("/customers", customer(ANA, "Rui", "rui@example.com"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(h.held("customers", ANA).await["first_name"], "Ana");
+}
+
+/// A forced status decides the answer: a repeated create keeps it, is not refused, and
+/// answers the held record, which it does not replace.
+#[tokio::test]
+async fn a_forced_status_is_kept_on_a_repeat() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            json!({"effects": [], "response": customer(ANA, "Rui", "rui@example.com")}),
+        ],
+    );
+    h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    let (status, body) = h
+        .send(
+            "POST",
+            "/customers",
+            Some(customer(ANA, "Rui", "rui@example.com")),
+            &[("x-mockingbird-status", "200")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["first_name"], "Ana", "{body}");
+    assert_eq!(h.held("customers", ANA).await["first_name"], "Ana");
+}
+
+/// A label's name is taken only in its own repository: `bug` in another one is a new
+/// label, shown nothing and stored, and refused nowhere.
+#[tokio::test]
+async fn a_taken_id_counts_only_under_the_same_parent() {
+    let label = |color: &str| json!({"name": "bug", "color": color});
+    let h = harness(
+        CONTRACT,
+        vec![
+            label("red"),
+            json!({"effects": [], "response": label("blue")}),
+            label("blue"),
+        ],
+    );
+    let (status, _) = h.post("/repos/a/labels", label("red")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = h.post("/repos/b/labels", label("blue")).await;
+    let prompt = h.prompt(1);
+    assert_eq!(status, StatusCode::CREATED, "{body} {prompt}");
+    assert!(!prompt.contains("same_values"), "{prompt}");
+    assert!(!prompt.contains("\"refusal\""), "{prompt}");
+    assert_eq!(body["color"], "blue", "{body}");
+}
+
+/// An `id` the request's schema does not declare is no client's choice: a payment sent
+/// with the first one's id is a new payment under a fresh id, and the first is kept.
+#[tokio::test]
+async fn an_undeclared_body_id_is_minted_over() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("tr_000001", 25.0, "Order X-1"),
+            payment("tr_000001", 7.0, "Order X-2"),
+        ],
+    );
+    h.post(
+        "/payments",
+        json!({"amount": 25.0, "description": "Order X-1"}),
+    )
+    .await;
+    let (status, body) = h
+        .post(
+            "/payments",
+            json!({"id": "tr_000001", "amount": 7.0, "description": "Order X-2"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_ne!(body["id"], "tr_000001", "{body}");
+    assert_eq!(body["amount"], 7.0, "{body}");
+    assert_eq!(h.held("payments", "tr_000001").await["amount"], 25.0);
+    assert_eq!(h.count("payments").await, 2);
+}
+
+/// An upsert by `PUT`, even one a bundle declares a create, replaces what it names, as
+/// it always did.
+#[tokio::test]
+async fn a_put_create_still_upserts() {
+    let h = harness_with(
+        CONTRACT,
+        vec![
+            customer(ANA, "Ana", "ana@example.com"),
+            json!({"effects": [], "response": customer(ANA, "Rui", "rui@example.com")}),
+        ],
+        |bundle| {
+            let op = bundle
+                .operations
+                .iter_mut()
+                .find(|op| op.id == "upsertCustomer")
+                .unwrap();
+            op.kind = mb_mcm::OperationKind::Command(mb_mcm::Effect::Create);
+            op.resource_type = Some("customers".into());
+            op.identity = Some(mb_mcm::Identity {
+                path_param: None,
+                field: "id".into(),
+                input_field: None,
+                path_field: None,
+                record: None,
+            });
+        },
+    );
+    h.post("/customers", customer(ANA, "Ana", "ana@example.com"))
+        .await;
+    let (status, body) = h
+        .send(
+            "PUT",
+            "/profiles",
+            Some(customer(ANA, "Rui", "rui@example.com")),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.held("customers", ANA).await["first_name"], "Rui");
+}
+
+/// A create may change a sibling its request names by a number or under a nested
+/// identity member, even with what it asks for itself, and may change one it does not
+/// name in a way the request does not say (the old default stops being the default).
+#[tokio::test]
+async fn a_create_s_effects_on_named_or_unrepeated_siblings_apply() {
+    let h = harness(
+        CONTRACT,
+        vec![
+            payment("1234567", 25.0, "Order X-1"),
+            payment("tr_000001", 30.0, "Order X-2"),
+            json!({
+                "effects": [{"type": "payments", "id": "1234567", "set": {"amount": 1.0}}],
+                "response": payment("tr_000002", 1.0, "Reply"),
+            }),
+            json!({
+                "effects": [{"type": "payments", "id": "tr_000001", "set": {"amount": 2.0}}],
+                "response": payment("tr_000003", 2.0, "Child"),
+            }),
+            json!({
+                "effects": [{"type": "payments", "id": "tr_000003", "set": {"is_default": false}}],
+                "response": payment("tr_000004", 3.0, "Default"),
+            }),
+        ],
+    );
+    let uri = "/ledgers/lg_000001/payments";
+    h.post(uri, json!({"amount": 25.0, "description": "Order X-1"}))
+        .await;
+    h.post(uri, json!({"amount": 30.0, "description": "Order X-2"}))
+        .await;
+    h.post(
+        uri,
+        json!({"amount": 1.0, "description": "Reply", "in_reply_to": 1_234_567}),
+    )
+    .await;
+    assert_eq!(
+        h.held("payments", "1234567").await["amount"],
+        1.0,
+        "{}",
+        h.prompt(2)
+    );
+    h.post(
+        uri,
+        json!({"amount": 2.0, "description": "Child", "fields": {"parent": {"id": "tr_000001"}}}),
+    )
+    .await;
+    assert_eq!(
+        h.held("payments", "tr_000001").await["amount"],
+        2.0,
+        "{}",
+        h.prompt(3)
+    );
+    h.post(
+        uri,
+        json!({"amount": 3.0, "description": "Default", "is_default": true}),
+    )
+    .await;
+    assert_eq!(
+        h.held("payments", "tr_000003").await["is_default"],
+        false,
+        "{}",
+        h.prompt(4)
+    );
+}
+
+/// A create answering its record in an envelope (`data`) beside another member of its
+/// own type keyed by the taken id stores neither over the held record, and serves the
+/// held record in the envelope.
+#[tokio::test]
+async fn a_repeat_s_wrapped_record_is_not_stored_either() {
+    let envelope = "{type: object, properties: {data: {$ref: \"#/components/schemas/Customer\"}, customer: {$ref: \"#/components/schemas/Customer\"}}}";
+    let contract = CONTRACT
+        .replacen(
+            "        \"200\": {description: ok, content: {application/json: {schema: {$ref: \"#/components/schemas/Customer\"}}}}\n        \"400\": {description: The request is invalid., content: {application/json: {schema: {$ref: \"#/components/schemas/Error\"}}}}\n",
+            &format!("        \"200\": {{description: ok, content: {{application/json: {{schema: {envelope}}}}}}}\n"),
+            1,
+        )
+        .replacen(
+            "  /customers/{customer_id}:\n",
+            "  /customers/{customer_id}/list:\n    get:\n      operationId: listCustomers\n      parameters: [{name: customer_id, in: path, required: true, schema: {type: string}}]\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: object, properties: {customers: {type: array, items: {$ref: \"#/components/schemas/Customer\"}}}}}}}\n  /customers/{customer_id}:\n",
+            1,
+        );
+    assert!(contract.contains("customer: {$ref") && contract.contains("listCustomers"));
+    let ana = customer(ANA, "Ana", "ana@example.com");
+    let rui = customer(ANA, "Rui", "rui@example.com");
+    let h = harness_with(
+        &contract,
+        vec![
+            json!({"data": ana, "customer": ana}),
+            json!({"effects": [], "response": {"data": rui, "customer": rui}}),
+        ],
+        |bundle| {
+            let op = bundle
+                .operations
+                .iter_mut()
+                .find(|op| op.id == "createCustomer")
+                .unwrap();
+            op.identity = Some(mb_mcm::Identity {
+                path_param: None,
+                field: "id".into(),
+                input_field: None,
+                path_field: None,
+                record: Some(mb_mcm::RecordAt::Member("data".into())),
+            });
+        },
+    );
+    h.post("/customers", ana.clone()).await;
+    assert_eq!(h.held("customers", ANA).await, ana);
+    let (status, body) = h.post("/customers", rui.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body} {}", h.prompt(1));
+    assert_eq!(body["data"], ana, "{body}");
+    assert_eq!(h.held("customers", ANA).await, ana, "{}", h.prompt(1));
 }
