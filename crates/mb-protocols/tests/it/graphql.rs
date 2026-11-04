@@ -2478,11 +2478,19 @@ async fn a_noun_first_delete_removes_the_stored_record() {
     assert!(deleted.body.get("errors").is_none(), "{}", deleted.body);
     let after = post(&base, read_comment.clone(), &session).await;
     assert_eq!(after.body["data"]["comment"], Value::Null, "{}", after.body);
-    assert!(after.body["errors"][0]["message"].is_string(), "{}", after.body);
+    assert!(
+        after.body["errors"][0]["message"].is_string(),
+        "{}",
+        after.body
+    );
     assert_eq!(provider.requests().len(), 2);
     // Another session never deleted it: its read is generated.
     let other = post(&base, read_comment, &[("x-mockingbird-session", "s2")]).await;
-    assert_eq!(other.body["data"]["comment"]["body"], "Made up", "{}", other.body);
+    assert_eq!(
+        other.body["data"]["comment"]["body"], "Made up",
+        "{}",
+        other.body
+    );
     assert_eq!(provider.requests().len(), 3);
 }
 

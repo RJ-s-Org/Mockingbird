@@ -63,9 +63,10 @@ pub(super) fn cut(
         asked = Some(tokens(raw)?);
     }
     let asked = asked?;
-    if asked.iter().any(|token| {
-        token == "*" || !declared.contains(&token.split('.').next().unwrap_or(token))
-    }) {
+    if asked
+        .iter()
+        .any(|token| token == "*" || !declared.contains(&token.split('.').next().unwrap_or(token)))
+    {
         return None;
     }
     let paths: Vec<Vec<&str>> = asked.iter().map(|t| t.split('.').collect()).collect();
@@ -152,7 +153,12 @@ fn ties(bundle: &mb_mcm::Bundle, param: &Value, declared: &[&str]) -> bool {
     let mut examples: Vec<Vec<String>> = Vec::new();
     for part in &parts {
         let mut values: Vec<&Value> = part.get("example").into_iter().collect();
-        values.extend(part.get("examples").and_then(Value::as_array).into_iter().flatten());
+        values.extend(
+            part.get("examples")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        );
         for value in values {
             let listed: Vec<String> = match value {
                 Value::String(text) => text.split(',').map(|t| t.trim().to_string()).collect(),
@@ -182,7 +188,11 @@ fn ties(bundle: &mb_mcm::Bundle, param: &Value, declared: &[&str]) -> bool {
 
 /// `members`, keeping what `paths` (each a token split at its dots) ask for at
 /// `depth`.
-fn cut_object(members: &Map<String, Value>, paths: &[Vec<&str>], depth: usize) -> Map<String, Value> {
+fn cut_object(
+    members: &Map<String, Value>,
+    paths: &[Vec<&str>],
+    depth: usize,
+) -> Map<String, Value> {
     let mut out = Map::new();
     for (name, value) in members {
         let wanted: Vec<&Vec<&str>> = paths
@@ -247,7 +257,9 @@ components:
                 None,
                 mb_engine::EngineConfig::default(),
             )),
-            Arc::new(mb_state::MemoryStore::new(std::time::Duration::from_secs(60))),
+            Arc::new(mb_state::MemoryStore::new(std::time::Duration::from_secs(
+                60,
+            ))),
         )
     }
 

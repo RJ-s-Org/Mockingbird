@@ -41,7 +41,12 @@ fn harness(contract: &str, script: Vec<Value>) -> Harness {
 }
 
 impl Harness {
-    async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, String, Value) {
+    async fn call(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
         if body.is_some() {
             req = req.header("content-type", "application/json");
@@ -126,7 +131,10 @@ async fn a_compound_owner_parameter_ties_the_record_s_owner_member() {
                        "workspace": {"id": "77", "slug": "acme"}});
     let h = harness(
         BOARDS,
-        vec![board.clone(), json!({"id": "9999", "slug": "roadmap", "name": "Made up"})],
+        vec![
+            board.clone(),
+            json!({"id": "9999", "slug": "roadmap", "name": "Made up"}),
+        ],
     );
     let (status, _, made) = h
         .call(
@@ -335,7 +343,11 @@ async fn a_stored_read_answers_only_the_fields_asked_for() {
     assert_eq!(source, "state", "{read}");
     assert_eq!(read, json!({"data": {"id": 731, "name": "Desk Lamp"}}));
     let (_, source, read) = h
-        .call("GET", "/items/products/731?fields=name,dimensions.width", None)
+        .call(
+            "GET",
+            "/items/products/731?fields=name,dimensions.width",
+            None,
+        )
         .await;
     assert_eq!(source, "state", "{read}");
     assert_eq!(

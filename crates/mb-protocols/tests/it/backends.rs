@@ -117,12 +117,7 @@ fn harness_in(store: Arc<dyn StateStore>, script: Vec<Value>, ws: &str) -> Harne
 }
 
 /// [`harness_in`] serving `contract`.
-fn harness_of(
-    contract: &str,
-    store: Arc<dyn StateStore>,
-    script: Vec<Value>,
-    ws: &str,
-) -> Harness {
+fn harness_of(contract: &str, store: Arc<dyn StateStore>, script: Vec<Value>, ws: &str) -> Harness {
     let script = script.into_iter().map(|v| Ok(v.to_string())).collect();
     let provider = Arc::new(ScriptedProvider::new(script));
     let state = CachingStateStore::wrap(store, LONG_TTL, mb_state::DEFAULT_CACHE_ENTRIES);
@@ -372,7 +367,9 @@ fn related_of(prompt: &str) -> &str {
     let Some(start) = prompt.find("<related_resources>") else {
         return "";
     };
-    let end = prompt[start..].find("</related_resources>").map_or(prompt.len(), |e| start + e);
+    let end = prompt[start..]
+        .find("</related_resources>")
+        .map_or(prompt.len(), |e| start + e);
     &prompt[start..end]
 }
 
@@ -397,12 +394,34 @@ async fn member_values_name_their_record(one: Arc<dyn StateStore>, other: Arc<dy
     );
     let asks = json!({"subject": "Help", "email": "jane.roe@example.com"});
     let contact = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
-    assert_eq!(post_in(&a, "s1", "/contacts", contact).await, StatusCode::CREATED);
-    assert_eq!(post_in(&a, "s1", "/tickets", asks.clone()).await, StatusCode::CREATED);
-    assert!(related_of(&a.prompt(1)).contains("ct-000101"), "{}", a.prompt(1));
-    assert_eq!(post_in(&a, "s2", "/tickets", asks.clone()).await, StatusCode::CREATED);
-    assert!(!related_of(&a.prompt(2)).contains("ct-000101"), "{}", a.prompt(2));
-    let elsewhere = harness_of(CONTACTS, Arc::clone(&one), vec![ticket("tk-000009")], &workspace());
+    assert_eq!(
+        post_in(&a, "s1", "/contacts", contact).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        post_in(&a, "s1", "/tickets", asks.clone()).await,
+        StatusCode::CREATED
+    );
+    assert!(
+        related_of(&a.prompt(1)).contains("ct-000101"),
+        "{}",
+        a.prompt(1)
+    );
+    assert_eq!(
+        post_in(&a, "s2", "/tickets", asks.clone()).await,
+        StatusCode::CREATED
+    );
+    assert!(
+        !related_of(&a.prompt(2)).contains("ct-000101"),
+        "{}",
+        a.prompt(2)
+    );
+    let elsewhere = harness_of(
+        CONTACTS,
+        Arc::clone(&one),
+        vec![ticket("tk-000009")],
+        &workspace(),
+    );
     post_in(&elsewhere, "s1", "/tickets", asks.clone()).await;
     assert!(!related_of(&elsewhere.prompt(0)).contains("ct-000101"));
     if shared {

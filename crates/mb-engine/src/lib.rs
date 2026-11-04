@@ -1255,7 +1255,8 @@ impl Engine {
 
     /// A `404` for a resource the session does not hold: the operation's
     /// declared `404` response (or its `default`), faker-filled; else the one
-    /// declared status standing for "not here" ([`missing_status`]), rendered
+    /// declared status standing for "not here" (a `410`, or a `403` naming what the
+    /// route reads, when exactly one of them is declared to fit), rendered
     /// so; else a problem+json `404` body with `detail`. Always tagged `State`.
     pub fn not_found(
         &self,
