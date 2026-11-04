@@ -650,6 +650,18 @@ pub(crate) async fn generate_once(
     generate_narrowed(rt, plan, call, None).await
 }
 
+/// The declared `ETag` response header of `generated`, with its record's concurrency
+/// token, when one is paired with a request header (see [`tokens`]).
+#[cfg(feature = "http-rest")]
+pub(crate) async fn entity_tag(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) -> Option<(String, String)> {
+    tokens::entity_tag(rt, plan, call, generated).await
+}
+
 /// The stored target and related resources a read-only generation of `call`
 /// takes into account (as [`generate_once`] reads them, but for the hops,
 /// which its callers do not read); the session is marked used.
@@ -1688,23 +1700,27 @@ pub(crate) async fn complete(
                 Source::Llm | Source::Patched | Source::Repaired
             )
             && let Some(before) = target.as_ref()
+            && op.kind == OperationKind::Command(Effect::Update)
+            && !generated.new_record
         {
-            match op.kind {
-                OperationKind::Command(Effect::Update) if !generated.new_record => {
-                    tokens::after_update(&mut state, session, before, &tokens).await;
-                }
-                OperationKind::Command(Effect::Delete) => {
-                    tokens::after_delete(
-                        &mut state,
-                        session,
-                        &before.resource_type,
-                        &before.id,
-                        &tokens,
-                    )
-                    .await;
-                }
-                _ => {}
-            }
+            tokens::after_update(
+                &mut state,
+                session,
+                before,
+                &tokens,
+                generated.body.as_mut(),
+            )
+            .await;
+        }
+        // Any delete of a record ends its tokens, whatever answered it.
+        if (200..300).contains(&generated.status)
+            && rt.consistency
+            && !foreign_key
+            && matches!(op.binding, Binding::Http { .. })
+            && op.kind == OperationKind::Command(Effect::Delete)
+            && let Some(before) = target.as_ref()
+        {
+            tokens::forget(&mut state, session, &before.resource_type, &before.id).await;
         }
         // After the effects: one on the resource means it shows the write.
         write_memory::after_write(

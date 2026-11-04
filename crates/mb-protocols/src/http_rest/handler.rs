@@ -541,9 +541,20 @@ async fn serve(
 
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
+    let entity_tag = call::entity_tag(rt, &plan, &call, &generated).await;
     let mut resp =
         tracing::info_span!("mb.encode").in_scope(|| log.generated(as_xml(rt, op, generated)));
     add_headers(&mut resp, rt, op, plan.scenario);
+    // The record's concurrency token, over the faker's value (a scenario's stands).
+    if let Some((name, value)) = entity_tag
+        && plan.scenario.is_none()
+        && let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        )
+    {
+        resp.headers_mut().insert(name, value);
+    }
     if plan.chaos.inject_error {
         mark_chaos(&mut resp);
     }
