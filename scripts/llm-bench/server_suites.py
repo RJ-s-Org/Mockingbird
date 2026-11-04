@@ -452,7 +452,8 @@ def fallback_reason(hdrs):
 
 
 # A fallback answer the provider caused, not the model: the provider answered 5xx or
-# 429 ("no capacity", rate limited), or the connection to it failed. Anchored, so a
+# 429 ("no capacity", rate limited), answered any other status with a rate-limit body
+# (`RATE_LIMITED`), or the connection to it failed. Anchored, so a
 # reason that starts with the model's own failure (`LLM output truncated: ...; not
 # salvaged: LLM returned HTTP 503`) is not one. An LLM timeout is not one either: it is
 # often the model being slow (aggregate.py counts timeouts on their own). The bench
@@ -462,13 +463,19 @@ def fallback_reason(hdrs):
 # as a bare `LLM returned HTTP 503` and cannot be told apart, so it is labelled infra.
 # That is why the label never changes a row and never causes a re-run.
 INFRA_REASON = re.compile(r"^LLM returned HTTP (5\d\d|429)\b|^LLM transport error")
+# A rate limit is the provider's whatever status carries it (OpenRouter's "temporarily
+# rate-limited upstream", a "Too Many Requests" body, a `rate_limit_exceeded` code).
+# Only for a reason that is itself an HTTP error from the LLM, so the model's own failure
+# that merely ends in one (`LLM output truncated: ...; not salvaged: ...`) stays the model's.
+RATE_LIMITED = re.compile(r"^LLM returned HTTP \d{3}\b.*(rate[-_ ]?limit|too many requests)", re.I | re.S)
 
 
 def infra_reason(last):
     """The fallback reason of `last` (a `Journey.last`) when the mock's answer was a
     fallback forced by a clear provider error, else None."""
     reason = str(last.get("fallback_reason") or "")
-    if last.get("source") == "fallback" and INFRA_REASON.search(reason) and "kept rejecting" not in reason:
+    provider = INFRA_REASON.search(reason) or RATE_LIMITED.search(reason)
+    if last.get("source") == "fallback" and provider and "kept rejecting" not in reason:
         return reason
     return None
 

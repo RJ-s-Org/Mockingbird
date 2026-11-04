@@ -1270,6 +1270,48 @@ class InfraFailureTest(unittest.TestCase):
         # infra. That is why the label is only a label: it never changes a row or re-runs one.
         self.assertIsNotNone(server_suites.infra_reason(last("LLM returned HTTP 503: repair call")))
 
+    # The reason full8 recorded for DeepSeek's 429s (cut where Mockingbird's header cuts it).
+    FULL8_429 = ('LLM returned HTTP 429: {"error":{"message":"Provider returned error","code":429,'
+                 '"metadata":{"raw":"deepseek/deepseek-v4.1-flash-1017 is temporarily rate-limited upstream. '
+                 'Please retry shortly, or add your own provider key to use your own limits: '
+                 'https://openrouter.ai/workspaces/default/byok","provid')
+
+    def test_a_rate_limit_is_the_providers_whatever_its_status(self):
+        def last(reason, source="fallback"):
+            return {"source": source, "fallback_reason": reason}
+
+        for reason in (
+            self.FULL8_429,
+            "LLM returned HTTP 429",
+            # A rate limit sent under another status, or as a code inside a 200 stream.
+            'LLM returned HTTP 400: {"error":{"message":"Rate limit exceeded: free-models-per-min"}}',
+            'LLM returned HTTP 403: {"error":{"code":"rate_limit_exceeded","message":"slow down"}}',
+            "LLM returned HTTP 408: Too Many Requests",
+            'LLM returned HTTP 400: {"error":{"metadata":{"raw":"x is temporarily RATE-LIMITED upstream"}}}',
+        ):
+            self.assertEqual(server_suites.infra_reason(last(reason)), reason)
+        for reason in (
+            # The model's own failure that only ends in a rate limit stays the model's.
+            "LLM output truncated: stopped at max_tokens; not salvaged: LLM returned HTTP 429: rate-limited",
+            "repaired output still invalid: rate limit field missing",
+            "LLM request timed out; rate-limited",
+            # A 4xx without rate-limit words stays the request's, and so does the proxy's 424.
+            'LLM returned HTTP 400: {"error":{"message":"Provider returned error"}}',
+            'LLM returned HTTP 424: {"error":{"message":"upstream kept rejecting the request; rate limit"}}',
+        ):
+            self.assertIsNone(server_suites.infra_reason(last(reason)), reason)
+        # A mock answer from the LLM is no fallback: nothing to label.
+        self.assertIsNone(server_suites.infra_reason(last(self.FULL8_429, source="llm")))
+
+    def test_a_429_at_the_gate_is_labelled_like_a_503(self):
+        rows = self.square("once", reason=self.FULL8_429)
+        checks = server_suites.JOURNEY_CHECKS["square"]
+        self.assertFalse(any(r["ok"] for r in rows))
+        self.assertTrue(all(r["detail"].get("infra") is True for r in rows), rows)
+        block = aggregate.journeys_block(rows)["journeys_heldout"]
+        self.assertEqual((block["failed_model"], block["failed_timeout"], block["failed_infra"]),
+                         (0, 0, len(checks)))
+
     def test_a_provider_failure_at_the_gate_is_labelled_and_never_rerun(self):
         rows = self.square("once")
         checks = server_suites.JOURNEY_CHECKS["square"]
@@ -1444,9 +1486,32 @@ class ProviderPinTest(unittest.TestCase):
         self.assertEqual(pins, {
             "nvidia/nemotron-3.5-lightning": {"order": ["fireworks"], "only": ["fireworks"], "allow_fallbacks": False},
             "openai/gpt-6-luna": {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False},
-            "deepseek/deepseek-v4.1-flash-1017": {"order": ["wafer/us"], "only": ["wafer/us"],
-                                                  "allow_fallbacks": False},
+            "deepseek/deepseek-v4.1-flash-1017": {
+                "order": ["wafer/us", "together"], "only": ["wafer/us", "together"], "allow_fallbacks": False,
+                "quantizations": ["mxfp4", "int8", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"]},
         })
+
+    # OpenRouter's `quantizations` values in the order the bench ranks them, lowest first.
+    # fp4 stands for both mxfp4 and nvfp4, and the bench ranks the 4-bit formats other
+    # than mxfp4 (the DeepSeek pin's first endpoint) below it, so a pin floored at mxfp4
+    # admits only mxfp4 among them.
+    QUANTIZATIONS = ("int4", "fp4", "nvfp4", "mxfp4", "int8", "fp6", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown")
+
+    def test_an_ordered_pin_stays_comparable(self):
+        # Every pin: `only` is `order`, no fallbacks, and a `quantizations` filter (when
+        # given) holds known values only and nothing below its lowest entry.
+        for model, pin in proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS).items():
+            self.assertEqual(pin["only"], pin["order"], model)
+            self.assertIs(pin["allow_fallbacks"], False, model)
+            self.assertLessEqual(len(pin["order"]), 3, model)
+            self.assertEqual(len(set(pin["order"])), len(pin["order"]), model)
+            q = pin.get("quantizations")
+            if q is None:
+                continue
+            self.assertTrue(set(q) <= set(self.QUANTIZATIONS), model)
+            known = [v for v in q if v != "unknown"]
+            floor = min(self.QUANTIZATIONS.index(v) for v in known)
+            self.assertEqual(set(known), set(self.QUANTIZATIONS[floor:-1]), model)
 
     def test_preflight_records_the_pins_it_is_given(self):
         d = tempfile.mkdtemp()
@@ -1562,6 +1627,30 @@ class ProviderPinProxyTest(unittest.TestCase):
         FakeRouter.error = (503, "There is no available model provider that meets your routing requirements")
         status, _, rec = self.call("nvidia/x")
         self.assertEqual((status, rec["error_kind"]), (503, "http_5xx"))
+
+    def test_an_ordered_pin_is_sent_whole_and_takes_any_endpoint_it_lists(self):
+        pin = proxy.load_provider_pins(proxy.DEFAULT_PROVIDER_PINS)["deepseek/deepseek-v4.1-flash-1017"]
+        self.px.pins["deepseek/x"] = pin
+        for served in ("Wafer", "Together"):
+            FakeRouter.served = served
+            status, _, rec = self.call("deepseek/x")
+            self.assertEqual(status, 200, served)
+            self.assertEqual(FakeRouter.bodies[-1]["provider"], pin)  # quantizations included
+            self.assertEqual((rec["provider"], rec["provider_pin"]), (served, ["wafer/us", "together"]))
+        FakeRouter.served = "StepFun"
+        status, doc, rec = self.call("deepseek/x")
+        self.assertEqual((status, rec["error_kind"]), (503, "provider_unavailable"))
+        self.assertTrue(rec["provider_pin_mismatch"])
+
+    def test_an_upstream_429_reaches_mockingbird_as_a_429(self):
+        # As in full8: every pinned endpoint is rate-limited. The proxy passes the 429 on,
+        # Mockingbird falls back with `LLM returned HTTP 429: ...`, and that is infra.
+        FakeRouter.error = (429, "deepseek/x is temporarily rate-limited upstream. Please retry shortly")
+        status, doc, rec = self.call("nvidia/x")
+        self.assertEqual((status, rec["status"], rec["error_kind"]), (429, 429, "http_4xx"))
+        self.assertEqual(len(FakeRouter.bodies), 1)  # not retried elsewhere
+        last = {"source": "fallback", "fallback_reason": f"LLM returned HTTP 429: {json.dumps(doc)}"}
+        self.assertIsNotNone(server_suites.infra_reason(last))
 
     def test_ordinary_request_errors_on_a_pinned_model_stay_4xx(self):
         # mb-llm steps down (schema, reasoning) on these, so they must reach it unchanged.
