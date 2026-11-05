@@ -39,7 +39,7 @@ Every journey suite ran on 3 models, alongside consistency and single answers. S
 | Second blind | 728/840 (86.7%) | 263/280 | 244/280 | 221/280 | 749/840 (89.2%) |
 | First blind | 629/828 (76.0%) | 231/276 | 215/276 | 183/276 | 624/828 (75.4%) |
 | Held-out | 767/840 (91.3%) | 250/280 | 275/280 | 242/280 | 761/840 (90.6%) |
-| Tuned | 326/344 (94.8%) | 112/114 | 104/114 | 110/116 | 318/347 (90.8%) |
+| Tuned | 326/344 (94.8%) | 112/114 | 104/114 | 110/116 | 318/347 (91.6%) |
 
 The tenth set's changes were made from its own diagnosis, so its number is a tuned one now, not a blind one.
 
