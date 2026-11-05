@@ -568,7 +568,7 @@ pub(super) fn narrow(
         || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
         call,
     );
-    let filters: Vec<Filter<'_>> = filters_of(bundle, query, &item_parts, call, page)
+    let filters: Vec<Filter<'_>> = filters_of(bundle, op, query, &item_parts, call, page)
         .into_iter()
         .map(|(_, filter)| filter)
         .collect();
@@ -630,10 +630,14 @@ fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
     usize::try_from(limit.items).ok()
 }
 
-/// The equality filters `call`'s query asks of the items `item_parts` describe, each
-/// with its parameter: all but the page size's `page`.
+/// The equality filters `call`'s query asks of `op`'s items `item_parts` describe, each
+/// with its parameter: all but the page size's `page`. A parameter that pages the list
+/// ([`runs::pages_list`]: `offset`, `page`) filters no member one object down that
+/// shares its name (`timezone.offset`): only a member of the items themselves would say
+/// so.
 fn filters_of<'a, 'c>(
     bundle: &'a mb_mcm::Bundle,
+    op: &Operation,
     query: Option<&'a Value>,
     item_parts: &[&'a Value],
     call: &'c OperationCall,
@@ -675,8 +679,8 @@ fn filters_of<'a, 'c>(
                     test: Test::HoldsAny,
                 },
             ));
-        } else if let Some((parent, member)) =
-            nested_filtered_member(bundle, query, item_parts, param)
+        } else if !runs::pages_list(bundle, op, page.map(|(name, _)| name), param)
+            && let Some((parent, member)) = nested_filtered_member(bundle, query, item_parts, param)
             && let Some(values) = wanted(&member, raw)
         {
             let loose = member.is_free_text()
@@ -936,7 +940,7 @@ pub(super) async fn collection_records(
     let mut held = None;
     let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
     let items_schema = array_parts.iter().find_map(|p| p.get("items"))?;
-    let filters = filters_of(bundle, op.input.query.as_ref(), &item_parts, call, None);
+    let filters = filters_of(bundle, op, op.input.query.as_ref(), &item_parts, call, None);
     if call
         .query
         .keys()
@@ -1007,7 +1011,8 @@ fn no_content_status(op: &Operation) -> Option<u16> {
 
 /// A list answer `generated` of `op` left with no items, as the bodiless status the
 /// operation declares beside its list for that ([`no_content_status`]), with no body.
-/// Any other answer stays as it is.
+/// Any other answer stays as it is. Only a generated answer comes here: a page past the
+/// end that the store serves ([`runs`], [`pages`]) stays a `200` with an empty list.
 pub(super) fn no_content(op: &Operation, generated: &mut GeneratedResponse) {
     if !(200..300).contains(&generated.status) {
         return;
@@ -1135,7 +1140,7 @@ async fn stored_records(
             return cut;
         }
     }
-    let filters = filters_of(bundle, query, &item_parts, call, page);
+    let filters = filters_of(bundle, op, query, &item_parts, call, page);
     let declared = declared_names(&item_parts);
     let declared_params = query.and_then(|q| q.get("properties"));
     let mut shown: Vec<Shown<'_>> = Vec::new();

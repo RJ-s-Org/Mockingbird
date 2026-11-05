@@ -303,6 +303,42 @@ fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option
     found.is_empty().then_some(one)
 }
 
+/// Whether query parameter `name` of `op` pages its list rather than filtering it: its
+/// name says a page position ([`named`]: `offset`, `page`, `page[number]`) or a page
+/// size (`limit`, `per_page`), it is a position of a page size's bracket family
+/// (`page[start]` beside `page[size]`), or the contract confirms it the page position
+/// ([`position`]) beside a page size. The page size is `size_param`, the one the call
+/// asks for, else any declared query parameter named as one.
+pub(super) fn pages_list(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    size_param: Option<&str>,
+    name: &str,
+) -> bool {
+    if named(name).is_some() || mb_engine::budget::names_page_size(name) {
+        return true;
+    }
+    let declared: Vec<&str> = op
+        .input
+        .query
+        .as_ref()
+        .and_then(|q| q.get("properties"))
+        .and_then(Value::as_object)
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let sizes: Vec<&str> = match size_param {
+        Some(size) => vec![size],
+        None => declared
+            .into_iter()
+            .filter(|d| *d != name && mb_engine::budget::names_page_size(d))
+            .collect(),
+    };
+    sizes.into_iter().any(|size| {
+        family_position(name, size)
+            || position(bundle, op, size).is_some_and(|found| found.param == name)
+    })
+}
+
 /// A query value as a whole number.
 fn whole(value: &Value) -> Option<usize> {
     let n = match value {

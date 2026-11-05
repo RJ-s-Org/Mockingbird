@@ -4370,3 +4370,141 @@ async fn a_comma_separated_array_reaches_the_model_split() {
     let prompt = api.prompt(0);
     assert!(prompt.contains(r#""query":{"ids":[2,3]}"#), "{prompt}");
 }
+
+/// Places paged by `limit`, `offset` and `page`, whose members `timezone.offset` and
+/// `source.page` share the paging parameters' names one object down, and whose
+/// `source.label` a `label` filter names; the list declares a bodiless `204`.
+const PAGED_NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Places, version: "1"}
+paths:
+  /places:
+    get:
+      operationId: listPlaces
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 10}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: label, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Place"}}
+        "204": {description: No place matches.}
+components:
+  schemas:
+    Place:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        timezone:
+          type: object
+          properties:
+            name: {type: string}
+            offset: {type: integer}
+        source:
+          type: object
+          properties:
+            page: {type: integer}
+            label: {type: string}
+"##;
+
+fn place(id: u64, offset: u64, page: u64, label: &str) -> Value {
+    json!({
+        "id": id,
+        "name": format!("Place {id}"),
+        "timezone": {"name": "UTC", "offset": offset},
+        "source": {"page": page, "label": label},
+    })
+}
+
+fn two_places() -> Value {
+    json!([place(1, 0, 3, "north"), place(2, 1, 4, "south")])
+}
+
+/// A page position (`offset`, `page`) is no filter on a member one object down that
+/// shares its name (`timezone.offset`, `source.page`): the page keeps both places and
+/// stays a `200`, never the declared `204`.
+#[tokio::test]
+async fn a_page_position_is_no_filter_one_object_down() {
+    for uri in [
+        "/places?offset=0",
+        "/places?page=1",
+        "/places?limit=5&offset=0",
+        "/places?limit=5&page=1",
+    ] {
+        let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
+        let (status, body) = api.call("GET", uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(order_ids(&body), [1, 2], "{uri}: {body}");
+    }
+}
+
+/// On the same list, a filter one object down (`label`, `source.label`) that matches
+/// nothing answers the declared `204`, with or without a page position beside it; one
+/// that matches keeps its place under a `200`.
+#[tokio::test]
+async fn a_nested_filter_beside_a_page_position_answers_no_content() {
+    for uri in ["/places?label=east", "/places?page=1&label=east"] {
+        let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
+        let (status, body) = api.call("GET", uri, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{uri}: {body}");
+        assert_eq!(body, Value::Null, "{uri}");
+    }
+    let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
+    let (status, body) = api.call("GET", "/places?offset=0&label=south", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body), [2], "{body}");
+}
+
+/// A page position only the contract confirms (`from`, from 0, echoed beside the list
+/// that `per_page` sizes) is no filter on a member one object down of its name.
+#[tokio::test]
+async fn a_confirmed_page_position_is_no_filter_one_object_down() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Places, version: "1"}
+paths:
+  /places:
+    get:
+      operationId: listPlaces
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, default: 10}}
+        - {name: from, in: query, schema: {type: integer, minimum: 0, default: 0}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, from]
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Place"}}
+                  from: {type: integer}
+        "204": {description: No place matches.}
+components:
+  schemas:
+    Place:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        window:
+          type: object
+          properties:
+            from: {type: integer}
+"##;
+    let answer = json!({
+        "data": [{"id": 1, "window": {"from": 0}}, {"id": 2, "window": {"from": 5}}],
+        "from": 0,
+    });
+    let api = api_of(contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/places?from=0", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body["data"]), [1, 2], "{body}");
+}
