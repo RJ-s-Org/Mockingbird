@@ -4063,6 +4063,121 @@ mod tests {
         );
     }
 
+    /// Apps read by `{app_id_or_name}`, a compound parameter (`id` or `name`), their
+    /// `id` of `id_schema`, with the validator of its answer.
+    fn apps(id_schema: &str) -> (Operation, SchemaValidator) {
+        let contract = format!(
+            r##"
+openapi: 3.0.0
+info: {{title: Apps, version: "1"}}
+paths:
+  /apps/{{app_id_or_name}}:
+    parameters:
+      - {{name: app_id_or_name, in: path, required: true, schema: {{type: string}}}}
+    patch:
+      operationId: updateApp
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: {id_schema}
+                name: {{type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {{$ref: "#/components/schemas/App"}}
+components:
+  schemas:
+    App:
+      type: object
+      properties:
+        id: {id_schema}
+        name: {{type: string}}
+"##
+        );
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        let op = bundle.operation("updateApp").unwrap().clone();
+        let identity = op.identity.as_ref().unwrap();
+        assert_eq!(
+            compound_members(identity),
+            Some(["id", "name"]),
+            "{identity:?}"
+        );
+        let schema = op.success_output().unwrap().schema.as_ref().unwrap();
+        let v = SchemaValidator::for_output(&bundle.with_reachable_defs(schema)).unwrap();
+        (op, v)
+    }
+
+    fn by_path(value: &str, body: Option<Value>) -> OperationCall {
+        let mut path_params = Map::new();
+        path_params.insert("app_id_or_name".into(), json!(value));
+        OperationCall {
+            operation_id: "updateApp".into(),
+            path_params,
+            body,
+            ..OperationCall::default()
+        }
+    }
+
+    #[test]
+    fn a_compound_path_value_goes_to_the_key_and_else_to_the_member_that_takes_it() {
+        let (op, v) = apps("{type: string}");
+        let answer = json!({"id": "a1", "name": "blue"});
+        // Held already in either member: left as it is.
+        let out = force_identity(&v, &op, &by_path("blue", None), answer.clone());
+        assert_eq!(out, answer);
+        let out = force_identity(&v, &op, &by_path("b2", None), answer.clone());
+        assert_eq!(out, json!({"id": "b2", "name": "blue"}));
+
+        let (uuid, v) = apps("{type: string, format: uuid}");
+        let id = "0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
+        let out = force_identity(
+            &v,
+            &uuid,
+            &by_path("green", None),
+            json!({"id": id, "name": "x"}),
+        );
+        assert_eq!(
+            out,
+            json!({"id": id, "name": "green"}),
+            "a uuid key refuses a name"
+        );
+    }
+
+    #[test]
+    fn a_compound_path_value_leaves_a_member_the_request_sets() {
+        // A rename: the request's name stands, and so does an id it sends.
+        let (op, v) = apps("{type: string}");
+        let answer = json!({"id": "a2", "name": "green"});
+        let call = by_path("blue", Some(json!({"id": "a2", "name": "green"})));
+        assert_eq!(force_identity(&v, &op, &call, answer.clone()), answer);
+    }
+
+    #[test]
+    fn a_compound_path_value_forces_nothing_into_a_record_held_as_a_list_item() {
+        // The item a list holds may be another record than the one the path names.
+        for record in [
+            mb_mcm::RecordAt::Item,
+            mb_mcm::RecordAt::MemberItem("apps".into()),
+        ] {
+            let (mut op, _) = apps("{type: string}");
+            if let Some(identity) = op.identity.as_mut() {
+                identity.record = Some(record.clone());
+            }
+            let answer = match &record {
+                mb_mcm::RecordAt::Item => json!([{"id": "a1", "name": "other"}]),
+                _ => json!({"apps": [{"id": "a1", "name": "other"}]}),
+            };
+            let v = SchemaValidator::new(&json!({})).unwrap();
+            let out = force_identity(&v, &op, &by_path("blue", None), answer.clone());
+            assert_eq!(out, answer, "{record:?}");
+        }
+    }
+
     /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.
     fn enveloped(required: &str, properties: &str) -> Bundle {
         let contract = format!(

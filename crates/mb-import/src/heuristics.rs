@@ -2356,8 +2356,11 @@ pub(crate) fn apply_action_routes(
 /// top-level member the parameter names, and one object member (`metadata`) holding a
 /// scalar member it names wholly ([`nested_key`]). The routes on that parameter go by
 /// the dotted path (`metadata.name`), and a create of the type whose answer holds the
-/// member by it too. Two reads that disagree key nothing.
+/// member by it too. Two reads that disagree key nothing. Only an object member that is
+/// record metadata ([`Metadata`]) keys a record: a related record held inline
+/// (`manager: Person`) does not.
 fn apply_nested_identities(operations: &mut [Operation], defs: &Map<String, Value>) {
+    let metadata = Metadata::of(operations, defs);
     let mut by_route: HashMap<(String, String), Option<String>> = HashMap::new();
     for op in gets(operations, |route| {
         route.last().is_some_and(|last| is_param(last))
@@ -2372,7 +2375,7 @@ fn apply_nested_identities(operations: &mut [Operation], defs: &Map<String, Valu
         let Some(param) = trailing_param(path).filter(|_| nests(path)) else {
             continue;
         };
-        let Some(field) = nested_key(param, schema, defs) else {
+        let Some(field) = nested_key(param, schema, &metadata, defs) else {
             continue;
         };
         by_route
@@ -2434,8 +2437,14 @@ fn apply_nested_identities(operations: &mut [Operation], defs: &Map<String, Valu
 /// wholly ([`param_match`] by all its words). A bare `{id}` names no such member: an
 /// `id` in an object member is that object's own. Nor does a parameter that names the
 /// object member itself (`{order_id}` and `order`): that member is the record, held in
-/// an envelope, which the envelope rules judge.
-fn nested_key(param: &str, schema: &Value, defs: &Map<String, Value>) -> Option<String> {
+/// an envelope, which the envelope rules judge. The object member must be record
+/// metadata ([`Metadata::holds`]).
+fn nested_key(
+    param: &str,
+    schema: &Value,
+    metadata: &Metadata<'_>,
+    defs: &Map<String, Value>,
+) -> Option<String> {
     let props = schema_properties(Some(schema), defs)?;
     if mb_mcm::is_generic_id(param)
         || props.contains_key("id")
@@ -2445,7 +2454,7 @@ fn nested_key(param: &str, schema: &Value, defs: &Map<String, Value>) -> Option<
     }
     let whole = mb_mcm::words(param).len();
     let mut found = props.iter().filter_map(|(member, inner)| {
-        if mb_mcm::names_member(param, member) {
+        if mb_mcm::names_member(param, member) || !metadata.holds(member, inner) {
             return None;
         }
         let inner = resolve(inner, defs)?;
@@ -2460,6 +2469,89 @@ fn nested_key(param: &str, schema: &Value, defs: &Map<String, Value>) -> Option<
         (Some(one), None) => Some(one),
         _ => None,
     }
+}
+
+/// The object members of records that are those records' metadata, as the shared
+/// metadata convention (Kubernetes' `ObjectMeta`) has them: the same object, by the same
+/// `$ref` or the same members, under the same member name in the records of two or more
+/// types. One no other type holds may be a related record held inline (`manager:
+/// Person`), so it is not metadata; nor is one that is itself a type's record, or that
+/// has an `id` of its own.
+struct Metadata<'a> {
+    /// The (member, [`shape`]) pairs that two or more types' records hold.
+    shared: HashSet<(String, String)>,
+    /// The record schemas the operations read by path and create answer.
+    records: Vec<&'a Value>,
+    defs: &'a Map<String, Value>,
+}
+
+impl<'a> Metadata<'a> {
+    fn of(operations: &'a [Operation], defs: &'a Map<String, Value>) -> Self {
+        let mut types: HashMap<(String, String), HashSet<&str>> = HashMap::new();
+        let mut records = Vec::new();
+        let read_by_path = |op: &Operation| {
+            http_path(op).is_some_and(|(method, path)| {
+                method == HttpMethod::Get && trailing_param(path).is_some()
+            })
+        };
+        for op in operations.iter().filter(|op| {
+            !is_stream(op)
+                && (read_by_path(op) || op.kind == OperationKind::Command(Effect::Create))
+        }) {
+            let Some(schema) = answer(op) else {
+                continue;
+            };
+            if let Some(record) = resolve(schema, defs) {
+                records.push(record);
+            }
+            let (Some(t), Some(props)) = (
+                op.resource_type.as_deref(),
+                schema_properties(Some(schema), defs),
+            ) else {
+                continue;
+            };
+            for (member, inner) in props.iter() {
+                if let Some(shape) = shape(inner, defs) {
+                    types.entry((member.clone(), shape)).or_default().insert(t);
+                }
+            }
+        }
+        let shared = types
+            .into_iter()
+            .filter(|(_, types)| types.len() >= 2)
+            .map(|(key, _)| key)
+            .collect();
+        Self {
+            shared,
+            records,
+            defs,
+        }
+    }
+
+    /// Whether `member`, declared by `inner`, is record metadata.
+    fn holds(&self, member: &str, inner: &Value) -> bool {
+        let Some(shape) = shape(inner, self.defs) else {
+            return false;
+        };
+        let Some(resolved) = resolve(inner, self.defs) else {
+            return false;
+        };
+        self.shared.contains(&(member.to_owned(), shape))
+            && !self.records.contains(&resolved)
+            && !schema_properties(Some(resolved), self.defs).is_some_and(|p| p.contains_key("id"))
+    }
+}
+
+/// What tells two object member schemas apart: the `$ref` naming it, else the members
+/// it declares. A schema declaring no members has none.
+fn shape(schema: &Value, defs: &Map<String, Value>) -> Option<String> {
+    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        return Some(format!("$ref {r}"));
+    }
+    let props = schema_properties(Some(schema), defs)?;
+    let mut members: Vec<&str> = props.keys().map(String::as_str).collect();
+    members.sort_unstable();
+    (!members.is_empty()).then(|| format!("members {}", members.join(",")))
 }
 
 /// Whether dotted `key` (`metadata.name`) is a scalar member of an object member of

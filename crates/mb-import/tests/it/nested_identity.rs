@@ -159,3 +159,113 @@ fn a_plain_identity_serializes_as_it_always_has() {
             .unwrap();
     assert_eq!(nested.field, "info.label");
 }
+
+/// Profiles read by `{username}`, each holding its manager inline: a related record,
+/// not the profile's metadata. `extra_paths` and `extra_schemas` add to it.
+fn profiles(extra_paths: &str, extra_schemas: &str, manager: &str) -> String {
+    format!(
+        r##"
+openapi: 3.0.0
+info: {{title: Profiles, version: "1"}}
+paths:
+  /profiles:
+    post:
+      operationId: createProfile
+      requestBody:
+        content:
+          application/json:
+            schema: {{$ref: "#/components/schemas/Profile"}}
+      responses:
+        "201":
+          description: made
+          content:
+            application/json:
+              schema: {{$ref: "#/components/schemas/Profile"}}
+  /profiles/{{username}}:
+    get:
+      operationId: readProfile
+      parameters:
+        - {{name: username, in: path, required: true, schema: {{type: string}}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {{$ref: "#/components/schemas/Profile"}}
+{extra_paths}
+components:
+  schemas:
+    Person:
+      type: object
+      properties:
+{manager}
+    Profile:
+      type: object
+      properties:
+        handle: {{type: string}}
+        bio: {{type: string}}
+        manager: {{$ref: "#/components/schemas/Person"}}
+{extra_schemas}
+"##
+    )
+}
+
+const PERSON: &str = "        username: {type: string}\n        email: {type: string}";
+
+fn assert_profiles_unkeyed(contract: &str) {
+    let bundle = compile(contract.as_bytes()).unwrap();
+    assert_eq!(field(&bundle, "readProfile"), None);
+    assert_eq!(field(&bundle, "createProfile"), None);
+}
+
+#[test]
+fn a_related_record_held_inline_is_not_metadata_that_keys_the_record() {
+    // Only profiles hold a `manager`: nothing says it is the record's own metadata.
+    assert_profiles_unkeyed(&profiles("", "", PERSON));
+}
+
+/// A `Team` read by path that holds a `manager: Person` too.
+const TEAMS: &str = r##"
+  /teams/{team}:
+    get:
+      operationId: readTeam
+      parameters:
+        - {name: team, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Team"}"##;
+
+const TEAM: &str = r##"    Team:
+      type: object
+      properties:
+        title: {type: string}
+        manager: {$ref: "#/components/schemas/Person"}"##;
+
+#[test]
+fn a_shared_member_that_is_another_type_s_record_is_not_metadata() {
+    // Profiles and teams both hold a manager, and a person is a record of its own.
+    let people = format!(
+        "{TEAMS}\n  /people/{{username}}:\n    get:\n      operationId: readPerson\n      parameters:\n        - {{name: username, in: path, required: true, schema: {{type: string}}}}\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema: {{$ref: \"#/components/schemas/Person\"}}"
+    );
+    assert_profiles_unkeyed(&profiles(&people, TEAM, PERSON));
+}
+
+#[test]
+fn a_shared_member_with_its_own_id_is_not_metadata() {
+    let with_id = format!("        id: {{type: string}}\n{PERSON}");
+    assert_profiles_unkeyed(&profiles(TEAMS, TEAM, &with_id));
+}
+
+#[test]
+fn metadata_shared_by_two_types_keys_the_record() {
+    // The shared metadata convention: profiles and teams both hold the same `manager`,
+    // which is no record of its own and has no `id`.
+    let bundle = compile(profiles(TEAMS, TEAM, PERSON).as_bytes()).unwrap();
+    assert_eq!(
+        field(&bundle, "readProfile"),
+        Some((Some("username".to_owned()), "manager.username".to_owned()))
+    );
+}

@@ -1,4 +1,5 @@
-//! A record keyed by a member of its object metadata (`info.label`), a create whose
+//! A record keyed by a member of its object metadata (`info.label`, the `Info` gadgets
+//! and widgets share), a create whose
 //! answer holds server-set members beside what the request sent, `PATCH` nulls that
 //! remove a member, and a path parameter that may hold either of two members.
 #![cfg(test)]
@@ -83,6 +84,17 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Gadget"}
+  /widgets/{widget}:
+    get:
+      operationId: readWidget
+      parameters:
+        - {name: widget, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Widget"}
   /apps:
     post:
       operationId: createApp
@@ -171,6 +183,11 @@ components:
         settings:
           type: object
           additionalProperties: {type: string}
+    Widget:
+      type: object
+      properties:
+        kind: {type: string}
+        info: {$ref: "#/components/schemas/Info"}
     Problem:
       type: object
       properties:
@@ -572,4 +589,90 @@ async fn a_merge_patch_null_removes_the_member_of_an_enveloped_record() {
     );
     let (_, read) = h.send("GET", "/boxes/b1", None).await;
     assert_eq!(read["data"], json!({"id": "b1", "color": "blue"}), "{read}");
+}
+
+/// Profiles read by `{username}`, each holding its manager inline: a related record,
+/// which no other type shares as metadata.
+const PROFILES: &str = r##"
+openapi: 3.0.0
+info: {title: Profiles, version: "1"}
+paths:
+  /profiles:
+    post:
+      operationId: createProfile
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Profile"}
+      responses:
+        "201":
+          description: made
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Profile"}
+  /profiles/{username}:
+    get:
+      operationId: readProfile
+      parameters:
+        - {name: username, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Profile"}
+components:
+  schemas:
+    Person:
+      type: object
+      properties:
+        username: {type: string}
+        email: {type: string}
+    Profile:
+      type: object
+      properties:
+        handle: {type: string}
+        bio: {type: string}
+        manager: {$ref: "#/components/schemas/Person"}
+"##;
+
+fn profile(handle: &str, bio: &str) -> Value {
+    json!({"handle": handle, "bio": bio,
+           "manager": {"username": "carol", "email": "carol@example.com"}})
+}
+
+#[tokio::test]
+async fn records_sharing_a_related_record_held_inline_are_not_keyed_by_it() {
+    let h = harness_on(
+        PROFILES,
+        vec![
+            profile("alice", "a"),
+            profile("bob", "b"),
+            profile("alice", "a"),
+            profile("carol", "c"),
+        ],
+    );
+    let (status, alice) = h
+        .send("POST", "/profiles", Some(profile("alice", "a")))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{alice}");
+    let (status, bob) = h.send("POST", "/profiles", Some(profile("bob", "b"))).await;
+    assert_eq!(status, StatusCode::CREATED, "{bob}");
+    assert_eq!(
+        bob["handle"], "bob",
+        "bob's create is no repeat of alice's: {bob}"
+    );
+    assert_eq!(bob["bio"], "b", "{bob}");
+
+    let (status, read) = h.send("GET", "/profiles/alice", None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(
+        read["manager"]["username"], "carol",
+        "the manager's username is never rewritten to the path's: {read}"
+    );
+    let (_, carol) = h.send("GET", "/profiles/carol", None).await;
+    assert_ne!(
+        carol["handle"], "alice",
+        "carol's read is not alice's record: {carol}"
+    );
 }
