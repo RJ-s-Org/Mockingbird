@@ -812,6 +812,13 @@ const PAGE_SIZE_WORDS: [&str; 7] = [
     "top",
 ];
 
+/// Whether query parameter `name` is named as a page size, as [`requested_limit`] has it, in any
+/// case and with any separators: `limit`, `per_page`, `pageSize`.
+#[must_use]
+pub fn names_page_size(name: &str) -> bool {
+    PAGE_SIZE_WORDS.contains(&normalized(name).as_str())
+}
+
 /// Lower case, with only letters and digits.
 fn normalized(name: &str) -> String {
     name.chars()

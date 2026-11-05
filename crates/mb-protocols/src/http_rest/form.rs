@@ -216,7 +216,11 @@ fn to_json(node: Node, schema: Option<&Value>, defs: &Map<String, Value>) -> Val
     match node {
         Node::Leaf(values) if wants_array => {
             let items = items(&branches);
-            Value::Array(values.iter().map(|v| leaf(v, items, defs)).collect())
+            let values: Vec<&str> = match delimiter(&branches) {
+                Some(at) => values.iter().flat_map(|v| v.split(at)).collect(),
+                None => values.iter().map(String::as_str).collect(),
+            };
+            Value::Array(values.into_iter().map(|v| leaf(v, items, defs)).collect())
         }
         // A repeated key the schema does not describe keeps every value.
         Node::Leaf(values) if branches.is_empty() && values.len() > 1 => {
@@ -245,6 +249,30 @@ fn to_json(node: Node, schema: Option<&Value>, defs: &Map<String, Value>) -> Val
                 Value::Object(object(entries, &branches, defs))
             }
         }
+    }
+}
+
+/// The character one value of an array is split on, by the OpenAPI `style` and
+/// `explode` the import kept on its schema (`x-style`, `x-explode`): a comma for a
+/// `form` array that does not explode (`ids=1,2`), a space for `spaceDelimited`, a pipe
+/// for `pipeDelimited`. An exploded array (the `form` default) repeats its key instead.
+fn delimiter(branches: &[&Value]) -> Option<char> {
+    let style = branches
+        .iter()
+        .find_map(|b| b.get("x-style").and_then(Value::as_str))
+        .unwrap_or("form");
+    let explode = branches
+        .iter()
+        .find_map(|b| b.get("x-explode").and_then(Value::as_bool))
+        .unwrap_or(style == "form");
+    if explode {
+        return None;
+    }
+    match style {
+        "form" => Some(','),
+        "spaceDelimited" => Some(' '),
+        "pipeDelimited" => Some('|'),
+        _ => None,
     }
 }
 
@@ -282,6 +310,41 @@ mod tests {
 
     fn pairs(raw: &str) -> Vec<(String, String)> {
         serde_urlencoded::from_str(raw).unwrap_or_default()
+    }
+
+    /// An array parameter with `explode: false` (kept by the import as `x-style` and
+    /// `x-explode`) is one value split on its style's delimiter: a comma for `form`, a
+    /// pipe for `pipeDelimited`, a space for `spaceDelimited`. An exploded one, and
+    /// text, are not split.
+    #[test]
+    fn a_delimited_array_is_split_before_coercion() {
+        let schema = json!({"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}, "x-style": "form", "x-explode": false},
+            "pipes": {"type": "array", "items": {"type": "string"}, "x-style": "pipeDelimited", "x-explode": false},
+            "spaces": {"type": "array", "items": {"type": "string"}, "x-style": "spaceDelimited"},
+            "many": {"type": "array", "items": {"type": "string"}},
+            "text": {"type": "string", "x-style": "form", "x-explode": false},
+        }});
+        let out = decode(
+            pairs("ids=1,2&pipes=a|b&spaces=c%20d&many=e,f&many=g&text=h,i"),
+            Some(&schema),
+            &Map::new(),
+        );
+        assert_eq!(
+            Value::Object(out),
+            json!({"ids": [1, 2], "pipes": ["a", "b"], "spaces": ["c", "d"], "many": ["e,f", "g"], "text": "h,i"})
+        );
+    }
+
+    /// A delimited array whose key is repeated anyway (`ids=1,2&ids=3`) is lenient:
+    /// each value is split on the delimiter, and the parts are one array in order.
+    #[test]
+    fn a_repeated_key_of_a_delimited_array_splits_each_value() {
+        let schema = json!({"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}, "x-style": "form", "x-explode": false},
+        }});
+        let out = decode(pairs("ids=1,2&ids=3"), Some(&schema), &Map::new());
+        assert_eq!(Value::Object(out), json!({"ids": [1, 2, 3]}));
     }
 
     #[test]

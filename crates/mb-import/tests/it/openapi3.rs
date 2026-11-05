@@ -103,6 +103,42 @@ components:
     );
 }
 
+/// A parameter's `style` and `explode` are kept on its schema (`x-style`, `x-explode`),
+/// where the request decoder finds how an array is written; one declaring neither gets
+/// neither.
+#[test]
+fn a_parameter_style_is_kept_on_its_schema() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - {name: ids, in: query, style: form, explode: false, schema: {type: array, items: {type: integer}}}
+        - {name: tags, in: query, style: pipeDelimited, schema: {type: array, items: {type: string}}}
+        - {name: kinds, in: query, schema: {type: array, items: {type: string}}}
+      responses:
+        "200": {description: ok}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    let op = bundle.operation("listTasks").unwrap();
+    let query = &op.input.query.as_ref().unwrap()["properties"];
+    assert_eq!(
+        query["ids"],
+        json!({"type": "array", "items": {"type": "integer"}, "x-style": "form", "x-explode": false})
+    );
+    assert_eq!(
+        query["tags"],
+        json!({"type": "array", "items": {"type": "string"}, "x-style": "pipeDelimited"})
+    );
+    assert_eq!(
+        query["kinds"],
+        json!({"type": "array", "items": {"type": "string"}})
+    );
+}
+
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!(
         "{}/../../fixtures/openapi/{name}",

@@ -361,10 +361,12 @@ fn params_schema(params: &[&Value], location: &str) -> Option<Value> {
                 .map(|(_, m)| schema_of(m))
                 .unwrap_or_else(|| json!({})),
         };
-        props.insert(
-            name.to_owned(),
-            crate::schema::with_param_description(schema, p),
-        );
+        let schema = crate::schema::with_param_description(schema, p);
+        let schema = match location {
+            "query" => crate::schema::with_param_style(schema, p),
+            _ => schema,
+        };
+        props.insert(name.to_owned(), schema);
         if p.get("required").and_then(Value::as_bool) == Some(true) || location == "path" {
             required.push(Value::String(name.to_owned()));
         }
