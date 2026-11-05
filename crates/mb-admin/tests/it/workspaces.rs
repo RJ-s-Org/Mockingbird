@@ -522,8 +522,8 @@ async fn openapi_has_canonical_and_deprecated_alias_paths() {
     // 23 P3 operations, the 6 channel and event-settings operations (P5)
     // the 8 import, draft and preview operations (P6), the single
     // request log entry and the webhook delivery list (WS6), and contract
-    // version delete.
-    assert_eq!(aliases, 40, "every mock and profile operation has an alias");
+    // version delete and the world description of a contract version.
+    assert_eq!(aliases, 41, "every mock and profile operation has an alias");
     assert!(paths["/api/v1/mocks"]["post"]["deprecated"] == true);
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();

@@ -17,6 +17,11 @@ mockingbird import orders.yaml --as orders --activate
 mockingbird contracts list orders
 mockingbird contracts activate orders 2
 
+# A contract version's world description: gaps first, then each entry, as
+# text (--json prints the Admin API answer); and the description format.
+mockingbird world show orders --version 2
+mockingbird world schema
+
 # A documentation, HAR or Postman import is a draft; approve it after review
 # (the newest draft without a version; --no-activate approves without serving).
 mockingbird import petstore.har --as pets

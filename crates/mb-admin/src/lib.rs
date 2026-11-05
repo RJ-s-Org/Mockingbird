@@ -312,6 +312,10 @@ pub fn router(st: AdminState) -> Router {
             post(drafts::approve),
         )
         .route(
+            "/mocks/{mock}/contracts/{version}/world",
+            get(world::get_world),
+        )
+        .route(
             "/mocks/{mock}/contracts/{version}/preview",
             post(drafts::preview),
         )

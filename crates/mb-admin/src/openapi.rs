@@ -13,11 +13,12 @@ use utoipa::openapi::{Deprecated, RefOr};
 use crate::{
     API_BASE, Source, VersionStatus, apikeys, audit, auth_routes, console_sessions, contracts,
     drafts, imports, live, mocks, problem, profiles, requests, scenarios, sessions, workspaces,
+    world,
 };
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions, import jobs, scenarios, LLM profiles, sessions, the request log and its live SSE tail, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only); `GET /api/v1/me` describes the caller; `/api/v1/console-sessions` lists and ends console login sessions. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
+    info(title = "Mockingbird Admin API", description = "Manage workspaces and, in each workspace, mocks, contract versions and their world descriptions, import jobs, scenarios, LLM profiles, sessions, the request log and its live SSE tail, API keys and the audit log. Every successful mutation writes one audit event; `GET /api/v1/audit` lists every workspace's events (sysadmin only); `GET /api/v1/me` describes the caller; `/api/v1/console-sessions` lists and ends console login sessions. The `/api/v1/mocks…` and `/api/v1/llm-profiles…` paths are deprecated aliases for workspace `default`. Every `/api/v1` request needs credentials (401 otherwise) and a sufficient role in the workspace (403 otherwise). Errors are RFC 9457 `application/problem+json`."),
     paths(
         workspaces::list,
         workspaces::create,
@@ -35,6 +36,7 @@ use crate::{
         contracts::source,
         contracts::activate,
         contracts::delete,
+        world::get_world,
         drafts::get_draft,
         drafts::put_draft,
         drafts::approve,
@@ -111,6 +113,12 @@ use crate::{
         imports::ImportProgressView,
         imports::ImportJobView,
         contracts::ChannelSummary,
+        world::WorldView,
+        world::AuthorSchema,
+        world::RefusalSchema,
+        world::RefusalCodeSchema,
+        world::GapSchema,
+        world::GapCodeSchema,
         scenarios::ScenarioView,
         scenarios::PutScenario,
         profiles::LlmProfileView,

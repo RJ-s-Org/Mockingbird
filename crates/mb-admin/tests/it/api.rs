@@ -1919,6 +1919,7 @@ async fn openapi_lists_all_paths() {
             &["get", "delete"],
         ),
         ("/api/v1/mocks/{mock}/contracts/{version}/source", &["get"]),
+        ("/api/v1/mocks/{mock}/contracts/{version}/world", &["get"]),
         (
             "/api/v1/mocks/{mock}/contracts/{version}/activate",
             &["post"],

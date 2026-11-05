@@ -331,6 +331,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mocks/{mock}/contracts/{version}/world": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["contracts_get_world_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mocks/{mock}/event-settings": {
         parameters: {
             query?: never;
@@ -823,6 +840,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["contracts_source"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["contracts_get_world"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2193,6 +2226,82 @@ export interface components {
             name: string;
             role?: components["schemas"]["Role"] | null;
         };
+        /**
+         * @description The OpenAPI schema of [`Author`] (which lives in `mb-mcm`).
+         * @enum {string}
+         */
+        WorldAuthor: "heuristic" | "agent" | "llm" | "user";
+        /**
+         * @description The OpenAPI schema of [`Gap`] (which lives in `mb-protocols`): something
+         *     the description leaves open.
+         */
+        WorldGap: {
+            code: components["schemas"]["WorldGapCode"];
+            /** @description What is missing, for a person or an assistant to fix. */
+            message: string;
+            /** @description The operation it is about, when it is about one. */
+            operation?: string | null;
+            /** @description The resource type it is about, when it is about one. */
+            type?: string | null;
+        };
+        /**
+         * @description The OpenAPI schema of [`GapCode`] (which lives in `mb-protocols`).
+         * @enum {string}
+         */
+        WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused";
+        /**
+         * @description The OpenAPI schema of [`Refusal`] (which lives in `mb-mcm`): one entry
+         *     of a description that did not validate.
+         */
+        WorldRefusal: {
+            code: components["schemas"]["WorldRefusalCode"];
+            /** @description What is wrong, for a person or an assistant to fix. */
+            message: string;
+            /**
+             * @description A JSON pointer into the description naming the entry; empty for the
+             *     whole document.
+             */
+            path: string;
+        };
+        /**
+         * @description The OpenAPI schema of [`RefusalCode`] (which lives in `mb-mcm`).
+         * @enum {string}
+         */
+        WorldRefusalCode: "unknown_key" | "unresolved" | "not_applicable" | "invalid" | "too_large";
+        /** @description A contract version's effective world description. */
+        WorldView: {
+            /**
+             * @description The author of each entry the overlay sets, keyed by JSON pointer
+             *     (`/types/{t}/{field}`, `/operations/{op}/{field}`); every entry not
+             *     listed is `heuristic`.
+             */
+            authors: {
+                [key: string]: components["schemas"]["WorldAuthor"];
+            };
+            /** @description What the description leaves open, including each refused entry. */
+            gaps: components["schemas"]["WorldGap"][];
+            /**
+             * @description The newest revision's entries that did not validate; they fall back
+             *     to tier 0.
+             */
+            refused: components["schemas"]["WorldRefusal"][];
+            /**
+             * Format: int64
+             * @description The newest revision's number; `0` when there is none.
+             */
+            revision: number;
+            /**
+             * Format: int64
+             * @description The contract version it describes (the active one's number for
+             *     `active`).
+             */
+            version: number;
+            /**
+             * @description The description: tier 0 overlaid with the newest revision's entries
+             *     that validate. Its format is `mockingbird world schema`.
+             */
+            world: Record<string, never>;
+        };
     };
     responses: never;
     parameters: never;
@@ -3498,6 +3607,49 @@ export interface operations {
                     "application/octet-stream": number[];
                 };
             };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_world_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldView"];
+                };
+            };
+            /** @description The version is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock or version, or no active version */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5843,6 +5995,51 @@ export interface operations {
                     "application/octet-stream": number[];
                 };
             };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_world: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldView"];
+                };
+            };
+            /** @description The version is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock or version, or no active version */
             404: {
                 headers: {
                     [name: string]: unknown;

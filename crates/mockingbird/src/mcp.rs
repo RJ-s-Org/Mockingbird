@@ -519,6 +519,20 @@ fn tools() -> Vec<Tool> {
             destructive: false,
         },
         Tool {
+            name: "get_world",
+            title: "Show a contract version's world description",
+            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps (no_identity, no_target, no_record, skipped_route, refused) to fix. The format is `mockingbird world schema`.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                }),
+                &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
             name: "get_draft",
             title: "Review a draft contract",
             description: "Review a draft import: operations with confidence and warnings; pass operation for its full definition. Without version, the newest draft.",
@@ -1305,6 +1319,22 @@ impl McpServer {
                     &["mocks", mock, "contracts", &version, "approve"],
                     &[],
                     Some(json!({ "activate": activate })),
+                )
+                .await
+            }
+            "get_world" => {
+                let version = match a.get("version").filter(|v| !v.is_null()) {
+                    None => "active".to_string(),
+                    Some(v) => v
+                        .as_u64()
+                        .ok_or_else(|| ToolError("version is not a version number".into()))?
+                        .to_string(),
+                };
+                self.ws(
+                    Method::GET,
+                    &["mocks", str_arg(a, "mock")?, "contracts", &version, "world"],
+                    &[],
+                    None,
                 )
                 .await
             }

@@ -1014,3 +1014,145 @@ async fn carry_forward_on_approve_takes_a_later_version_revised_since_the_draft(
         Some(&Author::User)
     );
 }
+
+/// [`V1`] with a second route that matches the same requests as
+/// `/widgets/{widgetId}`, so it is skipped and reported as a gap.
+fn with_skipped_route() -> String {
+    V1.replace(
+        "components:\n",
+        r#"  /widgets/{other}:
+    get:
+      operationId: getWidgetAgain
+      parameters: [{name: other, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok}
+components:
+"#,
+    )
+}
+
+/// A GET answering with any status: the status, content type and JSON body.
+async fn get_any(app: &Router, uri: &str) -> (u16, String, Value) {
+    let req = Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, ctype, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn get_world_returns_tier0_and_gaps() {
+    let (_st, app) = admin().await;
+    let src = with_skipped_route();
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        src.clone().into_bytes(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let bundle = compile(&src);
+
+    let view = send(
+        &app,
+        Method::GET,
+        &format!("{BASE}/widgets/contracts/{version}/world"),
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(view["revision"], 0, "{view}");
+    assert_eq!(view["version"], version, "{view}");
+    assert_eq!(view["world"], serde_json::to_value(tier0(&bundle)).unwrap());
+    assert_eq!(view["authors"], json!({}));
+    assert_eq!(view["refused"], json!([]));
+    let gaps = view["gaps"].as_array().unwrap();
+    assert!(gaps.iter().any(|g| g["code"] == "skipped_route"), "{view}");
+
+    // `active` names the active version.
+    let active = send(
+        &app,
+        Method::GET,
+        &format!("{BASE}/widgets/contracts/active/world"),
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(active, view);
+
+    // A missing version or mock is a 404 problem.
+    for uri in [
+        format!("{BASE}/widgets/contracts/99/world"),
+        format!("{BASE}/nope/contracts/1/world"),
+        format!("{BASE}/nope/contracts/active/world"),
+    ] {
+        let (status, ctype, body) = get_any(&app, &uri).await;
+        assert_eq!(status, 404, "{uri}: {body}");
+        assert_eq!(ctype, "application/problem+json", "{uri}");
+    }
+    // A version that is neither a number nor `active` is a 400 problem.
+    let (status, ctype, body) =
+        get_any(&app, &format!("{BASE}/widgets/contracts/latest/world")).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(ctype, "application/problem+json");
+}
+
+#[tokio::test]
+async fn get_world_on_a_mock_without_an_active_version_is_404() {
+    let (_st, app) = admin().await;
+    let (status, ctype, body) =
+        get_any(&app, &format!("{BASE}/widgets/contracts/active/world")).await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(ctype, "application/problem+json");
+}
+
+#[tokio::test]
+async fn get_world_on_pre_existing_version_is_revision_0() {
+    // A version stored before world descriptions existed has no revision.
+    let (st, app) = admin().await;
+    let mock = widgets_mock(&st).await;
+    let (version, bundle) = add_version(st.store.as_ref(), mock, V1).await;
+    let uri = format!("{BASE}/widgets/contracts/{version}/world");
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(view["revision"], 0, "{view}");
+    assert_eq!(view["world"], serde_json::to_value(tier0(&bundle)).unwrap());
+    assert_eq!(view["refused"], json!([]));
+
+    // The first write is revision 1.
+    let first = st
+        .store
+        .add_world_revision(
+            mock,
+            version,
+            NewWorldRevision {
+                author: Author::User,
+                document: json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}}),
+                created_by: None,
+                expect: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.revision, 1);
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(view["revision"], 1, "{view}");
+    assert_eq!(view["world"]["operations"]["getWidget"]["not_found"], 404);
+    assert_eq!(
+        view["authors"],
+        json!({"/operations/getWidget/not_found": "user"})
+    );
+}

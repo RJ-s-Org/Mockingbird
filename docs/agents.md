@@ -62,6 +62,7 @@ Ask in plain words: "mock the API in openapi.yaml", "use OpenRouter for Mockingb
 | Server | `start_server` (`proxy: true` also starts the HTTP(S) proxy), `server_status`, `server_logs`, `stop_server`, `proxy_env` | `server start/status/logs/stop`, `proxy env`, `run -- <command>` |
 | Mocks | `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version` | `mocks list/get/create/update/delete`, `import`, `contracts list/activate` |
 | Drafts | `get_draft`, `edit_draft`, `approve_draft` | `import --approve`, `drafts approve` |
+| World descriptions | `get_world` | `world show`, `world schema` |
 | Behaviour | `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile` | `scenarios …`, `profiles …` |
 | Traffic and state | `call_mock`, `list_requests` (summaries; `include_bodies` for bodies), `get_request`, `list_sessions`, `export_session`, `seed_session`, `reset_session` | `sessions …`, `export-fixtures`, `seed-fixtures` |
 | Events | `list_channels`, `publish_event` | `channels …` |

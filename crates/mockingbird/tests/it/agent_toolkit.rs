@@ -1050,3 +1050,109 @@ fn start_server_refuses_a_profile_whose_key_is_missing() {
     assert!(err.contains("MB_TEST_NOWHERE_API_KEY"), "{err}");
     assert!(err.contains("offline"), "says how to start anyway: {err}");
 }
+
+#[test]
+fn cli_world_schema_prints_valid_json() {
+    let dir = tempdir();
+    let printed = run_json(dir.path(), &["world", "schema"]);
+    assert_eq!(printed, json_file("crates/mb-mcm/schemas/world.v1.json"));
+    assert!(printed["$schema"].is_string(), "{printed}");
+    assert_eq!(printed["type"], "object", "{printed}");
+}
+
+#[test]
+fn mcp_get_world_matches_admin() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    run_json(
+        dir.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let (mut mcp, admin_url, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml" }),
+        mcp_env,
+        || {},
+    );
+    assert_eq!(started["ready"], true, "{started}");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let tools = mcp.rpc("tools/list", json!({}));
+        let tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_world")
+            .cloned()
+            .unwrap_or_else(|| panic!("no get_world tool: {tools}"));
+        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+
+        let admin = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "api",
+                "GET",
+                "/workspaces/default/mocks/orders/contracts/active/world",
+            ],
+        );
+        assert_eq!(admin["revision"], 0, "{admin}");
+        assert!(admin["world"]["operations"].is_object(), "{admin}");
+        let version = admin["version"].as_u64().unwrap();
+
+        let world = mcp.tool("get_world", json!({ "mock": "orders" }));
+        assert_eq!(world, admin);
+        let world = mcp.tool("get_world", json!({ "mock": "orders", "version": version }));
+        assert_eq!(world, admin);
+        let error = mcp.tool_error("get_world", json!({ "mock": "orders", "version": 99 }));
+        assert!(error.contains("99"), "{error}");
+
+        // The CLI answers the same JSON, and a human summary with the gaps
+        // first.
+        let shown = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "world",
+                "show",
+                "orders",
+                "--json",
+            ],
+        );
+        assert_eq!(shown, admin);
+        let shown = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "world",
+                "show",
+                "orders",
+                "--version",
+                &version.to_string(),
+                "--json",
+            ],
+        );
+        assert_eq!(shown, admin);
+        let out = bin()
+            .args(["--admin-url", &admin_url, "world", "show", "orders"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let gaps = text.find("Gaps").unwrap_or_else(|| panic!("{text}"));
+        let operations = text.find("Operations").unwrap_or_else(|| panic!("{text}"));
+        assert!(gaps < operations, "{text}");
+        assert!(text.contains("revision 0"), "{text}");
+    }));
+    mcp.tool("stop_server", json!({}));
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

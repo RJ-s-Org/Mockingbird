@@ -74,6 +74,8 @@ pub enum WorkflowCommand {
     Contracts(ContractsCommand),
     /// `api <METHOD> <PATH>`.
     Api(ApiArgs),
+    /// `world …`.
+    World(WorldCommand),
     /// `snapshot export --include …` (a plain `snapshot export` is
     /// [`crate::snapshot::SnapshotCommand::Export`]).
     SnapshotExport(crate::snapshot::SnapshotExportArgs),
@@ -90,6 +92,10 @@ pub(crate) enum WorkflowTop {
     /// List a mock's contract versions and activate one.
     #[command(subcommand)]
     Contracts(ContractsCommand),
+    /// Show a contract version's world description with its gaps, or print
+    /// the description format's JSON Schema.
+    #[command(subcommand)]
+    World(WorldCommand),
     /// Send any Admin API request and print the JSON answer: `api GET
     /// /workspaces/default/api-keys`. Non-2xx answers print their problem
     /// details on stderr and exit 1.
@@ -101,6 +107,7 @@ impl From<WorkflowTop> for WorkflowCommand {
         match top {
             WorkflowTop::Drafts(cmd) => Self::Drafts(cmd),
             WorkflowTop::Contracts(cmd) => Self::Contracts(cmd),
+            WorkflowTop::World(cmd) => Self::World(cmd),
             WorkflowTop::Api(args) => Self::Api(args),
         }
     }
@@ -189,6 +196,36 @@ pub enum ContractsCommand {
         /// The version to serve.
         version: u64,
     },
+}
+
+/// `world …`.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum WorldCommand {
+    /// Show a contract version's world description: the gaps to fix first,
+    /// then the refused entries and each type and operation, marking the
+    /// entries a revision set with their author.
+    Show {
+        /// The mock.
+        mock: String,
+        /// The contract version [default: the active one].
+        #[arg(long, value_name = "N")]
+        version: Option<u64>,
+        /// Print the Admin API's JSON answer instead.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the JSON Schema of world descriptions.
+    Schema,
+}
+
+impl WorkflowCommand {
+    /// Whether the answer is printed as text by [`world_text`] rather than
+    /// as JSON: `world show` without `--json`.
+    #[must_use]
+    pub fn prints_world_text(&self) -> bool {
+        matches!(self, Self::World(WorldCommand::Show { json: false, .. }))
+    }
 }
 
 /// `api <METHOD> <PATH>`.
@@ -598,6 +635,11 @@ pub async fn run_workflow(
     if let WorkflowCommand::Api(args) = cmd {
         return raw_api(admin_url, token, args).await;
     }
+    if let WorkflowCommand::World(WorldCommand::Schema) = cmd {
+        return serde_json::from_str(mb_mcm::world::SCHEMA)
+            .map(Some)
+            .map_err(|e| ClientError::Other(anyhow!("the world schema is not JSON: {e}")));
+    }
     if let WorkflowCommand::SnapshotExport(args) = &cmd {
         return crate::snapshot::export_with(admin_url, token, workspace, args)
             .await
@@ -679,11 +721,97 @@ pub async fn run_workflow(
             )
             .await
         }
+        WorkflowCommand::World(WorldCommand::Show { mock, version, .. }) => {
+            let version = version.map_or_else(|| "active".to_string(), |v| v.to_string());
+            api.send(
+                Method::GET,
+                &["mocks", &mock, "contracts", &version, "world"],
+                None,
+            )
+            .await
+        }
+        WorkflowCommand::World(WorldCommand::Schema) => {
+            Err(ClientError::Other(anyhow!("world schema is printed above")))
+        }
         WorkflowCommand::Api(_) => Err(ClientError::Other(anyhow!("api is sent by path"))),
         WorkflowCommand::SnapshotExport(_) => {
             Err(ClientError::Other(anyhow!("snapshot export is run above")))
         }
     }
+}
+
+/// A person's summary of a world view (`GET …/contracts/{v}/world`): the
+/// version and revision, the gaps first, then the refused entries and the
+/// types and operations, each entry a revision set followed by its author.
+#[must_use]
+pub fn world_text(view: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let list = |key: &str| view[key].as_array().cloned().unwrap_or_default();
+    let authors = view["authors"].as_object().cloned().unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "contract version {}, revision {}",
+        view["version"], view["revision"]
+    );
+    let gaps = list("gaps");
+    let _ = writeln!(out, "\nGaps ({}):", gaps.len());
+    if gaps.is_empty() {
+        let _ = writeln!(out, "  none");
+    }
+    for g in &gaps {
+        let about = match (g["operation"].as_str(), g["type"].as_str()) {
+            (Some(op), _) => format!(" operation {op}:"),
+            (None, Some(t)) => format!(" type {t}:"),
+            (None, None) => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "  {}{about} {}",
+            g["code"].as_str().unwrap_or("?"),
+            g["message"].as_str().unwrap_or_default()
+        );
+    }
+    let refused = list("refused");
+    if !refused.is_empty() {
+        let _ = writeln!(out, "\nRefused ({}):", refused.len());
+        for r in &refused {
+            let path = r["path"]
+                .as_str()
+                .filter(|p| !p.is_empty())
+                .unwrap_or("(document)");
+            let _ = writeln!(
+                out,
+                "  {path} {}: {}",
+                r["code"].as_str().unwrap_or("?"),
+                r["message"].as_str().unwrap_or_default()
+            );
+        }
+    }
+    for (title, section) in [("Types", "types"), ("Operations", "operations")] {
+        let items = view["world"][section]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let _ = writeln!(out, "\n{title} ({}):", items.len());
+        for (name, desc) in &items {
+            let _ = writeln!(out, "  {name}");
+            for (field, value) in desc.as_object().into_iter().flatten() {
+                let pointer = format!(
+                    "/{section}/{}/{}",
+                    name.replace('~', "~0").replace('/', "~1"),
+                    field.replace('~', "~0").replace('/', "~1")
+                );
+                let by = authors
+                    .get(&pointer)
+                    .and_then(Value::as_str)
+                    .map(|a| format!("  [{a}]"))
+                    .unwrap_or_default();
+                let _ = writeln!(out, "    {field}: {value}{by}");
+            }
+        }
+    }
+    out
 }
 
 /// The newest draft version of `mock`.
