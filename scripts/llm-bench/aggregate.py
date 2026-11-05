@@ -214,6 +214,8 @@ class Inputs:
         self.grades = self._jsonl("grades.jsonl", os.path.join(out, "grades.jsonl"))
         self.samples = self._samples()
         self.server = self._server()
+        self.world_authoring = self._world_rows("world-authoring.jsonl")
+        self.world_applied = self._world_rows("world-applied.jsonl")
         self.judge_rows = self._jsonl("judge.jsonl", judge_path)
         # judge_prep.py merge --recheck writes the reversed-order re-judge here.
         recheck = self._jsonl("judge-recheck.jsonl",
@@ -271,6 +273,16 @@ class Inputs:
         self.status["server.jsonl"] = {"present": True, "rows": len(merged),
                                        "fallback": "server/*/server.jsonl (merged per model)"}
         return merged
+
+    def _world_rows(self, name: str) -> List[Dict[str, Any]]:
+        """<out>/<name> plus server/*/<name> (written by server_suites.py --world)."""
+        paths = [os.path.join(self.out, name)] + sorted(glob.glob(os.path.join(self.out, "server", "*", name)))
+        rows: List[Dict[str, Any]] = []
+        for path in paths:
+            part, _ = read_jsonl(path)
+            rows += part or []
+        self.status[name] = {"present": bool(rows), "rows": len(rows)}
+        return rows
 
     def keyword_categories(self) -> Dict[str, List[str]]:
         cats = (self.grade_summary or {}).get("keyword_categories") if isinstance(self.grade_summary, dict) else None
@@ -727,6 +739,48 @@ def drop_harness_rejected(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
     return kept, len(rows) - len(kept)
 
 
+WORLD_TIERS = ("none", "derived", "agent")
+
+
+def world_of(row: Dict[str, Any]) -> str:
+    """The world description a server row ran with (`--world`); rows written before
+    the flag existed, and `--world none` rows, have none."""
+    return str(row.get("world") or "none")
+
+
+def suite_key(row: Dict[str, Any]) -> str:
+    """A server row's suite, with `@<world>` after it when it ran with a world
+    description: `journeys_blind11`, `journeys_blind11@agent`."""
+    world = world_of(row)
+    return str(row.get("suite")) + ("" if world == "none" else f"@{world}")
+
+
+def world_split(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Per suite, the ok rate under each world tier side by side:
+    {suite: {tier: {n, ok, ok_rate}}}. Only suites that ran under a world other than
+    none are listed (with their none rows, when there are any, next to them)."""
+    by: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    errors: Dict[Tuple[str, str], int] = defaultdict(int)
+    for r in rows:
+        if r.get("case") == "suite_error":
+            errors[(str(r.get("suite")), world_of(r))] += 1
+            by[str(r.get("suite"))][world_of(r)]
+            continue
+        by[str(r.get("suite"))][world_of(r)].append(r)
+    out: Dict[str, Dict[str, Any]] = {}
+    for suite in sorted(by):
+        tiers = by[suite]
+        if set(tiers) <= {"none"}:
+            continue
+        out[suite] = {}
+        for tier in sorted(tiers, key=lambda t: (WORLD_TIERS.index(t) if t in WORLD_TIERS else 99, t)):
+            got = tiers[tier]
+            ok = sum(1 for r in got if r.get("ok"))
+            out[suite][tier] = {"n": len(got), "ok": ok, "ok_rate": rate(ok, len(got)),
+                                "suite_errors": errors[(suite, tier)]}
+    return out
+
+
 def journeys_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Per journeys suite: checks, passes, and the failures split into those labelled
     as the provider's (`detail.infra`: a fallback on an HTTP 5xx or 429, on another
@@ -741,8 +795,8 @@ def journeys_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     is not a discount: those rows stay the model's and are only shown apart. The split
     is a label: every row counts in `ok_rate` exactly as it was recorded."""
     out: Dict[str, Any] = {}
-    for name in sorted({str(r.get("suite")) for r in rows if str(r.get("suite")).startswith("journeys")}):
-        suite = [r for r in rows if r.get("suite") == name and r.get("case") != "suite_error"]
+    for name in sorted({suite_key(r) for r in rows if str(r.get("suite")).startswith("journeys")}):
+        suite = [r for r in rows if suite_key(r) == name and r.get("case") != "suite_error"]
         details = [r.get("detail") if isinstance(r.get("detail"), dict) else {} for r in suite]
         failed = [d for r, d in zip(suite, details) if not r.get("ok")]
         infra = sum(1 for d in failed if d.get("infra"))
@@ -760,12 +814,15 @@ def server_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     rows, rejected = drop_harness_rejected(rows)
 
     def suite(name: str) -> List[Dict[str, Any]]:
-        return [r for r in rows if r.get("suite") == name]
+        # The scored blocks read the runs with no world description only, so a
+        # `--world` run in the same directory changes no score; it is in `worlds`.
+        return [r for r in rows if r.get("suite") == name and world_of(r) == "none"]
 
     return {"consistency": consistency_block(suite("consistency")),
             "sse": sse_block(suite("sse")),
             "import": import_block(suite("import")),
             "journeys": journeys_block(rows),
+            "worlds": world_split(rows),
             "n": len(rows),
             "n_all": n_all,
             "harness_rejected_n": rejected}
@@ -1139,10 +1196,16 @@ def analyse(out: str, judge_path: str, key_path: str, seed_arg: Optional[str], b
             continue
         samples_by_model[m].append(r)
     ledger_by_model: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    world_ledger: List[Dict[str, Any]] = []
     for r in ledger:
         m = row_model(r)
         if m is not None and not is_budget(r):
-            ledger_by_model[m].append(r)
+            if "@" in str(r.get("workload") or ""):
+                # A `--world` run's calls (label `<slug>~<suite>@<tier>`): kept out of
+                # the reliability, latency and cost blocks so they change no score.
+                world_ledger.append(r)
+            else:
+                ledger_by_model[m].append(r)
     server_by_model: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in server_rows:
         m = row_model(r)
@@ -1246,6 +1309,7 @@ def analyse(out: str, judge_path: str, key_path: str, seed_arg: Optional[str], b
     }
 
     spend = spend_summary(inputs)
+    world = world_summary(inputs.world_authoring, inputs.world_applied, world_ledger)
     return {
         "meta": {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1270,6 +1334,53 @@ def analyse(out: str, judge_path: str, key_path: str, seed_arg: Optional[str], b
         "models": models,
         "spend": spend,
         "keyword_categories": kw_categories,
+        **({"world": world} if world else {}),
+    }
+
+
+def world_summary(authoring: List[Dict[str, Any]], applied: List[Dict[str, Any]],
+                  ledger: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """The world descriptions of `--world` runs ({} when there were none):
+    - `contracts`: per (author, contract) the latest authoring (a cache hit repays
+      nothing and keeps the first numbers), with its writes, refusals and gaps;
+    - `authoring_cost_usd`/`authoring_ms`: every authoring that ran (a --refresh or a
+      failed attempt counts too), not cache hits;
+    - `applied`: per tier, the descriptions written onto suites' mocks and the entries
+      the server refused then;
+    - `ledger`: per tier, the LLM calls and spend of the runs (kept out of the scores)."""
+    if not authoring and not applied and not ledger:
+        return {}
+    contracts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for r in authoring:
+        key = (str(r.get("author_id")), str(r.get("contract_sha256")))
+        prev = contracts.get(key)
+        # The latest authoring row over cache hits; among cache hits, the last one.
+        if prev is None or not r.get("cached") or prev.get("cached"):
+            contracts[key] = r
+    rows = sorted(contracts.values(), key=lambda r: (str(r.get("author_id")), str(r.get("mock"))))
+    ran = [r for r in authoring if not r.get("cached")]
+    by_tier: Dict[str, Dict[str, Any]] = {}
+    for r in applied:
+        t = by_tier.setdefault(str(r.get("world")), {"writes": 0, "nothing_authored": 0, "refused": 0})
+        if r.get("status") == "nothing_authored":
+            t["nothing_authored"] += 1
+        else:
+            t["writes"] += 1
+        t["refused"] += int(r.get("refused_n") or 0)
+    spend: Dict[str, Dict[str, Any]] = {}
+    for r in ledger or []:
+        tier = str(r.get("workload") or "").rpartition("@")[2]
+        t = spend.setdefault(tier, {"calls": 0, "usd": 0.0})
+        t["calls"] += 1
+        t["usd"] = round(t["usd"] + (num(r.get("cost_usd")) or 0.0), 8)
+    return {
+        "contracts": rows,
+        "authoring_runs": len(ran),
+        "authoring_cost_usd": round(sum(num(r.get("cost_usd")) or 0.0 for r in ran), 6) if ran else None,
+        "authoring_ms": sum(int(r.get("duration_ms") or 0) for r in ran) if ran else None,
+        "authoring_errors": sum(1 for r in rows if r.get("is_error")),
+        "applied": by_tier,
+        "ledger": spend,
     }
 
 
@@ -1327,6 +1438,60 @@ def md_table(headers: List[str], rows: List[List[Any]]) -> List[str]:
     lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     for row in rows:
         lines.append("| " + " | ".join(str(c).replace("|", "\\|") for c in row) + " |")
+    return lines
+
+
+def world_tables(results: Dict[str, Any]) -> List[str]:
+    """The `--world` split: each suite's ok rate per world tier side by side, then the
+    agent's authoring per contract. Nothing when no run used `--world`."""
+    lines: List[str] = []
+    rows = []
+    for m, b in results["models"].items():
+        for suite, tiers in b["server"].get("worlds", {}).items():
+            cells = []
+            for tier in WORLD_TIERS:
+                t = tiers.get(tier)
+                err = f", {t['suite_errors']} suite errors" if t and t.get("suite_errors") else ""
+                cells.append(f"{fmt(t['ok_rate'], 'pct')} ({t['ok']}/{t['n']}{err})" if t else "—")
+            rows.append([m, suite] + cells)
+    world = results.get("world") or {}
+    contracts = world.get("contracts") or []
+    if not rows and not contracts:
+        return lines
+    lines.append("World descriptions (`--world`): ok rate of every check per tier. none = no description "
+                 "revision; derived = Mockingbird's heuristic description written back as a revision; "
+                 "agent = a coding agent's description, written blind from the contract.")
+    lines.append("")
+    lines += md_table(["Model", "suite", "none", "derived", "agent"], rows or [["—", "—", "—", "—", "—"]])
+    lines.append("")
+    if contracts:
+        lines.append(f"World authoring ({len(contracts)} contracts, {world.get('authoring_runs') or 0} "
+                     f"authoring runs in this directory costing {fmt(world.get('authoring_cost_usd'), 'usd')} "
+                     f"over {(world.get('authoring_ms') or 0) / 60000:.1f} min; "
+                     f"{world.get('authoring_errors') or 0} contracts whose latest authoring failed). "
+                     "Each row is a contract's latest authoring; a cache hit keeps that authoring's cost and time.")
+        lines.append("")
+        lines += md_table(["author", "mock", "contract", "$", "min", "turns", "writes", "failed writes",
+                           "entries refused in writes", "refused at the end", "gaps before → after", "error"],
+                          [[r.get("author_id"), r.get("mock"), r.get("contract"), fmt(r.get("cost_usd"), "usd"),
+                            f"{(r.get('duration_ms') or 0) / 60000:.1f}", fmt(r.get("num_turns"), "int"),
+                            fmt(r.get("writes"), "int"), fmt(r.get("writes_failed"), "int"),
+                            fmt(r.get("entries_refused_in_writes"), "int"), fmt(r.get("refused_final"), "int"),
+                            f"{r.get('gaps_before')} → {r.get('gaps_after')}",
+                            r.get("error") or "—"] for r in contracts])
+        lines.append("")
+    applied = world.get("applied") or {}
+    if applied:
+        lines.append("Entries the server refused when a run applied its description: " + ", ".join(
+            f"{tier} {v['refused']} over {v['writes']} writes"
+            + (f" ({v['nothing_authored']} mocks with nothing authored)" if v.get("nothing_authored") else "")
+            for tier, v in sorted(applied.items())) + ".")
+        lines.append("")
+    spend = world.get("ledger") or {}
+    if spend:
+        lines.append("LLM calls of the world runs (kept out of every score): " + ", ".join(
+            f"{tier} {v['calls']} calls, {fmt(v['usd'], 'usd')} USD" for tier, v in sorted(spend.items())) + ".")
+        lines.append("")
     return lines
 
 
@@ -1550,6 +1715,8 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
                      "and it overlaps of which timeouts. It is not a discount: those checks stay in failed "
                      "(model) and in every score; read it next to the raw ok count.")
         lines.append("")
+
+    lines += world_tables(results)
 
     lines.append("## 9. Value sensitivity")
     lines.append("")
