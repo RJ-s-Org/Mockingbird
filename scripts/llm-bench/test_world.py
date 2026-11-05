@@ -131,6 +131,12 @@ class BlindAgentTest(unittest.TestCase):
         self.assertEqual(len(world_author.isolation_problems(
             dict(ok, mcp_servers=ok["mcp_servers"] + [{"name": "github"}]), "claude")), 1)
         self.assertEqual(len(world_author.isolation_problems(dict(ok, plugins=[{"name": "p"}]), "claude")), 1)
+        builtin = [{"name": "cc-plugin-telemetry", "path": "builtin", "source": "cc-plugin-telemetry@builtin"}]
+        self.assertEqual(world_author.isolation_problems(dict(ok, plugins=builtin), "claude"), [])
+        self.assertEqual(len(world_author.isolation_problems(
+            dict(ok, plugins=builtin + [{"name": "superpowers", "source": "superpowers@marketplace"}]), "claude")), 1)
+        self.assertEqual(world_author.builtin_plugins({"plugins": builtin + [{"name": "x", "source": "x@m"}]}),
+                         ["cc-plugin-telemetry"])
         self.assertEqual(len(world_author.isolation_problems(None, "claude")), 1)
 
     def test_a_key_is_never_written(self):

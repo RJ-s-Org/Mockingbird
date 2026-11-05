@@ -440,9 +440,23 @@ def isolation_problems(init, author):
     servers = [s.get("name") if isinstance(s, dict) else s for s in init.get("mcp_servers") or []]
     if [s for s in servers if s != "mockingbird"]:
         problems.append(f"MCP servers beyond mockingbird: {servers}")
-    if init.get("plugins"):
-        problems.append(f"plugins loaded: {init.get('plugins')}")
+    # Claude Code's own built-in plugins (source `<name>@builtin`) load in every
+    # session; they add no tools (the tool check above holds) and are recorded in the
+    # entry. Any other plugin fails the authoring.
+    others = [p for p in init.get("plugins") or [] if not is_builtin_plugin(p)]
+    if others:
+        problems.append(f"plugins loaded: {others}")
     return problems
+
+
+def is_builtin_plugin(plugin):
+    return isinstance(plugin, dict) and str(plugin.get("source") or "").endswith("@builtin")
+
+
+def builtin_plugins(init):
+    """The names of the built-in plugins a session loaded, for the audit trail."""
+    return sorted(str(p.get("name") or p.get("source")) for p in (init or {}).get("plugins") or []
+                  if is_builtin_plugin(p))
 
 
 def parse_transcript(lines):
@@ -556,6 +570,7 @@ def author_contract(contract, args, sha=None):
             "inputs": dict(getattr(args, "author_inputs", None) or {}),
             "session": {k: (init or {}).get(k) for k in ("tools", "mcp_servers", "skills", "plugins",
                                                           "claude_code_version")},
+            "builtin_plugins": builtin_plugins(init),
             "authored_at": utc_now(),
             "exit_code": code,
             "is_error": error is not None,
