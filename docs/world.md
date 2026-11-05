@@ -13,7 +13,7 @@ A description is optional: a contract alone still works. It is not a dataset and
 | 0 | `heuristic` | Always, from what the importer already puts in the compiled contract: each operation's kind, type and target, where its answer holds the record, each type's identity member. |
 | 1 | `agent` | Your coding assistant, through MCP or the CLI. The `mockingbird-world` skill tells it how, and the `mockingbird-mock-api` skill tells it to review the description after every import. |
 | 2 | `llm` | Mockingbird's configured LLM, when asked (planned). |
-| 3 | `user` | A person: through the CLI or Admin API, or a file named in `mockingbird.yaml`. |
+| 3 | `user` | A person, through the CLI or Admin API. |
 
 A later tier overrides an earlier one entry by entry. `get_world` reports the author of each entry a revision set; every entry it does not list is `heuristic`.
 
@@ -60,15 +60,23 @@ A write sends an **overlay**: only the entries you want to set. The effective de
 
 The Admin API takes `PUT` and `PATCH` (`application/merge-patch+json`) on `…/contracts/{version}/world`, `GET …/world/revisions`, `GET …/world/revisions/{r}`, `POST …/world/revisions/{r}/restore` and `GET …/world/diff?from=a&to=b`.
 
-`author` is `agent`, `llm` or `user` (the default); `heuristic` is refused. Every write answers `{revision, applied, refused}`: the entries that validated are stored as the new revision, and each refused entry is reported with its JSON pointer, a code and a message. It is not stored.
+`author` is `agent`, `llm` or `user` (the default); `heuristic` is refused.
 
-| Refusal code | Meaning |
+A write that is accepted answers `{revision, applied, refused}`: the entries that validated are stored as the new revision, and each refused entry is reported with its JSON pointer, a code and a message, and is not stored.
+
+| Entry refusal | Meaning |
 | --- | --- |
 | `unknown_key` | The format has no such key at that place. Unknown keys are refused, not ignored. |
 | `unresolved` | It names an operation, type, member, parameter, header, status or schema location the contract does not have. |
 | `not_applicable` | It does not fit the operation's protocol, e.g. a header or a status on a GraphQL, gRPC or SOAP operation. |
-| `invalid` | Malformed: a pointer that does not parse, a pattern without exactly one `{id}`, a state not among the states, a document nested deeper than 32. |
-| `too_large` | The document is over 256 KiB (HTTP 413). |
+| `invalid` | The entry is malformed: a pattern without exactly one `{id}`, a state not among the states, a `from_request` pointer that does not parse, a pointer that does not reach into the schema. |
+
+Some documents are refused whole: the write fails with an `application/problem+json` answer whose `code` names the reason and whose `path` names the first entry at fault, and the server stores nothing.
+
+| Status | `code` | When |
+| --- | --- | --- |
+| 413 | `too_large` | The document is over 256 KiB. Describe structure, never data. |
+| 422 | `invalid` | The document is nested deeper than 32, has the wrong shape (a string where an object belongs, an unknown `kind`), or has a `request` or `answer` pointer that does not parse. |
 
 ### Revisions
 
@@ -160,6 +168,8 @@ operations:
 
 Install the skills (`mockingbird agent install <agent>`, see [Coding agents and MCP](agents.md)). The `mockingbird-world` skill has the assistant read `gaps` after each import, read that part of the contract and its documentation, write entries with `patch_world` as `agent`, fix what comes back under `refused`, and check the result with `call_mock` on a create read back. It records only what the contract or documentation states.
 
+The world tools act on the active contract version unless they are given `version`. A later import that was not activated, or an unapproved draft, is a different version, so the assistant must pass `version` (the number the import or `approve_draft` answered) to `get_world` and `patch_world` until that version is activated; otherwise it reviews and changes the older version, and carry-forward, which ran when the new version was created, never brings the fixes over.
+
 ## In a config file
 
-A mock declared in `mockingbird.yaml` takes `mocks.<name>.world: <path>` (YAML or JSON, relative to the config file). On reconcile the file is validated and stored as a revision with author `user` when its content differs from the newest revision's; refused entries are logged as warnings and do not fail startup. See [Configuration](configuration.md).
+A `world:` file for mocks declared in `mockingbird.yaml` is planned but not available yet: the config file does not take that key. Until it is, describe a config-file mock through the CLI, MCP or Admin API.
