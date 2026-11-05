@@ -385,3 +385,168 @@ async fn a_trimmed_effect_id_naming_no_shown_record_stays_rejected() {
     let board = stored(&state, "boards", "b1").await;
     assert_eq!(board["attributes"]["frozen"], false, "{board}");
 }
+
+/// An effect giving a request member the answer leaves out another value than the
+/// request sent contradicts the request: the member does not take it.
+#[tokio::test]
+async fn an_effect_contradicting_a_request_member_the_answer_leaves_out_is_not_stored() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "notes", "n1", note()).await;
+    let answer = json!({"response": {"id": "n1", "title": "New", "active": true}, "effects": [
+        {"type": "notes", "id": "n1", "set": {"body": "Wrong"}},
+    ]});
+    let edit = json!({"title": "New", "body": "B2"});
+    let (_, effects) = call(NOTES, &state, answer, ("PUT", "/notes/n1", Some(edit))).await;
+    assert_ne!(effects[0]["outcome"], "applied", "{effects}");
+    let note = stored(&state, "notes", "n1").await;
+    assert_ne!(note["body"], "Wrong", "{note}");
+}
+
+/// Orders holding their customer inline, with its own `id`; refunds are made apart.
+const ORDERS: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /refunds:
+    post:
+      operationId: createRefund
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {order_id: {type: string}, name: {type: string}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+  /refunds/{id}:
+    get:
+      operationId: getRefund
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Refund"}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, status]
+      properties:
+        id: {type: string}
+        status: {type: string}
+        customer:
+          type: object
+          properties:
+            id: {type: string}
+            name: {type: string}
+            email: {type: string}
+    Refund:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        order_id: {type: string}
+        name: {type: string}
+"##;
+
+/// A related record held inline (the order's `customer`, with an `id` of its own) is no
+/// home for a member written too high: a `name` meant for something else does not
+/// overwrite the customer's.
+#[tokio::test]
+async fn a_related_record_held_inline_is_no_home_for_a_member_written_too_high() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let order = json!({"id": "o1", "status": "paid",
+        "customer": {"id": "c1", "name": "Ann", "email": "ann@example.com"}});
+    store(&state, "orders", "o1", order).await;
+    let answer = json!({"response": {"id": "r1", "order_id": "o1", "name": "Refund 1"}, "effects": [
+        {"type": "orders", "id": "o1", "set": {"status": "refunded", "name": "Refund 1"}},
+    ]});
+    let refund = json!({"order_id": "o1", "name": "Refund 1"});
+    let (_, effects) = call(ORDERS, &state, answer, ("POST", "/refunds", Some(refund))).await;
+    assert_eq!(effects[0]["outcome"], "applied", "{effects}");
+    let order = stored(&state, "orders", "o1").await;
+    assert_eq!(order["status"], "refunded", "{order}");
+    assert_eq!(order["customer"]["name"], "Ann", "{order}");
+}
+
+/// Racks holding their keeper, another type's record keyed by `email`, by its `$ref`.
+const RACKS: &str = r##"
+openapi: 3.0.0
+info: {title: Racks, version: "1"}
+paths:
+  /racks/{id}:
+    get:
+      operationId: getRack
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Rack"}}}}
+  /keepers/{email}:
+    get:
+      operationId: getKeeper
+      parameters:
+        - {name: email, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Keeper"}}}}
+  /tags:
+    post:
+      operationId: createTag
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {rack_id: {type: string}, note: {type: string}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}
+  /tags/{id}:
+    get:
+      operationId: getTag
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}
+components:
+  schemas:
+    Rack:
+      type: object
+      required: [id, state]
+      properties:
+        id: {type: string}
+        state: {type: string}
+        keeper: {$ref: "#/components/schemas/Keeper"}
+    Keeper:
+      type: object
+      required: [email]
+      properties:
+        email: {type: string}
+        label: {type: string}
+    Tag:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        rack_id: {type: string}
+        note: {type: string}
+"##;
+
+/// Another type's record held by its `$ref` (the rack's `keeper`) is no home either, with
+/// no `id` member to show it.
+#[tokio::test]
+async fn another_types_record_held_by_ref_is_no_home_for_a_member_written_too_high() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let rack = json!({"id": "s1", "state": "open",
+        "keeper": {"email": "ann@example.com", "label": "Ann"}});
+    store(&state, "racks", "s1", rack).await;
+    let answer = json!({"response": {"id": "t1", "rack_id": "s1", "note": "Tag 1"}, "effects": [
+        {"type": "racks", "id": "s1", "set": {"state": "tagged", "label": "Tag 1"}},
+    ]});
+    let tag = json!({"rack_id": "s1", "note": "Tag 1"});
+    let (_, effects) = call(RACKS, &state, answer, ("POST", "/tags", Some(tag))).await;
+    assert_eq!(effects[0]["outcome"], "applied", "{effects}");
+    let rack = stored(&state, "racks", "s1").await;
+    assert_eq!(rack["state"], "tagged", "{rack}");
+    assert_eq!(rack["keeper"]["label"], "Ann", "{rack}");
+}

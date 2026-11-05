@@ -516,7 +516,8 @@ pub(super) fn onto_record(
 /// read schema does not declare at its top level, but exactly one of its object members
 /// does (`frozen` of a record keeping it under `attributes`), moved under that member:
 /// the effect wrote it one object too high. What the effect already wrote under that
-/// member wins over the moved one. A member no object member declares, or more than one
+/// member wins over the moved one. An object member holding a record of its own
+/// ([`is_a_record`]) is no home. A member no object member declares, or more than one
 /// does, stays where it was written, and so does all of `set` where the read's top level
 /// names no members, is a union, or is a map, any of which may hold it as written.
 pub(super) fn rehomed_members(
@@ -535,7 +536,7 @@ pub(super) fn rehomed_members(
             continue;
         }
         let level = Level::of(bundle, Some(schema));
-        if !level.properties.is_empty() {
+        if !level.properties.is_empty() && !is_a_record(rt, schema, &level) {
             homes.push((name.as_str(), level));
         }
     }
@@ -571,6 +572,35 @@ pub(super) fn rehomed_members(
         }
     }
     out
+}
+
+/// Whether an object member of `schema` (whose [`Level`] is `level`) holds a record of its
+/// own rather than its record's members: it declares an `id` of its own (a related record
+/// held inline, `customer: {id, name}`), or it is a type's record schema (`keeper:
+/// Keeper`, read by `/keepers/{email}`).
+fn is_a_record(rt: &MockRuntime, schema: &Value, level: &Level<'_>) -> bool {
+    if level.named("id").is_some() {
+        return true;
+    }
+    let bundle = rt.bundle();
+    fn resolved<'a>(bundle: &'a mb_mcm::Bundle, schema: &'a Value) -> &'a Value {
+        let mut at = schema;
+        for _ in 0..8 {
+            match def_name(at).and_then(|d| bundle.defs.get(d)) {
+                Some(target) => at = target,
+                None => break,
+            }
+        }
+        at
+    }
+    let own = resolved(bundle, schema);
+    let index = rt.index();
+    index
+        .detail_reads
+        .keys()
+        .chain(index.other_shapes.keys())
+        .filter_map(|t| read_schema(rt, t))
+        .any(|record| resolved(bundle, record) == own)
 }
 
 /// What one level of a schema says of its members, by its `$ref`s and `allOf`s. A
@@ -2266,7 +2296,7 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 /// not what would show another owner. An answer with the read's schema settles all the
 /// request names; one of another schema (an acknowledgement `{id, name}`) only what it
 /// declares, or all where it is a union or a map: a request member it leaves out reaches
-/// the record by an effect alone. A `readOnly` member may go on:
+/// the record by an effect alone, and only with the value the request sent. A `readOnly` member may go on:
 /// a client cannot set it, and an effect is the server saying what followed. The check on
 /// identity comes before this, as for any effect.
 pub(super) fn own_effect_members(
@@ -2294,10 +2324,14 @@ pub(super) fn own_effect_members(
     let index = rt.index();
     let paths = index.path_fields(t);
     let body = call.body.as_ref().and_then(Value::as_object);
-    let named = |key: &str| {
-        answers(key)
-            && (body.is_some_and(|members| members.contains_key(key))
-                || call.query.contains_key(key))
+    let sent = |key: &str| {
+        body.and_then(|members| members.get(key))
+            .or_else(|| call.query.get(key))
+    };
+    // A request member the answer settles is the answer's; one it leaves out takes the
+    // effect only where the effect agrees with what the request sent.
+    let named = |key: &str, value: &Value| {
+        sent(key).is_some_and(|given| answers(key) || !same_value(given, value))
     };
     // A member named for a parameter of this call's path, and holding its value.
     let shows_path = |key: &str| {
@@ -2309,7 +2343,7 @@ pub(super) fn own_effect_members(
     };
     set.iter()
         .filter(|(key, _)| !declaring || declared(key).is_some())
-        .filter(|(key, _)| !paths.contains(*key) && !shows_path(key) && !named(key))
+        .filter(|(key, value)| !paths.contains(*key) && !shows_path(key) && !named(key, value))
         .filter(|(key, value)| {
             // The member as it would merge (see [`merge_at`]), not as written.
             let mut alone = held.data.clone();
@@ -2324,6 +2358,17 @@ pub(super) fn own_effect_members(
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+/// Whether `given`, what a request sent, and `value`, what an effect set, are one value:
+/// equal, or scalars of one text (a query's `5` for a body's `5`).
+fn same_value(given: &Value, value: &Value) -> bool {
+    let text = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(_) | Value::Bool(_) => Some(v.to_string()),
+        _ => None,
+    };
+    given == value || text(given).is_some_and(|g| text(value).as_ref() == Some(&g))
 }
 
 /// What the applied effects of an update's answer set on `own`, the target it just stored,
