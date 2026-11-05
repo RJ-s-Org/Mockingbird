@@ -43,6 +43,8 @@ Standard library only.
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -67,7 +69,11 @@ AUTHORS = ("claude", "stub")
 PROMPT_VERSION = 1
 DEFAULT_CACHE = os.path.join("docs", "benchmarks", "world-cache")
 STUB_AUTHOR = os.path.join(HERE, "stub_author.py")
-SECRET_MARK = re.compile(r"sk-or-[A-Za-z0-9_-]{8,}")
+DEFAULT_AUTHOR_MODEL = "claude-opus-5-5"
+# OpenRouter and Anthropic keys: nothing the bench writes may hold one.
+SECRET_MARK = re.compile(r"sk-(?:or|ant)-[A-Za-z0-9_-]{8,}")
+# Kept out of the stored transcript: machine paths and session ids, no use for attribution.
+TRANSCRIPT_DROP = ("session_id", "cwd", "uuid", "apiKeySource", "memory_paths")
 
 # The Mockingbird MCP tools the author may call: reading the mock and its world,
 # writing the world, and calling the mock to check a description. Everything else
@@ -77,6 +83,7 @@ ALLOWED_MCP = ("list_mocks", "get_mock", "list_contract_versions", "get_world", 
                "restore_world_revision", "call_mock", "list_requests", "get_request")
 WORLD_WRITES = ("patch_world", "put_world", "restore_world_revision")
 BUILTIN_TOOLS = "Read,Grep,Glob"
+MCP_PREFIX = "mcp__mockingbird__"
 
 PROMPT = """\
 A Mockingbird server is running with the API contract `{contract}` (in this directory) \
@@ -124,14 +131,25 @@ def cache_path(cache, aid, sha):
     return os.path.join(cache, aid, f"{sha}.json")
 
 
-def load_cached(cache, aid, sha):
+def load_cached(cache, aid, sha, inputs=None):
+    """The cached entry, or None: when there is none, when it failed (failures are
+    kept as `<sha>.failed.json`, never read back), or when the agent's inputs
+    (`inputs`: the skills' and the world schema's sha256) changed since."""
     path = cache_path(cache, aid, sha)
     try:
         with open(path) as f:
             entry = json.load(f)
     except (OSError, ValueError):
         return None
-    return entry if isinstance(entry, dict) and entry.get("contract_sha256") == sha else None
+    if not isinstance(entry, dict) or entry.get("contract_sha256") != sha or entry.get("is_error"):
+        return None
+    if inputs and any(entry.get("inputs", {}).get(k) != v for k, v in inputs.items()):
+        return None
+    return entry
+
+
+def rel(path):
+    return os.path.relpath(path, REPO) if path.startswith(REPO + os.sep) else path
 
 
 def scan_secrets(text):
@@ -139,27 +157,64 @@ def scan_secrets(text):
     return bool(SECRET_MARK.search(text or ""))
 
 
-def write_json_atomic(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    text = json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+def write_text_atomic(path, text):
     if scan_secrets(text):
-        raise RuntimeError(f"refusing to write {path}: it holds an sk-or- key")
+        raise RuntimeError(f"refusing to write {path}: it holds an API key")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
     with os.fdopen(fd, "w") as f:
         f.write(text)
     os.replace(tmp, path)
 
 
+def write_json_atomic(path, obj):
+    write_text_atomic(path, json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 _JSONL_LOCK = threading.Lock()
 
 
 def append_jsonl(path, row):
-    line = json.dumps(row, ensure_ascii=False, sort_keys=True)
-    if scan_secrets(line):
-        raise RuntimeError(f"refusing to append to {path}: the row holds an sk-or- key")
+    """Appends one row; safe across threads and processes (flock, as `Sink` does)."""
+    line = (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode()
+    if scan_secrets(line.decode()):
+        raise RuntimeError(f"refusing to append to {path}: the row holds an API key")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with _JSONL_LOCK, open(path, "a") as f:
-        f.write(line + "\n")
+    with _JSONL_LOCK, open(path, "ab") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def file_lock(path):
+    """An exclusive lock across processes: two runs (or `run.py --parallel` models)
+    that need the same contract author it once; the second waits and reads the cache."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def clean_transcript(lines):
+    """The transcript as stored: each event without machine paths or session ids."""
+    out = []
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            for k in TRANSCRIPT_DROP:
+                ev.pop(k, None)
+        out.append(json.dumps(ev, ensure_ascii=False))
+    return "\n".join(out) + ("\n" if out else "")
 
 
 # ---------------------------------------------------------------- Admin API
@@ -221,21 +276,6 @@ def put_world(api, mock, document, author):
 
 # ---------------------------------------------------------------- authoring server
 
-def free_ports(n):
-    import socket
-    socks, ports = [], []
-    try:
-        for _ in range(n):
-            s = socket.socket()
-            s.bind(("127.0.0.1", 0))
-            socks.append(s)
-            ports.append(s.getsockname()[1])
-    finally:
-        for s in socks:
-            s.close()
-    return ports
-
-
 def wait_ready(admin, proc, timeout):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -260,31 +300,49 @@ class AuthoringServer:
         self.proc = self.log = None
 
     def __enter__(self):
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith("MB_") and k not in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")}
+        import server_suites  # the bench's port lock and port picker
+        env = {k: v for k, v in scrubbed_env().items() if k != "ANTHROPIC_API_KEY"}
         env.setdefault("RUST_LOG", "warn")
         self.log = open(os.path.join(self.dir, "server.log"), "w")
-        for attempt in range(3):
-            ports = free_ports(3)
-            config = os.path.join(self.dir, "mockingbird.yaml")
-            with open(config, "w") as f:
-                f.write(f"storage:\n  url: sqlite://{self.dir}/mockingbird.db\n"
-                        f"server:\n  port: {ports[0]}\n  admin_port: {ports[1]}\n  grpc_port: {ports[2]}\n"
-                        f"mocks:\n  {self.mock}:\n    contract: {json.dumps(self.contract)}\n"
-                        f"    route_prefix: /{self.mock}\n")
-            self.admin = f"http://127.0.0.1:{ports[1]}"
-            self.api = f"{self.admin}/api/v1/workspaces/default"
-            self.proc = subprocess.Popen([self.binary, "serve", "-c", config], cwd=self.dir,
-                                         stdout=self.log, stderr=self.log, env=env)
-            try:
-                wait_ready(self.admin, self.proc, self.ready_timeout)
-                return self
-            except RuntimeError:
+        try:
+            for attempt in range(3):
+                # Picked and bound under the lock server_suites uses, so no other
+                # bench server takes a port between picking and binding it.
+                with server_suites.port_reservation(self.ready_timeout + 30):
+                    ports = server_suites.free_ports(3)
+                    config = os.path.join(self.dir, "mockingbird.yaml")
+                    with open(config, "w") as f:
+                        f.write(f"storage:\n  url: sqlite://{self.dir}/mockingbird.db\n"
+                                f"server:\n  port: {ports[0]}\n  admin_port: {ports[1]}\n"
+                                f"  grpc_port: {ports[2]}\n"
+                                f"mocks:\n  {self.mock}:\n    contract: {json.dumps(self.contract)}\n"
+                                f"    route_prefix: /{self.mock}\n")
+                    self.data = f"http://127.0.0.1:{ports[0]}"
+                    self.admin = f"http://127.0.0.1:{ports[1]}"
+                    self.api = f"{self.admin}/api/v1/workspaces/default"
+                    self.proc = subprocess.Popen([self.binary, "serve", "-c", config], cwd=self.dir,
+                                                 stdout=self.log, stderr=self.log, env=env)
+                    try:
+                        wait_ready(self.admin, self.proc, self.ready_timeout)
+                    except RuntimeError:
+                        self._stop()
+                        if attempt == 2:
+                            raise
+                        continue
+                if self._is_ours():
+                    return self
                 self._stop()
-                if attempt == 2:
-                    self.log.close()
-                    raise
-        return self
+            raise RuntimeError("the authoring server's ports answered for another server")
+        except BaseException:
+            self.log.close()
+            raise
+
+    def _is_ours(self):
+        """The admin port answers with exactly our one mock, not another process's server."""
+        status, mocks = admin_call(self.api, "GET", "/mocks")
+        items = mocks if isinstance(mocks, list) else (mocks or {}).get("mocks") or [] if isinstance(mocks, dict) else []
+        names = sorted(m.get("name") for m in items if isinstance(m, dict))
+        return status == 200 and names == [self.mock] and self.proc.poll() is None
 
     def _stop(self):
         if self.proc and self.proc.poll() is None:
@@ -302,9 +360,33 @@ class AuthoringServer:
 
 # ---------------------------------------------------------------- the agent
 
-def claude_command(args, workdir, admin, contract_name, mock):
-    mcp = {"mcpServers": {"mockingbird": {"command": args.binary, "args": ["--admin-url", admin, "mcp"]}}}
-    allowed = ",".join([BUILTIN_TOOLS] + [f"mcp__mockingbird__{t}" for t in ALLOWED_MCP])
+def mcp_tool_names(binary):
+    """Every tool `mockingbird mcp` offers (tools/list over stdio; no server needed)."""
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": {"name": "llm-bench", "version": "1"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+    proc = subprocess.run([binary, "--admin-url", "http://127.0.0.1:9", "mcp"], env=scrubbed_env(),
+                          input="".join(json.dumps(m) + "\n" for m in msgs), capture_output=True, text=True,
+                          timeout=60)
+    for line in proc.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and msg.get("id") == 2:
+            return [t["name"] for t in (msg.get("result") or {}).get("tools") or [] if isinstance(t, dict)]
+    raise RuntimeError(f"mockingbird mcp listed no tools: {proc.stderr[-500:]}")
+
+
+def claude_command(args, workdir, srv, contract_name, mock):
+    mcp = {"mcpServers": {"mockingbird": {"command": args.binary,
+                                          "args": ["--admin-url", srv.admin, "mcp"],
+                                          "env": {"MB_DATA_URL": srv.data}}}}
+    allowed = ",".join([BUILTIN_TOOLS] + [MCP_PREFIX + t for t in ALLOWED_MCP])
+    others = [MCP_PREFIX + t for t in getattr(args, "mcp_tools", None) or [] if t not in ALLOWED_MCP]
+    isolation = ["--bare"] if getattr(args, "author_isolation", "restricted") == "bare" else []
     return [
         args.claude, "-p", PROMPT.format(contract=contract_name, mock=mock),
         "--model", args.author_model,
@@ -315,27 +397,58 @@ def claude_command(args, workdir, admin, contract_name, mock):
         "--permission-prompts", "none",
         "--no-session-persistence",
         "--max-budget-usd", str(args.author_budget),
-    ]
+    ] + (["--disallowedTools", ",".join(others)] if others else []) + isolation
 
 
-def stub_command(args, workdir, admin, contract_name, mock):
-    return [sys.executable, STUB_AUTHOR, "--binary", args.binary, "--admin-url", admin, "--mock", mock,
+def stub_command(args, workdir, srv, contract_name, mock):
+    return [sys.executable, STUB_AUTHOR, "--binary", args.binary, "--admin-url", srv.admin, "--mock", mock,
             "--contract", contract_name]
 
 
-def author_env(admin):
-    """The agent's environment: no OpenRouter key and no Mockingbird overrides."""
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("MB_") and k not in ("OPENROUTER_API_KEY", "CLAUDECODE")
-           and not k.endswith("_SESSION_ID")}
-    env["MB_ADMIN_URL"] = admin
+def scrubbed_env():
+    """os.environ without Mockingbird overrides and without any LLM key but
+    Anthropic's (the author's own login): OPENROUTER_API_KEY, any variable holding
+    its value, and every other *_API_KEY."""
+    key = os.environ.get("OPENROUTER_API_KEY")
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith("MB_") and not (key and v == key)
+            and not (k.endswith("_API_KEY") and k != "ANTHROPIC_API_KEY")
+            and k not in ("CLAUDECODE",) and not k.endswith("_SESSION_ID")}
+
+
+def author_env(srv):
+    """The agent's environment: the authoring server's admin and data URLs (so
+    `call_mock` reaches it, not a server on the default port), no OpenRouter key."""
+    env = scrubbed_env()
+    env["MB_ADMIN_URL"] = srv.admin
+    env["MB_DATA_URL"] = srv.data
     return env
 
 
+def isolation_problems(init, author):
+    """What the agent's session offers beyond the contract, the skills and the
+    Mockingbird MCP server, from its `system/init` event: [] when nothing."""
+    if author == "stub":
+        return []
+    if not isinstance(init, dict):
+        return ["no init event in the transcript"]
+    problems = []
+    builtin = set(BUILTIN_TOOLS.split(","))
+    extra = [t for t in init.get("tools") or [] if t not in builtin and not str(t).startswith(MCP_PREFIX)]
+    if extra:
+        problems.append(f"tools beyond Read, Grep, Glob and Mockingbird's: {sorted(extra)}")
+    servers = [s.get("name") if isinstance(s, dict) else s for s in init.get("mcp_servers") or []]
+    if [s for s in servers if s != "mockingbird"]:
+        problems.append(f"MCP servers beyond mockingbird: {servers}")
+    if init.get("plugins"):
+        problems.append(f"plugins loaded: {init.get('plugins')}")
+    return problems
+
+
 def parse_transcript(lines):
-    """From stream-json lines: the final result event, the model, and every world
+    """From stream-json lines: the final result event, the init event, and every world
     write's answer: [{tool, ok, revision?, refused?, problem?}]."""
-    result, model, uses, writes = None, None, {}, []
+    result, init, uses, writes = None, None, {}, []
     for line in lines:
         try:
             ev = json.loads(line)
@@ -345,7 +458,7 @@ def parse_transcript(lines):
             continue
         kind = ev.get("type")
         if kind == "system" and ev.get("subtype") == "init":
-            model = ev.get("model") or model
+            init = ev
         elif kind == "result":
             result = ev
         content = ((ev.get("message") or {}).get("content")) if kind in ("assistant", "user") else None
@@ -359,7 +472,7 @@ def parse_transcript(lines):
                     uses[block.get("id")] = tool
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in uses:
                 writes.append(write_answer(uses.pop(block.get("tool_use_id")), block))
-    return result, model, writes
+    return result, init, writes
 
 
 def write_answer(tool, block):
@@ -375,6 +488,11 @@ def write_answer(tool, block):
     if isinstance(answer, dict) and "revision" in answer and not block.get("is_error"):
         row["revision"] = answer.get("revision")
         row["refused"] = answer.get("refused") or []
+    elif answer is None and not block.get("is_error"):
+        # Not an error, but the answer is not JSON (cut short or saved aside by the
+        # client): unknown, not failed. The stored revisions settle what happened.
+        row["ok"] = None
+        row["unparsed"] = text[:2000]
     else:
         row["ok"] = False
         row["problem"] = answer if isinstance(answer, dict) else text[:2000]
@@ -382,7 +500,9 @@ def write_answer(tool, block):
 
 
 def author_contract(contract, args, sha=None):
-    """Authors one contract's description and returns the cache entry (not written)."""
+    """Authors one contract's description and returns the entry (not yet cached). An
+    author that fails (exit code, error result, timeout, a session that offers more
+    than it should) gives an entry with `is_error` and `error`, which is never cached."""
     sha = sha or sha256_file(contract)
     mock = mock_name_of(contract)
     base = tempfile.mkdtemp(prefix="mb-world-author-")
@@ -394,31 +514,52 @@ def author_contract(contract, args, sha=None):
         name = os.path.basename(contract)
         shutil.copyfile(contract, os.path.join(work, name))
         subprocess.run([args.binary, "agent", "skills", os.path.join(work, ".claude", "skills")],
-                       check=True, capture_output=True, env=author_env(""))
+                       check=True, capture_output=True, env=scrubbed_env())
         with AuthoringServer(args.binary, os.path.join(work, name), mock, srvdir) as srv:
             before = read_world(srv.api, mock)
             make = stub_command if args.author == "stub" else claude_command
-            cmd = make(args, work, srv.admin, name, mock)
+            cmd = make(args, work, srv, name, mock)
             started = time.monotonic()
-            proc = subprocess.run(cmd, cwd=work, env=author_env(srv.admin), capture_output=True, text=True,
-                                  timeout=args.author_timeout)
+            error = None
+            try:
+                proc = subprocess.run(cmd, cwd=work, env=author_env(srv), capture_output=True, text=True,
+                                      timeout=args.author_timeout)
+                stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
+            except subprocess.TimeoutExpired as e:
+                stdout = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+                code, error = None, f"timed out after {args.author_timeout:.0f}s"
             elapsed_ms = (time.monotonic() - started) * 1000
-            lines = proc.stdout.splitlines()
-            result, model, writes = parse_transcript(lines)
+            lines = stdout.splitlines()
+            result, init, writes = parse_transcript(lines)
             after = read_world(srv.api, mock)
             revisions = read_revisions(srv.api, mock)
         final = revisions[-1] if revisions else None
         result = result or {}
+        problems = isolation_problems(init, args.author)
+        if error is None and code != 0:
+            error = f"exit code {code}"
+        if error is None and result.get("is_error"):
+            error = f"result {result.get('subtype')}"
+        if error is None and not result:
+            error = "no result event"
+        if error is None and problems:
+            error = "isolation: " + "; ".join(problems)
         entry = {
-            "contract": os.path.relpath(contract, REPO) if contract.startswith(REPO) else contract,
+            "contract": rel(contract),
             "contract_sha256": sha,
             "mock": mock,
             "author": {"kind": args.author, "id": author_id(args.author, args.author_model),
                        "model_requested": None if args.author == "stub" else args.author_model,
-                       "model": model, "prompt_version": PROMPT_VERSION},
+                       "model": (init or {}).get("model"), "prompt_version": PROMPT_VERSION,
+                       "isolation": None if args.author == "stub" else getattr(args, "author_isolation", None)},
+            "inputs": dict(getattr(args, "author_inputs", None) or {}),
+            "session": {k: (init or {}).get(k) for k in ("tools", "mcp_servers", "skills", "plugins",
+                                                          "claude_code_version")},
             "authored_at": utc_now(),
-            "exit_code": proc.returncode,
-            "is_error": bool(result.get("is_error")) or proc.returncode != 0,
+            "exit_code": code,
+            "is_error": error is not None,
+            "error": error,
             "cost_usd": result.get("total_cost_usd"),
             "duration_ms": result.get("duration_ms") or round(elapsed_ms),
             "wall_ms": round(elapsed_ms),
@@ -426,7 +567,7 @@ def author_contract(contract, args, sha=None):
             "usage": result.get("usage"),
             "model_usage": result.get("modelUsage"),
             "summary": str(result.get("result") or "")[:4000],
-            "stderr_tail": proc.stderr[-2000:],
+            "stderr_tail": stderr[-2000:],
             "heuristic_gaps": before.get("gaps") or [],
             "writes": writes,
             "revisions": [{k: r[k] for k in ("revision", "author", "created_at")} for r in revisions],
@@ -437,10 +578,7 @@ def author_contract(contract, args, sha=None):
             "authors": after.get("authors") or {},
             "world": after.get("world"),
         }
-        transcript = "\n".join(lines)
-        if scan_secrets(transcript):
-            raise RuntimeError(f"the authoring transcript of {contract} holds an sk-or- key; not kept")
-        entry["_transcript"] = transcript
+        entry["_transcript"] = clean_transcript(lines)
         return entry
     finally:
         if not getattr(args, "keep", False):
@@ -460,12 +598,14 @@ def summary_row(entry, cached, cache_file):
         "author_model": (entry.get("author") or {}).get("model"),
         "cached": cached,
         "is_error": entry.get("is_error"),
+        "error": entry.get("error"),
         "cost_usd": entry.get("cost_usd"),
         "duration_ms": entry.get("duration_ms"),
         "num_turns": entry.get("num_turns"),
         "revision": entry.get("revision"),
         "writes": len(writes),
-        "writes_failed": sum(1 for w in writes if not w.get("ok")),
+        "writes_failed": sum(1 for w in writes if w.get("ok") is False),
+        "writes_unparsed": sum(1 for w in writes if w.get("ok") is None),
         "entries_refused_in_writes": sum(len(w.get("refused") or []) for w in writes),
         "refused_final": len(entry.get("refused") or []),
         "gaps_before": len(entry.get("heuristic_gaps") or []),
@@ -474,39 +614,68 @@ def summary_row(entry, cached, cache_file):
     }
 
 
+def author_inputs(binary):
+    """The sha256 of what the agent reads besides the contract: the skills Mockingbird
+    installs and the world description's JSON Schema. A cached entry whose inputs
+    differ is authored again (the vocabulary or the instructions changed)."""
+    d = tempfile.mkdtemp(prefix="mb-world-skills-")
+    try:
+        subprocess.run([binary, "agent", "skills", d], check=True, capture_output=True, env=scrubbed_env())
+        h = hashlib.sha256()
+        for root, _, files in sorted(os.walk(d)):
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                h.update(os.path.relpath(path, d).encode() + b"\0")
+                with open(path, "rb") as f:
+                    h.update(f.read() + b"\0")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    schema = subprocess.run([binary, "world", "schema"], check=True, capture_output=True, env=scrubbed_env())
+    return {"skills_sha256": h.hexdigest(), "world_schema_sha256": hashlib.sha256(schema.stdout).hexdigest()}
+
+
 def ensure_authored(contracts, args, out=None):
-    """{contract path: cache entry} for every contract, authoring the ones not cached.
-    One summary row per contract goes to <out>/world-authoring.jsonl."""
+    """{contract path: entry} for every contract, authoring the ones not cached. A
+    failed authoring is kept as `<sha>.failed.json` and returned (applying it fails the
+    suite), never cached. One summary row per contract goes to
+    <out>/world-authoring.jsonl."""
     aid = author_id(args.author, args.author_model)
     cache = args.world_cache
-    unique = list(dict.fromkeys(os.path.abspath(c) for c in contracts))
-    shas = {c: sha256_file(c) for c in unique}
-    results = {}
+    args.author_inputs = author_inputs(args.binary)
+    if args.author != "stub" and not getattr(args, "mcp_tools", None):
+        args.mcp_tools = mcp_tool_names(args.binary)
+    paths = list(dict.fromkeys(os.path.abspath(c) for c in contracts))
+    shas = {c: sha256_file(c) for c in paths}
+    by_sha = {}
+    for c in paths:
+        by_sha.setdefault(shas[c], c)
 
-    def one(contract):
-        sha = shas[contract]
+    def one(sha):
+        contract = by_sha[sha]
         path = cache_path(cache, aid, sha)
-        entry = None if args.refresh else load_cached(cache, aid, sha)
-        cached = entry is not None
-        if not cached:
-            print(f"world: authoring {os.path.relpath(contract, REPO)} ({aid})", file=sys.stderr)
-            entry = author_contract(contract, args, sha)
-            transcript = entry.pop("_transcript", "")
-            write_json_atomic(path, entry)
-            with open(path[:-len(".json")] + ".transcript.jsonl", "w") as f:
-                f.write(transcript + ("\n" if transcript else ""))
-        row = summary_row(entry, cached, os.path.relpath(path, REPO) if path.startswith(REPO) else path)
+        with file_lock(path[:-len(".json")] + ".lock"):
+            entry = None if args.refresh else load_cached(cache, aid, sha, args.author_inputs)
+            cached = entry is not None
+            if not cached:
+                print(f"world: authoring {rel(contract)} ({aid})", file=sys.stderr)
+                entry = author_contract(contract, args, sha)
+                transcript = entry.pop("_transcript", "")
+                stem = path[:-len(".json")] + (".failed" if entry.get("is_error") else "")
+                write_json_atomic(stem + ".json", entry)
+                write_text_atomic(stem + ".transcript.jsonl", transcript)
+        row = summary_row(entry, cached, rel(path))
         print(f"world: {row['mock']} revision {row['revision']}, {row['writes']} writes "
-              f"({row['writes_failed']} failed, {row['entries_refused_in_writes']} entries refused), gaps {row['gaps_before']} -> {row['gaps_after']}, "
-              f"${row['cost_usd'] or 0:.2f}{' (cached)' if cached else ''}", file=sys.stderr)
+              f"({row['writes_failed']} failed, {row['entries_refused_in_writes']} entries refused), gaps "
+              f"{row['gaps_before']} -> {row['gaps_after']}, ${row['cost_usd'] or 0:.2f}"
+              f"{' (cached)' if cached else ''}{' ERROR ' + str(row['error']) if row['is_error'] else ''}",
+              file=sys.stderr)
         if out:
             append_jsonl(os.path.join(out, "world-authoring.jsonl"), row)
-        return contract, entry
+        return sha, entry
 
     with ThreadPoolExecutor(max_workers=max(1, args.author_jobs)) as pool:
-        for contract, entry in pool.map(one, unique):
-            results[contract] = entry
-    return results
+        by_entry = dict(pool.map(one, list(by_sha)))
+    return {c: by_entry[shas[c]] for c in paths}
 
 
 # ---------------------------------------------------------------- applying
@@ -523,6 +692,8 @@ def apply_world(api, mock, world, entry=None):
     else:
         if entry is None:
             raise RuntimeError(f"no authored description for {mock}")
+        if entry.get("is_error"):
+            raise RuntimeError(f"the description of {mock} failed to author: {entry.get('error')}")
         rec["author_id"] = (entry.get("author") or {}).get("id")
         rec["contract_sha256"] = entry.get("contract_sha256")
         rec["authored_revision"] = entry.get("revision")
@@ -549,7 +720,13 @@ def add_author_args(p):
     p.add_argument("--author", choices=AUTHORS, default="claude",
                    help="who writes `--world agent` descriptions: claude (headless Claude Code, default) "
                         "or stub (free, deterministic, for dry runs)")
-    p.add_argument("--author-model", default="opus", help="claude --model for the author (default opus)")
+    p.add_argument("--author-model", default=DEFAULT_AUTHOR_MODEL,
+                   help="claude --model for the author; a full id, as it is part of the cache key "
+                        "(default %(default)s)")
+    p.add_argument("--author-isolation", choices=("restricted", "bare"), default="restricted",
+                   help="restricted (default): claude --restricted, which still reads the user's own "
+                        "~/.claude/CLAUDE.md; bare: also --bare (no CLAUDE.md, memory or hooks), which needs "
+                        "ANTHROPIC_API_KEY")
     p.add_argument("--author-budget", type=float, default=5.0, help="claude --max-budget-usd per contract")
     p.add_argument("--author-timeout", type=float, default=1800, help="seconds per contract")
     p.add_argument("--author-jobs", type=int, default=2, help="contracts authored at once")

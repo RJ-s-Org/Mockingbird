@@ -7551,7 +7551,7 @@ def main():
     if args.world == "agent":
         # Authored (or read from the cache) before any suite runs, so a suite never
         # waits on authoring and every suite of the run uses the same descriptions.
-        contracts = [os.path.join(REPO, c) for s in suites for c, _, _ in RUNNERS[s][0].values()]
+        contracts = [os.path.join(REPO, c) for s in suites for c, _, _ in suite_mocks(s, args).values()]
         args.authored = world_author.ensure_authored(contracts, args, args.out)
     if args.suites_parallel:
         # A suite's server log is named by model and suite, so each runs once.
@@ -7590,6 +7590,15 @@ def run_suite(suite, args):
     return failed
 
 
+def suite_mocks(suite, args):
+    """The mocks a suite's run uses: every mock of the suite, except that `journeys`
+    under --journey uses only the named journeys' mocks."""
+    mocks = RUNNERS[suite][0]
+    if suite == "journeys" and getattr(args, "journey", None):
+        return {k: v for k, v in mocks.items() if k in args.journey}
+    return mocks
+
+
 def apply_worlds(srv, args, suite, mocks):
     """Writes the run's world description (`--world`) onto every mock of the suite before
     its checks run, and records each write in <out>/world-applied.jsonl. `none` writes
@@ -7598,6 +7607,8 @@ def apply_worlds(srv, args, suite, mocks):
     if world == "none" or not mocks:
         return
     import world_author
+    if suite == "journeys" and getattr(args, "journey", None):
+        mocks = {k: v for k, v in mocks.items() if k in args.journey}
     for name, (contract, _, _) in mocks.items():
         entry = (getattr(args, "authored", None) or {}).get(os.path.abspath(os.path.join(REPO, contract)))
         rec = world_author.apply_world(srv.api, name, world, entry)

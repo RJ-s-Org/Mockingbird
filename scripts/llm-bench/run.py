@@ -464,8 +464,12 @@ def run_server_suites(
     world = getattr(args, "world", None) or "none"
     if world != "none":
         cmd += ["--world", world]
-        if getattr(args, "author", None):
-            cmd += ["--author", args.author]
+        for flag in ("author", "author_model", "author_isolation", "world_cache"):
+            value = getattr(args, flag, None)
+            if value:
+                cmd += ["--" + flag.replace("_", "-"), str(value)]
+        if getattr(args, "refresh_world", False):
+            cmd += ["--refresh"]
     rcs = []
     suites = [s.strip() for s in (args.suites or "").split(",") if s.strip()] or [None]
     for suite in suites:
@@ -940,6 +944,10 @@ def main() -> int:
                    help="server_suites.py --world: the world description the mocks run with (default none)")
     p.add_argument("--author", choices=("claude", "stub"),
                    help="server_suites.py --author for --world agent (default claude)")
+    p.add_argument("--author-model", help="server_suites.py --author-model (default: its own)")
+    p.add_argument("--author-isolation", choices=("restricted", "bare"), help="server_suites.py --author-isolation")
+    p.add_argument("--world-cache", help="server_suites.py --world-cache (default: docs/benchmarks/world-cache)")
+    p.add_argument("--refresh-world", action="store_true", help="server_suites.py --refresh: author again")
 
     args = ap.parse_args()
     if args.cmd == "preflight":
