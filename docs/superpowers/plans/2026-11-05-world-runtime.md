@@ -87,7 +87,7 @@ Fixes 9 (echo over a withheld null) and 11 (JSON Patch bodies) have no branch ye
    - No `ArcSwap` is added. A rebuilt runtime recomputes `BundleIndex` from the applied bundle.
 3. **Two places the description lands.**
    - `mb_mcm::world::apply(bundle, base, world) -> Bundle` rewrites each operation where `world` differs from `base` (= `tier0(bundle)`, passed in so it is computed once per build). It compares field by field, so tier 0 is a no-op by construction. The fields are kind, resource type, `identity.path_param`/`input_field`, `identity.field` (from the type's `identity.member`) and `identity.record` (from `answer.record`, a deep pointer allowed).
-   - **An absent field keeps the bundle's value.** `apply` writes only a world value that is set (`Some`) and differs from `base`'s; it never writes a `None`. With Task 2's field-wise overlay of `identity`, `target` and `answer`, an author who writes only `answer: {identity_header: X}` keeps tier 0's `answer.record`.
+   - **An absent field keeps the bundle's value.** `apply` writes only a world value that is set (`Some`) and differs from `base`'s; it never writes a `None` **for an absent field**. One set value is written as a `None` in the bundle: `kind: list`. The bundle has no list kind; `OpKind::of` reads a `Query` with `identity: None` as a list. So a set `kind: list` that differs from `base`'s kind clears the op's identity, and this rule wins over "never a `None`", which is about absent fields only (Task 1 test `apply_kind_list_over_a_read_clears_its_identity`). With Task 2's field-wise overlay of `identity`, `target` and `answer`, an author who writes only `answer: {identity_header: X}` keeps tier 0's `answer.record`.
    - **A wrong pointer is corrected by replacing it, not by clearing it.** An author writes the right pointer; `""` (the RFC 6901 root) says the answer itself is the record. The same holds for a wrong identity member or target. A description that says "this answer holds no record at all" is not expressible in v1 (see "Not in this plan").
    - **`""` is new syntax, added by Task 1.** On `main`, `Pointer::check` refuses `""` (`PointerError::Empty`), and so do `validate.rs::check_pointer`, the `world.v1.json` pointer pattern and `mb-admin`'s `bad_pointer`. Task 1 adds a root-allowing check (`Pointer::check_record`) used for `answer.record` and `request.record` only; `answer.records`, `request.records`, `changes.*.from_request` and `long_running` members keep refusing `""`. Task 1 changes the schema, the validator, `bad_pointer` and the spec to match.
    - Everything else goes into `call::described::Described`. Applying the world to the bundle makes kind, target and pointer changes reach all of today's heuristics without editing them.
@@ -98,7 +98,12 @@ Fixes 9 (echo over a withheld null) and 11 (JSON Patch bodies) have no branch ye
 6. **How `world_gap` is marked.**
    - `mb_engine::GeneratedResponse` gains `world_gaps: Vec<String>`. Like `effect_outcomes`, it is filled by the caller in `mb-protocols`.
    - The static gaps of an operation come from `world_gaps::gaps(bundle, world, &[])`, computed once in `Described`: `no_identity` for its type, `no_target`, `no_record`.
-   - **`complete` fills the field, not the handlers.** Every request-response protocol reaches `call::complete` (through `call.rs`'s shared path or `graphql/resolve.rs`). At its start, `complete` seeds `generated.world_gaps` with the static gaps, `rt.described().gaps(&op.id)` mapped through `GapCode::as_str` to `String`, **extending and deduplicating** (it never assigns the field). The protocol handlers only record what `complete` returned; they do not set the field. A recorded call that does not pass through `complete` (if `events/ws.rs` or `http_rest/sse.rs` has one) calls the same `call::seed_world_gaps(rt, op, &mut generated)` before recording.
+   - **Seeded where an answer leaves `call.rs`, not in the handlers.** Not every call reaches `call::complete`. On `main`, `prepare` returns `Prepared::Answered` without calling `complete` for answers from state (`serve_held`, `call.rs` ~1028-1094), for refusals (~974) and for `nothing_held` (~919/942). This plan adds two more such answers: Task 8's `replays::replayed` and Task 10's `state_lists::answer`. So `call::seed_world_gaps(rt, op, &mut generated)` (static gaps, `rt.described().gaps(&op.id)` mapped through `GapCode::as_str` to `String`, **extending and deduplicating**, never assigning the field) is called at three points:
+     - at the start of `complete`, for every generated answer (the shared path, `generate_pending` and the GraphQL batch join all end there);
+     - in `generate_narrowed`'s `Prepared::Answered` arm (`call.rs:713` on `main`), the shared path's prepare-side answers;
+     - in `graphql/resolve.rs`'s `call::Prepared::Answered` arm, where it becomes `Route::Answered` (batched root fields; `Route::Alone` goes through `generate_narrowed`).
+
+     Those are the only two callers of `prepare` on `main`, so every answer `prepare` returns is seeded once, whatever task added it. The protocol handlers only record what they were given; they do not set the field. Task 3 Step 3 lists every `record_effects` caller and traces its answer to one of the three points; a recorded call that reaches none of them (if `events/ws.rs` or `http_rest/sse.rs` has one) calls `seed_world_gaps` before recording.
    - The dynamic gap `no_record` is added when a 2xx create or update stored nothing. `write_state` cannot mark it (`WriteRequest.generated` is a shared reference), so it returns a `WriteOutcome` and `complete`, which owns the response, pushes the mark after `write_state` and before returning it to the handler (Task 5). The push is skipped when the static gaps already hold `no_record`, so the list never has duplicates.
    - `call::record_effects` writes them into the request record's `request` JSON as `"world_gap": ["no_identity", …]`, next to `effects`. A `tracing::info!` line carries `world_gap = …`.
    - No store migration and no Admin API schema change: the request log already stores and serves `request` as JSON.
@@ -118,8 +123,13 @@ Fixes 9 (echo over a withheld null) and 11 (JSON Patch bodies) have no branch ye
    - `types.<t>.identity.alternates: [member]`, for a path value that names a record by either of two members;
    - `operations.<op>.answer.identity_header: <header>`, for a create that names its id only in a response header.
 
-   These are the World overrides for blind11 mechanisms 1 (a header-only create id, 132 checks) and 5 (an id-or-alias path value, 36). Their heuristics are `claude/header-ids-alt-keys` (blind11 fixes 1 and 5). The described path and the heuristic path are **one implementation**: the heuristic's detectors produce the header name and the alternate members, tier 0 emits them as `answer.identity_header` and `identity.alternates` wherever they detect something, and the runtime functions take the header name or the members as parameters (Task 5). Nothing else is added. (One exception, if fix 5's members turn out per path parameter rather than per type; Task 5's "Coordination cases" says what happens then.)
-10. **Idempotency is never inferred into the world.** Tier 0 does not emit `operations.<op>.idempotency`, and Task 8 adds no such emission. Replay (`replays::replayed`/`keep`) runs only for a header an author described. A contract whose `Idempotency-Key` header only `carries_an_idempotency_key`'s name rule detects behaves as today under tier 0 and with no world: the repeat skips repeat detection and is generated as a new create. So `tier0_world_answers_as_no_world` holds and production answers for undescribed contracts do not change. Replaying on the heuristic header too would be a behaviour change for every such contract, and is not in this plan. `errors`, `masked` and child records of a fixed kind from a create's request array stay out (see "Not in this plan").
+   These are the World overrides for blind11 mechanisms 1 (a header-only create id, 132 checks) and 5 (an id-or-alias path value, 36). Their heuristics are `claude/header-ids-alt-keys` (blind11 fixes 1 and 5). The described path and the heuristic path are **one implementation**: the heuristic's detectors produce the header name and the alternate members, tier 0 emits them as `answer.identity_header` and `identity.alternates` wherever they detect something, and the runtime reads the header name and the members **only** from the effective world (`records::identity_header`, `records::alternates`), with the detectors consulted directly only when no world is attached (`Described::default()`). So each `by_path_fields` site takes fix 5's members from `records::alternates(rt, t)`, in the position fix 5 gave them, not from the detector: a described `alternates` list replaces the detected one entry by entry, and `alternates: []` removes a wrongly guessed alias (Task 5). Nothing else is added. (One exception, if fix 5's members turn out per path parameter rather than per type; Task 5's "Coordination cases" says what happens then.)
+10. **The request's record pointer is read at runtime.** `request.record` (Task 1 allows `""`) says where a create's or update's request body holds the one record, for a body that wraps it (`{data: {...}}`). `records::request_record(rt, op, body) -> &Value` (Task 5) returns the value there, and the whole body when the effective world sets none (tier 0 emits no `request.record`, so today's behaviour is kept) or the pointer does not resolve in this body. It is used by:
+    - create shaping (Task 5): the fix-1 record (the request shaped onto the read schema, plus the id) and every other place a create takes the record from its request take `request_record` instead of the whole body;
+    - the update merge (Task 6): the request members that `write_state`'s update arm lays onto the held record (`claude/effect-members`' merge in `write_memory.rs`) come from `request_record`, not the whole body.
+
+    `request.records` (an array of records) stays Task 5's `records::created`. A body where the pointer does not resolve is logged with `tracing::info!`.
+11. **Idempotency is never inferred into the world.** Tier 0 does not emit `operations.<op>.idempotency`, and Task 8 adds no such emission. Replay (`replays::replayed`/`keep`) runs only for a header an author described. A contract whose `Idempotency-Key` header only `carries_an_idempotency_key`'s name rule detects behaves as today under tier 0 and with no world: the repeat skips repeat detection and is generated as a new create. So `tier0_world_answers_as_no_world` holds and production answers for undescribed contracts do not change. Replaying on the heuristic header too would be a behaviour change for every such contract, and is not in this plan. `errors`, `masked` and child records of a fixed kind from a create's request array stay out (see "Not in this plan").
 
 ## Order, and why
 
@@ -133,21 +143,21 @@ The spec's order is kept: identity → kind/target/transition → lifecycle → 
 | Task | Depends on | Parallel with | Files it owns |
 | --- | --- | --- | --- |
 | 1 `RecordAt::Pointer`, root pointer `""`, `tier0` move, `apply`, `effective` | — | — | `mb-mcm/src/lib.rs`, `mb-mcm/src/world/{tier0,apply,effective}.rs`, `mb-mcm/src/world/mod.rs` (`mod` lines, `Pointer::check_record`), `mb-mcm/src/world/validate.rs` (`RecordAt` use, root pointer), `mb-mcm/schemas/world.v1.json` (record pointer pattern), `mb-admin/src/world.rs` (`bad_pointer`, `effective_world` calls `effective`), spec and `docs/world.md` (the `""` sentence), `mb-import/src/world.rs`, `mb-import/src/heuristics.rs` (`RecordAt` uses), every `RecordAt` match in `mb-protocols`/`mb-engine` (`mb-engine/src/compact.rs` among them) |
-| 2 Vocabulary: `alternates`, `identity_header`; field-wise overlay | 1, PR `claude/header-ids-alt-keys` | 3 | `mb-mcm/src/world/{mod,validate}.rs`, `mb-mcm/schemas/world.v1.json`, spec, `docs/world.md` vocabulary table, `mockingbird-world` skill |
-| 3 `Described`, `with_world`, gap marking | 1 | 2 | `mb-protocols/src/call/described.rs`, `mb-protocols/src/lib.rs`, `call.rs` (`record_effects`, `seed_world_gaps` and its call at the start of `complete`), `mb-engine/src/lib.rs` (`GeneratedResponse` field). It edits no `mb-mcm` file, so it does not touch `world/mod.rs`, which Task 2 owns. |
+| 2 Vocabulary: `alternates`, `identity_header`; field-wise overlay; optional `identity.member` | 1, PR `claude/header-ids-alt-keys` | 3 | `mb-mcm/src/world/{mod,validate,effective}.rs`, `mb-mcm/schemas/world.v1.json`, `mb-mcm/src/world/tier0.rs` (`member: Some(..)`), `mb-protocols/src/world_gaps.rs` (`member.as_deref()`), spec, `docs/world.md` vocabulary table, `mockingbird-world` skill |
+| 3 `Described`, `with_world`, gap marking | 1 | 2 | `mb-protocols/src/call/described.rs`, `mb-protocols/src/lib.rs`, `call.rs` (`record_effects`, `seed_world_gaps`, its call at the start of `complete` and in `generate_narrowed`'s `Prepared::Answered` arm), `graphql/resolve.rs` (one `seed_world_gaps` call in the `Prepared::Answered` arm), `mb-engine/src/lib.rs` (`GeneratedResponse` field). It edits no `mb-mcm` file, so it does not touch `world/mod.rs`, which Task 2 owns. |
 | 4 Load at build, hot reload | 3 | 5, 8, 9 | `mb-store/src/{sqlite,postgres}.rs`, `mb-admin/src/world.rs` (`runtime_world`), `mockingbird/src/runtime.rs`, `mockingbird/src/registry.rs` (`Mounted.world`, `build_mounted` retry) |
-| 5 Identity and record pointers | 2, 3, PR `claude/header-ids-alt-keys` | 4, 8, 9 | `call/records.rs` (new), `mb-mcm/src/world/tier0.rs` (header and alternate emission), `call.rs`: `write_state` create arm (returns `WriteOutcome`), `complete` (the create-id call site before `write_state` and the `no_record` mark after it), `mint_create_id`, the extra members appended to the field lists passed to `by_path_fields`; `http_rest/handler.rs` header placement |
-| 6 Kind, target, transition, changes | 5, PR `claude/effect-members` | 8, 9 | `call/transitions.rs` (new), `call.rs` `write_state` update/action arms, `call/write_memory.rs` (`onto_record` replace) |
+| 5 Identity and record pointers | 2, 3, PR `claude/header-ids-alt-keys` | 4, 8, 9 | `call/records.rs` (new), `mb-mcm/src/world/tier0.rs` (header and alternate emission), `call.rs`: `write_state` create arm (returns `WriteOutcome`), `complete` (the create-id call site before `write_state` and the `no_record` mark after it), `mint_create_id`, the fix-5 members in the field lists passed to `by_path_fields` (read from `records::alternates`) and the one extra attempt per site; `http_rest/handler.rs` header placement; `records::request_record` in create shaping |
+| 6 Kind, target, transition, changes | 5, PR `claude/effect-members` | 8, 9 | `call/transitions.rs` (new), `call.rs` `write_state` update/action arms, `call/write_memory.rs` (`onto_record` replace; the request merge takes `records::request_record`) |
 | 7 Lifecycle, soft delete, `not_found` | 6, 8, 9, PR #253 | — | `call/lifecycle.rs` (new), `call/deleted.rs`, `call.rs` `write_state` delete arm and create arm (the `lifecycle::initial` call), `call/list_query.rs` (exclusion), `call/repeats.rs` (exclusion in `described_conflict`) |
-| 8 Unique, concurrency, idempotency | 3 | 4, 5, 6, 9 | `call/repeats.rs`, `call/tokens.rs`, `call/replays.rs` (new), `call.rs`: `prepare` (refusal and replay call sites), `complete` (the `replays::keep` call site), `repeated_record` (the described idempotency header); `call/value_index.rs` (`same_values`, the same header); `mb-engine/src/guards.rs` (`carries_an_idempotency_key` takes the described header). No `tier0.rs` change (Decision 10). |
+| 8 Unique, concurrency, idempotency | 3 | 4, 5, 6, 9 | `call/repeats.rs`, `call/tokens.rs`, `call/replays.rs` (new), `call.rs`: `prepare` (refusal and replay call sites), `complete` (the `replays::keep` call site), `repeated_record` (the described idempotency header); `call/value_index.rs` (`same_values`, the same header); `mb-engine/src/guards.rs` (`carries_an_idempotency_key` takes the described header). No `tier0.rs` change (Decision 11). |
 | 9 Paging, filters, scope, order | 3, PR #252 | 4, 5, 6, 8 | `call/list_query.rs` (new), `call/lists.rs`, `call/runs.rs`, `call/pages.rs`, `call/cursors.rs` |
 | 10 Lists answered from state | 7 | — | `call/state_lists.rs` (new), `call.rs`: `prepare` list branch, one `#listed` mark call in `complete` (seeding) and in `write_state`'s create arm |
 | 11 Derived counts and sums | 10 | — | `call/derived.rs` (new), hooks in `serve_held`, the generated-answer path of a held record, and `state_lists.rs` |
 | 12 Docs, changelog, regression run | all | — | `docs/world.md`, `CHANGELOG.md`, `mockingbird-world` skill |
 
-Tasks 5, 6 and 8 all edit `crates/mb-protocols/src/call.rs`. The functions they edit:
-- Task 3: `record_effects`, the new `seed_world_gaps`, and one call to it at the start of `complete`;
-- Task 5: `write_state`'s create arm and signature (it returns `WriteOutcome`), `mint_create_id`, one appended `by_path_fields` attempt at each of three sites (the update/delete target lookup, `any_owner_holds`, which `read_state` calls, and the parent lookup in `related`), and two call sites in `complete` around the `write_state` call;
+**The Parallel column is not file-disjoint.** Tasks 5, 6 and 8 are marked parallel, but all three edit `crates/mb-protocols/src/call.rs` (and Tasks 3, 7 and 10 edit it too, in sequence). They are disjoint only at function level. The functions they edit:
+- Task 3: `record_effects`, the new `seed_world_gaps`, one call to it at the start of `complete` and one in `generate_narrowed`'s `Prepared::Answered` arm;
+- Task 5: `write_state`'s create arm and signature (it returns `WriteOutcome`), `mint_create_id`, the fix-5 members (read from `records::alternates`) and one appended `by_path_fields` attempt at each of three sites (the update/delete target lookup, `any_owner_holds`, which `read_state` calls, and the parent lookup in `related`), and two call sites in `complete` around the `write_state` call;
 - Task 6: `write_state`'s update and action arms;
 - Task 7 (after 5 and 6): `write_state`'s delete arm and one `lifecycle::initial` call in its create arm;
 - Task 8: `prepare` (two call sites), one call site in `complete` after the answer is settled, and the guard in `repeated_record`.
@@ -242,6 +252,10 @@ Tasks 5 and 8 both add call sites in `complete`, at different points (Task 5 aro
     // listThings (Query, identity None) with world {kind: read} and no target:
     // identity Some { field: type member else "id", path_param: None, input_field: None, .. }; OpKind::of(op) == Read.
 }
+#[test] fn apply_kind_list_over_a_read_clears_its_identity() {
+    // getBundle: Query with Identity { field: "id", path_param: "id", .. } in the bundle (tier0 kind read);
+    // world {kind: list}: identity None, OpKind::of(op) == List. A world {kind: list, target: {path_param: id}} gives the same.
+}
 #[test] fn a_kind_only_delete_takes_the_effective_target() { /* action with tier0 target.path_param "id", world kind delete: identity path_param "id" */ }
 
 // mb-mcm/tests/it/world_schema.rs
@@ -276,8 +290,9 @@ Expected: FAIL (`RecordAt::Pointer`, `apply`, `effective` and `record_at` are no
 - [ ] **Step 3: Implement**
   - Add `RecordAt::Pointer`. `record_in` walks the tokens: an object takes the member; an array at token `"0"` must hold exactly one object. `answer_holding` builds the same path.
   - Move `tier0`, `identities` and `record_pointer` verbatim into `world/tier0.rs`.
-  - `apply` clones the bundle and takes `base` from the caller. For each operation, each field (`kind`, `type`, `target.path_param`, `target.member`, `answer.record`) is written in only when the world's value is set and differs from `base`'s. **An absent (`None`) world value means "keep the bundle's value"; `apply` never writes a `None`.**
+  - `apply` clones the bundle and takes `base` from the caller. For each operation, each field (`kind`, `type`, `target.path_param`, `target.member`, `answer.record`) is written in only when the world's value is set and differs from `base`'s. **An absent (`None`) world value means "keep the bundle's value"; `apply` never writes a `None` for an absent field.**
     - kind: `Create`/`Update`/`Replace`/`Delete`/`Action` → `Command(Create/Update/Update/Delete/Other)`; `Read` → `Query` with an identity; `List` → `Query` with `identity: None`.
+    - **`kind: list` is the one set value that clears.** When the world sets `list` and `base`'s kind is not `list`, `apply` sets the op's `identity` to `None`, because that is how the bundle spells a list (`OpKind::of`). This wins over the "never a `None`" rule, which covers absent fields only (Decision 3). The op's `target` and `answer.record` are then not written (a list has no target and no single record); its `answer.records` stays a `Described` entry. A tier-0 world never sets a differing kind, so this never fires under tier 0.
     - `answer.record`: `""` → `identity.record = None` (the answer is the record); `/m`, `/0`, `/m/0` → the shallow variants; anything deeper → `Pointer`.
   - **Operations whose `identity` is `None`.** This is the usual case for a create, and for a type tier 0 gave no identity. `apply` creates an `Identity` for an operation of kind create, read, update, replace, delete or action (never list or stream) when its identity is `None` and either:
     - the world sets a type `identity.member` that differs from `base`'s (a type with no identity in tier 0 gets one), or
@@ -315,7 +330,16 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 - Prerequisite: `claude/header-ids-alt-keys` merged. The two keys name what its detectors find, and Task 5 has tier 0 emit them.
 - Modify: `crates/mb-mcm/src/world/mod.rs`:
   - `IdentityDesc.alternates`, `AnswerDesc.identity_header`;
-  - `overlay` merges `identity`, `target` and `answer` **field by field** instead of replacing them whole (`overlay_type`/`overlay_op` call `set`/`set_vec` per sub-field, as they already do per entry). An author who writes `answer: {identity_header: X}` keeps tier 0's `answer.record`, and one who writes `identity: {alternates: [..]}` keeps tier 0's `member`. `alternates` is a vector, so a set one replaces tier 0's whole, like other vectors.
+  - `overlay` merges `identity`, `target` and `answer` **field by field** instead of replacing them whole (`overlay_type`/`overlay_op` call `set` per sub-field, as they already do per entry). An author who writes `answer: {identity_header: X}` keeps tier 0's `answer.record`, and one who writes `identity: {alternates: [..]}` keeps tier 0's `member`.
+  - **`IdentityDesc.member` becomes `Option<String>`** (`#[serde(default, skip_serializing_if = "Option::is_none")]`). On `main` it is a required `String` with no serde default, so a revision `types.t.identity: {alternates: [...]}` does not deserialize as a `World` at all, and Task 4 would serve the whole revision as tier 0. With `Option`, an absent member means "unset": the overlay keeps the lower tier's member.
+  - **`IdentityDesc.alternates` is `Option<Vec<String>>`**, not a `Vec` with "empty means unset". `None` keeps the lower tier's alternates; `Some(vec![])` says the type has none, which is how an author removes a wrongly guessed alias (Task 5). A set list replaces the lower tier's whole.
+- **What reads an absent member** (every place on `main` that reads `IdentityDesc.member`):
+  - `crates/mb-mcm/schemas/world.v1.json`: `$defs/identity` drops `"required": ["member"]` (an empty `identity: {}` stays valid JSON Schema and is refused below).
+  - `crates/mb-mcm/src/world/validate.rs`: `check_member` runs only when `member` is `Some`; `pattern` and `alternates` are checked against the record schema either way. The validator sees only the revision, so it does not refuse an absent member.
+  - `crates/mb-mcm/src/world/effective.rs` (Task 1's): after the overlay, an effective identity whose `member` is still `None` (the revision set `pattern` or `alternates` on a type tier 0 gave no identity) is dropped from the effective world and refused `invalid` at `/types/<t>/identity/member` with the message "tier 0 names no member for this type; set identity.member". The rest of the revision applies. So the runtime, `Described` and `apply` never see an identity with no member.
+  - `crates/mb-mcm/src/world/tier0.rs` (moved by Task 1): writes `member: Some(..)`; tier 0 never emits an identity without a member.
+  - `crates/mb-protocols/src/world_gaps.rs` (`i.member.as_str()` at ~160 becomes `as_deref()`; a `None` member reads as no identity, which the effective world never holds).
+  - `crates/mb-admin/src/world.rs`: `effective_world` goes through `effective`, so the admin view shows tier 0's member under the revision's alternates, and the same refusal. `attribute` keeps its `/types/{t}/{field}` granularity: an identity entry whose sub-fields changed is attributed to the revision as a whole, member included, as today. `bad_pointer` does not read the identity. No Admin API schema change (the world document is served as an object).
 - Modify: `crates/mb-mcm/src/world/validate.rs`, `crates/mb-mcm/schemas/world.v1.json`, `crates/mb-mcm/tests/fixtures/world-spec-excerpt.json` (unchanged unless the roundtrip needs it)
 - Modify: `docs/superpowers/specs/2026-11-04-world-description-design.md` (the vocabulary list: `identity`: member, optional pattern, optional `alternates`; `answer`: optional `identity_header`), `docs/world.md` (vocabulary table), `plugins/mockingbird/skills/mockingbird-world/SKILL.md` (one line each)
 - Test: `crates/mb-mcm/src/world/validate.rs` tests, `crates/mb-mcm/tests/it/world_schema.rs`
@@ -323,7 +347,7 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 **Interfaces:**
 - Consumes: Task 1's module layout.
 - Produces:
-  - `IdentityDesc { member, pattern, alternates: Vec<String>, extra }`, where `alternates` is skipped when empty;
+  - `IdentityDesc { member: Option<String>, pattern, alternates: Option<Vec<String>>, extra }`, both skipped when `None`;
   - `AnswerDesc { record, records, long_running, identity_header: Option<String>, extra }`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -340,13 +364,22 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 #[test] fn overlay_keeps_base_answer_members_the_top_leaves_out() {
     // base answer {record: "/data"}; top answer {identity_header: "Resource-ID"} → {record: "/data", identity_header: "Resource-ID"}
 }
-#[test] fn overlay_keeps_base_identity_member_when_only_alternates_are_set() {}
+#[test] fn overlay_keeps_base_identity_member_when_only_alternates_are_set() {
+    // the revision document {types: {template: {identity: {alternates: ["Alias"]}}}} deserializes as a World;
+    // base identity {member: TemplateId} → {member: TemplateId, alternates: [Alias]}
+}
+#[test] fn an_identity_with_no_member_on_a_type_tier0_gave_none_is_refused() {
+    // effective: type widget has no tier-0 identity; revision identity {alternates: [Alias]} →
+    // refused invalid at /types/widget/identity/member, widget has no effective identity, the rest of the revision applies
+}
+#[test] fn empty_alternates_are_kept_as_set() { /* revision alternates [] over tier0 [Alias] → effective Some([]) */ }
+#[test] fn schema_accepts_an_identity_without_member() { /* world_schema.rs: {identity: {alternates: [a]}} valid */ }
 #[test] fn overlay_keeps_base_target_members_the_top_leaves_out() { /* base target {path_param: id}; top {member: id} → both */ }
 ```
 
 - [ ] **Step 2: Run and verify the tests fail.** `cargo test -p mb-mcm` → FAIL: unknown fields land in `extra` and are refused as `unknown_key`.
-- [ ] **Step 3: Implement.** Add the fields, their JSON Schema entries and the validator checks. Reuse `check_member` for alternates. For the header, check it the way `check_type_header` does, against the operation's 2xx outputs, case-insensitively. Make `overlay` field-wise for `identity`, `target` and `answer`, and update the spec's overlay paragraph to say so. `mb-admin`'s `attribute` keeps its `/types/{t}/{field}` granularity: an entry whose sub-field changed is attributed as a whole, as today.
-- [ ] **Step 4: Run and verify the tests pass.** `cargo test -p mb-mcm && cargo test -p mb-admin --test it world` → PASS.
+- [ ] **Step 3: Implement.** Make `member` optional and add the fields, their JSON Schema entries and the validator checks, then the `effective` refusal and the `world_gaps` change (see Files). Reuse `check_member` for alternates. For the header, check it the way `check_type_header` does, against the operation's 2xx outputs, case-insensitively. Make `overlay` field-wise for `identity`, `target` and `answer`, and update the spec's overlay paragraph to say so. `mb-admin`'s `attribute` keeps its `/types/{t}/{field}` granularity: an entry whose sub-field changed is attributed as a whole, as today.
+- [ ] **Step 4: Run and verify the tests pass.** `cargo test -p mb-mcm && cargo test -p mb-admin --test it world && cargo test -p mb-protocols --test it world_gaps` → PASS.
 - [ ] **Step 5: Commit** `git commit -m "world: identity alternates and answer identity_header"`
 
 ### Task 3: `Described`, `MockRuntime::with_world`, and `world_gap` marks
@@ -357,10 +390,12 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
   - `mod described;`;
   - `record_effects` also writes `world_gap`;
   - new `pub(crate) fn seed_world_gaps(rt: &MockRuntime, op: &Operation, generated: &mut GeneratedResponse)`: for each `GapCode` in `rt.described().gaps(&op.id)`, push `code.as_str().to_owned()` unless the list already holds it. It **extends and deduplicates**; it never assigns the field, so a mark pushed earlier is kept;
-  - `complete` calls `seed_world_gaps` first, before any other work, so Task 5's dynamic `no_record` (pushed later in `complete`) lands after the static marks and is skipped when one is already there.
+  - `complete` calls `seed_world_gaps` first, before any other work, so Task 5's dynamic `no_record` (pushed later in `complete`) lands after the static marks and is skipped when one is already there;
+  - `generate_narrowed`'s `Prepared::Answered(answer)` arm calls `seed_world_gaps` on the answer before returning it. That covers every answer `prepare` returns through the shared path: `serve_held` from state, refusals, `nothing_held`, and the prepare-side answers later tasks add (Task 8's `replays::replayed`, Task 10's `state_lists::answer`), with no edit in those tasks.
+- Modify: `crates/mb-protocols/src/graphql/resolve.rs`: in `call::Prepared::Answered(answer)` (the batched root field that `prepare` answered), call `call::seed_world_gaps` before it becomes `Route::Answered`. `Route::Join` ends in `complete`; `Route::Alone` goes through `generate_narrowed`.
 - Modify: `crates/mb-protocols/src/lib.rs` (`MockRuntime` field, `with_world`, `world_revision`, `described`)
 - Modify: `crates/mb-engine/src/lib.rs` (`GeneratedResponse.world_gaps: Vec<String>`, default empty, and every constructor)
-- The protocol handlers (`http_rest/handler.rs`, `graphql/resolve.rs`, `grpc/service.rs`, `soap/mod.rs`) are **not** edited for the gaps: they already call `record_effects` on what `complete` returned. Step 3 checks `events/ws.rs` and `http_rest/sse.rs`; a recorded call there that does not pass through `complete` calls `seed_world_gaps` before recording.
+- The protocol handlers (`http_rest/handler.rs`, `grpc/service.rs`, `soap/mod.rs`, and `graphql/resolve.rs` beyond the one arm above) are **not** edited for the gaps: they call `record_effects` on what `generate_narrowed`, `generate_pending` or `complete` returned. Step 3 lists every `record_effects` caller and traces its answer to one of the three seeding points (Decision 6), and checks `events/ws.rs` and `http_rest/sse.rs`; a recorded call that reaches none of them calls `seed_world_gaps` before recording.
 - `crates/mb-mcm/src/world/effective.rs` and the `effective_world` switch are Task 1's; this task only consumes `effective`.
 - Modify: `crates/mb-protocols/tests/it/support.rs` (`Described` harness), `crates/mb-protocols/tests/it/main.rs`
 - Test: `crates/mb-protocols/tests/it/described_runtime.rs` (new)
@@ -380,6 +415,7 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
     - `Described::gaps(&self, op_id: &str) -> &[GapCode]`;
     - `Described::state_value(&self, t: &str, state: &str) -> Option<Value>`. It returns a lifecycle state in the member's declared type: `"true"` → `true` for a boolean, a number for an integer, the text otherwise. `None` when it does not fit.
   - `Described::default()` describes nothing.
+  - `Described::for_test(gaps: HashMap<String, Vec<GapCode>>) -> Described` (`#[doc(hidden)]`), for the seeding tests only.
   - Test support: `support::described(contract: &str, world: Value, script: Vec<Value>) -> DescribedHarness`, with `send(method, uri, body, headers) -> (StatusCode, HeaderMap, Value)`, `records() -> Vec<RequestRecord>` and `stored(t, id) -> Option<Value>`.
     - **It treats `world` exactly as the runtime does.** It parses `world` as a revision document, computes `base = tier0(&bundle)`, runs `mb_mcm::world::effective(&bundle, &base, &doc)`, and builds the runtime with `with_world(&base, &effective, 1)`. It never passes the raw document in.
     - It **panics when `effective` refuses any entry**, with the refusals in the message, so a test whose world has a typo fails loudly instead of testing tier 0. A test that means to exercise a refusal uses `support::described_allowing_refusals`.
@@ -411,6 +447,19 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
     assert_eq!(body["label"], "a");
 }
 #[tokio::test] async fn a_refused_entry_in_a_test_world_fails_the_harness() { /* #[should_panic]: identity.member "nope" */ }
+#[tokio::test] async fn an_answer_prepare_refuses_is_marked() {
+    // PATCH /things/{id} answers an Ack {ok} (static gap no_record); consistency on; PATCH of an unheld id
+    // is answered by nothing_held in prepare (404) → recorded with world_gap ["no_record"], provider not called
+}
+#[tokio::test] async fn an_answer_from_state_is_marked() {
+    // A held record read back through serve_held (source state). A read served from state has an identity and a target,
+    // so its op has no static gap of its own; the runtime is built with Described::for_test(gaps: {getThing: [NoTarget]})
+    // (a `#[doc(hidden)] pub` constructor, since `tests/it` does not see `#[cfg(test)]` items) to prove the Prepared::Answered arm seeds: world_gap ["no_target"]
+}
+#[tokio::test] async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
+    // two root fields in one GraphQL document (batched); one is an updateThing of an unheld id answered by nothing_held
+    // in prepare (Route::Answered): its recorded call carries ["no_record"], like the same call sent alone
+}
 #[test] fn seed_world_gaps_extends_and_deduplicates() {
     // generated.world_gaps = ["no_record"]; static gaps [NoIdentity, NoRecord] → ["no_record", "no_identity"]
 }
@@ -431,7 +480,7 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 - Test: `crates/mb-store/tests/it/conformance.rs`, `crates/mb-admin/tests/it/world.rs`, `crates/mockingbird/tests/it/world_runtime.rs` (new; register it in `tests/it/main.rs`)
 
 **Interfaces:**
-- Consumes: `MockRuntime::with_world` (Task 3), `mb_mcm::world::effective` (Task 3).
+- Consumes: `MockRuntime::with_world` (Task 3), `mb_mcm::world::effective` (Task 1; Task 3 only consumes it).
 - Produces:
   - `mb_admin::world::runtime_world(store, mock_id, version, bundle, base: &World) -> Result<(World, i64), StoreError>`. It makes one `latest_world_revision` read, then `effective(bundle, base, &doc)`. It does no `attribute`, no gap list and no earlier-revision reads. With no revision it returns `(base.clone(), 0)`.
     - The stored document is JSON (`latest.document`). When `serde_json::from_value::<World>` fails, `runtime_world` does what `effective_world` does: the world is tier 0 at that revision, `Ok((base.clone(), latest.revision))`, and the whole-document refusal is logged with `tracing::warn!(mock, revision, error)`. It is not a `StoreError`, so it does not set `world_pending` and does not start the retry loop. `Err` is returned only for a failed store read.
@@ -514,11 +563,9 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
     - `any_owner_holds` (called from `read_state`): `name_fields(param)` then `index.path_fields(t)`;
     - the parent lookup in `related`: `name_fields(field)` only.
 
-    None of those lists, conditions or orders changes. Task 5 adds `records::extra_fields(rt, t, already: &[&str]) -> Vec<&str>`, which returns only new members, in this order:
-    1. the type's identity member from the effective world, when it differs from `base`'s (tier 0's) member for the type. It is included even though `apply` already wrote it into the op's `identity.field`: a record stored before the revision is keyed by the old member, so the key read misses and only a scan by the new member finds it (Review Focus 3);
-    2. then `records::alternates(rt, t)`;
+    None of those lists, conditions or orders changes, with one substitution: **where fix 5 put its id-like members in a site's list, the site now takes them from `records::alternates(rt, t)` instead of calling the detector.** `records::alternates` reads the effective world's `identity.alternates`, and calls the fix-5 detector itself only when no world is attached (`Described::default()`). Tier 0 emits exactly the detector's members as `alternates`, so under tier 0 and with no world each site's list is the same members in the same position as after fix 5. An author's `alternates` then replaces the guessed members in that position, entry by entry: `[Handle]` replaces a wrongly guessed `Alias` (which no longer reaches the record), and `[]` removes it. This is what makes "a later tier overrides an earlier one" hold for alternates; the detector feeds tier 0 only.
 
-    each skipped when `already` holds it. Each site, after its existing attempts miss, makes **one more** `by_path_fields` call with `extra_fields(..)` only when that list is non-empty, and under the site's own conditions (the update/delete lookup only when `rt.consistency` is on, as its scans are today). With no world and with a tier-0 world the list is empty (step 1 diffs against `base`; step 2 drops fix-5 members the site already lists), so no scan is added and every site behaves byte-for-byte as before. An extra attempt costs at most one `MAX_SCAN` (500) listing per miss, and only for a type the author described. `by_path_fields` itself is unchanged: `PathAliases` first, then one `MAX_SCAN` listing, first match in field order.
+    Task 5 also adds `records::extra_fields(rt, t, already: &[&str]) -> Vec<&str>`, which returns at most one member: the type's identity member from the effective world, when it differs from `base`'s (tier 0's) member for the type and `already` does not hold it. It is needed even though `apply` already wrote it into the op's `identity.field`: a record stored before the revision is keyed by the old member, so the key read misses and only a scan by the new member finds it (Review Focus 3). Each site, after its existing attempts miss, makes **one more** `by_path_fields` call with `extra_fields(..)` only when it is non-empty, and under the site's own conditions (the update/delete lookup only when `rt.consistency` is on, as its scans are today). With no world and with a tier-0 world it is empty (it diffs against `base`), so no scan is added and every site behaves byte-for-byte as after fix 5. An extra attempt costs at most one `MAX_SCAN` (500) listing per miss, and only for a type the author described. `by_path_fields` itself is unchanged: `PathAliases` first, then one `MAX_SCAN` listing, first match in field order.
   - `mint_create_id`: format a minted id with `identity.pattern`.
 - Modify: `crates/mb-engine/src/lib.rs`: `GeneratedResponse.created_id: Option<String>`, filled by the caller like `effect_outcomes`. If fix 1 already carries the minted id to the handler some other way, use that carrier instead and skip this field.
 - Modify: `crates/mb-protocols/src/http_rest/handler.rs`: after `mb_engine::headers::declared_headers` fills the response headers, the fix-1 header placement runs with the header name from `records::identity_header(rt, op)` and the id from `generated.created_id`. `Location` becomes the item URL. The engine stays unaware of it.
@@ -542,19 +589,20 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
     - `request.records`/`answer.records` items, one each;
     - else the `long_running.result` member of the answer;
     - else the one record at `answer.record`;
-    - else, for a create with an identity header, the fix-1 record (the request shaped onto the read schema, plus the id).
+    - else, for a create with an identity header, the fix-1 record (`records::request_record` of the request, shaped onto the read schema, plus the id).
   - `records::identity_header(rt, op) -> Option<String>`: the effective world's `answer.identity_header`. With no world attached (`Described::default()`), it is the fix-1 detector's result. Tier 0 emits that same value, so the two are equal for a tier-0 world.
-  - `records::alternates(rt, t) -> Vec<String>`: the effective `identity.alternates`, else the fix-5 members. It has the same tier-0 equality.
-  - `records::extra_fields(rt, t, already: &[&str]) -> Vec<&str>` (see Files). There is no `records::path_fields`: the existing lists stay where they are built.
+  - `records::alternates(rt, t) -> Vec<String>`: the effective `identity.alternates` when the effective world sets them (`Some`, empty included); the fix-5 detector's members only when no world is attached. A world that sets none for the type gives none, which equals the detector's result, because tier 0 emits `alternates` wherever the detector finds any. Every `by_path_fields` site reads fix 5's members through this function (see Files).
+  - `records::extra_fields(rt, t, already: &[&str]) -> Vec<&str>` (see Files): only a changed identity member. There is no `records::path_fields`: the existing lists stay where they are built.
+  - `records::request_record<'a>(rt, op, body: &'a Value) -> &'a Value` (Decision 10): the value at the effective `request.record`, else the whole body. Used by the fix-1 create record (the request shaped onto the read schema) and by every other place the create arm takes its record from the request. Task 6 uses it for the update merge.
   - `records::settle_create(rt, plan, call, generated: &mut GeneratedResponse)`.
   - `records::patterned(pattern: &str, id: &str) -> String` and `records::bare_id(pattern: &str, value: &str) -> Option<String>`. A read by a path value tries both forms, so a record keyed under either one is found.
-- One rule for alternates: they are more members tried by `by_path_fields`, after every member the site tried before, so they follow its rule (first match in field order, owner check, `PathAliases` memo). There is no separate "exactly one" rule. If fix 5 needs uniqueness for guessed members, it adds that to `by_path_fields` for every field, and described alternates get it too.
+- One rule for alternates: they are members tried by `by_path_fields`, in the position fix 5 gave its members, so they follow its rule (first match in field order, owner check, `PathAliases` memo). There is no separate "exactly one" rule. If fix 5 needs uniqueness for guessed members, it adds that to `by_path_fields` for every field, and described alternates get it too.
 
 **Coordination cases for `claude/header-ids-alt-keys`.** Step 1 of this task records, in `records.rs`'s module doc, what the merged branch did. Then:
-- **Fix 5's members are per type and appended after each site's fields** (what Coordination asks for). `records::alternates(rt, t)` returns the effective `identity.alternates`, else `fix5::id_like_members(bundle, t)`; tier 0 emits the latter; `extra_fields` drops members the site already lists. Fix 5's members keep the position fix 5 gave them, and described alternates go last, so "alternates last" reorders nothing. `a_detected_alternate_and_the_same_alternate_described_answer_alike` holds.
+- **Fix 5's members are per type and appended after each site's fields** (what Coordination asks for). Each site's `fix5::id_like_members(bundle, t)` call is replaced by `records::alternates(rt, t)`, in the same position; tier 0 emits `id_like_members` as `alternates`. `a_detected_alternate_and_the_same_alternate_described_answer_alike`, `described_alternates_replace_the_detected_ones` and `empty_alternates_remove_the_detected_ones` hold.
 - **Fix 5's members are per path parameter** (derived from `name_fields(param)`, an `idOrAlias`-style name, or anything else not a function of the type alone). Tier 0 cannot restate them as type-level `alternates`, so:
   - tier 0 emits no `identity.alternates`; `records::alternates(rt, t)` returns only the described alternates (empty with no world or a tier-0 world);
-  - fix 5's per-parameter lookup stays as it merged, untouched and in its place; described alternates are tried after it, through `extra_fields`;
+  - fix 5's per-parameter lookup stays as it merged, untouched and in its place; described alternates are tried after it, as one more `by_path_fields` attempt with `records::alternates(rt, t)` minus the site's list (in this case only, `extra_fields` returns the changed identity member followed by the described alternates). An author can add members but cannot remove or replace a per-parameter guess, so "a later tier overrides" does not hold for fix 5's members in this case; that limitation is stated in `docs/world.md`, and `described_alternates_replace_the_detected_ones`/`empty_alternates_remove_the_detected_ones` are dropped;
   - `a_detected_alternate_and_the_same_alternate_described_answer_alike` is replaced by `a_described_alternate_adds_to_the_detected_members` (a type where fix 5 detects `Alias` per parameter and the world adds `Handle`: both reach the record; with no world only `Alias` does, as on `main` plus fix 5), and the tier-0 test asserts no `alternates` are emitted;
   - "one implementation" then holds for the header (fix 1) only, and the plan's Decision 9 sentence about alternates is read with this exception.
 - **Fix 5 lands as a separate lookup** (not in a field list): the first step folds it into the site's list at the position it held, then the per-type or per-parameter case above applies.
@@ -590,6 +638,15 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
     // DELETE /templates/welcome → GET /templates/{TemplateId} 404
 }
 #[tokio::test] async fn a_detected_alternate_and_the_same_alternate_described_answer_alike() { /* as the header twin, for Alias */ }
+#[tokio::test] async fn described_alternates_replace_the_detected_ones() {
+    // fix 5 detects Alias on template; world alternates [Handle]: GET /templates/{Handle} → state,
+    // GET /templates/{Alias} → not found from state (Alias is no longer tried), same list calls as with Alias
+}
+#[tokio::test] async fn empty_alternates_remove_the_detected_ones() { /* world alternates []: GET /templates/{Alias} no longer reaches the record */ }
+#[tokio::test] async fn a_create_whose_request_wraps_the_record_stores_the_inner_record() {
+    // POST /conversations {"data": {"subject": "a"}} answering 201 with only a Resource-ID header; world request.record "/data":
+    // the stored record holds subject "a" (not a "data" member); with no world it is shaped from the whole body, as today
+}
 #[tokio::test] async fn the_identity_member_is_tried_before_an_alternate() {
     // record A has TemplateId "x"; record B has Alias "x": GET /templates/x → A (by_path_fields' field order)
 }
@@ -635,11 +692,11 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
 - Create: `crates/mb-protocols/src/call/transitions.rs`
 - Prerequisite: `claude/effect-members` (blind11 fixes 6, 12, 15) merged; it edits `write_memory.rs` too.
 - Modify: `crates/mb-protocols/src/call.rs`. In the `write_state` update and action arms, after a 2xx, call `transitions::apply(..)`.
-- Modify: `crates/mb-protocols/src/call/write_memory.rs`. For a `Replace`, `onto_record` replaces instead of merging.
+- Modify: `crates/mb-protocols/src/call/write_memory.rs`. For a `Replace`, `onto_record` replaces instead of merging. The request members laid onto the held record (the merge `claude/effect-members` adds for fix 6) come from `records::request_record(rt, op, body)` (Task 5, Decision 10), not the whole body; a `Replace` replaces with that value too.
 - Test: `crates/mb-protocols/tests/it/described_kinds.rs` (new)
 
 **Interfaces:**
-- Consumes: `Described::op` (Task 3); `apply` kind/target (Task 1).
+- Consumes: `Described::op` (Task 3); `apply` kind/target (Task 1); `records::request_record` (Task 5).
 - Produces:
   - `transitions::apply(rt: &MockRuntime, op: &Operation, request: Option<&Value>, record: &mut Value) -> Vec<String>`. It returns the members it set: `transition` members (each value fit to its member's schema), then `changes` (`from_request` pointer or literal `value`).
   - `transitions::replaces(rt, op) -> bool`.
@@ -655,6 +712,10 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
     // POST /folders/{id}:archive, transition {state: ARCHIVED}; model answers state ACTIVE; stored and served state ARCHIVED
 }
 #[tokio::test] async fn changes_apply_request_members_to_the_target() { /* :move with changes {parent: {from_request: /destinationParent}} */ }
+#[tokio::test] async fn an_update_whose_request_wraps_the_record_merges_the_inner_record() {
+    // PATCH /things/{id} {"data": {"title": "b"}} answering an Ack; world request.record "/data":
+    // the held record's title becomes "b" and gains no "data" member; with no world the merge is as today
+}
 #[tokio::test] async fn a_replace_drops_members_it_does_not_send() { /* PUT kind replace: an unsent optional member is gone, identity and readOnly members kept */ }
 #[tokio::test] async fn a_described_delete_on_a_graphql_mutation_removes_the_record() { /* GraphQL mutation removeWidget(id:) kind delete target.member id */ }
 ```
@@ -726,7 +787,7 @@ About 68 checks across blind7-10.
 1. `replays::replayed` runs first. A key already kept for this op in this session answers the kept response. Nothing else runs: no generation, no unique check, no store write.
 2. A key not kept yet goes on as today. `carries_an_idempotency_key` is true, also for a described header the name heuristic misses, so `repeated_record` and `same_values` still skip. `described_conflict` still runs: a new key with a taken unique set is a new request and is refused.
 3. `replays::keep` keeps the final answer (2xx or a refusal), so a retry of a refused create is refused the same way.
-4. Without a described `idempotency`, nothing changes (Decision 10). Tier 0 does not emit `idempotency`, and this task adds no emission: a header that only `carries_an_idempotency_key`'s name rule detects keeps today's behaviour (skip repeat detection, generate a new create) under tier 0 and with no world (`Described::default()`). Replay is only for an author-described header. So `tier0_world_answers_as_no_world` holds for a contract with an `Idempotency-Key` header.
+4. Without a described `idempotency`, nothing changes (Decision 11). Tier 0 does not emit `idempotency`, and this task adds no emission: a header that only `carries_an_idempotency_key`'s name rule detects keeps today's behaviour (skip repeat detection, generate a new create) under tier 0 and with no world (`Described::default()`). Replay is only for an author-described header. So `tier0_world_answers_as_no_world` holds for a contract with an `Idempotency-Key` header.
 
 **Interfaces:**
 - Consumes: `Described::{op, type_desc}` (Task 3); `Engine::refuse_from_state(bundle, op, call, code)`.
@@ -744,7 +805,7 @@ About 68 checks across blind7-10.
 #[tokio::test] async fn a_stale_if_match_is_refused_on_the_first_write() { /* concurrency {member: etag, header: If-Match, conflict: 412} */ }
 #[tokio::test] async fn a_described_token_advances_after_an_update() { /* integer version +1; string etag re-minted */ }
 #[tokio::test] async fn if_match_star_and_no_token_pass() {}
-#[tokio::test] async fn an_idempotent_replay_answers_as_the_first() { /* Idempotency-Key twice → same status/body, one record, provider called once */ }
+#[tokio::test] async fn an_idempotent_replay_answers_as_the_first() { /* Idempotency-Key twice → same status/body, one record, provider called once; the replay's recorded call carries the op's world_gap (seeded in generate_narrowed's Answered arm, Task 3) */ }
 #[tokio::test] async fn a_new_key_with_a_taken_unique_set_is_refused() {}
 #[tokio::test] async fn a_described_key_header_the_name_rule_misses_skips_repeat_detection() { /* header "X-Request-Token" described as idempotency */ }
 #[tokio::test] async fn a_replayed_refusal_is_refused_again() {}
@@ -848,6 +909,7 @@ The biggest mechanism across blind7-10: about 175 checks.
 #[tokio::test] async fn pages_from_state_never_repeat_an_item() {}
 #[tokio::test] async fn a_list_page_whose_envelope_cannot_be_filled_is_generated() { /* required free-number member → source llm */ }
 #[tokio::test] async fn an_undescribed_list_is_generated_as_today() {}
+#[tokio::test] async fn a_list_from_state_carries_the_ops_world_gap() { /* answered in prepare by state_lists::answer: the recorded call has the same world_gap as a generated list of that op */ }
 #[tokio::test] async fn a_world_revision_mid_session_keeps_lists_from_state() {
     // list (generated, seeded), create; put a revision (rebuild); list → source state, exactly the seeded items plus the created one,
     // no new Seeded records, provider called twice not three times
@@ -922,7 +984,7 @@ The biggest mechanism across blind7-10: about 175 checks.
 
 - **The blind11 "engine now" fixes:** 1 and 5 (`claude/header-ids-alt-keys`), 2 and 3 (#253), 6, 12 and 15 (`claude/effect-members`), 7, 8 and 13 (#252), plus 9 and 11 (no branch yet). They are structural fixes with no description needed, each group in its own PR. See "Base" and "Coordination" above.
 - **A description that clears a pointer to nothing** ("this answer holds no record"). In v1 an author corrects a wrong `answer.record`, identity member or target by replacing it; `""` makes the answer itself the record (new syntax, added by Task 1 for `answer.record` and `request.record` only). An explicit "none" needs a spec amendment, because a JSON `null` reads as absent.
-- **Replaying on a heuristically detected idempotency header.** Only an author-described `idempotency` header replays (Decision 10); tier 0 emits none.
+- **Replaying on a heuristically detected idempotency header.** Only an author-described `idempotency` header replays (Decision 11); tier 0 emits none.
 - **Vocabulary the diagnosis asks for beyond Task 2:**
   - `errors` (`{status, cause} → member values`), for blind11 mechanism 2, engine-made error bodies;
   - `masked` write-only members, for blind11 mechanism 9, a withheld sensitive value the request echo puts back;
