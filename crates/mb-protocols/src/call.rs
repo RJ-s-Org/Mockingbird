@@ -4359,7 +4359,7 @@ async fn next_numbers(
             continue;
         };
         let next = highest + 1;
-        body[field] = Value::from(next);
+        mb_mcm::set_member_at(body, field, Value::from(next));
         let (old, new) = (
             format!("/{resource_type}/{number}"),
             format!("/{resource_type}/{next}"),
@@ -5370,7 +5370,7 @@ async fn read_context(
 fn path_values<'f>(fields: &'f [String], data: &Value) -> Vec<(&'f str, String)> {
     fields
         .iter()
-        .filter_map(|f| Some((f.as_str(), data.get(f).and_then(id_string)?)))
+        .filter_map(|f| Some((f.as_str(), mb_mcm::member_at(data, f).and_then(id_string)?)))
         .collect()
 }
 

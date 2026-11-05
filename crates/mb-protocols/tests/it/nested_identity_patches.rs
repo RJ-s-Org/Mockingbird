@@ -236,6 +236,10 @@ struct Harness {
 }
 
 fn harness(answers: Vec<Value>) -> Harness {
+    harness_on(CONTRACT, answers)
+}
+
+fn harness_on(contract: &str, answers: Vec<Value>) -> Harness {
     let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let provider = Arc::new(Scripted {
         answers: Mutex::new(answers.into()),
@@ -243,7 +247,7 @@ fn harness(answers: Vec<Value>) -> Harness {
     });
     let rt = MockRuntime::new(
         "m",
-        Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(Arc::clone(&provider) as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -337,6 +341,7 @@ async fn a_record_keyed_inside_its_metadata_is_stored_read_and_listed_by_it() {
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_eq!(read["info"]["label"], "alpha", "{read}");
     assert_eq!(read["info"]["serial"], SERIAL, "{read}");
+    assert!(read.get("info.label").is_none(), "{read}");
     assert_eq!(h.requests(), before, "read from the store");
 
     let (status, list) = h.send("GET", "/racks/r1/gadgets", None).await;
@@ -374,10 +379,12 @@ async fn a_merge_patch_null_removes_the_member_at_any_depth() {
     assert_eq!(answer["info"]["tags"], json!({"tier": "db"}), "{answer}");
     assert_eq!(answer["settings"], json!({"B": "2"}), "{answer}");
     assert_eq!(answer["info"]["serial"], SERIAL, "{answer}");
+    assert!(answer.get("info.label").is_none(), "{answer}");
 
     let (_, read) = h.send("GET", "/racks/r1/gadgets/alpha", None).await;
     assert_eq!(read["info"]["tags"], json!({"tier": "db"}), "{read}");
     assert_eq!(read["settings"], json!({"B": "2"}), "{read}");
+    assert!(read.get("info.label").is_none(), "{read}");
 }
 
 #[tokio::test]
@@ -419,4 +426,150 @@ async fn a_compound_path_value_is_written_to_the_member_it_fits_only() {
         renamed["id"], APP_ID,
         "a name is never written into a uuid id: {renamed}"
     );
+}
+
+#[tokio::test]
+async fn an_update_settled_on_a_nested_key_keeps_it_where_it_sits() {
+    let patched = json!({
+        "kind": "Gadget",
+        "info": {"label": "alpha", "rack": "r1", "serial": SERIAL, "revision": "8",
+                 "tags": {"app": "web"}},
+        "settings": {"A": "9", "B": "2"},
+    });
+    let h = harness(vec![made_alpha(), patched]);
+    h.send("POST", "/racks/r1/gadgets", Some(alpha_request()))
+        .await;
+    let (status, answer) = h
+        .send_as(
+            "PATCH",
+            "/racks/r1/gadgets/alpha",
+            "application/merge-patch+json",
+            Some(json!({"settings": {"A": "9"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["info"]["label"], "alpha", "{answer}");
+    assert!(answer.get("info.label").is_none(), "answer: {answer}");
+    let (_, read) = h.send("GET", "/racks/r1/gadgets/alpha", None).await;
+    assert_eq!(read["settings"]["A"], "9", "{read}");
+    assert!(read.get("info.label").is_none(), "read: {read}");
+}
+
+#[tokio::test]
+async fn a_merge_patch_null_clears_a_required_member_that_may_be_null() {
+    let contract = CONTRACT.replace(
+        "    Gadget:\n      type: object\n      properties:\n        kind: {type: string}",
+        "    Gadget:\n      type: object\n      required: [kind]\n      properties:\n        kind: {type: string, nullable: true}",
+    );
+    assert_ne!(contract, CONTRACT);
+    // The model keeps the kind the patch clears.
+    let patched = json!({
+        "kind": "Gadget",
+        "info": {"label": "alpha", "rack": "r1", "serial": SERIAL, "revision": "8",
+                 "tags": {"app": "web"}},
+        "settings": {"A": "1", "B": "2"},
+    });
+    let h = harness_on(&contract, vec![made_alpha(), patched]);
+    h.send("POST", "/racks/r1/gadgets", Some(alpha_request()))
+        .await;
+    let (status, answer) = h
+        .send_as(
+            "PATCH",
+            "/racks/r1/gadgets/alpha",
+            "application/merge-patch+json",
+            Some(json!({"kind": null})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer.get("kind"), Some(&Value::Null), "{answer}");
+    let (_, read) = h.send("GET", "/racks/r1/gadgets/alpha", None).await;
+    assert_eq!(read.get("kind"), Some(&Value::Null), "{read}");
+}
+
+/// Boxes answered in a `{data: Box}` envelope; the patch sends the record itself.
+const ENVELOPED: &str = r##"
+openapi: 3.0.0
+info: {title: Boxes, version: "1"}
+paths:
+  /boxes:
+    post:
+      operationId: createBox
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Box"}
+      responses:
+        "201":
+          description: made
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BoxOut"}
+  /boxes/{box_id}:
+    parameters:
+      - {name: box_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: readBox
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BoxOut"}
+    patch:
+      operationId: patchBox
+      requestBody:
+        content:
+          application/merge-patch+json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BoxOut"}
+components:
+  schemas:
+    Box:
+      type: object
+      properties:
+        id: {type: string, readOnly: true}
+        note: {type: string}
+        color: {type: string}
+    BoxOut:
+      type: object
+      required: [data]
+      properties:
+        data: {$ref: "#/components/schemas/Box"}
+"##;
+
+#[tokio::test]
+async fn a_merge_patch_null_removes_the_member_of_an_enveloped_record() {
+    let h = harness_on(
+        ENVELOPED,
+        vec![
+            json!({"data": {"id": "b1", "note": "n", "color": "red"}}),
+            // The model keeps the note the patch removes.
+            json!({"data": {"id": "b1", "note": "n", "color": "blue"}}),
+        ],
+    );
+    let (status, made) = h
+        .send("POST", "/boxes", Some(json!({"note": "n", "color": "red"})))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let (status, answer) = h
+        .send_as(
+            "PATCH",
+            "/boxes/b1",
+            "application/merge-patch+json",
+            Some(json!({"note": null, "color": "blue"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        answer["data"],
+        json!({"id": "b1", "color": "blue"}),
+        "{answer}"
+    );
+    let (_, read) = h.send("GET", "/boxes/b1", None).await;
+    assert_eq!(read["data"], json!({"id": "b1", "color": "blue"}), "{read}");
 }

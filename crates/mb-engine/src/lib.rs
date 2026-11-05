@@ -1566,8 +1566,22 @@ impl Engine {
         let defaulted = prompt::with_body_defaults(bundle, op, call);
         let reflected = defaulted.as_ref().unwrap_or(call);
         // A `PATCH`'s `null`s that remove a member are no value to reflect: the member
-        // goes from the answer after (see [`merge_patch`]).
-        let removed = merge_patch::removals(bundle, op, reflected, schema);
+        // goes from the answer after (see [`merge_patch`]). A request that sends the
+        // record an answer holds in an envelope (`{data: Deal}`) names its places in
+        // the record, so they are found by the record's schema and removed there.
+        let in_record = op.identity.as_ref().and_then(|identity| {
+            let body = reflected.body.as_ref()?;
+            if identity.record.is_none() || identity.record_in(body).is_some() {
+                return None;
+            }
+            Some((identity, record_schema(bundle, identity, schema)?))
+        });
+        let removed = merge_patch::removals(
+            bundle,
+            op,
+            reflected,
+            in_record.as_ref().map_or(schema, |(_, record)| record),
+        );
         let stripped = (!removed.is_empty()).then(|| OperationCall {
             body: reflected
                 .body
@@ -1586,7 +1600,12 @@ impl Engine {
             ),
             None => reflect(validator, op, reflected, ctx, response),
         };
-        let response = without_removed(validator, response, &removed);
+        let response = without_removed(
+            validator,
+            response,
+            &removed,
+            in_record.map(|(identity, _)| identity),
+        );
         let response = self.keep_persona_formats(validator, call, response, draws);
         let response = if matches!(op.kind, OperationKind::Query)
             && ctx.target.is_none()
@@ -2689,30 +2708,57 @@ fn reflected(
 }
 
 /// `response` without the members a `PATCH` removed ([`merge_patch::removals`]), on a
-/// success: all of them where the answer stays valid, else each that keeps it so.
+/// success: all of them where the answer stays valid, else each that keeps it so, and
+/// one the schema needs but lets be `null` is set to `null`. The places are in the
+/// record `envelope` holds in the answer when there is one (see
+/// [`mb_mcm::Identity::record_in`]), else in the answer itself.
 fn without_removed(
     validator: &SchemaValidator,
     mut response: GeneratedResponse,
     removed: &[Vec<String>],
+    envelope: Option<&mb_mcm::Identity>,
 ) -> GeneratedResponse {
     if removed.is_empty() || !(200..300).contains(&response.status) {
         return response;
     }
-    let Some(mut body) = response.body.take() else {
+    let Some(body) = response.body.take() else {
         return response;
     };
-    let all = apply_set(&body, &merge_patch::as_patch(removed));
-    if validator.is_valid(&all) {
-        body = all;
+    let record = match envelope {
+        Some(identity) => identity.record_in(&body).cloned(),
+        None => Some(body.clone()),
+    };
+    let Some(mut record) = record else {
+        response.body = Some(body);
+        return response;
+    };
+    let holding = |record: Value| match envelope {
+        Some(identity) => {
+            let mut whole = body.clone();
+            if let Some(slot) = identity.record_in_mut(&mut whole) {
+                *slot = record;
+            }
+            whole
+        }
+        None => record,
+    };
+    let valid = |record: &Value| validator.is_valid(&holding(record.clone()));
+    let all = apply_set(&record, &merge_patch::as_patch(removed));
+    if valid(&all) {
+        record = all;
     } else {
         for path in removed {
-            let one = apply_set(&body, &merge_patch::as_patch(std::slice::from_ref(path)));
-            if validator.is_valid(&one) {
-                body = one;
+            let one = apply_set(&record, &merge_patch::as_patch(std::slice::from_ref(path)));
+            if valid(&one) {
+                record = one;
+            } else if let Some(nulled) =
+                merge_patch::with_null(&record, path).filter(|nulled| valid(nulled))
+            {
+                record = nulled;
             }
         }
     }
-    response.body = Some(body);
+    response.body = Some(holding(record));
     response
 }
 
@@ -3077,8 +3123,8 @@ fn merge_request(validator: &SchemaValidator, base: Value, body: Option<&Value>)
     overlay(validator, applied, Some(&Value::Object(whole)))
 }
 
-/// What [`merged_member`] does with a map (an object whose schema declares no members,
-/// only `additionalProperties`).
+/// What [`merged_member`] does with a map (an object whose schema declares no members:
+/// see [`is_map`]) or an object with no schema at all.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Maps {
     /// Member by member, as a `PATCH` names the keys it sets.
@@ -3100,9 +3146,14 @@ fn merged_member(
     let (Value::Object(held_members), Value::Object(over_members)) = (held, over) else {
         return over.clone();
     };
-    if schema.is_some_and(|node| {
-        schema_level(root, node, None, 0).0 || (maps == Maps::Replace && is_map(root, node, 0))
-    }) {
+    let replaced = match schema {
+        Some(node) => {
+            schema_level(root, node, None, 0).0 || (maps == Maps::Replace && is_map(root, node, 0))
+        }
+        // Nothing says what the object holds beside what the request names.
+        None => maps == Maps::Replace,
+    };
+    if replaced {
         return over.clone();
     }
     let mut out = held_members.clone();
@@ -3299,9 +3350,10 @@ fn caught_up(
 }
 
 /// Whether `node` (by its `$ref`s and `allOf`s) is a map: it declares no members and
-/// allows others by `additionalProperties`.
+/// does not close itself to others with `additionalProperties: false`. A free-form
+/// `{type: object}` is one, as JSON Schema leaves `additionalProperties` open.
 fn is_map(root: &Value, node: &Value, depth: usize) -> bool {
-    fn walk(root: &Value, node: &Value, depth: usize, declares: &mut bool, open: &mut bool) {
+    fn walk(root: &Value, node: &Value, depth: usize, declares: &mut bool, closed: &mut bool) {
         if depth > 8 {
             return;
         }
@@ -3311,29 +3363,25 @@ fn is_map(root: &Value, node: &Value, depth: usize) -> bool {
             .and_then(|r| r.strip_prefix('#'))
             .and_then(|pointer| root.pointer(pointer))
         {
-            return walk(root, target, depth + 1, declares, open);
+            return walk(root, target, depth + 1, declares, closed);
         }
         *declares |= node
             .get("properties")
             .and_then(Value::as_object)
             .is_some_and(|p| !p.is_empty());
-        *open |= match node.get("additionalProperties") {
-            Some(Value::Bool(allowed)) => *allowed,
-            Some(Value::Object(_)) => true,
-            _ => false,
-        };
+        *closed |= node.get("additionalProperties") == Some(&Value::Bool(false));
         for branch in node
             .get("allOf")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
-            walk(root, branch, depth + 1, declares, open);
+            walk(root, branch, depth + 1, declares, closed);
         }
     }
-    let (mut declares, mut open) = (false, false);
-    walk(root, node, depth, &mut declares, &mut open);
-    open && !declares
+    let (mut declares, mut closed) = (false, false);
+    walk(root, node, depth, &mut declares, &mut closed);
+    !declares && !closed
 }
 
 /// What one level of a schema in `root` says, by its `$ref`s and `allOf`s: whether it
@@ -3980,6 +4028,39 @@ mod tests {
         let two = json!({"items": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
         let out = echo_request(&v, answer, Some(&two), true);
         assert_eq!(out["items"], two["items"]);
+    }
+
+    /// A create's free-form object (`{type: object}`, no members declared and
+    /// `additionalProperties` left open) or an object with no schema at all is taken
+    /// whole from the request: the client never sees keys it did not send. A declared
+    /// object still goes member by member.
+    #[test]
+    fn echo_takes_a_free_form_or_undeclared_object_whole() {
+        let v = SchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "metadata": {"type": "object"},
+                "meta": {"type": "object", "properties": {"uid": {"type": "string"}}},
+            },
+        }))
+        .unwrap();
+        let answer = json!({
+            "id": "x",
+            "metadata": {"invented": "yes"},
+            "meta": {"uid": "u-1", "extra": {"invented": "yes"}},
+        });
+        let sent = json!({
+            "metadata": {"order": "7"},
+            "meta": {"name": "n", "extra": {"order": "7"}},
+        });
+        let out = echo_request(&v, answer, Some(&sent), true);
+        assert_eq!(out["metadata"], json!({"order": "7"}), "{out}");
+        assert_eq!(
+            out["meta"],
+            json!({"uid": "u-1", "name": "n", "extra": {"order": "7"}}),
+            "{out}"
+        );
     }
 
     /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.

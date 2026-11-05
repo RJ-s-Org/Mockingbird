@@ -84,6 +84,18 @@ pub(crate) fn without(body: &Value, removed: &[Vec<String>]) -> Value {
     out
 }
 
+/// `record` with the member at `path` set to `null`, where its parents are objects: a
+/// member the schema needs but lets be `null` is cleared that way, as it cannot go.
+pub(crate) fn with_null(record: &Value, path: &[String]) -> Option<Value> {
+    let (last, parents) = path.split_last()?;
+    let mut out = record.clone();
+    let parent = parents
+        .iter()
+        .try_fold(&mut out, |at, step| at.get_mut(step.as_str()))?;
+    parent.as_object_mut()?.insert(last.clone(), Value::Null);
+    Some(out)
+}
+
 /// The merge patch of `null`s at the places `removed` names, which [`crate::apply_set`]
 /// applies to remove them.
 pub(crate) fn as_patch(removed: &[Vec<String>]) -> Value {
@@ -294,5 +306,16 @@ paths: {}
             without(&json!({"a": {"b": null, "k": 1}, "c": null}), &removed),
             json!({"a": {"k": 1}})
         );
+    }
+
+    #[test]
+    fn with_null_sets_the_place_where_its_parents_are_objects_only() {
+        let path = vec!["a".to_owned(), "b".to_owned()];
+        assert_eq!(
+            with_null(&json!({"a": {"b": 1, "k": 2}}), &path),
+            Some(json!({"a": {"b": null, "k": 2}}))
+        );
+        assert_eq!(with_null(&json!({"a": 3}), &path), None);
+        assert_eq!(with_null(&json!({"c": 3}), &path), None);
     }
 }

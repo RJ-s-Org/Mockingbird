@@ -112,7 +112,9 @@ fn identifying_values<'a>(rt: &MockRuntime, t: &str, data: &'a Value) -> Vec<(St
     identifying(rt, t)
         .into_iter()
         .filter_map(|member| {
-            let value = data.get(&member)?.as_str().filter(|v| !v.is_empty())?;
+            let value = mb_mcm::member_at(data, &member)?
+                .as_str()
+                .filter(|v| !v.is_empty())?;
             Some((member, value))
         })
         .take(MAX_MARKED_VALUES)
