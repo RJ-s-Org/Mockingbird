@@ -1486,7 +1486,10 @@ pub(crate) async fn complete(
                     next_numbers(rt, &mut state, session, t, &mut generated).await;
                 }
                 let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-                let own = generated.body.as_ref().and_then(|b| b.get(field));
+                let own = generated
+                    .body
+                    .as_ref()
+                    .and_then(|b| mb_mcm::member_at(b, field));
                 if let Some(id) = own.and_then(id_string) {
                     target_id = Some(id);
                 }
@@ -1515,7 +1518,7 @@ pub(crate) async fn complete(
                 .identity
                 .as_ref()
                 .filter(|i| seeding && i.path_param.is_none())
-                .and_then(|i| generated.body.as_ref()?.get(&i.field).and_then(id_string));
+                .and_then(|i| i.id_in(generated.body.as_ref()?).and_then(id_string));
             if let Some(id) = own_record {
                 if let Some(body) = generated.body.clone().filter(|_| !in_path && !single_read) {
                     let resource = StoredResource {
@@ -1661,7 +1664,7 @@ pub(crate) async fn complete(
                 let created = generated
                     .body
                     .as_ref()
-                    .and_then(|b| b.get(field))
+                    .and_then(|b| mb_mcm::member_at(b, field))
                     .and_then(id_string);
                 let effects = std::mem::take(&mut generated.effects);
                 let (kept, dropped) =
@@ -2744,10 +2747,20 @@ async fn apply_effect(
     let index = rt.index();
     let set = mended_set(rt, t, &effect.set);
     let identity = index.identity_fields(t);
-    if set
-        .keys()
-        .any(|k| matches!(k.as_str(), "id" | "number") || identity.contains(k))
-    {
+    // A key held in an object member (`metadata.name`) is set by naming it there.
+    let sets_nested = |k: &str, v: &Value| {
+        identity
+            .iter()
+            .filter(|f| !f.contains('.') || !set.contains_key(f.as_str()))
+            .any(|f| {
+                f.strip_prefix(k)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .is_some_and(|rest| mb_mcm::member_at(v, rest).is_some())
+            })
+    };
+    if set.iter().any(|(k, v)| {
+        matches!(k.as_str(), "id" | "number") || identity.contains(k) || sets_nested(k, v)
+    }) {
         return Err("it sets an identity field");
     }
     if !has_schema(index, t) {
@@ -2872,7 +2885,7 @@ async fn taken_id(
     generated: &GeneratedResponse,
 ) -> Option<String> {
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
+    let id = mb_mcm::member_at(generated.body.as_ref()?, field).and_then(id_string)?;
     // A create asks for an id only under a member its request declares: one it does
     // not, the API mints over (see [`mb_engine::guards::asked_identity`]).
     let requested = match op.kind {
@@ -2882,7 +2895,7 @@ async fn taken_id(
         _ => call
             .body
             .as_ref()
-            .and_then(|b| b.get(field))
+            .and_then(|b| mb_mcm::member_at(b, field))
             .and_then(id_string),
     };
     if requested.as_deref() == Some(id.as_str()) {
@@ -3042,7 +3055,7 @@ async fn repeated_record(
         return None;
     }
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    let id = generated.body.as_ref()?.get(field).and_then(id_string)?;
+    let id = mb_mcm::member_at(generated.body.as_ref()?, field).and_then(id_string)?;
     if mb_engine::guards::asked_identity(rt.bundle(), op, call).as_deref() != Some(id.as_str()) {
         return None;
     }
@@ -3168,7 +3181,7 @@ async fn unique_create_id(
         let Some(fresh) = fresh_record(rt, op, generated.status, (body, answer), 0) else {
             return;
         };
-        let Some(fresh_id) = fresh.get(field).and_then(id_string) else {
+        let Some(fresh_id) = mb_mcm::member_at(&fresh, field).and_then(id_string) else {
             return;
         };
         if !carried.contains(&fresh_id)
@@ -3198,7 +3211,7 @@ async fn mint_create_id(
     let Some(body) = generated.body.as_ref().filter(|b| b.is_object()) else {
         return;
     };
-    if body.get(field).is_some_and(|v| !v.is_null()) {
+    if mb_mcm::member_at(body, field).is_some_and(|v| !v.is_null()) {
         return;
     }
     let named_by_path = identity
@@ -3210,7 +3223,11 @@ async fn mint_create_id(
     let carried = request_values(op, call);
     for attempt in 0..3 {
         let draw = fresh_record(rt, op, generated.status, (body, answer), attempt);
-        let Some(drawn) = draw.as_ref().and_then(|d| d.get(field)).and_then(id_string) else {
+        let Some(drawn) = draw
+            .as_ref()
+            .and_then(|d| mb_mcm::member_at(d, field))
+            .and_then(id_string)
+        else {
             return;
         };
         if !carried.contains(&drawn) && state.get(session, resource_type, &drawn).await.is_none() {
@@ -3247,7 +3264,10 @@ async fn place_new_record(
     if let Some(body) = generated.body.as_ref() {
         for attempt in 0..3 {
             let draw = fresh_record(rt, op, generated.status, (body, answer), attempt);
-            let drawn = draw.as_ref().and_then(|d| d.get(field)).and_then(id_string);
+            let drawn = draw
+                .as_ref()
+                .and_then(|d| mb_mcm::member_at(d, field))
+                .and_then(id_string);
             let Some(drawn) = drawn else {
                 break;
             };
@@ -4328,18 +4348,18 @@ async fn next_numbers(
     };
     let stored = state.list(session, resource_type, MAX_SCAN).await;
     for field in fields.iter().map(String::as_str) {
-        let Some(number) = body.get(field).and_then(Value::as_i64) else {
+        let Some(number) = mb_mcm::member_at(body, field).and_then(Value::as_i64) else {
             continue;
         };
         let highest = stored
             .iter()
-            .filter_map(|r| r.data.get(field).and_then(Value::as_i64))
+            .filter_map(|r| mb_mcm::member_at(&r.data, field).and_then(Value::as_i64))
             .max();
         let Some(highest) = highest.filter(|h| number <= *h) else {
             continue;
         };
         let next = highest + 1;
-        body[field] = Value::from(next);
+        mb_mcm::set_member_at(body, field, Value::from(next));
         let (old, new) = (
             format!("/{resource_type}/{number}"),
             format!("/{resource_type}/{next}"),
@@ -4547,7 +4567,7 @@ async fn seed_own_read(
     let id = if named != identity.field {
         // Read by another member than its key (`/issues/{issue_iid}` by `iid`): the path's
         // value is in that member, and the record goes under its own key.
-        let value = |member: &str| body.get(member).and_then(id_string);
+        let value = |member: &str| mb_mcm::member_at(body, member).and_then(id_string);
         value(&identity.field).filter(|_| value(named).as_deref() == Some(target_id))
     } else if identity.path_field.is_some() {
         // A path that may hold the key or another member (Jira's `issueIdOrKey`) tells
@@ -4556,7 +4576,7 @@ async fn seed_own_read(
     } else if path_names_identity(identity) {
         Some(target_id.to_string())
     } else {
-        body.get(&identity.field)
+        mb_mcm::member_at(body, &identity.field)
             .and_then(id_string)
             .filter(|id| id != target_id || !follows_a_param(op, identity))
     };
@@ -4701,7 +4721,7 @@ impl<'a> EntityWalk<'a> {
             .into_iter()
             .chain(["id", "number"])
             .chain(identity.map(String::as_str))
-            .find_map(|f| value.get(f).and_then(id_string))
+            .find_map(|f| mb_mcm::member_at(value, f).and_then(id_string))
         else {
             return;
         };
@@ -4913,7 +4933,7 @@ fn path_names_identity(identity: &mb_mcm::Identity) -> bool {
     let Some(param) = identity.path_param.as_deref() else {
         return false;
     };
-    param == identity.field || identity.path_field.is_some() || id_like(param)
+    param == mb_mcm::leaf_member(&identity.field) || identity.path_field.is_some() || id_like(param)
 }
 
 /// Whether a path parameter's name says it holds an id.
@@ -5303,9 +5323,7 @@ async fn read_context(
                 op.identity.as_ref().is_none_or(|identity| {
                     let named = identity.path_member();
                     named == identity.field
-                        || hit
-                            .data
-                            .get(named)
+                        || mb_mcm::member_at(&hit.data, named)
                             .and_then(id_string)
                             .is_none_or(|value| value == id)
                 })
@@ -5352,7 +5370,7 @@ async fn read_context(
 fn path_values<'f>(fields: &'f [String], data: &Value) -> Vec<(&'f str, String)> {
     fields
         .iter()
-        .filter_map(|f| Some((f.as_str(), data.get(f).and_then(id_string)?)))
+        .filter_map(|f| Some((f.as_str(), mb_mcm::member_at(data, f).and_then(id_string)?)))
         .collect()
 }
 
@@ -6197,7 +6215,10 @@ fn owner_fits(
         .fits(session, r, owner)
         .unwrap_or_else(|| match owner_evidence(rt, r, owner) {
             Some(shown) => shown,
-            None => r.data.get(field).is_some_and(Value::is_number) && !links_elsewhere(r, owner),
+            None => {
+                mb_mcm::member_at(&r.data, field).is_some_and(Value::is_number)
+                    && !links_elsewhere(r, owner)
+            }
         })
 }
 
@@ -6284,7 +6305,10 @@ async fn by_path_fields(
     }
     let rt = state.rt;
     let holds = |r: &StoredResource, field: &str| {
-        r.data.get(field).and_then(id_string).as_deref() == Some(value)
+        mb_mcm::member_at(&r.data, field)
+            .and_then(id_string)
+            .as_deref()
+            == Some(value)
             && owner.is_none_or(|o| owner_fits(rt, session, r, o, field))
     };
     for field in fields {
@@ -7187,7 +7211,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         );
         let mut seeded = Vec::new();
         for item in items {
-            let Some(id) = item.get(&field).and_then(id_string) else {
+            let Some(id) = mb_mcm::member_at(item, &field).and_then(id_string) else {
                 continue;
             };
             // Marked under this list's parent; a mention is seen to on insert.
@@ -7231,7 +7255,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
             let Some(data) = data else { return };
-            match data.get(field).and_then(id_string) {
+            match mb_mcm::member_at(&data, field).and_then(id_string) {
                 Some(id) => (id, Some(data)),
                 // An envelope the contract does not say holds the record: the one
                 // member of the answer that is a record of the type and holds what
@@ -7247,7 +7271,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
                     let Some(data) = fitting_member(rt, on, resource_type, answer, want) else {
                         return;
                     };
-                    let Some(id) = data.get(field).and_then(id_string) else {
+                    let Some(id) = mb_mcm::member_at(&data, field).and_then(id_string) else {
                         return;
                     };
                     let resource = StoredResource {
@@ -7399,7 +7423,7 @@ fn fitting_member(
             match &op.identity {
                 Some(identity) => [identity.field.as_str(), identity.path_member()]
                     .iter()
-                    .any(|f| record.get(*f).is_some_and(is_id)),
+                    .any(|f| mb_mcm::member_at(record, f).is_some_and(is_id)),
                 None => record.as_object().is_some_and(|r| r.values().any(is_id)),
             }
         }

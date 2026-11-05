@@ -632,10 +632,17 @@ fn merge_declared(
             }
         }
     }
-    (
-        Value::Object(merged),
-        (!rest.is_empty()).then_some(Value::Object(rest)),
-    )
+    let mut merged = Value::Object(merged);
+    // A key held in an object member (`metadata.name`) is pinned where it sits.
+    for field in pinned
+        .iter()
+        .filter(|f| f.contains('.') && !held.contains_key(**f))
+    {
+        if let Some(kept) = mb_mcm::member_at(stored, field) {
+            mb_mcm::set_member_at(&mut merged, field, kept.clone());
+        }
+    }
+    (merged, (!rest.is_empty()).then_some(Value::Object(rest)))
 }
 
 /// The part of `request` that `schema` declares and a client may set, by the same
@@ -926,17 +933,16 @@ pub(super) fn for_context(
         recorder.redact(&mut kept);
     }
     plan.engine.scrub(&mut kept);
-    if let (Value::Object(kept), Value::Object(given)) = (&mut kept, value) {
+    if kept.is_object() && value.is_object() {
         for field in pinned_members(rt, t) {
             let shaped = |v: &Value| {
                 v.as_str()
                     .is_some_and(mb_mcm::credentials::is_credential_value)
             };
-            if let Some(identity) = given
-                .get(field)
-                .filter(|v| identity_stays(t, field) && !shaped(v))
+            if let Some(identity) =
+                mb_mcm::member_at(value, field).filter(|v| identity_stays(t, field) && !shaped(v))
             {
-                kept.insert(field.to_string(), identity.clone());
+                mb_mcm::set_member_at(&mut kept, field, identity.clone());
             }
         }
     }
@@ -1112,7 +1118,7 @@ fn only_redacted(value: &Value) -> bool {
 /// request's) identity field, else that of the member wrapping its own type.
 fn created_id(op: &Operation, stored: &Value) -> Option<String> {
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    if let Some(id) = stored.get(field).and_then(id_string) {
+    if let Some(id) = mb_mcm::member_at(stored, field).and_then(id_string) {
         return Some(id);
     }
     let t = op.resource_type.as_deref()?;
@@ -2141,10 +2147,10 @@ fn keeping_identity(rt: &MockRuntime, held: &StoredResource, answer: &Value) -> 
         .into_iter()
         .chain(index.identity_fields(t).iter().map(String::as_str))
         .chain(index.path_fields(t).iter().map(String::as_str));
-    if let Value::Object(members) = &mut answer {
+    if answer.is_object() {
         for field in fields {
-            if let Some(value) = held.data.get(field) {
-                members.insert(field.to_string(), value.clone());
+            if let Some(value) = mb_mcm::member_at(&held.data, field) {
+                mb_mcm::set_member_at(&mut answer, field, value.clone());
             }
         }
     }
@@ -2405,7 +2411,7 @@ pub(super) async fn settle_read(
         let own = generated
             .body
             .as_ref()
-            .and_then(|b| b.get(field))
+            .and_then(|b| mb_mcm::member_at(b, field))
             .and_then(id_string);
         for stored in [Some(id.to_string()), own].into_iter().flatten() {
             if state.get(session, t, &stored).await.is_some() {

@@ -236,10 +236,12 @@ async fn held_under(
                     continue;
                 };
                 lookups += 1;
-                hit = state
-                    .get(session, &t, &id)
-                    .await
-                    .filter(|r| r.data.get(field).and_then(id_string).as_ref() == Some(value));
+                hit = state.get(session, &t, &id).await.filter(|r| {
+                    mb_mcm::member_at(&r.data, field)
+                        .and_then(id_string)
+                        .as_ref()
+                        == Some(value)
+                });
             }
             if let Some(hit) = hit
                 && !known(&t, &hit.id)

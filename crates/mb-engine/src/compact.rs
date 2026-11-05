@@ -113,7 +113,16 @@ pub(crate) fn with_echoes_required(
             wanted.push((Vec::new(), member.clone()));
         }
     } else if let Some(identity) = identity {
-        wanted.push((record.clone(), identity.field.clone()));
+        // A key held in an object member (`metadata.name`) needs that member and the
+        // key in it.
+        let mut at = record.clone();
+        let mut steps: Vec<&str> = identity.field.split('.').collect();
+        let leaf = steps.pop().unwrap_or(identity.field.as_str());
+        for step in steps {
+            wanted.push((at.clone(), step.to_owned()));
+            at.push(Step::Member(step.to_owned()));
+        }
+        wanted.push((at, leaf.to_owned()));
     } else if op.kind == OperationKind::Command(Effect::Create) {
         wanted.push((record.clone(), "id".to_string()));
     }

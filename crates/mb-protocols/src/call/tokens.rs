@@ -847,7 +847,8 @@ pub(super) async fn entity_tag(
         None => Some(b),
     });
     let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-    let id = target_id(op, call).or_else(|| record?.get(field).and_then(id_string))?;
+    let id =
+        target_id(op, call).or_else(|| mb_mcm::member_at(record?, field).and_then(id_string))?;
     let mut state = StateAccess::new(rt);
     let doc = state
         .get(&plan.session, INTERNAL_TYPE, &key(t, &id))
