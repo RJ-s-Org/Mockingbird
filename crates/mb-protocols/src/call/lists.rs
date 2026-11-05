@@ -35,7 +35,11 @@
 //! (`email` for `billing_address.email`), filters on that one when exactly one object
 //! member of the items declares a member of that very name (ignoring case, with no
 //! plural or stem: `emails` reaches no `email` there), under the same guards: `street`,
-//! which both `billing_address` and `shipping_address` declare, names neither.
+//! which both `billing_address` and `shipping_address` declare, names neither. The
+//! member there must declare a `format` (`email`), one the parameter declares too if it
+//! declares one, and that no member of the items declares: free text one object down
+//! (`brand.name`, `country.code`) is commonly a referenced record's own label, and a
+//! `name` filter on products means the products' own, so it names nothing there.
 //!
 //! A parameter that names no member changes nothing, whatever its value: a bound
 //! (`before`, `oldest`) or a search naming an item's id leaves it in, as which side of
@@ -199,7 +203,9 @@ pub(super) fn filtered_member<'a>(
 /// `param`, declared by `query`, names, with the object member holding it: when no
 /// member of the items is named so, and exactly one of their object members declares
 /// one of that very name, ignoring case (`email` in `billing_address`; `emails` names
-/// none), the two declaring the one same type, as [`filtered_member`] has it.
+/// none), the two declaring the one same type, as [`filtered_member`] has it. The
+/// member declares a `format` the parameter does not contradict and no member of the
+/// items declares (see the module's doc).
 fn nested_filtered_member<'a>(
     bundle: &'a mb_mcm::Bundle,
     query: Option<&'a Value>,
@@ -230,6 +236,31 @@ fn nested_filtered_member<'a>(
     });
     let (parent, member) = found.next()?;
     if found.next().is_some() {
+        return None;
+    }
+    // Only a value of a declared kind (`format: email`) is what the parameter means one
+    // object down: free text there (`brand.name`, `country.code`) is commonly a
+    // referenced record's own label, while the parameter means the items' own. And
+    // the items declaring a member of that kind themselves may be what it means.
+    let format = member.format()?;
+    let (param_parts, _) = schema_parts(bundle, Some(declared));
+    let param_format = param_parts
+        .iter()
+        .find_map(|p| p.get("format").and_then(Value::as_str));
+    if param_format.is_some_and(|f| f != format) {
+        return None;
+    }
+    let own_of_format = item_parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flat_map(|props| props.values())
+        .any(|schema| {
+            let (parts, _) = schema_parts(bundle, Some(schema));
+            parts
+                .iter()
+                .any(|p| p.get("format").and_then(Value::as_str) == Some(format))
+        });
+    if own_of_format {
         return None;
     }
     Some((parent, fits_param(bundle, declared, member)?))

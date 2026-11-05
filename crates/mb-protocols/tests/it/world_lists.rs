@@ -4149,7 +4149,7 @@ components:
           type: object
           properties:
             street: {type: string}
-            email: {type: string}
+            email: {type: string, format: email}
         shipping_address: {$ref: "#/components/schemas/Address"}
 "##;
 
@@ -4188,6 +4188,127 @@ async fn a_member_two_objects_declare_is_no_filter() {
     assert_eq!(order_ids(&body), [1, 2], "{body}");
 }
 
+/// Products whose `brand`, one object down, declares a `name`, as a referenced
+/// record does, beside the products' own `title`; the list declares a bodiless `204`.
+const BRANDED: &str = r##"
+openapi: 3.0.0
+info: {title: Products, version: "1"}
+paths:
+  /products:
+    get:
+      operationId: listProducts
+      parameters:
+        - {name: name, in: query, description: Filter by product name, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Product"}}
+        "204": {description: No product matches.}
+    post:
+      operationId: createProduct
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Product"}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Product"}
+components:
+  schemas:
+    Product:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        brand:
+          type: object
+          properties:
+            name: {type: string}
+"##;
+
+/// `name` names no member of the products, and `brand.name` is free text, which a
+/// sub-record's label (`name`, `code`, `type`) commonly is: it is no filter, so the
+/// model's products for `name=Widget` stand under a `200`, never the declared `204`.
+#[tokio::test]
+async fn a_free_text_member_one_object_down_is_no_filter() {
+    let answer = json!([
+        {"id": 1, "title": "Widget", "brand": {"name": "Acme"}},
+        {"id": 2, "title": "Widget Pro", "brand": {"name": "Globex"}},
+    ]);
+    let api = api_of(BRANDED, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/products?name=Widget", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// The products the session created fill a list answer whose `data` the model left
+/// out: `name`, which names only the free-text `brand.name` one object down, drops
+/// none of them, so the list is no `204`.
+#[tokio::test]
+async fn stored_records_are_not_filtered_on_a_free_text_member_one_object_down() {
+    let widget = json!({"id": 1, "title": "Widget", "brand": {"name": "Acme"}});
+    let pro = json!({"id": 2, "title": "Widget Pro", "brand": {"name": "Globex"}});
+    let enveloped = BRANDED.replace(
+        "schema: {type: array, items: {$ref: \"#/components/schemas/Product\"}}",
+        "schema: {type: object, properties: {data: {type: array, items: {$ref: \"#/components/schemas/Product\"}}}}",
+    );
+    assert!(enveloped.contains("properties: {data:"));
+    let api = api_of(
+        &enveloped,
+        true,
+        vec![
+            Ok(widget.to_string()),
+            Ok(pro.to_string()),
+            Ok(json!({}).to_string()),
+        ],
+    );
+    for product in [&widget, &pro] {
+        let (status, _) = api.call("POST", "/products", Some(product.clone())).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, body) = api.call("GET", "/products?name=Widget", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body["data"]), [1, 2], "{body}");
+}
+
+/// A formatted member one object down (`billing_address.email`) is no filter when the
+/// items declare a member of that format themselves (`contact`): the parameter may mean
+/// that one.
+#[tokio::test]
+async fn a_format_the_items_declare_themselves_is_no_filter_one_object_down() {
+    let contract = NESTED.replace(
+        "        id: {type: integer}\n        billing_address:",
+        "        id: {type: integer}\n        contact: {type: string, format: email}\n        billing_address:",
+    );
+    assert!(contract.contains("contact: {type: string, format: email}"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/orders?email=ann@example.com", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// A parameter declaring another format than the member one object down
+/// (`format: uri` against `format: email`) names no member there.
+#[tokio::test]
+async fn a_parameter_of_another_format_is_no_filter_one_object_down() {
+    let contract = NESTED.replace(
+        "- {name: email, in: query, schema: {type: string}}",
+        "- {name: email, in: query, schema: {type: string, format: uri}}",
+    );
+    assert!(contract.contains("schema: {type: string, format: uri}"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?email=ann@example.com").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
 /// A list a filter leaves empty, of an operation declaring a bodiless `204` beside its
 /// list, answers that `204` with no body.
 #[tokio::test]
@@ -4199,6 +4320,46 @@ async fn an_empty_list_answers_its_declared_no_content() {
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     assert_eq!(body, Value::Null);
+}
+
+/// The `204` an empty list answers carries the headers the `204` declares, never
+/// those only its `200` declares (a required total count), so it stays a valid answer.
+#[tokio::test]
+async fn the_no_content_carries_its_own_headers_only() {
+    let contract = NESTED
+        .replace(
+            "        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema: {type: array, items: {$ref: \"#/components/schemas/Order\"}}\n        \"204\": {description: No order matches.}",
+            "        \"200\":\n          description: ok\n          headers:\n            X-Total-Count: {required: true, schema: {type: integer}}\n          content:\n            application/json:\n              schema: {type: array, items: {$ref: \"#/components/schemas/Order\"}}\n        \"204\":\n          description: No order matches.\n          headers:\n            X-Request-Id: {required: true, schema: {type: string}}",
+        );
+    assert!(contract.contains("X-Total-Count") && contract.contains("X-Request-Id"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/orders?email=nobody@example.com")
+        .body(Body::empty())
+        .unwrap();
+    let resp = api.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("x-total-count").is_none(),
+        "{:?}",
+        resp.headers()
+    );
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "{:?}",
+        resp.headers()
+    );
+    assert!(
+        resp.headers().get("content-type").is_none(),
+        "{:?}",
+        resp.headers()
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty());
 }
 
 /// A list declaring no `204` answers an empty list as its `200`; with consistency off,
@@ -4373,7 +4534,7 @@ async fn a_comma_separated_array_reaches_the_model_split() {
 
 /// Places paged by `limit`, `offset` and `page`, whose members `timezone.offset` and
 /// `source.page` share the paging parameters' names one object down, and whose
-/// `source.label` a `label` filter names; the list declares a bodiless `204`.
+/// `source.email` an `email` filter names; the list declares a bodiless `204`.
 const PAGED_NESTED: &str = r##"
 openapi: 3.0.0
 info: {title: Places, version: "1"}
@@ -4385,7 +4546,7 @@ paths:
         - {name: limit, in: query, schema: {type: integer, default: 10}}
         - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
         - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
-        - {name: label, in: query, schema: {type: string}}
+        - {name: email, in: query, schema: {type: string}}
       responses:
         "200":
           description: ok
@@ -4410,20 +4571,23 @@ components:
           type: object
           properties:
             page: {type: integer}
-            label: {type: string}
+            email: {type: string, format: email}
 "##;
 
-fn place(id: u64, offset: u64, page: u64, label: &str) -> Value {
+fn place(id: u64, offset: u64, page: u64, email: &str) -> Value {
     json!({
         "id": id,
         "name": format!("Place {id}"),
         "timezone": {"name": "UTC", "offset": offset},
-        "source": {"page": page, "label": label},
+        "source": {"page": page, "email": email},
     })
 }
 
 fn two_places() -> Value {
-    json!([place(1, 0, 3, "north"), place(2, 1, 4, "south")])
+    json!([
+        place(1, 0, 3, "north@example.com"),
+        place(2, 1, 4, "south@example.com"),
+    ])
 }
 
 /// A page position (`offset`, `page`) is no filter on a member one object down that
@@ -4444,19 +4608,24 @@ async fn a_page_position_is_no_filter_one_object_down() {
     }
 }
 
-/// On the same list, a filter one object down (`label`, `source.label`) that matches
+/// On the same list, a filter one object down (`email`, `source.email`) that matches
 /// nothing answers the declared `204`, with or without a page position beside it; one
 /// that matches keeps its place under a `200`.
 #[tokio::test]
 async fn a_nested_filter_beside_a_page_position_answers_no_content() {
-    for uri in ["/places?label=east", "/places?page=1&label=east"] {
+    for uri in [
+        "/places?email=east@example.com",
+        "/places?page=1&email=east@example.com",
+    ] {
         let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
         let (status, body) = api.call("GET", uri, None).await;
         assert_eq!(status, StatusCode::NO_CONTENT, "{uri}: {body}");
         assert_eq!(body, Value::Null, "{uri}");
     }
     let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
-    let (status, body) = api.call("GET", "/places?offset=0&label=south", None).await;
+    let (status, body) = api
+        .call("GET", "/places?offset=0&email=south@example.com", None)
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(order_ids(&body), [2], "{body}");
 }
