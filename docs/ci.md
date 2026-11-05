@@ -87,9 +87,10 @@ The snapshot directory:
 | `sessions/<mock>/<session>.json` | `snapshot export` | Each session's stored resources, seeded on `serve --replay` and by `snapshot import`. |
 | `mocks/<mock>.json`, `contracts/<mock>.<ext>` | `snapshot export` | The mocks and their active contracts, for `snapshot import` into a server without the config (mocks created through the API or the console). A mock file carries `name`, `route_prefix`, `persona`, `consistency`, `unknown_ids`, `hosts`, `path_rewrite` and `header_overrides`, plus `chaos`, `limits` and `default_scenario` when exported with `--include` (below). Never the LLM profile, data-plane auth or webhooks, which name profiles, secrets and targets of the source environment (set them on the target after the import). |
 | `scenarios/<mock>/<scenario>.json` | `snapshot export --include scenarios` | Each scenario of the mock, as its `PUT /mocks/{mock}/scenarios/{name}` body. |
+| `worlds/<mock>.json` | `snapshot export --include world` | The newest [world description](world.md#in-a-snapshot) overlay of the mock's active contract version, added by `snapshot import` as a revision by `user`. |
 | `snapshot.json` | `snapshot export` | Format version and the workspace the sessions came from; with `--include`, the parts it added (`"include": ["scenarios", "chaos", "limits"]`). |
 
-By default a snapshot leaves out each mock's scenarios, chaos and limits:
+By default a snapshot leaves out each mock's scenarios, chaos, limits and world description:
 they shape test runs, and a snapshot committed for one suite should not
 force errors or latency on another. Opt in per export with `--include`
 (comma-separated, or repeated):

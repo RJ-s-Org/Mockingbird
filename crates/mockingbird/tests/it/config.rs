@@ -746,6 +746,133 @@ async fn reconcile_carries_the_world_description_to_a_new_version() {
     assert_eq!(carried.author, mb_mcm::world::Author::User);
 }
 
+/// [`BASIC`] with `mocks.orders.world: orders.world.yaml`.
+fn with_world() -> String {
+    BASIC.replace(
+        "    contract: orders.yaml\n",
+        "    contract: orders.yaml\n    world: orders.world.yaml\n",
+    )
+}
+
+/// A world description of the orders fixture: one entry that resolves and
+/// one on an operation the contract does not have.
+const ORDERS_WORLD: &str = r#"
+version: 1
+operations:
+  getOrder:
+    not_found: 404
+  noSuchOperation:
+    not_found: 404
+"#;
+
+#[tokio::test]
+async fn config_world_file_becomes_a_revision() {
+    let ws = Workspace::new();
+    std::fs::write(ws.dir.path().join("orders.world.yaml"), ORDERS_WORLD).unwrap();
+    let cfg = ws.load(&with_world());
+    assert_eq!(
+        cfg.mocks["orders"].world.as_deref(),
+        Some(ws.dir.path().join("orders.world.yaml").as_path()),
+        "resolved against the config file's directory"
+    );
+    let store = store().await;
+    // The stale entry is refused (and logged), not a startup failure.
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let revision = store
+        .latest_world_revision(mock.id, 1)
+        .await
+        .unwrap()
+        .expect("a revision from the config file");
+    assert_eq!(revision.revision, 1);
+    assert_eq!(revision.author, mb_mcm::world::Author::User);
+    assert_eq!(
+        revision.document,
+        json!({"version": 1, "operations": {"getOrder": {"not_found": 404}}}),
+        "only the entries that validate are stored"
+    );
+
+    // A JSON file works too, and an unreadable one fails naming its path.
+    std::fs::write(
+        ws.dir.path().join("orders.world.json"),
+        r#"{"version": 1, "operations": {"getOrder": {"not_found": 404}}}"#,
+    )
+    .unwrap();
+    let cfg = ws.load(&BASIC.replace(
+        "    contract: orders.yaml\n",
+        "    contract: orders.yaml\n    world: orders.world.json\n",
+    ));
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let missing = ws.load(&BASIC.replace(
+        "    contract: orders.yaml\n",
+        "    contract: orders.yaml\n    world: missing.world.yaml\n",
+    ));
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &missing)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("missing.world.yaml"), "{err:#}");
+    assert_eq!(
+        store.list_world_revisions(mock.id, 1).await.unwrap().len(),
+        1,
+        "the JSON file holds the same entries, and a failed reconcile writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn unchanged_config_world_adds_no_revision() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    std::fs::write(&world, ORDERS_WORLD).unwrap();
+    let cfg = ws.load(&with_world());
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.is_empty(), "{again:?}");
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.list_world_revisions(mock.id, 1).await.unwrap().len(),
+        1
+    );
+
+    // Editing the file adds a revision on top.
+    std::fs::write(
+        &world,
+        "version: 1\noperations:\n  getOrder:\n    not_found: 404\n  deleteOrder:\n    kind: delete\n",
+    )
+    .unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["orders"]);
+    let latest = store
+        .latest_world_revision(mock.id, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.revision, 2);
+    assert!(
+        latest.document["operations"]["deleteOrder"].is_object(),
+        "{}",
+        latest.document
+    );
+}
+
 async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
     let mock = store
         .create_mock(

@@ -229,3 +229,93 @@ async fn an_opt_in_snapshot_restores_scenarios_chaos_and_limits() {
     expected[0].as_object_mut().unwrap().remove("source");
     assert_eq!(scenarios, expected);
 }
+
+/// `snapshot export --include world` writes the newest overlay of each
+/// mock's active version to `worlds/<mock>.json`, and `snapshot import`
+/// adds it to the created mock as a revision by `user`; a plain export
+/// writes no world.
+#[tokio::test]
+async fn snapshot_roundtrips_world() {
+    use mockingbird::snapshot::{
+        self, SnapshotArgs, SnapshotCommand, SnapshotExportArgs, SnapshotPart,
+    };
+    let source = start().await;
+    seed(&source, &orders_with_conflict()).await;
+    let http = reqwest::Client::new();
+    let w = format!("{}/api/v1/workspaces/default", source.admin);
+    let world = json!({"version": 1, "operations": {"getOrder": {"not_found": 404}}});
+    for author in ["agent", "user"] {
+        let mut doc = world.clone();
+        if author == "agent" {
+            doc["operations"]["deleteOrder"] = json!({"kind": "delete"});
+        }
+        let r = http
+            .put(format!(
+                "{w}/mocks/orders/contracts/active/world?author={author}"
+            ))
+            .json(&doc)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let plain = tmp.path().join("plain");
+    snapshot::run(
+        &source.admin,
+        None,
+        "default",
+        SnapshotCommand::Export(SnapshotArgs { dir: plain.clone() }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !plain.join("worlds").exists(),
+        "a default export has no world"
+    );
+
+    let full = tmp.path().join("full");
+    let args = SnapshotExportArgs::new(&full, [SnapshotPart::World]);
+    let out = snapshot::export_with(&source.admin, None, "default", &args)
+        .await
+        .unwrap();
+    assert_eq!(out["mocks"][0]["world"], 2, "{out}");
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(full.join("worlds/orders.json")).unwrap()).unwrap();
+    assert_eq!(written, world, "the newest overlay");
+
+    let target = start().await;
+    let out = snapshot::run(
+        &target.admin,
+        None,
+        "default",
+        SnapshotCommand::Import(SnapshotArgs { dir: full.clone() }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["created_mocks"], json!(["orders"]), "{out}");
+    assert_eq!(out["restored_worlds"], 1, "{out}");
+    let t = format!("{}/api/v1/workspaces/default", target.admin);
+    let revisions: Value = http
+        .get(format!("{t}/mocks/orders/contracts/active/world/revisions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(revisions.as_array().map(Vec::len), Some(1), "{revisions}");
+    assert_eq!(revisions[0]["author"], "user");
+    let restored: Value = http
+        .get(format!(
+            "{t}/mocks/orders/contracts/active/world/revisions/1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restored["document"], world, "{restored}");
+}

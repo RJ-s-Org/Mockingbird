@@ -4,7 +4,8 @@
 //! answer for falls back to the faker), and `mockingbird snapshot
 //! export|import` copy contracts and session state between a running
 //! server and the same directory (`snapshot export --include` adds the
-//! mocks' scenarios, chaos and limits; see [`SnapshotPart`]).
+//! mocks' scenarios, chaos, limits and world descriptions; see
+//! [`SnapshotPart`]).
 //!
 //! Answers are matched on the prompt, not on the HTTP request: the prompt
 //! already carries everything that shapes an answer (the operation, its
@@ -618,6 +619,9 @@ pub enum SnapshotPart {
     Chaos,
     /// The mock's limits.
     Limits,
+    /// The newest world description overlay of the mock's active contract
+    /// version (`worlds/<mock>.json`), imported as a revision by `user`.
+    World,
 }
 
 impl SnapshotPart {
@@ -628,6 +632,7 @@ impl SnapshotPart {
             SnapshotPart::Scenarios => "scenarios",
             SnapshotPart::Chaos => "chaos",
             SnapshotPart::Limits => "limits",
+            SnapshotPart::World => "world",
         }
     }
 }
@@ -644,8 +649,9 @@ impl std::fmt::Display for SnapshotPart {
 #[derive(Args, Debug)]
 pub(crate) struct IncludeArgs {
     /// Also export these mock settings (comma-separated): `scenarios` (with
-    /// the default scenario), `chaos`, `limits`. None by default; `snapshot
-    /// import` restores them on the mocks it creates.
+    /// the default scenario), `chaos`, `limits`, `world` (the active
+    /// contract's world description). None by default; `snapshot import`
+    /// restores them on the mocks it creates.
     #[arg(long, value_enum, value_delimiter = ',', value_name = "PART")]
     pub(crate) include: Vec<SnapshotPart>,
 }
@@ -803,12 +809,16 @@ const MOCK_FIELDS: &[&str] = &[
 /// The directory of each mock's exported scenarios.
 const SCENARIOS_DIR: &str = "scenarios";
 
+/// The directory of the mocks' exported world descriptions.
+const WORLDS_DIR: &str = "worlds";
+
 /// The mock-view fields each [`SnapshotPart`] adds to a mock file.
 fn part_fields(part: SnapshotPart) -> &'static [&'static str] {
     match part {
         SnapshotPart::Scenarios => &["default_scenario"],
         SnapshotPart::Chaos => &["chaos"],
         SnapshotPart::Limits => &["limits"],
+        SnapshotPart::World => &[],
     }
 }
 
@@ -921,6 +931,35 @@ async fn export(api: &Api<'_>, dir: &Path, include: &[SnapshotPart]) -> anyhow::
             }
             entry["scenarios"] = json!(written);
         }
+        let world_file = dir.join(WORLDS_DIR).join(format!("{name}.json"));
+        // A re-export replaces the mock's world, and one without `world`
+        // drops it.
+        if world_file.exists() {
+            std::fs::remove_file(&world_file)
+                .with_context(|| format!("clearing {}", world_file.display()))?;
+        }
+        if include.contains(&SnapshotPart::World) {
+            let mut exported = 0;
+            if let Some(version) = mock["active_version"].as_i64() {
+                let version = version.to_string();
+                let world = ["mocks", name, "contracts", &version, "world"];
+                let revisions = api.get(&[&world[..], &["revisions"]].concat()).await?;
+                if let Some(newest) = revisions
+                    .as_array()
+                    .and_then(|r| r.first())
+                    .and_then(|r| r["revision"].as_i64())
+                {
+                    let n = newest.to_string();
+                    let revision = api.get(&[&world[..], &["revisions", &n]].concat()).await?;
+                    write(
+                        &world_file,
+                        &serde_json::to_vec_pretty(&revision["document"])?,
+                    )?;
+                    exported = newest;
+                }
+            }
+            entry["world"] = json!(exported);
+        }
         summary.push(entry);
     }
     let mut meta = json!({ "version": FORMAT_VERSION, "workspace": api.workspace });
@@ -938,6 +977,7 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
     }
     let mut created = Vec::new();
     let mut restored = 0;
+    let mut worlds = 0;
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir.join("mocks")) {
         Ok(entries) => entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -972,8 +1012,8 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
             .await
             .map_err(api_error)
             .with_context(|| format!("creating mock {name}"))?;
-        if let Some(contract) = contract {
-            let file = dir.join(&contract);
+        if let Some(contract) = &contract {
+            let file = dir.join(contract);
             let source = mb_import::read_source(&file)
                 .with_context(|| format!("cannot read {}", file.display()))?;
             let content_type = client::contract_media_type(&file, &source);
@@ -1007,6 +1047,26 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
             .with_context(|| format!("restoring scenario {scenario} of {name}"))?;
             restored += 1;
         }
+        let world_file = dir.join(WORLDS_DIR).join(format!("{name}.json"));
+        if contract.is_some() && world_file.exists() {
+            let bytes = std::fs::read(&world_file)
+                .with_context(|| format!("reading {}", world_file.display()))?;
+            let world: Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("{} is not JSON", world_file.display()))?;
+            client::api(
+                api.admin_url,
+                api.token,
+                Some(api.workspace),
+                Method::PUT,
+                &["mocks", &name, "contracts", "active", "world"],
+                &[("author", "user".to_string())],
+                Some(world),
+            )
+            .await
+            .map_err(api_error)
+            .with_context(|| format!("restoring the world description of {name}"))?;
+            worlds += 1;
+        }
         if let Some(default_scenario) = default_scenario {
             api.json(
                 Method::PATCH,
@@ -1034,6 +1094,9 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
     let mut out = json!({ "dir": dir, "created_mocks": created, "seeded_sessions": seeded });
     if restored > 0 {
         out["restored_scenarios"] = json!(restored);
+    }
+    if worlds > 0 {
+        out["restored_worlds"] = json!(worlds);
     }
     Ok(out)
 }

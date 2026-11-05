@@ -13,7 +13,7 @@ A description is optional: a contract alone still works. It is not a dataset and
 | 0 | `heuristic` | Always, from what the importer already puts in the compiled contract: each operation's kind, type and target, where its answer holds the record, each type's identity member. |
 | 1 | `agent` | Your coding assistant, through MCP or the CLI. The `mockingbird-world` skill tells it how, and the `mockingbird-mock-api` skill tells it to review the description after every import. |
 | 2 | `llm` | Mockingbird's configured LLM, when asked (planned). |
-| 3 | `user` | A person, through the CLI or Admin API. |
+| 3 | `user` | A person, through the CLI, the Admin API or a config file's `world:` file. |
 
 A later tier overrides an earlier one entry by entry. `get_world` reports the author of each entry a revision set; every entry it does not list is `heuristic`.
 
@@ -172,4 +172,12 @@ The world tools act on the active contract version unless they are given `versio
 
 ## In a config file
 
-A `world:` file for mocks declared in `mockingbird.yaml` is planned but not available yet: the config file does not take that key. Until it is, describe a config-file mock through the CLI, MCP or Admin API.
+A mock declared in `mockingbird.yaml` takes its description from a file named by `mocks.<name>.world` (for example `world: orders.world.yaml` next to `contract: orders.yaml`), relative to the config file: YAML, or JSON for a `.json` file. See [the configuration reference](configuration.md#mocks).
+
+The file is an overlay, the same document `put_world` takes. On every reconcile (startup and `--watch`) Mockingbird validates it against the active contract version and, when the entries that apply differ from the newest revision's, stores them as a new revision by `user`; an unchanged file adds no revision. Refused entries (for example one naming an operation the contract no longer has) are logged at warn level and the rest applies. A file that cannot be read or parsed, or is refused whole (over 256 KiB, nested over 32 deep, not of the format's shape), fails the reconcile and names the file.
+
+The file wins: an edit made through the API or MCP is replaced by the file's entries at the next reconcile. Removing the `world:` key leaves the stored revisions as they are.
+
+## In a snapshot
+
+`mockingbird snapshot export --include world` writes the newest overlay of each mock's active contract version to `worlds/<mock>.json`, and `snapshot import` adds it as a revision by `user` to each mock it creates, after uploading its contract. A plain export writes no world.

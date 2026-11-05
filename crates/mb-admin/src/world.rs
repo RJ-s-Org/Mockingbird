@@ -947,19 +947,53 @@ fn parse_json(bytes: &[u8]) -> WorldResult<Value> {
 /// naming the first entry that is not). The entries are validated against
 /// a bundle later, one by one.
 fn check_document(doc: &Value) -> WorldResult<World> {
-    let bytes = serde_json::to_vec(doc).map_err(StoreError::from)?;
-    check_size(&bytes).map_err(WorldError::refused)?;
-    let world = serde_json::from_value::<World>(doc.clone()).map_err(|e| {
-        WorldError::refused(Refusal {
-            path: shape_error_path(doc),
-            code: RefusalCode::Invalid,
-            message: format!("not a world description entry: {e}"),
-        })
+    check_world(doc).map_err(WorldError::refused)
+}
+
+/// [`check_document`], refusing with the [`Refusal`] itself.
+fn check_world(doc: &Value) -> Result<World, Refusal> {
+    let bytes = serde_json::to_vec(doc).map_err(|e| Refusal {
+        path: String::new(),
+        code: RefusalCode::Invalid,
+        message: format!("the description does not serialize: {e}"),
+    })?;
+    check_size(&bytes)?;
+    let world = serde_json::from_value::<World>(doc.clone()).map_err(|e| Refusal {
+        path: shape_error_path(doc),
+        code: RefusalCode::Invalid,
+        message: format!("not a world description entry: {e}"),
     })?;
     if let Some(r) = bad_pointer(&world) {
-        return Err(WorldError::refused(r));
+        return Err(r);
     }
     Ok(world)
+}
+
+/// The overlay a write of `doc` against `bundle` stores, as the Admin API's
+/// `PUT …/world` would: the entries that validate, without types and
+/// operations left with none, and the entries refused.
+///
+/// For writers outside the Admin API (config-file mocks). It does what the
+/// `PUT` checks do before storing: the size and depth limits, the format's
+/// shape and the pointers, then [`validate`].
+///
+/// # Errors
+///
+/// The [`Refusal`] of a document refused whole: over
+/// [`mb_mcm::world::MAX_BYTES`] (`too_large`), too deep, not of the format's
+/// shape or with a pointer that does not parse (`invalid`, naming where).
+pub fn validated_overlay(doc: &Value, bundle: &Bundle) -> Result<Validation, Refusal> {
+    let world = check_world(doc)?;
+    Ok(trimmed(validate(&world, bundle)))
+}
+
+/// `v` without the types and operations its `applied` has no entry for.
+fn trimmed(mut v: Validation) -> Validation {
+    v.applied.types.retain(|_, t| *t != TypeDesc::default());
+    v.applied
+        .operations
+        .retain(|_, op| *op != OpDesc::default());
+    v
 }
 
 /// The first request or answer pointer of `world` that does not parse.
@@ -1162,13 +1196,8 @@ async fn store_validated(
     created_by: &str,
     expect: Option<i64>,
 ) -> WorldResult<(WorldRevision, Vec<Refusal>, World)> {
-    let Validation {
-        mut applied,
-        refused,
-    } = validate(world, &v.bundle);
     // A type or operation left with no entry sets nothing.
-    applied.types.retain(|_, t| *t != TypeDesc::default());
-    applied.operations.retain(|_, op| *op != OpDesc::default());
+    let Validation { applied, refused } = trimmed(validate(world, &v.bundle));
     let document = serde_json::to_value(&applied).map_err(StoreError::from)?;
     let added = st
         .store
