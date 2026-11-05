@@ -36,6 +36,7 @@ mod minted;
 #[cfg(test)]
 mod owner_tie_tests;
 mod pages;
+mod ranges;
 mod repeats;
 mod runs;
 mod tokens;
@@ -664,6 +665,18 @@ pub(crate) async fn entity_tag(
     tokens::entity_tag(rt, plan, call, generated).await
 }
 
+/// The `Next-Range` header of a `206` page of a list paged by its `Range` header (see
+/// [`ranges`]).
+#[cfg(feature = "http-rest")]
+pub(crate) fn next_range(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    generated: &GeneratedResponse,
+) -> Option<(String, String)> {
+    ranges::next_range(rt, plan, call, generated)
+}
+
 /// The stored target and related resources a read-only generation of `call`
 /// takes into account (as [`generate_once`] reads them, but for the hops,
 /// which its callers do not read); the session is marked used.
@@ -927,6 +940,22 @@ pub(crate) async fn prepare<'a>(
         let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
         return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
+    }
+
+    // A read whose `If-None-Match` holds the stored record's entity tag: `304`, at once,
+    // unless writes the stored copy does not show yet make the read catch up.
+    if !foreign_key
+        && let Some(held) = &target
+        && let Some(answer) = tokens::not_modified(&mut state, plan, call, held)
+            .instrument(state_span())
+            .await
+        && !write_memory::recall(&mut state, plan, call, target_id.as_deref(), true)
+            .instrument(state_span())
+            .await
+            .forces(rt, plan, call)
+    {
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(answer);
     }
 
     // A write sending a token its record held before is refused before generating.
@@ -1563,6 +1592,15 @@ pub(crate) async fn complete(
                     deleted::mark(&mut state, session, (op, call), t, id, target.as_ref()).await;
                 }
             }
+        }
+        // A list paged by its `Range` header: ordered and cut from what the session
+        // holds, once its own items are seeded.
+        if is_query
+            && target_id.is_none()
+            && answered.is_none()
+            && (200..300).contains(&generated.status)
+        {
+            ranges::apply(&mut state, (plan, call), resource_type, &mut generated).await;
         }
         // What else the envelope said, for a stored record to be answered the same.
         if let Some(answer) = answered.as_ref().filter(|_| !unstored) {

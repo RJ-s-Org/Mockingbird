@@ -53,6 +53,20 @@
 //!
 //! HTTP, an LLM and `consistency: on` only, with no scenario or forced status:
 //! everything else is as it was.
+//!
+//! **Conditional reads** (`If-None-Match`, RFC 9110 §13.1.2). A read declaring a `304`
+//! response and an `If-None-Match` request header, of a record the session stores, is
+//! answered `304` with no body, before any LLM call, when the header's entity tags (the
+//! list parsed as `If-Match`'s is, compared weakly, by opaque value) hold the record's
+//! current entity tag, or the header is `*`. The entity tag is the member `If-Match`
+//! was seen paired with for the record, else the one string member the server manages
+//! (as above) whose value a sent tag holds, else, for `*`, the one such member the
+//! record holds. The `304` carries the tag in an `ETag` header (its declared name, if
+//! any). A record nothing stores, a read sending no such header, one whose tags hold
+//! no such member's value (or several members'), a record with no such member, or one
+//! whose stored copy does not show earlier writes yet (the read catches up, see
+//! [`write_memory`]), is answered as before. This needs `consistency: on` and a plain
+//! call over HTTP, not an LLM: nothing is generated.
 
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
@@ -67,6 +81,8 @@ const INDEX: &str = "#tokens";
 const MAX_VALUE_CHARS: usize = 256;
 /// The standard precondition header (RFC 9110 §13.1.1), lowercase.
 const IF_MATCH: &str = "if-match";
+/// The conditional read's header (RFC 9110 §13.1.2), lowercase.
+const IF_NONE_MATCH: &str = "if-none-match";
 
 /// What a write found of its record's tokens, for its answer and for after it.
 #[derive(Default)]
@@ -300,10 +316,15 @@ fn server_managed(rt: &MockRuntime, t: &str, member: &str) -> bool {
 }
 
 /// Whether `If-Match` on `op` may hold member `member` of a stored `t`: `op` declares a
-/// `409` or a `412`, and the member is a string the server manages.
+/// `409` or a `412`, and the member is an [`etag_member`].
 fn if_match_member(rt: &MockRuntime, op: &Operation, t: &str, member: &str) -> bool {
-    declares_conflict(op)
-        && server_managed(rt, t, member)
+    declares_conflict(op) && etag_member(rt, t, member)
+}
+
+/// Whether member `member` of a stored `t` may be its entity tag: a string the server
+/// manages, of a token's shape.
+fn etag_member(rt: &MockRuntime, t: &str, member: &str) -> bool {
+    server_managed(rt, t, member)
         && token_schema(rt, t, member, false).is_some_and(|schema| {
             let node = deref_schema(rt.bundle(), &schema);
             match node.get("type") {
@@ -828,6 +849,9 @@ pub(super) async fn entity_tag(
     answer: &GeneratedResponse,
 ) -> Option<(String, String)> {
     let op = plan.op;
+    if answer.status == 304 && rt.consistency && plain(plan) {
+        return not_modified_tag(rt, plan, call).await;
+    }
     if !rt.consistency
         || !plain(plan)
         || !matches!(op.binding, Binding::Http { .. })
@@ -868,12 +892,165 @@ pub(super) async fn entity_tag(
             .get(&member)
             .and_then(as_text)?,
     };
-    let tag = if value.starts_with('"') || value.starts_with("W/\"") {
+    Some((name, as_entity_tag(value)))
+}
+
+/// A token's value as an entity tag: quoted, unless it is one already.
+#[cfg(feature = "http-rest")]
+fn as_entity_tag(value: String) -> String {
+    if value.starts_with('"') || value.starts_with("W/\"") {
         value
     } else {
         format!("\"{value}\"")
+    }
+}
+
+/// What `call`'s `If-None-Match` holds, when `op` declares the header and `call` sends
+/// it: its entity tags (RFC 9110 §8.8.3, as [`entity_tags`] reads them), or `None` for
+/// `*`. `None` overall for no such header, an empty one, or one too long to compare.
+fn if_none_match(op: &Operation, call: &OperationCall) -> Option<Option<Vec<String>>> {
+    let Some(Value::Object(declared)) = op.input.headers.as_ref().and_then(|s| s.get("properties"))
+    else {
+        return None;
     };
-    Some((name, tag))
+    if !declared
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(IF_NONE_MATCH))
+    {
+        return None;
+    }
+    let text = call
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(IF_NONE_MATCH))
+        .and_then(|(_, value)| as_text(value))?;
+    match entity_tags(&text) {
+        Some(tags) => Some(Some(tags)),
+        None if text.split(',').any(|part| part.trim() == "*") => Some(None),
+        None => None,
+    }
+}
+
+/// The member of stored `target` holding its entity tag, with its value: the member
+/// `If-Match` was seen paired with for the record, else the one [`etag_member`] whose
+/// value one of `tags` holds, else, for `*` (`tags` `None`), the one [`etag_member`] the
+/// record holds. `None` when there is none, or several.
+async fn current_etag(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    target: &StoredResource,
+    tags: Option<&[String]>,
+) -> Option<(String, String)> {
+    let rt = state.rt;
+    let t = target.resource_type.as_str();
+    let Value::Object(held) = &target.data else {
+        return None;
+    };
+    let fits = |member: &str| etag_member(rt, t, member);
+    let paired = state
+        .get(session, INTERNAL_TYPE, &key(t, &target.id))
+        .await
+        .and_then(|doc| {
+            doc.data
+                .get("headers")?
+                .get(IF_MATCH)?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|member| fits(member));
+    if let Some(member) = paired {
+        let value = held.get(&member).and_then(as_text)?;
+        return Some((member, value));
+    }
+    let mut found = held.iter().filter(|(member, value)| {
+        fits(member)
+            && as_text(value).is_some()
+            && tags.is_none_or(|tags| holds(IF_MATCH, tags, value))
+    });
+    let (member, value) = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some((member.clone(), as_text(value)?))
+}
+
+/// A read `plan` of stored `target` answered `304 Not Modified`, with no body and no LLM
+/// call, when its `If-None-Match` holds the record's current entity tag (see the
+/// module's documentation). `None` otherwise: the read is answered as before.
+pub(super) async fn not_modified(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    target: &StoredResource,
+) -> Option<GeneratedResponse> {
+    let rt = state.rt;
+    let op = plan.op;
+    if !rt.consistency
+        || !plain(plan)
+        || !matches!(op.binding, Binding::Http { .. })
+        || !matches!(op.kind, OperationKind::Query)
+        || !op
+            .outputs
+            .iter()
+            .any(|variant| variant.status == mb_mcm::StatusSelector::Code(304))
+    {
+        return None;
+    }
+    let tags = if_none_match(op, call)?;
+    let (_, value) = current_etag(state, &plan.session, target, tags.as_deref()).await?;
+    let matched = tags
+        .as_deref()
+        .is_none_or(|tags| holds(IF_MATCH, tags, &Value::String(value)));
+    if !matched {
+        return None;
+    }
+    tracing::info!(
+        mock = %rt.name,
+        operation = %op.id,
+        "read answered 304: If-None-Match holds the stored record's entity tag"
+    );
+    Some(GeneratedResponse {
+        status: 304,
+        content_type: None,
+        body: None,
+        source: Source::State,
+        usage: Usage::default(),
+        fallback_reason: None,
+        effects: Vec::new(),
+        effect_outcomes: Vec::new(),
+        dropped_effects: 0,
+        new_record: false,
+        patched: None,
+    })
+}
+
+/// The `ETag` header of a `304` [`not_modified`] answered: by the name the `304` (else
+/// the success answer) declares it under, else `ETag`, with the stored record's entity
+/// tag.
+#[cfg(feature = "http-rest")]
+async fn not_modified_tag(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+) -> Option<(String, String)> {
+    let op = plan.op;
+    let declared = |variant: Option<&mb_mcm::OutputVariant>| {
+        variant?
+            .headers
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case("etag"))
+            .cloned()
+    };
+    let name = declared(op.output_for_status(304))
+        .or_else(|| declared(op.success_output()))
+        .unwrap_or_else(|| "ETag".to_string());
+    let t = op.resource_type.as_deref()?;
+    let id = target_id(op, call)?;
+    let mut state = StateAccess::new(rt);
+    let target = state.get(&plan.session, t, &id).await?;
+    let tags = if_none_match(op, call)?;
+    let (_, value) = current_etag(&mut state, &plan.session, &target, tags.as_deref()).await?;
+    Some((name, as_entity_tag(value)))
 }
 
 /// A new value of token `held`, in its format: an integer one higher; a string's
