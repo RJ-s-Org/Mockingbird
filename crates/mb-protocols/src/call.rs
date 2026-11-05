@@ -494,18 +494,20 @@ pub(crate) async fn plan<'a>(
     })
 }
 
-/// The admission and data-plane auth of [`plan`].
 /// The engine the provider policy picks for a call the mock refuses before planning it
-/// (a request failing its schema), to write its error's code (see
-/// [`mb_engine::error_body`]): the caller's tenant resolved and its credentials checked,
-/// with no quota or rate limit admitted, as that refusal costs at most one generation
-/// per operation, status and cause. `None` when either fails or the policy refuses.
+/// (a request failing its schema), to write its error's code for `status` (see
+/// [`mb_engine::error_body`]): the caller's tenant resolved and its credentials
+/// checked; and, when that body is not written yet (so answering it asks the LLM), the
+/// call admitted by the quota and the mock's rate limit, as a planned call is. `None`
+/// when any of these fails or the policy refuses: the faker's body answers, and the
+/// refusal still answers its declared status.
 #[cfg(feature = "http-rest")]
 pub(crate) async fn refusing_engine(
     rt: &MockRuntime,
     op: &Operation,
     headers: &HeaderMap,
     presented: Presented<'_>,
+    status: u16,
 ) -> Option<std::sync::Arc<mb_engine::Engine>> {
     let call_info = CallInfo::new(&rt.name, &op.id, headers);
     let tenancy = rt.ext.tenants.resolve(&call_info).await.ok()?;
@@ -519,9 +521,20 @@ pub(crate) async fn refusing_engine(
     )
     .await
     .ok()?;
-    rt.engine_for(&tenancy).await.ok()
+    let engine = rt.engine_for(&tenancy).await.ok()?;
+    if !engine.error_kept(
+        &rt.bundle,
+        op,
+        status,
+        mb_engine::error_body::ErrorCause::Invalid,
+    ) {
+        rt.ext.quota.admit(&tenancy, &call_info).await.ok()?;
+        rate_limit(rt).ok()?;
+    }
+    Some(engine)
 }
 
+/// The admission and data-plane auth of [`plan`].
 async fn admit_and_authenticate(
     rt: &MockRuntime,
     op: &Operation,

@@ -979,7 +979,7 @@ async fn invalid_input(
                 .as_ref()
                 .is_some_and(|s| error_body::writes_code(s, &rt.bundle.defs));
             let engine = match writes {
-                true => call::refusing_engine(rt, op, headers, presented).await,
+                true => call::refusing_engine(rt, op, headers, presented, status).await,
                 false => None,
             };
             let base = match &engine {

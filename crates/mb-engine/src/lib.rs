@@ -555,8 +555,9 @@ pub struct Engine {
     faker_seed: Option<u64>,
     /// The error bodies the model wrote (see [`error_body`]), keyed by
     /// (`<source digest>/<operation id>`, status, cause); `None` when its answer
-    /// failed. At most [`error_body::MAX_ERROR_BODIES`], emptied when full.
-    error_bodies: DashMap<(String, u16, error_body::ErrorCause), Option<Value>>,
+    /// failed. Each is written once: concurrent misses wait for the one generation.
+    /// At most [`error_body::MAX_ERROR_BODIES`]; a new one drops another.
+    error_bodies: DashMap<error_body::ErrorKey, error_body::ErrorCell>,
 }
 
 /// The schema a response answers and what it belongs to: the input of

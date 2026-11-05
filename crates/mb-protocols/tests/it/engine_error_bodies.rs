@@ -6,15 +6,21 @@
 //! the operation declares for it. Synthetic contracts only.
 #![cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use mb_engine::{Engine, EngineConfig};
+use mb_ext::{CallInfo, QuotaGuard, Rejection, Tenancy};
 use mb_import::compile;
-use mb_llm::{Provider, ScriptedProvider};
-use mb_protocols::{MockRuntime, UnknownIds, http_rest};
+use mb_llm::{Capabilities, ChatRequest, ChatResponse, LlmError, Provider, ScriptedProvider};
+use mb_protocols::{
+    DataPlaneAuth, DataPlaneAuthMode, DataPlaneKeys, MockRuntime, RateLimiter, UnknownIds,
+    http_rest,
+};
 use mb_state::MemoryStore;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -50,6 +56,12 @@ paths:
         "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
         "422": {description: Invalid., content: {application/json: {schema: {$ref: "#/components/schemas/Pointed"}}}}
   /gizmos:
+    get:
+      operationId: listGizmos
+      parameters: [{name: limit, in: query, schema: {type: integer, maximum: 10}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Item"}}}}}
+        "400": {description: Invalid., content: {application/json: {schema: {$ref: "#/components/schemas/Sourced"}}}}
     post:
       operationId: createGizmo
       requestBody:
@@ -105,6 +117,24 @@ components:
             properties:
               source: {type: object, required: [pointer], properties: {pointer: {type: string}}}
               detail: {type: string}
+    Sourced:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [source, detail]
+            properties:
+              source:
+                type: object
+                required: [pointer, parameter]
+                properties:
+                  pointer: {type: string}
+                  parameter: {type: string}
+              detail: {type: string}
     Coded:
       type: object
       required: [ErrorCode, Message]
@@ -129,12 +159,27 @@ struct Harness {
 }
 
 fn harness(script: Option<Vec<Value>>) -> Harness {
-    let provider = script.map(|s| {
-        Arc::new(ScriptedProvider::new(
-            s.into_iter().map(|v| Ok(v.to_string())).collect(),
-        ))
-    });
+    harness_with(script, |_| {})
+}
+
+/// [`harness`] with the runtime set up by `configure` before it serves.
+fn harness_with(script: Option<Vec<Value>>, configure: impl FnOnce(&mut MockRuntime)) -> Harness {
+    let provider = script.map(scripted);
     let dyn_provider = provider.clone().map(|p| p as Arc<dyn Provider>);
+    harness_of(dyn_provider, provider, configure)
+}
+
+fn scripted(script: Vec<Value>) -> Arc<ScriptedProvider> {
+    Arc::new(ScriptedProvider::new(
+        script.into_iter().map(|v| Ok(v.to_string())).collect(),
+    ))
+}
+
+fn harness_of(
+    dyn_provider: Option<Arc<dyn Provider>>,
+    provider: Option<Arc<ScriptedProvider>>,
+    configure: impl FnOnce(&mut MockRuntime),
+) -> Harness {
     let mut rt = MockRuntime::new(
         "shelf",
         Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
@@ -142,6 +187,7 @@ fn harness(script: Option<Vec<Value>>) -> Harness {
         Arc::new(MemoryStore::new(Duration::from_secs(3600))),
     );
     rt.unknown_ids = UnknownIds::NotFound;
+    configure(&mut rt);
     Harness {
         router: http_rest::router(Arc::new(rt)),
         provider,
@@ -267,4 +313,177 @@ async fn a_missing_record_answers_the_one_declared_4xx() {
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = body_json(resp).await;
     assert!(body["Message"].as_str().unwrap().contains("w9"), "{body}");
+}
+
+/// A query parameter's violation names the parameter, never a pointer into the
+/// request document: JSON:API's `source.pointer` is about the body.
+#[tokio::test]
+async fn a_query_violation_names_the_parameter_not_a_pointer() {
+    let h = harness(None);
+    let resp = send(&h, get("/gizmos?limit=99")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["errors"][0]["source"]["parameter"], "limit", "{body}");
+    assert_ne!(body["errors"][0]["source"]["pointer"], "/limit", "{body}");
+}
+
+/// Refuses every call.
+struct Exhausted;
+
+#[async_trait]
+impl QuotaGuard for Exhausted {
+    async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
+        Err(Rejection::new(429, "Too Many Requests", "quota exhausted"))
+    }
+}
+
+/// Admits every call, counting them.
+#[derive(Default)]
+struct Counted(AtomicUsize);
+
+#[async_trait]
+impl QuotaGuard for Counted {
+    async fn admit(&self, _t: &Tenancy, _call: &CallInfo<'_>) -> Result<(), Rejection> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// A caller over its quota still gets the declared 400, with the faker's code: the
+/// LLM is not asked for it.
+#[tokio::test]
+async fn over_quota_an_invalid_request_is_the_fakers() {
+    let written = json!({"error": {"type": "invalid_parameters", "messages": ["bad"]}});
+    let h = harness_with(Some(vec![written]), |rt| rt.ext.quota = Arc::new(Exhausted));
+    let resp = send(&h, post_json("/gizmos", r#"{"name": ""}"#)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_ne!(body["error"]["type"], "invalid_parameters", "{body}");
+    assert!(body["error"]["type"].is_string(), "{body}");
+    assert!(h.provider.as_ref().unwrap().requests().is_empty());
+}
+
+/// Over the mock's rate limit, likewise.
+#[tokio::test]
+async fn over_the_rate_limit_an_invalid_request_is_the_fakers() {
+    let written = json!({"error": {"type": "invalid_parameters", "messages": ["bad"]}});
+    let limiter = Arc::new(RateLimiter::new(0.0, 1));
+    assert!(limiter.try_acquire().is_ok());
+    let h = harness_with(Some(vec![written]), |rt| rt.limits.rate = Some(limiter));
+    let resp = send(&h, post_json("/gizmos", r#"{"name": ""}"#)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_ne!(body["error"]["type"], "invalid_parameters", "{body}");
+    assert!(h.provider.as_ref().unwrap().requests().is_empty());
+}
+
+/// The quota is admitted for the generation, not for a body already written.
+#[tokio::test]
+async fn the_quota_counts_the_generation_once() {
+    let written = json!({"error": {"type": "invalid_parameters", "messages": ["bad"]}});
+    let quota = Arc::new(Counted::default());
+    let guard = Arc::clone(&quota);
+    let h = harness_with(Some(vec![written]), |rt| rt.ext.quota = guard);
+    for _ in 0..3 {
+        let resp = send(&h, post_json("/gizmos", r#"{"name": ""}"#)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"]["type"], "invalid_parameters");
+    }
+    assert_eq!(quota.0.load(Ordering::SeqCst), 1);
+    assert_eq!(h.provider.as_ref().unwrap().requests().len(), 1);
+}
+
+/// Answers as its inner provider does, after a pause.
+struct Slow(Arc<ScriptedProvider>);
+
+#[async_trait]
+impl Provider for Slow {
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.0.complete(req).await
+    }
+}
+
+/// Two invalid requests at once ask the LLM once between them.
+#[tokio::test]
+async fn concurrent_misses_ask_the_llm_once() {
+    let written = json!({"error": {"type": "invalid_parameters", "messages": ["bad"]}});
+    let inner = scripted(vec![written.clone(), written]);
+    let slow: Arc<dyn Provider> = Arc::new(Slow(Arc::clone(&inner)));
+    let h = harness_of(Some(slow), Some(inner), |_| {});
+    let (a, b) = tokio::join!(
+        send(&h, post_json("/gizmos", r#"{"name": ""}"#)),
+        send(&h, post_json("/gizmos", r#"{"size": 1}"#)),
+    );
+    assert_eq!(a.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(b.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(h.provider.as_ref().unwrap().requests().len(), 1);
+}
+
+/// Accepts the key `good`, counting the checks.
+#[derive(Default)]
+struct Keys(AtomicUsize);
+
+#[async_trait]
+impl DataPlaneKeys for Keys {
+    async fn verify(&self, _workspace: &str, key: &str) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        key == "good"
+    }
+}
+
+fn keyed(keys: Arc<Keys>) -> impl FnOnce(&mut MockRuntime) {
+    move |rt| {
+        rt.set_data_plane_auth(DataPlaneAuth {
+            mode: DataPlaneAuthMode::ApiKey,
+            header: "x-api-key".into(),
+        });
+        rt.data_plane_keys = Some(keys);
+    }
+}
+
+fn post_keyed(uri: &str, body: &str, key: Option<&str>) -> Request<Body> {
+    let mut req = Request::post(uri).header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = key {
+        req = req.header("x-api-key", key);
+    }
+    req.body(Body::from(body.to_string())).unwrap()
+}
+
+/// An invalid request whose credentials are missing or wrong answers the declared
+/// 400, not a 401, with the faker's code: the LLM is not asked.
+#[tokio::test]
+async fn without_good_credentials_an_invalid_request_is_the_fakers_400() {
+    let written = json!({"error": {"type": "invalid_parameters", "messages": ["bad"]}});
+    let keys = Arc::new(Keys::default());
+    let h = harness_with(Some(vec![written]), keyed(Arc::clone(&keys)));
+    for key in [None, Some("wrong")] {
+        let resp = send(&h, post_keyed("/gizmos", r#"{"name": ""}"#, key)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{key:?}");
+        let body = body_json(resp).await;
+        assert_ne!(body["error"]["type"], "invalid_parameters", "{body}");
+        assert!(body["error"]["type"].is_string(), "{body}");
+    }
+    assert!(h.provider.as_ref().unwrap().requests().is_empty());
+    // With the good key, the LLM writes it.
+    let resp = send(&h, post_keyed("/gizmos", r#"{"name": ""}"#, Some("good"))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(resp).await["error"]["type"], "invalid_parameters");
+    assert_eq!(h.provider.as_ref().unwrap().requests().len(), 1);
+}
+
+/// A declared error with no open code member asks no LLM and checks no credentials
+/// on the validation path.
+#[tokio::test]
+async fn without_a_code_member_no_llm_and_no_auth() {
+    let keys = Arc::new(Keys::default());
+    let h = harness_with(Some(Vec::new()), keyed(Arc::clone(&keys)));
+    let resp = send(&h, post_keyed("/widgets", r#"{"name": ""}"#, Some("good"))).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(resp).await["errors"][0]["path"], "name");
+    assert!(h.provider.as_ref().unwrap().requests().is_empty());
+    assert_eq!(keys.0.load(Ordering::SeqCst), 0);
 }
