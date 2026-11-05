@@ -1,0 +1,478 @@
+openapi: 3.0.3
+info:
+  title: HCP Terraform API (organizations, workspaces and workspace variables)
+  version: v2
+  description: |
+    A subset of the HCP Terraform (Terraform Cloud) API v2, written from its public
+    reference (developer.hashicorp.com/terraform/cloud-docs/api-docs: Organizations,
+    Workspaces and Workspace Variables). Requests send a bearer token. The API follows
+    JSON:API: requests and answers are `application/vnd.api+json`; one resource answers
+    as `{data: {id, type, attributes, relationships, links}}` and a list as
+    `{data: [...], links, meta}`. Attribute names are kebab-case
+    (`terraform-version`, `auto-apply`). A request body names the resource's `type`
+    (`organizations`, `workspaces`, `vars`).
+
+    An organization is named by its `name`, which is its id. A workspace belongs to one
+    organization; its `name` is unique in the organization (letters, digits, `-` and
+    `_`, at most 90 characters), and its `id` looks like `ws-` and 16 letters and
+    digits. A workspace reads the same at `/workspaces/{workspace_id}` and at
+    `/organizations/{organization_name}/workspaces/{workspace_name}`. A create or
+    rename to a name that is taken in the organization is refused with 422.
+    `PATCH /workspaces/{workspace_id}` sets the attributes sent and keeps the rest.
+
+    A workspace is locked so that no run can change its state:
+    `POST /workspaces/{workspace_id}/actions/lock` (with an optional `reason`) answers
+    200 with the workspace, now `locked` true with the reason in `locked-reason`;
+    locking a locked workspace is refused with 409 Conflict. `POST /workspaces/{workspace_id}/actions/unlock` answers the
+    workspace with `locked` false. `POST /workspaces/{workspace_id}/actions/safe-delete`
+    deletes a workspace that manages no resources (204; 409 when it still manages
+    some); `DELETE /workspaces/{workspace_id}` deletes it whatever it manages (204).
+    A deleted workspace answers 404.
+
+    Variables are a workspace's nested resource at `/workspaces/{workspace_id}/vars`.
+    A variable has a `key`, a `value`, a `category` (`terraform` for an input
+    variable, `env` for an environment variable), `hcl` and `sensitive`. A key is
+    unique among the workspace's variables of one category: a second variable with
+    the same key and category is refused with 422. A sensitive variable is written
+    once and not shown again: its `value` answers null, on create and on every read.
+    Each variable names its workspace in `relationships.configurable`.
+
+    `GET /organizations/{organization_name}/workspaces` lists the organization's
+    workspaces, paged by `page[number]` (from 1) and `page[size]` (default 20, at most
+    100), and filtered by `search[name]` (workspaces whose name holds the text) and
+    `search[tags]`. The answer's `meta.pagination` holds `current-page`, `prev-page`,
+    `next-page` (null on the last page), `total-pages` and `total-count`, and
+    `links` holds `self`, `first`, `prev`, `next` and `last`.
+
+    Errors answer JSON:API errors: `{errors: [{status, title, detail, source?}]}`,
+    with `status` the HTTP status as a string and `source.pointer` naming the
+    attribute that was refused (such as `/data/attributes/name`). A token that is not
+    allowed to see a resource gets 404, as for one that does not exist.
+servers:
+  - url: https://app.terraform.io
+security:
+  - bearer: []
+tags:
+  - name: Organizations
+  - name: Workspaces
+  - name: Variables
+paths:
+  /api/v2/organizations:
+    post:
+      tags: [Organizations]
+      operationId: createOrganization
+      summary: Create an organization
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema:
+              type: object
+              properties:
+                data:
+                  type: object
+                  required: [type, attributes]
+                  properties:
+                    type: {type: string, enum: [organizations]}
+                    attributes:
+                      type: object
+                      required: [name, email]
+                      properties:
+                        name: {type: string}
+                        email: {type: string, format: email}
+      responses:
+        "201":
+          description: The created organization.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/OrganizationDocument"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/v2/organizations/{organization_name}:
+    parameters:
+      - $ref: "#/components/parameters/organization_name"
+    get:
+      tags: [Organizations]
+      operationId: showOrganization
+      summary: Show an organization
+      responses:
+        "200":
+          description: The organization.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/OrganizationDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v2/organizations/{organization_name}/workspaces:
+    parameters:
+      - $ref: "#/components/parameters/organization_name"
+    get:
+      tags: [Workspaces]
+      operationId: listWorkspaces
+      summary: List workspaces
+      parameters:
+        - {name: "page[number]", in: query, description: The page; the first is 1., schema: {type: integer, minimum: 1}}
+        - {name: "page[size]", in: query, description: Workspaces per page (default 20)., schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: "search[name]", in: query, description: Workspaces whose name holds this text., schema: {type: string}}
+        - {name: "search[tags]", in: query, description: "Tags, comma-separated; a workspace must have all of them.", schema: {type: string}}
+        - {name: sort, in: query, description: "`name`, `current-run.created-at` or `latest-change-at`; a leading `-` reverses.", schema: {type: string}}
+      responses:
+        "200":
+          description: A page of workspaces.
+          content:
+            application/vnd.api+json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Workspace"}}
+                  links: {$ref: "#/components/schemas/PageLinks"}
+                  meta:
+                    type: object
+                    properties:
+                      pagination: {$ref: "#/components/schemas/Pagination"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Workspaces]
+      operationId: createWorkspace
+      summary: Create a workspace
+      description: "A name taken in the organization is refused with 422."
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/WorkspaceInput"}
+      responses:
+        "201":
+          description: The created workspace.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/WorkspaceDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/v2/organizations/{organization_name}/workspaces/{workspace_name}:
+    parameters:
+      - $ref: "#/components/parameters/organization_name"
+      - {name: workspace_name, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Workspaces]
+      operationId: showWorkspaceByName
+      summary: Show a workspace by name
+      responses:
+        "200":
+          description: The workspace.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/WorkspaceDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v2/workspaces/{workspace_id}:
+    parameters:
+      - $ref: "#/components/parameters/workspace_id"
+    get:
+      tags: [Workspaces]
+      operationId: showWorkspace
+      summary: Show a workspace
+      responses:
+        "200":
+          description: The workspace.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/WorkspaceDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Workspaces]
+      operationId: updateWorkspace
+      summary: Update a workspace
+      description: Sets the attributes sent and keeps the rest.
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/WorkspaceInput"}
+      responses:
+        "200":
+          description: The updated workspace.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/WorkspaceDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Workspaces]
+      operationId: forceDeleteWorkspace
+      summary: Force delete a workspace
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v2/workspaces/{workspace_id}/actions/lock:
+    parameters:
+      - $ref: "#/components/parameters/workspace_id"
+    post:
+      tags: [Workspaces]
+      operationId: lockWorkspace
+      summary: Lock a workspace
+      requestBody:
+        content:
+          application/vnd.api+json:
+            schema:
+              type: object
+              properties:
+                reason: {type: string}
+      responses:
+        "200":
+          description: The workspace, locked.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/WorkspaceDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /api/v2/workspaces/{workspace_id}/actions/unlock:
+    parameters:
+      - $ref: "#/components/parameters/workspace_id"
+    post:
+      tags: [Workspaces]
+      operationId: unlockWorkspace
+      summary: Unlock a workspace
+      responses:
+        "200":
+          description: The workspace, unlocked.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/WorkspaceDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /api/v2/workspaces/{workspace_id}/actions/safe-delete:
+    parameters:
+      - $ref: "#/components/parameters/workspace_id"
+    post:
+      tags: [Workspaces]
+      operationId: safeDeleteWorkspace
+      summary: Safe delete a workspace
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /api/v2/workspaces/{workspace_id}/vars:
+    parameters:
+      - $ref: "#/components/parameters/workspace_id"
+    get:
+      tags: [Variables]
+      operationId: listWorkspaceVariables
+      summary: List a workspace's variables
+      responses:
+        "200":
+          description: The variables.
+          content:
+            application/vnd.api+json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Variable"}}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Variables]
+      operationId: createWorkspaceVariable
+      summary: Create a variable
+      description: "A key taken in the same category of the workspace is refused with 422."
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/VariableInput"}
+      responses:
+        "201":
+          description: The created variable.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/VariableDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/v2/workspaces/{workspace_id}/vars/{variable_id}:
+    parameters:
+      - $ref: "#/components/parameters/workspace_id"
+      - {name: variable_id, in: path, required: true, schema: {type: string}}
+    patch:
+      tags: [Variables]
+      operationId: updateWorkspaceVariable
+      summary: Update a variable
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema: {$ref: "#/components/schemas/VariableInput"}
+      responses:
+        "200":
+          description: The updated variable.
+          content:
+            application/vnd.api+json:
+              schema: {$ref: "#/components/schemas/VariableDocument"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Variables]
+      operationId: deleteWorkspaceVariable
+      summary: Delete a variable
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    organization_name:
+      name: organization_name
+      in: path
+      required: true
+      schema: {type: string}
+    workspace_id:
+      name: workspace_id
+      in: path
+      required: true
+      schema: {type: string, pattern: "^ws-[A-Za-z0-9]{16}$"}
+  responses:
+    Error:
+      description: "JSON:API errors: `{errors: [{status, title, detail, source}]}`."
+      content:
+        application/vnd.api+json:
+          schema:
+            type: object
+            properties:
+              errors:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    status: {type: string, example: "422"}
+                    title: {type: string, example: invalid attribute}
+                    detail: {type: string, example: Name has already been taken}
+                    source:
+                      type: object
+                      properties:
+                        pointer: {type: string, example: /data/attributes/name}
+  schemas:
+    PageLinks:
+      type: object
+      properties:
+        self: {type: string}
+        first: {type: string}
+        prev: {type: string, nullable: true}
+        next: {type: string, nullable: true}
+        last: {type: string}
+    Pagination:
+      type: object
+      properties:
+        current-page: {type: integer}
+        page-size: {type: integer}
+        prev-page: {type: integer, nullable: true}
+        next-page: {type: integer, nullable: true}
+        total-pages: {type: integer}
+        total-count: {type: integer}
+    Relationship:
+      type: object
+      properties:
+        data:
+          type: object
+          nullable: true
+          properties:
+            id: {type: string}
+            type: {type: string}
+        links:
+          type: object
+          properties:
+            related: {type: string}
+    OrganizationDocument:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id: {type: string, description: The organization's name.}
+            type: {type: string, enum: [organizations]}
+            attributes:
+              type: object
+              properties:
+                name: {type: string}
+                email: {type: string}
+                created-at: {type: string, format: date-time}
+    WorkspaceAttributes:
+      type: object
+      properties:
+        name: {type: string, maxLength: 90, pattern: "^[A-Za-z0-9_-]+$"}
+        description: {type: string, nullable: true}
+        auto-apply: {type: boolean}
+        execution-mode: {type: string, enum: [remote, local, agent]}
+        terraform-version: {type: string, example: 1.9.5}
+        working-directory: {type: string, nullable: true}
+        queue-all-runs: {type: boolean}
+        speculative-enabled: {type: boolean}
+        locked: {type: boolean, readOnly: true}
+        locked-reason: {type: string, nullable: true, readOnly: true}
+        resource-count: {type: integer, readOnly: true}
+        created-at: {type: string, format: date-time, readOnly: true}
+        updated-at: {type: string, format: date-time, readOnly: true}
+    WorkspaceInput:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [type]
+          properties:
+            type: {type: string, enum: [workspaces]}
+            attributes: {$ref: "#/components/schemas/WorkspaceAttributes"}
+    Workspace:
+      type: object
+      properties:
+        id: {type: string, pattern: "^ws-[A-Za-z0-9]{16}$"}
+        type: {type: string, enum: [workspaces]}
+        attributes: {$ref: "#/components/schemas/WorkspaceAttributes"}
+        relationships:
+          type: object
+          properties:
+            organization: {$ref: "#/components/schemas/Relationship"}
+            locked-by: {$ref: "#/components/schemas/Relationship"}
+            current-run: {$ref: "#/components/schemas/Relationship"}
+        links:
+          type: object
+          properties:
+            self: {type: string, example: /api/v2/organizations/my-org/workspaces/my-workspace}
+    WorkspaceDocument:
+      type: object
+      properties:
+        data: {$ref: "#/components/schemas/Workspace"}
+    VariableAttributes:
+      type: object
+      properties:
+        key: {type: string}
+        value: {type: string, nullable: true, description: Null for a sensitive variable.}
+        description: {type: string, nullable: true}
+        category: {type: string, enum: [terraform, env]}
+        hcl: {type: boolean, default: false}
+        sensitive: {type: boolean, default: false}
+        version-id: {type: string, readOnly: true}
+    VariableInput:
+      type: object
+      properties:
+        data:
+          type: object
+          required: [type]
+          properties:
+            id: {type: string}
+            type: {type: string, enum: [vars]}
+            attributes: {$ref: "#/components/schemas/VariableAttributes"}
+    Variable:
+      type: object
+      properties:
+        id: {type: string, pattern: "^var-[A-Za-z0-9]{16}$"}
+        type: {type: string, enum: [vars]}
+        attributes: {$ref: "#/components/schemas/VariableAttributes"}
+        relationships:
+          type: object
+          properties:
+            configurable: {$ref: "#/components/schemas/Relationship"}
+        links:
+          type: object
+          properties:
+            self: {type: string}
+    VariableDocument:
+      type: object
+      properties:
+        data: {$ref: "#/components/schemas/Variable"}

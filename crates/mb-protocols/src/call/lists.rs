@@ -60,7 +60,9 @@
 //! an item the store holds but the answer does not name stays out of the page, as
 //! which list and page it belongs on is not known well enough. A full page may still
 //! leave such records for a next page ([`stored_rest`]), served by a token as a cut's
-//! rest is, or by a later page number or offset ([`runs`]).
+//! rest is, or by a later page number or offset ([`runs`]). An answer that left its
+//! declared list member out altogether gave no page at all: it gets the member as `[]`
+//! ([`absent_list`]), and the store fills that page the same way ([`stored_page`]).
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -195,7 +197,7 @@ pub(super) fn filtered_member<'a>(
 }
 
 /// The names of the members the parts of an item declare, each once.
-fn declared_names<'a>(item_parts: &[&'a Value]) -> Vec<&'a str> {
+pub(super) fn declared_names<'a>(item_parts: &[&'a Value]) -> Vec<&'a str> {
     let mut names: Vec<&'a str> = Vec::new();
     for part in item_parts {
         for name in part
@@ -419,10 +421,21 @@ pub(super) fn list_parts<'a>(
     body: &Value,
     held: &'a mut Option<Value>,
 ) -> Option<(Vec<&'a Value>, Vec<&'a Value>)> {
+    list_parts_at(bundle, schema, body, None, held)
+}
+
+/// [`list_parts`] of the list under `member` of object `body`, when given.
+fn list_parts_at<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    schema: &'a Value,
+    body: &Value,
+    member: Option<&str>,
+    held: &'a mut Option<Value>,
+) -> Option<(Vec<&'a Value>, Vec<&'a Value>)> {
     let array: &'a Value = match body {
         Value::Array(_) => schema,
         Value::Object(_) => {
-            *held = property_schema(bundle, schema, list_member(body)?);
+            *held = property_schema(bundle, schema, member.or_else(|| list_member(body))?);
             held.as_ref()?
         }
         _ => return None,
@@ -785,8 +798,141 @@ pub(super) async fn stored_rest(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     t: Option<&str>,
-    body: &Value,
+    body: &mut Value,
     cut: Option<Cut>,
+) -> Option<Cut> {
+    stored_records(state, (plan, call), t, body, cut, None).await
+}
+
+/// [`stored_rest`] for a list answer `body` that left its declared list `member` out
+/// altogether, and holds it now as `[]` (see [`absent_list`]): the model gave no page,
+/// so the page is what the store holds for it, chosen as [`stored_rest`] chooses a
+/// page's rest. The first page size of them (all of them, without a page size) fill
+/// the page, and what is left past it is the cut's rest, for a next page as a cut's
+/// rest is served. A route the store is not read for, or a query a record cannot be
+/// shown to answer, leaves the page empty.
+pub(super) async fn stored_page(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: Option<&str>,
+    body: &mut Value,
+    member: &str,
+) -> Option<Cut> {
+    stored_records(state, (plan, call), t, body, None, Some(member)).await
+}
+
+/// The records the session holds for `op`'s list answer `body` as a whole, each as the
+/// items declare it ([`projected`]), for a page the mock orders and cuts itself
+/// ([`ranges`]): of the items' type, in the route's collection (see [`in_collection`]),
+/// holding what each of the query's filters asks, with an identity, and valid as an item
+/// of the answer, least recently written first. A route with no path parameter is read
+/// only as [`stored_rest`] reads one. `None`, and nothing is read, for a query holding a
+/// value that is no such filter (no record can be shown to answer it), or a list the
+/// store is not read for. The items' type `t` when their schema names no type of its own.
+pub(super) async fn collection_records(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: Option<&str>,
+    body: &Value,
+) -> Option<Vec<Value>> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let op = plan.op;
+    let schema = op.success_output()?.schema.as_ref()?;
+    let mut held = None;
+    let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
+    let items_schema = array_parts.iter().find_map(|p| p.get("items"))?;
+    let filters = filters_of(bundle, op.input.query.as_ref(), &item_parts, call, None);
+    if call
+        .query
+        .keys()
+        .any(|param| !filters.iter().any(|(name, _)| name == param))
+    {
+        return None;
+    }
+    let item_type = rt
+        .index()
+        .item_type(bundle, op, body)
+        .or_else(|| t.map(str::to_string))?;
+    if call.path_params.is_empty() {
+        let Binding::Http { path, .. } = &op.binding else {
+            return None;
+        };
+        if !rt.index().sole_written_list(path, &item_type) {
+            return None;
+        }
+    }
+    let field = item_identity(bundle, op, body);
+    let mut records = state.list(&plan.session, &item_type, MAX_STORED_REST).await;
+    records.reverse();
+    records.retain(|r| in_collection(rt, (plan, call), &item_type, &field, r));
+    let mut out: Vec<Value> = Vec::new();
+    let mut known: Vec<String> = Vec::new();
+    for r in &records {
+        let item = projected(bundle, Some(items_schema), &r.data, 0);
+        let Some(id) = mb_mcm::member_at(&item, &field).and_then(id_string) else {
+            continue;
+        };
+        if known.contains(&id)
+            || !filters
+                .iter()
+                .all(|(_, filter)| holds_wanted(&item, filter))
+        {
+            continue;
+        }
+        let valid = pages::with_items(body, vec![item.clone()]).is_some_and(|candidate| {
+            plan.engine
+                .serve_stored(bundle, op, &candidate, None)
+                .is_some()
+        });
+        if !valid {
+            continue;
+        }
+        known.push(id);
+        out.push(item);
+    }
+    Some(out)
+}
+
+/// The declared list member of `op`'s list answer `body`, an object, that the body
+/// leaves out: the one member its schema declares as a list of objects
+/// ([`list_members`]), when the body holds no other list, inserted as `[]` when the
+/// answer still validates with it. Returns the member inserted.
+pub(super) fn absent_list(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    body: &mut Value,
+) -> Option<String> {
+    let bundle = rt.bundle();
+    let op = plan.op;
+    let schema = op.success_output()?.schema.as_ref()?;
+    if !body.is_object() || list_member(body).is_some() {
+        return None;
+    }
+    let members = list_members(bundle, schema);
+    let [member] = members.as_slice() else {
+        return None;
+    };
+    if body.get(member).is_some() {
+        return None;
+    }
+    let mut candidate = body.clone();
+    candidate
+        .as_object_mut()?
+        .insert(member.clone(), Value::Array(Vec::new()));
+    plan.engine.serve_stored(bundle, op, &candidate, None)?;
+    *body = candidate;
+    Some(member.clone())
+}
+
+/// [`stored_rest`], or with `absent`, [`stored_page`].
+async fn stored_records(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: Option<&str>,
+    body: &mut Value,
+    cut: Option<Cut>,
+    absent: Option<&str>,
 ) -> Option<Cut> {
     let rt = state.rt;
     let bundle = rt.bundle();
@@ -798,7 +944,8 @@ pub(super) async fn stored_rest(
         return cut;
     };
     let mut held = None;
-    let Some((array_parts, item_parts)) = list_parts(bundle, schema, body, &mut held) else {
+    let Some((array_parts, item_parts)) = list_parts_at(bundle, schema, body, absent, &mut held)
+    else {
         return cut;
     };
     let Some(items_schema) = array_parts.iter().find_map(|p| p.get("items")) else {
@@ -811,23 +958,34 @@ pub(super) async fn stored_rest(
         || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
         call,
     );
-    let Some((size_param, size)) =
-        page.and_then(|(name, limit)| Some((name, page_size(limit, &array_parts)?)))
-    else {
-        return cut;
+    let sized = page.and_then(|(name, limit)| Some((name, page_size(limit, &array_parts)?)));
+    // A page the store fills takes every record without a page size it can go by.
+    let (size_param, size) = match (sized, absent) {
+        (Some((name, size)), _) => (Some(name), size),
+        (None, Some(_)) => (None, MAX_STORED_REST),
+        (None, None) => return cut,
     };
-    let Some(served) = list_items(body).filter(|items| size > 0 && items.len() >= size) else {
-        return cut;
+    let served: Vec<Value> = match absent {
+        Some(_) => Vec::new(),
+        None => match list_items(body).filter(|items| size > 0 && items.len() >= size) {
+            Some(items) => items.clone(),
+            None => return cut,
+        },
     };
     // No place for a token, and no first page of a list paged by number or offset: no
-    // next page to serve, and the store is not read.
-    let slot = pages::slot(
-        bundle,
-        (op, call, plan.page_url.as_deref()),
-        body,
-        size_param,
-    );
-    if slot.is_none() && !runs::starts(bundle, (op, call), size_param) {
+    // next page to serve, and the store is not read (for a page the store fills, it
+    // keeps nothing past the page).
+    let pageable = size_param.is_some_and(|size_param| {
+        pages::slot(
+            bundle,
+            (op, call, plan.page_url.as_deref()),
+            body,
+            size_param,
+        )
+        .is_some()
+            || runs::starts(bundle, (op, call), size_param)
+    });
+    if !pageable && absent.is_none() {
         return cut;
     }
     let Some(item_type) = rt
@@ -852,7 +1010,7 @@ pub(super) async fn stored_rest(
     let declared_params = query.and_then(|q| q.get("properties"));
     let mut shown: Vec<Shown<'_>> = Vec::new();
     for (param, raw) in &call.query {
-        if param == size_param || filters.iter().any(|(name, _)| name == param) {
+        if Some(param.as_str()) == size_param || filters.iter().any(|(name, _)| name == param) {
             continue;
         }
         let texts: Vec<String> = match raw {
@@ -944,17 +1102,24 @@ pub(super) async fn stored_rest(
     }
     let field = item_identity(bundle, op, body);
     let texts = text_members(bundle, &item_parts, &field);
-    let identity = |item: &Value| item.get(&field).and_then(id_string);
+    let identity = |item: &Value| mb_mcm::member_at(item, &field).and_then(id_string);
     let mut known: Vec<String> = served.iter().filter_map(identity).collect();
     if let Some(cut) = &cut {
         known.extend(cut.rest.iter().filter_map(identity));
     }
     let valid = |item: &Value| {
         let mut candidate = body.clone();
-        let Some(slot) = list_items_mut(&mut candidate).and_then(|items| items.first_mut()) else {
-            return false;
-        };
-        *slot = item.clone();
+        if let Some(member) = absent {
+            if let Some(obj) = candidate.as_object_mut() {
+                obj.insert(member.to_string(), Value::Array(vec![item.clone()]));
+            }
+        } else {
+            let Some(slot) = list_items_mut(&mut candidate).and_then(|items| items.first_mut())
+            else {
+                return false;
+            };
+            *slot = item.clone();
+        }
         plan.engine
             .serve_stored(bundle, op, &candidate, None)
             .is_some()
@@ -1015,6 +1180,18 @@ pub(super) async fn stored_rest(
         }
         return cut;
     }
+    if let Some(member) = absent {
+        let page: Vec<Value> = missing.drain(..size.min(missing.len())).collect();
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(member.to_string(), Value::Array(page));
+        }
+        if missing.is_empty() || !pageable {
+            return cut;
+        }
+    }
+    let Some(size_param) = size_param else {
+        return cut;
+    };
     let stored = missing.len();
     let mut cut = cut.unwrap_or_else(|| Cut {
         rest: Vec::new(),
@@ -1146,7 +1323,10 @@ pub(super) async fn overlay_stored(
     };
     let mut overlaid: Vec<(usize, Value)> = Vec::new();
     for (at, item) in items.iter().enumerate().take(MAX_OVERLAID) {
-        let (Some(own), Some(id)) = (item.as_object(), item.get(&field).and_then(id_string)) else {
+        let (Some(own), Some(id)) = (
+            item.as_object(),
+            mb_mcm::member_at(item, &field).and_then(id_string),
+        ) else {
             continue;
         };
         let Some(stored) = state.get(&plan.session, &item_type, &id).await else {

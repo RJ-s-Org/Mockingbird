@@ -542,18 +542,21 @@ async fn serve(
     // 5. Respond (the handler sleeps `delay` after recording).
     log.delay = plan.delay;
     let entity_tag = call::entity_tag(rt, &plan, &call, &generated).await;
+    let next_range = call::next_range(rt, &plan, &call, &generated);
     let mut resp =
         tracing::info_span!("mb.encode").in_scope(|| log.generated(as_xml(rt, op, generated)));
     add_headers(&mut resp, rt, op, plan.scenario);
-    // The record's concurrency token, over the faker's value (a scenario's stands).
-    if let Some((name, value)) = entity_tag
-        && plan.scenario.is_none()
-        && let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(&value),
-        )
-    {
-        resp.headers_mut().insert(name, value);
+    // The record's concurrency token, and a ranged page's next range, over the faker's
+    // values (a scenario's stand).
+    for (name, value) in [entity_tag, next_range].into_iter().flatten() {
+        if plan.scenario.is_none()
+            && let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(&value),
+            )
+        {
+            resp.headers_mut().insert(name, value);
+        }
     }
     if plan.chaos.inject_error {
         mark_chaos(&mut resp);

@@ -1,0 +1,360 @@
+openapi: 3.0.3
+info:
+  title: Postmark API (templates and message streams)
+  version: "1"
+  description: |
+    A subset of the Postmark server API, written from its public reference
+    (postmarkapp.com/developer/api: Templates API, Message Streams API and the API
+    overview). Every request sends the server's token in `X-Postmark-Server-Token`
+    and `Accept: application/json`. Fields are PascalCase in requests and answers.
+
+    Templates are a server's email templates. A template is `Standard` (an email with
+    a `Subject`) or `Layout` (a shared frame, with no `Subject`, whose `HtmlBody` holds
+    the `{{{@content}}}` placeholder); `TemplateType` is set at creation and never
+    changes. `POST /templates` answers `{TemplateId, Name, Active, Alias, TemplateType, LayoutTemplate}`;
+    `TemplateId` is a number the server assigns. `Alias` is the template's own
+    name for the client: it starts with a letter and holds letters, digits, `.`, `-`
+    and `_`, and no other template on the server has it. Every template path takes
+    `{templateIdOrAlias}`, the template's `TemplateId` or its `Alias`; both name the
+    same template. A Standard template names its layout by the layout's alias in
+    `LayoutTemplate`. `PUT /templates/{templateIdOrAlias}` sets the fields sent and
+    keeps the rest; it answers `{TemplateId, Name, Active, Alias}`.
+    `DELETE /templates/{templateIdOrAlias}` answers `{ErrorCode: 0, Message}`; the
+    template then answers ErrorCode 1101. A layout that Standard templates use cannot
+    be deleted (ErrorCode 1130).
+
+    `GET /templates` pages with `Count` (how many, required) and `Offset` (how many to
+    skip, required), filters by `TemplateType` (`All`, `Standard` or `Layout`;
+    default `All`) and by `LayoutTemplate` (the templates that use that layout's
+    alias), and answers `{TotalCount, Templates}`: `TotalCount` counts every template
+    that matches, `Templates` holds this page.
+
+    Message streams split a server's mail into `Transactional`, `Broadcasts` and the
+    one `Inbound` stream. A stream's `ID` is chosen by the client at creation: it
+    starts with a letter, is at most 30 characters, does not start with `pm-`, and is
+    unique on the server. `PATCH /message-streams/{stream_ID}` changes `Name` and
+    `Description` and answers the whole stream; `MessageStreamType` never changes.
+    `POST /message-streams/{stream_ID}/archive` archives a stream: it answers
+    `{ID, ServerID, ExpectedPurgeDate}`, the stream's `ArchivedAt` is set, and the
+    stream is purged 45 days after archiving. An archived stream leaves
+    `GET /message-streams` unless `IncludeArchivedStreams=true`.
+    `POST /message-streams/{stream_ID}/unarchive` brings it back before its purge
+    date, with `ArchivedAt` null. The default transactional and inbound streams cannot
+    be archived. `GET /message-streams` filters by `MessageStreamType` (`All`,
+    `Inbound`, `Transactional` or `Broadcasts`) and answers
+    `{MessageStreams, TotalCount}`.
+
+    Errors answer 422 with `{ErrorCode, Message}` (and the code in the
+    `X-PM-ApiErrorCode` header), except a bad token, which answers 401. Template codes:
+    1100 bad paging or `TemplateType`, 1101 no template with that id or alias,
+    1105 too many templates, 1120 a required field is missing, 1121 a field is too
+    long, 1122 an invalid or taken alias or an invalid `TemplateType`, 1123 a field
+    that the template's type does not allow (such as a `Subject` on a layout),
+    1130 a layout in use. Message stream codes: 1221 invalid `MessageStreamType`,
+    1222 a valid `ID` is required, 1223 a valid `Name` is required, 1225 too many
+    streams, 1226 no stream with that `ID`, 1227 an `ID` that does not start with a
+    letter or is too long, 1229 a default stream cannot be archived, 1230 that `ID`
+    is taken, 1232 the stream can no longer be unarchived, 1233 an `ID` that starts
+    with `pm-`.
+servers:
+  - url: https://api.postmarkapp.com
+security:
+  - serverToken: []
+tags:
+  - name: Templates
+  - name: Message Streams
+paths:
+  /templates:
+    get:
+      tags: [Templates]
+      operationId: listTemplates
+      summary: List templates
+      parameters:
+        - {name: Count, in: query, required: true, description: How many templates to answer., schema: {type: integer, minimum: 1, maximum: 500}}
+        - {name: Offset, in: query, required: true, description: How many templates to skip., schema: {type: integer, minimum: 0}}
+        - {name: TemplateType, in: query, schema: {type: string, enum: [All, Standard, Layout], default: All}}
+        - {name: LayoutTemplate, in: query, description: The templates that use the layout with this alias., schema: {type: string}}
+      responses:
+        "200":
+          description: A page of templates.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  TotalCount: {type: integer, description: Every template that matches.}
+                  Templates: {type: array, items: {$ref: "#/components/schemas/TemplateSummary"}}
+        "422": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Templates]
+      operationId: createTemplate
+      summary: Create a template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TemplateInput"}
+      responses:
+        "200":
+          description: The created template.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TemplateSummary"}
+        "422": {$ref: "#/components/responses/Error"}
+  /templates/{templateIdOrAlias}:
+    parameters:
+      - name: templateIdOrAlias
+        in: path
+        required: true
+        description: "The template's TemplateId or its Alias."
+        schema: {type: string}
+    get:
+      tags: [Templates]
+      operationId: getTemplate
+      summary: Get a template
+      responses:
+        "200":
+          description: The template.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Template"}
+        "422": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Templates]
+      operationId: editTemplate
+      summary: Edit a template
+      description: Sets the fields sent and keeps the rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                Name: {type: string}
+                Subject: {type: string}
+                HtmlBody: {type: string}
+                TextBody: {type: string}
+                Alias: {type: string}
+                LayoutTemplate: {type: string, nullable: true}
+      responses:
+        "200":
+          description: The edited template.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  TemplateId: {type: integer}
+                  Name: {type: string}
+                  Active: {type: boolean}
+                  Alias: {type: string, nullable: true}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Templates]
+      operationId: deleteTemplate
+      summary: Delete a template
+      responses:
+        "200":
+          description: "`{ErrorCode: 0, Message}`."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorBody"}
+        "422": {$ref: "#/components/responses/Error"}
+  /message-streams:
+    get:
+      tags: [Message Streams]
+      operationId: listMessageStreams
+      summary: List message streams
+      parameters:
+        - {name: MessageStreamType, in: query, schema: {type: string, enum: [All, Inbound, Transactional, Broadcasts], default: All}}
+        - {name: IncludeArchivedStreams, in: query, description: true lists the archived streams too., schema: {type: boolean, default: false}}
+      responses:
+        "200":
+          description: The streams.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  MessageStreams: {type: array, items: {$ref: "#/components/schemas/MessageStream"}}
+                  TotalCount: {type: integer}
+    post:
+      tags: [Message Streams]
+      operationId: createMessageStream
+      summary: Create a message stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ID, Name, MessageStreamType]
+              properties:
+                ID: {$ref: "#/components/schemas/StreamId"}
+                Name: {type: string}
+                MessageStreamType: {type: string, enum: [Transactional, Broadcasts]}
+                Description: {type: string}
+                SubscriptionManagementConfiguration: {$ref: "#/components/schemas/SubscriptionManagement"}
+      responses:
+        "200":
+          description: The created stream.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MessageStream"}
+        "422": {$ref: "#/components/responses/Error"}
+  /message-streams/{stream_ID}:
+    parameters:
+      - $ref: "#/components/parameters/stream_ID"
+    get:
+      tags: [Message Streams]
+      operationId: getMessageStream
+      summary: Get a message stream
+      responses:
+        "200":
+          description: The stream.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MessageStream"}
+        "422": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Message Streams]
+      operationId: editMessageStream
+      summary: Edit a message stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                Name: {type: string}
+                Description: {type: string}
+                SubscriptionManagementConfiguration: {$ref: "#/components/schemas/SubscriptionManagement"}
+      responses:
+        "200":
+          description: The whole stream after the change.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MessageStream"}
+        "422": {$ref: "#/components/responses/Error"}
+  /message-streams/{stream_ID}/archive:
+    parameters:
+      - $ref: "#/components/parameters/stream_ID"
+    post:
+      tags: [Message Streams]
+      operationId: archiveMessageStream
+      summary: Archive a message stream
+      description: "Sent with no body. The stream is purged 45 days later unless unarchived."
+      responses:
+        "200":
+          description: The archived stream's purge date.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ID: {type: string}
+                  ServerID: {type: integer}
+                  ExpectedPurgeDate: {type: string, format: date-time}
+        "422": {$ref: "#/components/responses/Error"}
+  /message-streams/{stream_ID}/unarchive:
+    parameters:
+      - $ref: "#/components/parameters/stream_ID"
+    post:
+      tags: [Message Streams]
+      operationId: unarchiveMessageStream
+      summary: Unarchive a message stream
+      description: Sent with no body.
+      responses:
+        "200":
+          description: The stream, with ArchivedAt null.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MessageStream"}
+        "422": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    serverToken:
+      type: apiKey
+      in: header
+      name: X-Postmark-Server-Token
+  parameters:
+    stream_ID:
+      name: stream_ID
+      in: path
+      required: true
+      description: "The stream's ID, chosen at creation."
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{ErrorCode, Message}`."
+      headers:
+        X-PM-ApiErrorCode:
+          description: The ErrorCode again.
+          schema: {type: integer}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorBody"}
+  schemas:
+    ErrorBody:
+      type: object
+      properties:
+        ErrorCode: {type: integer, example: 1101}
+        Message: {type: string}
+    TemplateInput:
+      type: object
+      required: [Name]
+      description: "HtmlBody or TextBody is required; Subject is required for a Standard template and refused on a Layout."
+      properties:
+        Name: {type: string}
+        Alias: {type: string, pattern: "^[A-Za-z][A-Za-z0-9._-]*$"}
+        Subject: {type: string}
+        HtmlBody: {type: string}
+        TextBody: {type: string}
+        TemplateType: {type: string, enum: [Standard, Layout], default: Standard}
+        LayoutTemplate: {type: string, nullable: true, description: "The alias of the layout a Standard template uses."}
+    TemplateSummary:
+      type: object
+      properties:
+        TemplateId: {type: integer}
+        Name: {type: string}
+        Active: {type: boolean}
+        Alias: {type: string, nullable: true}
+        TemplateType: {type: string, enum: [Standard, Layout]}
+        LayoutTemplate: {type: string, nullable: true}
+    Template:
+      type: object
+      properties:
+        TemplateId: {type: integer}
+        Name: {type: string}
+        Subject: {type: string}
+        HtmlBody: {type: string}
+        TextBody: {type: string}
+        AssociatedServerId: {type: integer}
+        Active: {type: boolean}
+        Alias: {type: string, nullable: true}
+        TemplateType: {type: string, enum: [Standard, Layout]}
+        LayoutTemplate: {type: string, nullable: true}
+    StreamId:
+      type: string
+      maxLength: 30
+      pattern: "^[A-Za-z][A-Za-z0-9-]*$"
+      description: "Chosen by the client; unique on the server and not starting with pm-."
+    SubscriptionManagement:
+      type: object
+      properties:
+        UnsubscribeHandlingType: {type: string, enum: [none, Postmark, Custom]}
+    MessageStream:
+      type: object
+      properties:
+        ID: {$ref: "#/components/schemas/StreamId"}
+        ServerID: {type: integer}
+        Name: {type: string}
+        Description: {type: string, nullable: true}
+        MessageStreamType: {type: string, enum: [Inbound, Transactional, Broadcasts]}
+        CreatedAt: {type: string, format: date-time}
+        UpdatedAt: {type: string, format: date-time, nullable: true}
+        ArchivedAt: {type: string, format: date-time, nullable: true}
+        ExpectedPurgeDate: {type: string, format: date-time, nullable: true}
+        SubscriptionManagementConfiguration: {$ref: "#/components/schemas/SubscriptionManagement"}

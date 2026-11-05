@@ -61,6 +61,265 @@ pub(crate) fn response_prompt_schema(bundle: &Bundle, schema: &Value) -> Value {
     crate::encoded::hint(prompt_schema(bundle, schema))
 }
 
+/// Most members [`with_echoes_required`] adds to one answer's `required` lists.
+pub(crate) const MAX_ECHOED_REQUIRED: usize = 12;
+
+/// One step into a schema: a member of its `properties`, or its `items`.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    Member(String),
+    Items,
+}
+
+/// `doc`, the prompt's schema of `op`'s 2xx answer of `status` to `call`, with members
+/// the answer is sure to need added to its `required` lists, since some models write
+/// only what a schema requires: the operation's identity member on the record the
+/// answer holds (at its [`mb_mcm::RecordAt`], whose envelope member is required too),
+/// or `id` on a create naming none; a list read's one declared list member; and on a
+/// create or update, the record's top-level members the request sets (no `null`),
+/// which the answer echoes. Only members the schema declares at that place, none it
+/// marks `writeOnly`, none the request's schema marks `readOnly` or `writeOnly`, and at
+/// most [`MAX_ECHOED_REQUIRED`]. A `$ref` on the way is replaced by a copy of its
+/// definition, so no other use of the definition changes. For the prompt only:
+/// validation keeps the contract's schema.
+pub(crate) fn with_echoes_required(
+    bundle: &Bundle,
+    op: &mb_mcm::Operation,
+    status: u16,
+    call: &crate::OperationCall,
+    mut doc: Value,
+) -> Value {
+    use mb_mcm::{Effect, OperationKind, RecordAt};
+    if !(200..300).contains(&status) || !doc.is_object() {
+        return doc;
+    }
+    let identity = op.identity.as_ref();
+    let record: Vec<Step> = match identity.and_then(|i| i.record.as_ref()) {
+        None => Vec::new(),
+        Some(RecordAt::Member(m)) => vec![Step::Member(m.clone())],
+        Some(RecordAt::Item) => vec![Step::Items],
+        Some(RecordAt::MemberItem(m)) => vec![Step::Member(m.clone()), Step::Items],
+    };
+    let mut wanted: Vec<(Vec<Step>, String)> = Vec::new();
+    if let Some(RecordAt::Member(m) | RecordAt::MemberItem(m)) =
+        identity.and_then(|i| i.record.as_ref())
+    {
+        wanted.push((Vec::new(), m.clone()));
+    }
+    let is_list = op.kind == OperationKind::Query
+        && identity.is_none_or(|i| i.path_param.is_none() && i.input_field.is_none());
+    if is_list {
+        if let [member] = crate::consistency::list_members(bundle, &doc).as_slice() {
+            wanted.push((Vec::new(), member.clone()));
+        }
+    } else if let Some(identity) = identity {
+        // A key held in an object member (`metadata.name`) needs that member and the
+        // key in it.
+        let mut at = record.clone();
+        let mut steps: Vec<&str> = identity.field.split('.').collect();
+        let leaf = steps.pop().unwrap_or(identity.field.as_str());
+        for step in steps {
+            wanted.push((at.clone(), step.to_owned()));
+            at.push(Step::Member(step.to_owned()));
+        }
+        wanted.push((at, leaf.to_owned()));
+    } else if op.kind == OperationKind::Command(Effect::Create) {
+        wanted.push((record.clone(), "id".to_string()));
+    }
+    let writes = matches!(
+        op.kind,
+        OperationKind::Command(Effect::Create | Effect::Update)
+    );
+    if let Some(body) = call.body.as_ref().filter(|_| writes) {
+        let held = identity
+            .filter(|i| i.record.is_some())
+            .and_then(|i| Some((i, i.record_in(body)?)));
+        let sent = held.map_or(body, |(_, record)| record);
+        // The request's schema of what it sent: of the record its envelope holds.
+        let input = match (
+            held.and_then(|(i, _)| i.record.as_ref()),
+            op.input.body.as_ref(),
+        ) {
+            (Some(RecordAt::Member(m)), Some(schema)) => {
+                crate::consistency::property_schema(bundle, schema, m)
+            }
+            (Some(RecordAt::MemberItem(m)), Some(schema)) => {
+                crate::consistency::property_schema(bundle, schema, m).and_then(|list| {
+                    crate::consistency::deref(bundle, &list)
+                        .get("items")
+                        .cloned()
+                })
+            }
+            (Some(RecordAt::Item), Some(schema)) => crate::consistency::deref(bundle, schema)
+                .get("items")
+                .cloned(),
+            (_, schema) => schema.cloned(),
+        };
+        let input = input.as_ref();
+        for (name, value) in sent.as_object().into_iter().flatten() {
+            let flagged = input
+                .and_then(|schema| crate::consistency::property_schema(bundle, schema, name))
+                .is_some_and(|member| {
+                    let member = crate::consistency::deref(bundle, &member).clone();
+                    ["readOnly", "writeOnly"]
+                        .iter()
+                        .any(|k| member.get(*k) == Some(&Value::Bool(true)))
+                });
+            if !value.is_null() && !flagged {
+                wanted.push((record.clone(), name.clone()));
+            }
+        }
+    }
+    let defs = doc.as_object_mut().and_then(|root| root.remove("$defs"));
+    let none = Value::Object(serde_json::Map::new());
+    let mut added = 0;
+    for (path, name) in &wanted {
+        if added < MAX_ECHOED_REQUIRED
+            && require_at(&mut doc, path, name, defs.as_ref().unwrap_or(&none))
+        {
+            added += 1;
+        }
+    }
+    if let (Some(defs), Some(root)) = (defs, doc.as_object_mut()) {
+        root.insert("$defs".to_string(), defs);
+    }
+    doc
+}
+
+/// Whether [`require_at`] adds `name` at `path`: the schema there declares it (in its
+/// own `properties` or an `allOf` part's), not as `writeOnly`, and requires it nowhere
+/// yet.
+fn would_require(doc: &Value, path: &[Step], name: &str, defs: &Value) -> bool {
+    let mut node = resolved(doc, defs);
+    for step in path {
+        let next = match step {
+            Step::Member(m) => node.get("properties").and_then(|p| p.get(m)),
+            Step::Items => node.get("items"),
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        node = resolved(next, defs);
+    }
+    let parts: Vec<&Value> = std::iter::once(node)
+        .chain(
+            node.get("allOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|part| resolved(part, defs)),
+        )
+        .collect();
+    let requires = parts.iter().any(|part| {
+        part.get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|r| r.iter().any(|n| n.as_str() == Some(name)))
+    });
+    let declared = parts
+        .iter()
+        .find_map(|part| part.get("properties").and_then(|p| p.get(name)))
+        .map(|member| resolved(member, defs));
+    !requires && declared.is_some_and(|m| m.get("writeOnly") != Some(&Value::Bool(true)))
+}
+
+/// `node` with a `$ref` to one of `defs` replaced by a copy of the definition (its
+/// own members beside the `$ref`, a `description`, kept), as long as it is one.
+fn inline(node: &mut Value, defs: &Value) {
+    for _ in 0..8 {
+        let Some(def) = node
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|name| defs.get(name))
+            .filter(|def| def.is_object())
+        else {
+            return;
+        };
+        let mut copy = def.clone();
+        if let (Some(own), Some(out)) = (node.as_object(), copy.as_object_mut()) {
+            for (k, v) in own {
+                if k != "$ref" && !out.contains_key(k) {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        *node = copy;
+    }
+}
+
+/// `schema` with `$ref`s to `defs` followed, without copying.
+fn resolved<'a>(mut schema: &'a Value, defs: &'a Value) -> &'a Value {
+    for _ in 0..8 {
+        match schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+            .and_then(|name| defs.get(name))
+        {
+            Some(def) => schema = def,
+            None => break,
+        }
+    }
+    schema
+}
+
+/// Adds `name` to the `required` of the object schema at `path` in `doc` (see
+/// [`with_echoes_required`]), when that schema declares it (in its own `properties`
+/// or an `allOf` part's) and not as `writeOnly`. Whether it was added.
+fn require_at(doc: &mut Value, path: &[Step], name: &str, defs: &Value) -> bool {
+    // Nothing is copied for a member required already, or not declared there.
+    if !would_require(doc, path, name, defs) {
+        return false;
+    }
+    let mut node = doc;
+    for step in path {
+        inline(node, defs);
+        let next = match step {
+            Step::Member(m) => node.get_mut("properties").and_then(|p| p.get_mut(m)),
+            Step::Items => node.get_mut("items"),
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        node = next;
+    }
+    inline(node, defs);
+    let parts = std::iter::once(&*node).chain(
+        node.get("allOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|part| resolved(part, defs)),
+    );
+    let mut declared = None;
+    for part in parts {
+        if let Some(member) = part.get("properties").and_then(|p| p.get(name)) {
+            declared = Some(resolved(member, defs));
+            break;
+        }
+    }
+    let Some(member) = declared else {
+        return false;
+    };
+    if member.get("writeOnly") == Some(&Value::Bool(true)) {
+        return false;
+    }
+    let Some(obj) = node.as_object_mut() else {
+        return false;
+    };
+    let required = obj
+        .entry("required")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(list) = required.as_array_mut() else {
+        return false;
+    };
+    if list.iter().any(|r| r.as_str() == Some(name)) {
+        return false;
+    }
+    list.push(Value::from(name));
+    true
+}
+
 /// `doc` (a schema carrying `$defs`) fitted to `budget` bytes of compact
 /// JSON: unchanged when it fits; else with descriptions cut to
 /// [`MAX_DESCRIPTION`] characters; else also with the definitions more than
@@ -326,5 +585,133 @@ mod tests {
         let out = fit(doc, 10);
         assert!(out["$defs"]["A"]["properties"].is_object());
         assert!(out["$defs"]["B"].get("enum").is_none());
+    }
+
+    /// A contract whose schemas require nothing: an envelope create, a list, a shared
+    /// `Item` definition.
+    const ECHOES: &str = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                item:
+                  type: object
+                  properties: {title: {type: string}, secret: {type: string, writeOnly: true}, stamp: {type: string, readOnly: true}, extra: {type: string}}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item: {$ref: "#/components/schemas/Item"}
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: {type: integer}
+                  entries: {type: array, items: {$ref: "#/components/schemas/Item"}}
+components:
+  schemas:
+    Item:
+      type: object
+      properties:
+        id: {type: string}
+        title: {type: string}
+        secret: {type: string, writeOnly: true}
+        stamp: {type: string}
+        parent: {$ref: "#/components/schemas/Item"}
+"##;
+
+    fn call(body: Option<Value>) -> crate::OperationCall {
+        crate::OperationCall {
+            operation_id: String::new(),
+            path_params: serde_json::Map::new(),
+            query: serde_json::Map::new(),
+            headers: serde_json::Map::new(),
+            body,
+        }
+    }
+
+    fn sent(bundle: &Bundle, op_id: &str, body: Option<Value>) -> Value {
+        let op = bundle.operation(op_id).unwrap();
+        let schema = op.success_output().unwrap().schema.clone().unwrap();
+        let doc = response_prompt_schema(bundle, &schema);
+        with_echoes_required(bundle, op, 201, &call(body), doc)
+    }
+
+    fn names(schema: &Value) -> Vec<&str> {
+        schema["required"]
+            .as_array()
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_create_requires_its_envelope_its_identity_and_what_the_request_set() {
+        let bundle = mb_import::compile(ECHOES.as_bytes()).unwrap();
+        let body = json!({"item": {"title": "t", "secret": "s", "stamp": "x", "extra": null}});
+        let out = sent(&bundle, "createItem", Some(body));
+        assert_eq!(names(&out), ["item"], "{out}");
+        let record = &out["properties"]["item"];
+        // The record is this answer's copy: `title` sent, `secret` writeOnly, `stamp`
+        // readOnly in the request, `extra` null and undeclared.
+        assert_eq!(names(record), ["id", "title"], "{out}");
+        // The shared definition, and the nested use of it, are as they were.
+        let defs = out["$defs"].as_object().unwrap();
+        let shared = defs
+            .values()
+            .find(|d| d.get("properties").is_some())
+            .unwrap();
+        assert!(shared.get("required").is_none(), "{out}");
+    }
+
+    #[test]
+    fn a_list_requires_its_list_member_only() {
+        let bundle = mb_import::compile(ECHOES.as_bytes()).unwrap();
+        let op = bundle.operation("listItems").unwrap();
+        let schema = op.success_output().unwrap().schema.clone().unwrap();
+        let doc = response_prompt_schema(&bundle, &schema);
+        let out = with_echoes_required(&bundle, op, 200, &call(None), doc.clone());
+        assert_eq!(names(&out), ["entries"], "{out}");
+        // Not for an error answer.
+        let error = with_echoes_required(&bundle, op, 404, &call(None), doc.clone());
+        assert_eq!(error, doc);
+    }
+
+    #[test]
+    fn echoed_members_are_bounded() {
+        let props: serde_json::Map<String, Value> = (0..30)
+            .map(|i| (format!("m{i}"), json!({"type": "string"})))
+            .collect();
+        let contract = json!({
+            "openapi": "3.0.0",
+            "info": {"title": "T", "version": "1"},
+            "paths": {"/things": {"post": {
+                "operationId": "createThing",
+                "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": props}}}},
+                "responses": {"201": {"description": "created", "content": {"application/json": {"schema": {"type": "object", "properties": props}}}}}
+            }}}
+        });
+        let bundle = mb_import::compile(contract.to_string().as_bytes()).unwrap();
+        let body: serde_json::Map<String, Value> =
+            (0..30).map(|i| (format!("m{i}"), json!("v"))).collect();
+        let out = sent(&bundle, "createThing", Some(Value::Object(body)));
+        assert_eq!(names(&out).len(), MAX_ECHOED_REQUIRED, "{out}");
     }
 }

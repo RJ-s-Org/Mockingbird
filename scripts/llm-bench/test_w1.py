@@ -359,6 +359,48 @@ class HeldOutJourneyTest(unittest.TestCase):
             earlier |= set(getattr(server_suites, f"BLIND{n}_MOCKS"))
         self.assertEqual(earlier & set(mocks), set())
 
+    def test_journeys_blind10_is_a_suite(self):
+        self.assertIn("journeys_blind10", server_suites.SUITES)
+        self.assertNotIn("journeys_blind10", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind10"]
+        self.assertIs(runner, server_suites.run_journeys_blind10)
+        self.assertEqual(sorted(mocks), ["databricks", "googlecalendar", "heroku", "kubernetes", "pagerduty"])
+        self.assertEqual(sorted(server_suites.BLIND10_JOURNEYS), sorted(mocks))
+        for name, (contract, prefix, persona) in mocks.items():
+            self.assertIsNone(persona)
+            self.assertEqual(prefix, f"/{name}")
+            self.assertTrue(contract.startswith("scripts/llm-bench/contracts/blind10/"), contract)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+            self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
+        # A blind set's journeys are new: none shares a name with an earlier suite's.
+        earlier = set(server_suites.JOURNEYS) | set(server_suites.HELDOUT_JOURNEYS) | set(server_suites.BLIND_JOURNEYS)
+        for n in range(2, 10):
+            earlier |= set(getattr(server_suites, f"BLIND{n}_MOCKS"))
+        self.assertEqual(earlier & set(mocks), set())
+
+    def test_journeys_blind11_is_a_suite(self):
+        self.assertIn("journeys_blind11", server_suites.SUITES)
+        self.assertNotIn("journeys_blind11", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind11"]
+        self.assertIs(runner, server_suites.run_journeys_blind11)
+        self.assertEqual(sorted(mocks), ["bigcommerce", "helpscout", "mux", "postmark", "terraform"])
+        self.assertEqual(sorted(server_suites.BLIND11_JOURNEYS), sorted(mocks))
+        for name, (contract, prefix, persona) in mocks.items():
+            self.assertIsNone(persona)
+            self.assertEqual(prefix, f"/{name}")
+            self.assertTrue(contract.startswith("scripts/llm-bench/contracts/blind11/"), contract)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+            self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
+        # A blind set's journeys are new: none shares a name with an earlier suite's.
+        earlier = set(server_suites.JOURNEYS) | set(server_suites.HELDOUT_JOURNEYS) | set(server_suites.BLIND_JOURNEYS)
+        for n in range(2, 11):
+            earlier |= set(getattr(server_suites, f"BLIND{n}_MOCKS"))
+        self.assertEqual(earlier & set(mocks), set())
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
@@ -482,7 +524,7 @@ class FakeEmpty(FakeStripe):
 
 
 class EmptyAnswersTest(unittest.TestCase):
-    def test_each_blind7_to_blind9_journey_records_every_check_on_empty_answers(self):
+    def test_each_blind7_to_blind11_journey_records_every_check_on_empty_answers(self):
         # Every check runs and fails on its own: none gates the rest and none raises.
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeEmpty)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -497,7 +539,9 @@ class EmptyAnswersTest(unittest.TestCase):
 
         for suite, journeys in (("journeys_blind7", server_suites.BLIND7_JOURNEYS),
                                 ("journeys_blind8", server_suites.BLIND8_JOURNEYS),
-                                ("journeys_blind9", server_suites.BLIND9_JOURNEYS)):
+                                ("journeys_blind9", server_suites.BLIND9_JOURNEYS),
+                                ("journeys_blind10", server_suites.BLIND10_JOURNEYS),
+                                ("journeys_blind11", server_suites.BLIND11_JOURNEYS)):
             for name, steps in journeys.items():
                 self.run_on_empty_answers(Srv, Args, suite, name, steps)
 
@@ -783,6 +827,16 @@ class JobsTest(unittest.TestCase):
         rows = self.assert_same_rows("journeys_blind9")
         self.assertEqual(len(rows), 3 * 5 * 14)
         self.assertEqual({r["case"].split(".")[0] for r in rows}, set(server_suites.BLIND9_JOURNEYS))
+
+    def test_journeys_blind10(self):
+        rows = self.assert_same_rows("journeys_blind10")
+        self.assertEqual(len(rows), 3 * 5 * 14)
+        self.assertEqual({r["case"].split(".")[0] for r in rows}, set(server_suites.BLIND10_JOURNEYS))
+
+    def test_journeys_blind11(self):
+        rows = self.assert_same_rows("journeys_blind11")
+        self.assertEqual(len(rows), 3 * 5 * 14)
+        self.assertEqual({r["case"].split(".")[0] for r in rows}, set(server_suites.BLIND11_JOURNEYS))
 
     def test_a_unit_error_is_raised_and_stops_units_not_started(self):
         ran = []

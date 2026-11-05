@@ -548,7 +548,7 @@ pub(super) async fn serve(
         if live.len() > wanted {
             break;
         }
-        let gone = match (t, item.get(&field).and_then(id_string)) {
+        let gone = match (t, mb_mcm::member_at(&item, &field).and_then(id_string)) {
             (Some(t), Some(id)) if state.tracks_deleted => {
                 deleted::is_deleted(state, &plan.session, t, scope.as_deref(), &id).await
             }

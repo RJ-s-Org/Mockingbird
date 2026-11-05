@@ -104,6 +104,12 @@
 //! A list paged by number or offset has no place for a token: its first page is kept
 //! as a run instead, and its later pages served from it ([`runs`]).
 //!
+//! A list may carry its cursor in headers instead, as Heroku's does: a [`HeaderSlot`].
+//! The request's `Range` header names the member the list is ordered by and the values
+//! that bound it, and a `206 Partial Content` answer's `Next-Range` header is the
+//! `Range` of the following page. Nothing is kept for it: the cursor is the last value
+//! served, and [`ranges`] orders and cuts every such page from what the session holds.
+//!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says, and plain calls
 //! (no scenario or forced status).
 
@@ -157,6 +163,75 @@ impl Slot {
         };
         (!token.trim().is_empty()).then_some(token)
     }
+}
+
+/// Where a list read carries its cursor in headers (the `Range` convention, as Heroku
+/// pages its lists): it declares a `Range` request header, and a `206` answer with a
+/// schema and a `Next-Range` (or `Content-Range`) response header, beside another 2xx
+/// answer with the same schema, which holds every remaining item. Only an HTTP read.
+pub(super) struct HeaderSlot {
+    /// The request header, by its declared name.
+    pub(super) header: String,
+    /// The `206`'s `Next-Range` header, by its declared name; `Next-Range` when it
+    /// declares only `Content-Range`. Served by the HTTP handler only.
+    #[cfg_attr(not(feature = "http-rest"), allow(dead_code))]
+    pub(super) next: String,
+    /// The status of a page more items follow: `206`.
+    pub(super) partial: u16,
+    /// The status of a page holding every remaining item (`200`).
+    pub(super) full: u16,
+}
+
+/// The [`HeaderSlot`] of `op`, when it has one.
+pub(super) fn header_slot(op: &Operation) -> Option<HeaderSlot> {
+    if !matches!(op.kind, OperationKind::Query) || !matches!(op.binding, Binding::Http { .. }) {
+        return None;
+    }
+    let Some(Value::Object(declared)) = op.input.headers.as_ref().and_then(|s| s.get("properties"))
+    else {
+        return None;
+    };
+    let header = declared
+        .keys()
+        .find(|name| name.eq_ignore_ascii_case("range"))?
+        .clone();
+    let partial = op.outputs.iter().find(|variant| {
+        variant.status == mb_mcm::StatusSelector::Code(206) && variant.schema.is_some()
+    })?;
+    let named = |wanted: &str| {
+        partial
+            .headers
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(wanted))
+            .cloned()
+    };
+    let next = match named("next-range") {
+        Some(name) => name,
+        None => {
+            named("content-range")?;
+            "Next-Range".to_string()
+        }
+    };
+    let full = op
+        .outputs
+        .iter()
+        .filter_map(|variant| match variant.status {
+            mb_mcm::StatusSelector::Code(code)
+                if (200..300).contains(&code)
+                    && code != 206
+                    && variant.schema == partial.schema =>
+            {
+                Some(code)
+            }
+            _ => None,
+        })
+        .min()?;
+    Some(HeaderSlot {
+        header,
+        next,
+        partial: 206,
+        full,
+    })
 }
 
 /// Whether member `name` is, or ends with the words of, parameter `param`.
@@ -1127,7 +1202,7 @@ pub(super) fn drop_served(
     };
     let was = items.len();
     items.retain(|item| {
-        item.get(&field)
+        mb_mcm::member_at(item, &field)
             .and_then(id_string)
             .is_none_or(|id| !followed.ids.contains(&id))
     });
@@ -1290,7 +1365,7 @@ pub(super) async fn mint(
             truncated = true;
             break;
         }
-        let gone = match (t, item.get(&field).and_then(id_string)) {
+        let gone = match (t, mb_mcm::member_at(&item, &field).and_then(id_string)) {
             (Some(t), Some(id)) if state.tracks_deleted => {
                 deleted::is_deleted(state, session, t, scope.as_deref(), &id).await
             }
@@ -1312,7 +1387,7 @@ pub(super) async fn mint(
         let then = slot.given(body).filter(|_| cut.stored > 0).map(|token| {
             let ids: Vec<String> = rest
                 .iter()
-                .filter_map(|item| item.get(&field).and_then(id_string))
+                .filter_map(|item| mb_mcm::member_at(item, &field).and_then(id_string))
                 .collect();
             (token, ids)
         });
