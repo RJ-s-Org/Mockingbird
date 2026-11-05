@@ -51,10 +51,10 @@ Fixes 9 (echo over a withheld null) and 11 (JSON Patch bodies) have no branch ye
 1. **Tier 0 must change nothing.** The runtime reads tier 0, which restates the heuristics. Expected: every answer, status and stored record is byte-identical to a runtime built without a world. Tests: Task 1 `apply_of_tier0_is_identity` (every repo contract) and Task 3 `tier0_world_answers_as_no_world`.
 2. **An engine-made value that the schema refuses.** Examples: a sum written to a `string` member with a `pattern`, a soft-delete state written to a boolean member, a patterned id over `maxLength`, a list page whose envelope requires a member nothing fills. Expected: the value is coerced to the member's declared type where that is exact; otherwise the answer falls back to generation and is still valid. Tests: Task 7 `a_boolean_soft_delete_state_is_stored_as_true`, Task 10 `a_list_page_whose_envelope_cannot_be_filled_is_generated`, Task 11 `a_sum_into_a_string_member_keeps_the_children_scale`.
 3. **A revision written mid-session.** A rebuild resets the runtime's in-memory indexes: `collections`, `path_aliases`, `value_index`, `written_types` and `own_reads` (`mb-protocols/src/lib.rs`). Stored records survive, because they live in the state store. The next request follows the new revision. Two cases need more than that, because an assistant iterating on revisions hits them often:
-   - **A described list after a rebuild.** Expected: the next list of a collection the session already listed or wrote is still answered from state. It is not generated and seeded again (`WriteOrigin::Seeded`), so model records are never mixed into a collection that holds real ones. This holds because Task 10 keeps its "listed or written before" mark in the state store, not in `Collections`.
-   - **A revision that changes a type's identity member or pattern.** Expected: records stored before stay under their old key and nothing is migrated. A read, update or delete by the new member's value still reaches them, because `by_path_fields` scans the type's current identity member (Task 5). A read by a bare or a patterned id reaches a record stored under either form (`records::bare_id`/`patterned`). New records are stored under the new member.
+   - **A described list after a rebuild.** Expected: the next list of a collection the session already listed or wrote is still answered from state. It is not generated and seeded again (`WriteOrigin::Seeded`), so model records are never mixed into a collection that holds real ones. This holds because Task 10 keeps its "listed or written before" mark in the state store, not in `Collections`. The mark also records which records the session placed in the collection, so a nested list (`/parents/{p}/children`) after a rebuild holds that parent's children only, including children whose members do not name the parent (Task 10's membership rule).
+   - **A revision that changes a type's identity member or pattern.** Expected: records stored before stay under their old key and nothing is migrated. A read, update or delete by the new member's value still reaches them, because `by_path_fields` scans the type's current identity member (Task 5). A read, update or delete by a bare or a patterned id reaches a record stored under either form, because every direct key read by a path value goes through `records::held_by_key`, which tries the other form on a miss (`records::bare_id`/`patterned`; the four sites are listed in Task 5). New records are stored under the new member.
 
-   Tests: Task 4 `a_world_revision_mid_session_keeps_stored_records`, Task 10 `a_world_revision_mid_session_keeps_lists_from_state`, Task 5 `a_revision_that_changes_the_identity_member_still_reaches_earlier_records` and `a_revision_that_adds_a_pattern_still_reaches_bare_keyed_records`.
+   Tests: Task 4 `a_world_revision_mid_session_keeps_stored_records`, Task 10 `a_world_revision_mid_session_keeps_lists_from_state` and `a_nested_list_keeps_its_parents_children_across_a_rebuild`, Task 5 `a_revision_that_changes_the_identity_member_still_reaches_earlier_records` and `a_revision_that_adds_a_pattern_still_reaches_bare_keyed_records`.
 4. **Client input the description does not cover:**
    - a page token the mock never minted;
    - a page past the end;
@@ -138,21 +138,22 @@ The spec's order is kept: identity → kind/target/transition → lifecycle → 
 - **Lists from state** (Task 10) needs identity (records are stored), lifecycle (the soft-delete exclusion) and the described query, so it comes late.
 - **Soft-deleted records** are excluded from Task 8's unique check by Task 7, which owns `lifecycle::Exclusion`, so Task 8 does not wait for Task 7.
 - **Every task that edits `call.rs` runs in sequence**: 3 → 8 → 5 → 6 → 7 → 10 → 11. Task 8 goes before Task 5 because it needs only Task 3, while Task 5 waits for `claude/header-ids-alt-keys`; Task 8 uses that wait. Task 3 also goes after Task 2, because `Described` reads Task 2's `Option<String>` member.
+- **Only Task 5 waits for `claude/header-ids-alt-keys`.** Task 2 adds vocabulary only (serde fields, schema, validator, overlay) and uses none of that PR's code, so it depends on Task 1 alone. Tasks 3, 4, 8 and 9 therefore start without the PR; Task 5 (which calls its detectors and has tier 0 emit them) is the one task gated on it, and Task 6 and later wait for it only through Task 5.
 
 "PR" in the Depends column is a prerequisite engine PR from the table under "Base".
 
 | Task | Depends on | Parallel with | Files it owns |
 | --- | --- | --- | --- |
 | 1 `RecordAt::Pointer`, root pointer `""`, `tier0` move, `apply`, `effective` | — | — | `mb-mcm/src/lib.rs`, `mb-mcm/src/world/{tier0,apply,effective}.rs`, `mb-mcm/src/world/mod.rs` (`mod` lines, `Pointer::check_record`), `mb-mcm/src/world/validate.rs` (`RecordAt` use, root pointer), `mb-mcm/schemas/world.v1.json` (record pointer pattern), `mb-admin/src/world.rs` (`bad_pointer`, `effective_world` calls `effective`), spec and `docs/world.md` (the `""` sentence), `mb-import/src/world.rs`, `mb-import/src/heuristics.rs` (`RecordAt` uses), every `RecordAt` match in `mb-protocols`/`mb-engine` (`mb-engine/src/compact.rs` among them) |
-| 2 Vocabulary: `alternates`, `identity_header` (with its `false` form); field-wise overlay; optional `identity.member` | 1, PR `claude/header-ids-alt-keys` | — | `mb-mcm/src/world/{mod,validate,effective}.rs`, `mb-mcm/src/world/apply.rs` (Task 1's reads of the type's `identity.member`), `mb-mcm/schemas/world.v1.json`, `mb-mcm/src/world/tier0.rs` (`member: Some(..)`), `mb-protocols/src/world_gaps.rs` (`member.as_deref()`), tests that read `IdentityDesc.member` (`mb-import/tests/it/world_tier0.rs`), spec, `docs/world.md` vocabulary table, `mockingbird-world` skill |
-| 3 `Described`, `with_world`, gap marking | 1, 2 | — | `mb-protocols/src/call/described.rs`, `mb-protocols/src/lib.rs`, `call.rs` (`record_effects`, `seed_world_gaps`, its call at the start of `complete` and in `generate_narrowed`'s `Prepared::Answered` arm), `graphql/resolve.rs` (one `seed_world_gaps` call in the `Prepared::Answered` arm), `mb-engine/src/lib.rs` (`GeneratedResponse` field). It edits no `mb-mcm` file. It is written against Task 2's `IdentityDesc.member: Option<String>`. |
-| 4 Load at build, hot reload | 3 | 5, 6, 8, 9 | `mb-store/src/{sqlite,postgres}.rs`, `mb-admin/src/world.rs` (`runtime_world`), `mockingbird/src/runtime.rs` (`LoadedWorld`, `build_runtime_tracked`), `mockingbird/src/registry.rs` (`Mounted.world`, `build_mounted` retry, `Registry::world_status`). It edits no `mb-protocols` file: the pending flag lives in `LoadedWorld`, not on `MockRuntime`. |
-| 5 Identity and record pointers | 2, 3, 8, PR `claude/header-ids-alt-keys` | 4, 9 | `call/records.rs` (new), `mb-mcm/src/world/tier0.rs` (header and alternate emission), `call.rs`: `write_state` (returns `WriteOutcome`; create arm), `complete` (the create-id call site before `write_state` and the `no_record` mark after it), `mint_create_id`, the fix-5 members in the field lists passed to `by_path_fields` (read from `records::alternates`) and the one extra attempt per site; `mb-engine/src/lib.rs` (`created_id`); `http_rest/handler.rs` header placement; `records::request_record` in create shaping |
+| 2 Vocabulary: `alternates`, `identity_header` (with its `false` form); field-wise overlay; optional `identity.member` | 1 | — | `mb-mcm/src/world/{mod,validate,effective}.rs`, `mb-mcm/src/world/apply.rs` (Task 1's reads of the type's `identity.member`), `mb-mcm/schemas/world.v1.json`, `mb-mcm/src/world/tier0.rs` (`member: Some(..)`), `mb-protocols/src/world_gaps.rs` (`member.as_deref()`), tests that read `IdentityDesc.member` (`mb-import/tests/it/world_tier0.rs`), spec, `docs/world.md` vocabulary table, `mockingbird-world` skill |
+| 3 `Described`, `with_world`, gap marking | 1, 2 | — | `mb-protocols/src/call/described.rs`, `mb-protocols/src/lib.rs`, `call.rs` (`record_effects`, `seed_world_gaps`, its call at the start of `complete` and in `generate_narrowed`'s `Prepared::Answered` arm), `graphql/resolve.rs` (one `seed_world_gaps` call in the `Prepared::Answered` arm), `mb-engine/src/lib.rs` (`GeneratedResponse` field), `mb-protocols/tests/it/main.rs` (registers every `described_*` module of Tasks 3-11) and `support.rs` (the harness), plus the stub files of those modules. It edits no `mb-mcm` file. It is written against Task 2's `IdentityDesc.member: Option<String>`. |
+| 4 Load at build, hot reload | 3 | 5, 6, 8, 9 | `mb-store/src/{sqlite,postgres}.rs`, `mb-admin/src/world.rs` (`runtime_world`), `mockingbird/src/runtime.rs` (`LoadedWorld`, `build_runtime_tracked`, its wrapper `build_runtime_with_budget`), `mockingbird/src/registry.rs` (`Mounted.world`, `build_mounted` retry and its cancellation, `MockRegistry::world_status`). It edits no `mb-protocols` file: the pending flag lives in `LoadedWorld`, not on `MockRuntime`. |
+| 5 Identity and record pointers | 2, 3, 8, PR `claude/header-ids-alt-keys` | 4, 9 | `call/records.rs` (new), `mb-mcm/src/world/tier0.rs` (header and alternate emission), `call.rs`: `write_state` (returns `WriteOutcome`; create arm), `complete` (the create-id call site before `write_state` and the `no_record` mark after it), `mint_create_id`, the fix-5 members in the field lists passed to `by_path_fields` (read from `records::alternates`) and the one extra attempt per site, the direct key reads that take `records::held_by_key` (`read_context`'s target read, the `foreign_key` check in `prepare`, `any_owner_holds`' first read, `follow`'s reference read); `mb-engine/src/lib.rs` (`created_id`); `http_rest/handler.rs` header placement; `records::request_record` in create shaping |
 | 6 Kind, target, transition, changes | 5, PR `claude/effect-members` | 4, 9 | `call/transitions.rs` (new), `call.rs` `write_state` update/action arms, `call/write_memory.rs` (`onto_record` replace; the request merge takes `records::request_record`) |
 | 7 Lifecycle, soft delete, `not_found` | 6, 8, 9, PR #253 | — | `call/lifecycle.rs` (new), `call/deleted.rs`, `call.rs` `write_state` delete arm and create arm (the `lifecycle::initial` call), `call/list_query.rs` (exclusion), `call/repeats.rs` (exclusion in `described_conflict`) |
 | 8 Unique, concurrency, idempotency | 3 | 4, 9 | `call/repeats.rs`, `call/tokens.rs`, `call/replays.rs` (new), `call.rs`: `prepare` (refusal and replay call sites), `complete` (the `replays::keep` call site), `repeated_record` (the described idempotency header); `call/value_index.rs` (`same_values`, the same header); `mb-engine/src/guards.rs` (`carries_an_idempotency_key` takes the described header). No `tier0.rs` change (Decision 11). |
 | 9 Paging, filters, scope, order | 3, PR #252 | 4, 5, 6, 8 | `call/list_query.rs` (new), `call/lists.rs`, `call/runs.rs`, `call/pages.rs`, `call/cursors.rs` |
-| 10 Lists answered from state | 7 | — | `call/state_lists.rs` (new), `call.rs`: `prepare` list branch, one `#listed` mark call in `complete` (seeding) and in `write_state`'s create arm |
+| 10 Lists answered from state | 7 | — | `call/state_lists.rs` (new), `call.rs`: `prepare` list branch, one `#listed` mark call in `complete` (seeding) and in `write_state`'s create arm; `call/lists.rs` (`in_collection` made `pub(super)`, no other change) |
 | 11 Derived counts and sums | 10 | — | `call/derived.rs` (new), hooks in `serve_held`, the generated-answer path of a held record, and `state_lists.rs` |
 | 12 Docs, changelog, regression run | all | — | `docs/world.md`, `CHANGELOG.md`, `mockingbird-world` skill |
 
@@ -160,16 +161,17 @@ The spec's order is kept: identity → kind/target/transition → lifecycle → 
 - `crates/mb-protocols/src/call.rs` is edited by Tasks 3, 8, 5, 6, 7, 10 and 11, in that order, one at a time. None of them is parallel with another. What each edits there:
   - Task 3: `record_effects`, the new `seed_world_gaps`, one call to it at the start of `complete` and one in `generate_narrowed`'s `Prepared::Answered` arm;
   - Task 8: `prepare` (two call sites), one call site in `complete` after the answer is settled, and the guard in `repeated_record`;
-  - Task 5: `write_state`'s signature (it returns `WriteOutcome`) and create arm, every other `return` in `write_state` (each returns its `WriteOutcome` per the table in Task 5, with no other change), `mint_create_id`, the fix-5 members (read from `records::alternates`) and one appended `by_path_fields` attempt at each of three sites (the update/delete target lookup, `any_owner_holds`, which `read_state` calls, and the parent lookup in `related`), and two call sites in `complete` around the `write_state` call;
+  - Task 5: `write_state`'s signature (it returns `WriteOutcome`) and create arm, every other `return` in `write_state` (each returns its `WriteOutcome` per the table in Task 5, with no other change), `mint_create_id`, the fix-5 members (read from `records::alternates`) and one appended `by_path_fields` attempt at each of three sites (the update/delete target lookup, `any_owner_holds`, which `read_state` calls, and the parent lookup in `related`), the four direct key reads that become `records::held_by_key` (`read_context`'s target read, which serves reads through `read_state` and is the update/delete key read before its `by_path_fields` attempts; the `foreign_key` check in `prepare`; `any_owner_holds`' first read; `follow`'s reference read), and two call sites in `complete` around the `write_state` call;
   - Task 6: `write_state`'s update and action arms;
   - Task 7: `write_state`'s delete arm and one `lifecycle::initial` call in its create arm;
   - Task 10: `prepare`'s list branch, one `#listed` mark in `complete` and one in `write_state`'s create arm;
   - Task 11: `serve_held` and the generated-answer path of a held record.
-- `crates/mb-engine/src/lib.rs` is edited by Task 3, then Task 5 (after 3). `mb-mcm/src/world/{tier0,apply,effective,validate,mod}.rs` by Task 1, then Task 2, then Task 5 (`tier0.rs`). `mb-admin/src/world.rs` by Task 1, then Task 4. `call/list_query.rs` by Task 9, then Task 7. `call/repeats.rs` by Task 8, then Task 7.
+- `crates/mb-engine/src/lib.rs` is edited by Task 3, then Task 5 (after 3). `mb-mcm/src/world/{tier0,apply,effective,validate,mod}.rs` by Task 1, then Task 2, then Task 5 (`tier0.rs`). `mb-admin/src/world.rs` by Task 1, then Task 4. `call/list_query.rs` by Task 9, then Task 7. `call/repeats.rs` by Task 8, then Task 7. `call/lists.rs` by Task 9, then Task 10 (one visibility change).
+- **The integration-test crate's shared files.** `crates/mb-protocols/tests/it/main.rs` and `support.rs` are edited by **Task 3 only**. Task 3 registers every module the later tasks fill (`mod described_runtime; mod described_identity; mod described_kinds; mod described_lifecycle; mod described_conflicts; mod described_lists; mod described_state_lists; mod described_derived;`) and creates each file as a stub holding only its module doc line, so Tasks 5, 6, 8 and 9 (parallel in pairs) each edit only their own module file. A helper a later task needs goes in its own module file; if one is needed by two modules, it is added to `support.rs` by the earlier of the two tasks in the Depends order, never by two parallel tasks. `crates/mockingbird/tests/it/main.rs` is edited by Task 4 only (`mod world_runtime;`).
 - The parallel pairs that remain: Task 4 (`mb-store`, `mb-admin/src/world.rs`, `mockingbird/src/{runtime,registry}.rs`) with any of 5, 6, 8 and 9; Task 9 (`call/{list_query,lists,runs,pages,cursors}.rs`) with any of 4, 5, 6 and 8. Neither edits `call.rs`, `mb-engine`, `mb-mcm` or a file of the other.
 
 **Coordination.**
-- **`claude/header-ids-alt-keys`** (blind11 fixes 1 and 5) lands **before** Tasks 2 and 5, which build on it:
+- **`claude/header-ids-alt-keys`** (blind11 fixes 1 and 5) lands **before** Task 5, which builds on it (Task 2 names the two keys its detectors find, but needs none of its code, so it does not wait):
   - Fix 1 adds the header-id detector (a declared 2xx response header whose name ends in `-id`/`_id`/`ID`, or `Location` matching the item route) and the create path that mints the id, stores the request body shaped onto the read schema, and echoes the id in the header. Task 5 reuses those functions with the header name as a parameter. It does not write a second `header_id`.
   - Fix 5 adds id-like members that a path value may name. Task 5 assumes they land as extra members in the `fields` list that `by_path_fields` already scans (`call.rs`, `by_path_fields`: `PathAliases` first, then one `MAX_SCAN` listing, first match in field order). If they land as a separate lookup, Task 5's first step folds that lookup into `by_path_fields`' field list before adding described alternates. There is one lookup and one rule.
   - **Fix 5 is asked to land per type**: the id-like members are a function of the type (`fn id_like_members(bundle, t) -> Vec<String>`, from the type's record schema), appended **after** each site's existing fields. That is what lets tier 0 restate them as `types.<t>.identity.alternates`. Task 5's first step writes down, in `records.rs`'s module doc, where fix 5 put its members in each site's list as merged. If fix 5 lands per path parameter instead (for example from `name_fields(param)` or an `idOrAlias`-style parameter name), Task 5 follows "Coordination cases" under Task 5.
@@ -331,7 +333,7 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 ### Task 2: Vocabulary for id-or-alias paths and header ids
 
 **Files:**
-- Prerequisite: `claude/header-ids-alt-keys` merged. The two keys name what its detectors find, and Task 5 has tier 0 emit them.
+- No PR prerequisite: this task depends on Task 1 only. The two keys name what `claude/header-ids-alt-keys`' detectors find, but this task adds only their vocabulary (serde fields, schema, validator, overlay) and calls none of that PR's code. Task 5, which has tier 0 emit them from the detectors, is the task that waits for the PR.
 - Modify: `crates/mb-mcm/src/world/mod.rs`:
   - `IdentityDesc.alternates`, `AnswerDesc.identity_header`;
   - `overlay` merges `identity`, `target` and `answer` **field by field** instead of replacing them whole (`overlay_type`/`overlay_op` call `set` per sub-field, as they already do per entry). An author who writes `answer: {identity_header: X}` keeps tier 0's `answer.record`, and one who writes `identity: {alternates: [..]}` keeps tier 0's `member`.
@@ -413,7 +415,8 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 - Modify: `crates/mb-engine/src/lib.rs` (`GeneratedResponse.world_gaps: Vec<String>`, default empty, and every constructor)
 - The protocol handlers (`http_rest/handler.rs`, `grpc/service.rs`, `soap/mod.rs`, and `graphql/resolve.rs` beyond the one arm above) are **not** edited for the gaps: they call `record_effects` on what `generate_narrowed`, `generate_pending` or `complete` returned. Step 3 lists every `record_effects` caller and traces its answer to one of the three seeding points (Decision 6), and checks `events/ws.rs` and `http_rest/sse.rs`; a recorded call that reaches none of them calls `seed_world_gaps` before recording.
 - `crates/mb-mcm/src/world/effective.rs` and the `effective_world` switch are Task 1's; this task only consumes `effective`.
-- Modify: `crates/mb-protocols/tests/it/support.rs` (`Described` harness), `crates/mb-protocols/tests/it/main.rs`
+- Modify: `crates/mb-protocols/tests/it/support.rs` (`Described` harness), `crates/mb-protocols/tests/it/main.rs` (one `mod` line for each `described_*` module of Tasks 3-11; see "The integration-test crate's shared files")
+- Create: stubs `crates/mb-protocols/tests/it/{described_identity,described_kinds,described_lifecycle,described_conflicts,described_lists,described_state_lists,described_derived}.rs`, each holding only its `//!` module doc, filled by Tasks 5, 6, 7, 8, 9, 10 and 11
 - Test: `crates/mb-protocols/tests/it/described_runtime.rs` (new)
 
 **Interfaces:**
@@ -431,8 +434,8 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
     - `Described::gaps(&self, op_id: &str) -> &[GapCode]`;
     - `Described::state_value(&self, t: &str, state: &str) -> Option<Value>`. It returns a lifecycle state in the member's declared type: `"true"` → `true` for a boolean, a number for an integer, the text otherwise. `None` when it does not fit.
   - `Described::default()` describes nothing.
-  - `Described::for_test(gaps: HashMap<String, Vec<GapCode>>) -> Described` (`#[doc(hidden)]`), for the seeding tests only.
-  - Test support: `support::described(contract: &str, world: Value, script: Vec<Value>) -> DescribedHarness`, with `send(method, uri, body, headers) -> (StatusCode, HeaderMap, Value)`, `records() -> Vec<RequestRecord>` and `stored(t, id) -> Option<Value>`.
+  - `#[doc(hidden)] pub fn MockRuntime::with_test_gaps(self, gaps: HashMap<String, Vec<mb_protocols::world_gaps::GapCode>>) -> Self`, for the seeding tests only. It replaces the static gaps of each named operation in the runtime's `Described` (operations it does not name keep theirs) and changes nothing else. It is the only way a `Described` is set from outside the crate: `call` is a private module (`mod call;` in `lib.rs`), so `Described` and its constructors are `pub(crate)`, and `tests/it`, which sees neither `call` nor `#[cfg(test)]` items, reaches them only through this method. `world_gaps` is already `pub mod`, so `GapCode` is reachable. There is no `Described::for_test`.
+  - Test support: `support::described(contract: &str, world: Value, script: Vec<Value>) -> DescribedHarness`, and `support::described_with_gaps(contract, world, script, gaps)`, which builds the same runtime and then calls `with_test_gaps(gaps)`, with `send(method, uri, body, headers) -> (StatusCode, HeaderMap, Value)`, `records() -> Vec<RequestRecord>` and `stored(t, id) -> Option<Value>`.
     - **It treats `world` exactly as the runtime does.** It parses `world` as a revision document, computes `base = tier0(&bundle)`, runs `mb_mcm::world::effective(&bundle, &base, &doc)`, and builds the runtime with `with_world(&base, &effective, 1)`. It never passes the raw document in.
     - It **panics when `effective` refuses any entry**, with the refusals in the message, so a test whose world has a typo fails loudly instead of testing tier 0. A test that means to exercise a refusal uses `support::described_allowing_refusals`.
 
@@ -448,6 +451,9 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
     let h = support::described(NO_ID_CONTRACT, json!({}), vec![create_answer()]);
     h.send("POST", "/widgets", Some(json!({"label": "a"})), &[]).await;
     assert_eq!(h.records()[0].request["world_gap"], json!(["no_identity"]));
+    // Only the writing ops of the type are marked: the read carries no "no_identity".
+    h.send("GET", "/widgets/a", None, &[]).await;
+    assert!(!h.records()[1].request.get("world_gap").is_some_and(|g| g.as_array().unwrap().contains(&json!("no_identity"))));
 }
 #[tokio::test] async fn a_described_identity_clears_the_gap() {
     let h = support::described(NO_ID_CONTRACT, json!({"types": {"widget": {"identity": {"member": "label"}}}}), vec![create_answer()]);
@@ -469,8 +475,8 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 }
 #[tokio::test] async fn an_answer_from_state_is_marked() {
     // A held record read back through serve_held (source state). A read served from state has an identity and a target,
-    // so its op has no static gap of its own; the runtime is built with Described::for_test(gaps: {getThing: [NoTarget]})
-    // (a `#[doc(hidden)] pub` constructor, since `tests/it` does not see `#[cfg(test)]` items) to prove the Prepared::Answered arm seeds: world_gap ["no_target"]
+    // so its op has no static gap of its own; the harness is support::described_with_gaps(.., {getThing: [GapCode::NoTarget]}),
+    // which calls the `#[doc(hidden)] pub` MockRuntime::with_test_gaps, to prove the Prepared::Answered arm seeds: world_gap ["no_target"]
 }
 #[tokio::test] async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
     // two root fields in one GraphQL document (batched); one is an updateThing of an unheld id answered by nothing_held
@@ -483,7 +489,7 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
 ```
 
 - [ ] **Step 2: Run and verify the tests fail.** `cargo test -p mb-protocols --test it described_runtime` → FAIL (`with_world` is not defined).
-- [ ] **Step 3: Implement.** (`NO_ID_CONTRACT` has `POST /widgets` and `GET /widgets/{label}`, and no member tier 0 takes for an identity.) `with_world` replaces `self.bundle` with `Arc::new(apply(&self.bundle, base, world))` and recomputes the derived fields, as `new` does. `Described::new` keeps `world.operations`/`world.types` keyed as they are and precomputes `gaps` per operation (each `Gap` with `operation: Some(id)`, plus `NoIdentity` for the op's type). It lowercases header names for lookup. `record_effects` writes `world_gap` whenever `generated.world_gaps` is non-empty, even with no effects.
+- [ ] **Step 3: Implement.** (`NO_ID_CONTRACT` has `POST /widgets` and `GET /widgets/{label}`, and no member tier 0 takes for an identity.) `with_world` replaces `self.bundle` with `Arc::new(apply(&self.bundle, base, world))` and recomputes the derived fields, as `new` does. `Described::new` keeps `world.operations`/`world.types` keyed as they are and precomputes `gaps` per operation (each `Gap` with `operation: Some(id)`, plus `NoIdentity` for the op's type on the ops `world_gaps::gaps` lists for that gap). `gaps` reports `NoIdentity` once per type, with `operation: None`, for a type that an operation creates, updates, replaces, deletes or acts on (`is_write` of the effective kind). `Described` marks exactly those writing ops of the type. A read or list of a type with no identity gets no `no_identity` mark; it carries its own `no_target` when `gaps` reports one. A test in `world_gap_marks_an_operation_whose_type_has_no_identity` checks this: `GET /widgets/{label}` on `NO_ID_CONTRACT` records no `no_identity`. It lowercases header names for lookup. `record_effects` writes `world_gap` whenever `generated.world_gaps` is non-empty, even with no effects.
 - [ ] **Step 4: Run and verify the tests pass.** `cargo test -p mb-protocols && cargo test -p mb-engine` → PASS.
 - [ ] **Step 5: Commit** `git commit -m "runtime: compile the effective world into the runtime, mark world gaps"`
 
@@ -495,7 +501,7 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
   - Postgres: `let (ws, name) = require_locked_mock_key(&mut tx, mock_id, LOCK_KEEP).await?;` inside the transaction, as `put_scenario` does, taken **before** the existing `contract_versions ... FOR NO KEY UPDATE` read, so the lock order is mock row then version row, the order the version writers use (`require_locked_mock_key(.., LOCK_FOR_VERSIONS)` first).
   - After commit: `self.publish_mock(&ws, &name)` when the version is active.
 - Modify: `crates/mb-admin/src/world.rs` (new `runtime_world`)
-- Modify: `crates/mockingbird/src/runtime.rs` (`LoadedWorld`; `build_runtime_tracked` takes the previous `LoadedWorld` and returns the new one), `crates/mockingbird/src/registry.rs` (`Mounted.world`; `build_mounted` passes the previous runtime's world and schedules the retry; `Registry::world_status` for the tests)
+- Modify: `crates/mockingbird/src/runtime.rs` (`LoadedWorld`; `build_runtime_tracked` takes the previous `LoadedWorld` and returns the new one), `crates/mockingbird/src/registry.rs` (`Mounted.world`; `build_mounted` passes the previous runtime's world and schedules the retry; `MockRegistry::world_status` for the tests)
 - **No `mb-protocols` file.** `crates/mb-protocols/src/lib.rs` is Task 3's. This task uses Task 3's `MockRuntime::world()` and `world_revision()` and adds nothing to `MockRuntime`: the pending flag is kept in `LoadedWorld`.
 - Test: `crates/mb-store/tests/it/conformance.rs`, `crates/mb-admin/tests/it/world.rs`, `crates/mockingbird/tests/it/world_runtime.rs` (new; register it in `tests/it/main.rs`)
 
@@ -506,8 +512,9 @@ git commit -m "mcm: deep and root record pointers, tier0 in mb-mcm, apply and ef
     - The stored document is JSON (`latest.document`). When `serde_json::from_value::<World>` fails, `runtime_world` does what `effective_world` does: the world is tier 0 at that revision, `Ok((base.clone(), latest.revision))`, and the whole-document refusal is logged with `tracing::warn!(mock, revision, error)`. It is not a `StoreError`, so it does not set `pending` and does not start the retry loop. `Err` is returned only for a failed store read.
   - `pub(crate) struct LoadedWorld { version: i64, world: Arc<World>, revision: i64, pending: bool }` in `runtime.rs`. `pending` is true when the world could not be loaded (the runtime was built with the fallback) and a retry is scheduled.
   - `build_runtime_tracked(deps, mock, previous: Option<&LoadedWorld>)` returns the `LoadedWorld` it built with as a fourth tuple member, next to the runtime, budget and profiles. Its `world` is `MockRuntime::world()` (Task 3) of the runtime it built, or `base` when the runtime has none.
+  - Its public wrapper `build_runtime_with_budget(deps, mock)` (`runtime.rs` ~486; `build_runtime` calls it) keeps its signature: it calls `build_runtime_tracked(deps, mock, None)` and drops the `LoadedWorld` (`.map(|(rt, budget, _, _)| (rt, budget))`). Its callers (`tests/it/{registry,import_llm,webhooks_e2e}.rs` through `build_runtime`) have no previous world and schedule no retry; a store error there builds with `base`, as a first build does. `registry.rs`'s `build_mounted` is the only caller of `build_runtime_tracked`.
   - `Mounted.world: Option<LoadedWorld>` in `registry.rs`. On `main`, `Mounted` holds `workspace`, `name`, `served`, `state_health`, `events`, `channels`, `budget`, `profiles` and `uses_default`, and nothing about the runtime's world, so this field is new. `build_mounted` fills it from what `build_runtime_tracked` returned, and reads the previous one from the registry map entry for the mock.
-  - `#[doc(hidden)] pub fn Registry::world_status(&self, workspace: &str, name: &str) -> Option<(i64 /*revision*/, bool /*pending*/)>`, read from `Mounted.world`, for `tests/it` (which do not see `#[cfg(test)]` items).
+  - `#[doc(hidden)] pub fn MockRegistry::world_status(&self, workspace: &str, name: &str) -> Option<(i64 /*revision*/, bool /*pending*/)>`, read from `Mounted.world`, for `tests/it` (which do not see `#[cfg(test)]` items).
   - A runtime whose `world_revision()` is the newest revision of its active contract version.
 
 - [ ] **Step 1: Write the failing tests**
@@ -540,6 +547,15 @@ async fn a_world_revision_on_an_inactive_version_publishes_nothing(store) { /* t
     // the first retry's build_mounted returns Err (the pending runtime stays mounted), a later retry is still scheduled,
     // and once the store recovers world_status is (1, pending false), with no other mock change.
 }
+#[tokio::test] async fn a_pending_retry_stops_when_the_mock_is_deleted() {
+    // latest_world_revision always fails: world_status (0, pending true). Delete the mock: the next retry finds it gone,
+    // the counting store sees no further build for it, and world_status is None.
+    // Same with the active version deactivated (build returns Ok(None)): the mock is unmounted and no retry fires again.
+}
+#[tokio::test] async fn a_version_change_replaces_the_pending_retry() {
+    // pending on version 1; activate version 2 while the store has recovered: world_status reports version 2's revision,
+    // pending false, and exactly one build ran after the activation (the stale version-1 retry did nothing).
+}
 #[tokio::test] async fn a_revision_that_is_not_a_world_serves_tier0_without_retrying() {
     // Revision 1's document is {"types": 5} (does not deserialize as World): world_status (1, pending false),
     // a create is logged with tier 0's world_gap; the counting store sees no second build.
@@ -561,7 +577,14 @@ async fn a_world_revision_on_an_inactive_version_publishes_nothing(store) { /* t
   - The registry schedules one delayed rebuild of that mock (1 s, doubling to 60 s, reset on success) when either:
     - the built `LoadedWorld` is `pending`, or
     - a retry's own `build_mounted` returned `Err` (the store is still down; `active_contract` or `list_scenarios` usually fails before the world read). The old runtime stays mounted, as today, and the retry is rescheduled with the next backoff.
-  - A rebuild for any other reason that **succeeds** cancels the pending retry and schedules its own if it is also pending. One that fails while the mounted `LoadedWorld` is `pending` leaves the retry scheduled. So the loop ends only when a build loads the world.
+  - A rebuild for any other reason that **succeeds** cancels the pending retry and schedules its own if it is also pending. One that fails while the mounted `LoadedWorld` is `pending` leaves the retry scheduled. So the loop ends when a build loads the world, or when one of the cancellation conditions below holds.
+  - **What cancels a pending retry.** The retry is keyed by `(workspace, name)` and carries the build generation that scheduled it (a counter `build_mounted` bumps per mock on every build it starts). At most one retry per mock is scheduled. When it fires, it does nothing and schedules nothing when any of these holds:
+    - the mock is no longer in the registry map: it was unmounted, deleted, or its workspace was removed (a `ControlChange::Mock` or `ControlChange::Workspace` rebuild that dropped it, or a `Resync` that did not find it);
+    - a build since it was scheduled returned `Ok(None)`: the mock was deleted or has no active contract, so the registry unmounts it (as today) and a retry has nothing to load. An `Ok(None)` build also cancels the scheduled retry at once, rather than letting it fire and find the mock gone;
+    - its generation is older than the mounted runtime's: a later rebuild (a scenario change, a new revision, a version activation) replaced the runtime, and that rebuild already cancelled or rescheduled the retry by the rule above;
+    - the mounted `LoadedWorld` is not `pending` (another rebuild loaded the world);
+    - the registry is shutting down (the hub closed, `ChangeBatch.closed`): every pending retry is dropped with the registry's task set.
+    An **active-version change** is a rebuild like any other: it bumps the generation, so the old version's retry is stale. The new build's fallback uses the previous `(world, revision)` only when it served the same contract version (see the fallback above), so a store error during it falls back to the new version's `base` and schedules a fresh retry for the new version.
   - **A retry is a full rebuild, and that is accepted.** Each retry rebuild restarts the mock's `ChannelRuntime` and webhooks and resets the in-memory indexes (`collections`, `path_aliases`, `value_index`, `written_types`, `own_reads`), exactly as a scenario change or a new revision does. Stored records, the Task 10 `#listed` marks and the Task 8 replay keys live in the state store and survive. Retries happen only while the control store is failing, with backoff to 60 s, so the restarts are rare; retrying only the world load would need an in-place runtime swap (`ArcSwap`), which this plan does not add.
   - Call `with_world` before `set_data_plane_auth`, or rely on `with_world` recomputing the credential names.
 - [ ] **Step 4: Run and verify the tests pass.** Run the same commands, plus `LC_ALL=en_US.UTF-8 scripts/test-postgres.sh`. Expected: PASS.
@@ -611,9 +634,15 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
 
     Task 5 also adds `records::extra_fields(rt, t, already: &[&str]) -> Vec<&str>`, which returns at most one member: the type's identity member from the effective world, when it differs from `base`'s (tier 0's) member for the type and `already` does not hold it. It is needed even though `apply` already wrote it into the op's `identity.field`: a record stored before the revision is keyed by the old member, so the key read misses and only a scan by the new member finds it (Review Focus 3). Each site, after its existing attempts miss, makes **one more** `by_path_fields` call with `extra_fields(..)` only when it is non-empty, and under the site's own conditions (the update/delete lookup only when `rt.consistency` is on, as its scans are today). With no world and with a tier-0 world it is empty (it diffs against `base`), so no scan is added and every site behaves byte-for-byte as after fix 5. An extra attempt costs at most one `MAX_SCAN` (500) listing per miss, and only for a type the author described. `by_path_fields` itself is unchanged: `PathAliases` first, then one `MAX_SCAN` listing, first match in field order.
   - `mint_create_id`: format a minted id with `identity.pattern`.
+  - **The direct key reads try both forms of a patterned id.** A record is keyed by its identity value as it was stored: bare (`7`) when it was stored before the type had a pattern, patterned (`folders/7`) when minted or answered under one. The path value may be either. Four `state.get(session, t, id)` calls read a record by the path value as its key, and each becomes `records::held_by_key(state, session, t, id)`:
+    - `read_context`'s target read (`call.rs` ~5373). It serves every read (`read_state` calls `read_context`) and is also the update/delete key read that runs **before** that function's `by_path_fields` attempts, which stay as they are (above). `prepare` and `write_state` reach it through `read_context` too, so there is no second update/delete key read to edit;
+    - the `foreign_key` check in `prepare` (~896: whether the target's key holds another owner's record), so it agrees with the target read on which key is meant;
+    - `any_owner_holds`' first read (~6338), before its `by_path_fields` scan;
+    - `follow`'s reference read (~6900), so a nested route's parent (`/folders/{folder}/files` with `folder=7`) reaches a parent keyed `folders/7`.
+    `records::held_by_key` reads `id` first. On a miss, and only when the type's effective identity has a `pattern`, it reads the other form: `records::patterned(pattern, id)` when `id` does not already fit the pattern, else `records::bare_id(pattern, id)`. It returns the hit with its stored key (`StoredResource.id`), and the existing `target_id = Some(found.id.clone())` (~889) then sends the update or delete to that stored key, so a write never creates a second record under the other form. With no pattern (every type with no world, and under tier 0, which emits no pattern) it is the one `state.get` it replaces, byte for byte. A miss costs at most one extra key read, never a scan. `by_path_fields`, `PathAliases` and the scans compare member values as given; the dual form is a key-read rule only. The other `state.get` calls in `call.rs` (by an id the runtime itself holds: effect targets, stubs, `held_answer`, minting checks) read keys already in stored form and stay as they are.
 - Modify: `crates/mb-engine/src/lib.rs`: `GeneratedResponse.created_id: Option<String>`, filled by the caller like `effect_outcomes`. If fix 1 already carries the minted id to the handler some other way, use that carrier instead and skip this field.
 - Modify: `crates/mb-protocols/src/http_rest/handler.rs`: after `mb_engine::headers::declared_headers` fills the response headers, the fix-1 header placement runs with the header name from `records::identity_header(rt, op)` and the id from `generated.created_id`. `Location` becomes the item URL. The engine stays unaware of it.
-- Test: `crates/mb-protocols/tests/it/described_identity.rs` (new), `crates/mb-import/tests/it/world_tier0.rs`
+- Test: `crates/mb-protocols/tests/it/described_identity.rs` (Task 3's stub; this task fills it and edits no other file in `mb-protocols/tests/it`), `crates/mb-import/tests/it/world_tier0.rs`
 
 **Data flow of a create** (all in `complete`, in this order):
 1. The answer is settled (generated, repaired, validated), as today.
@@ -640,6 +669,7 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
   - `records::request_record<'a>(rt, op, body: &'a Value) -> &'a Value` (Decision 10): the value at the effective `request.record`, else the whole body. Used by the fix-1 create record (the request shaped onto the read schema) and by every other place the create arm takes its record from the request. Task 6 uses it for the update merge.
   - `records::settle_create(rt, plan, call, generated: &mut GeneratedResponse)`.
   - `records::patterned(pattern: &str, id: &str) -> String` and `records::bare_id(pattern: &str, value: &str) -> Option<String>`. A read by a path value tries both forms, so a record keyed under either one is found.
+  - `records::held_by_key(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) -> Option<StoredResource>`: the dual-form key read (see Files), used at exactly the four sites listed there.
 - One rule for alternates: they are members tried by `by_path_fields`, in the position fix 5 gave its members, so they follow its rule (first match in field order, owner check, `PathAliases` memo). There is no separate "exactly one" rule. If fix 5 needs uniqueness for guessed members, it adds that to `by_path_fields` for every field, and described alternates get it too.
 
 **Coordination cases for `claude/header-ids-alt-keys`.** Step 1 of this task records, in `records.rs`'s module doc, what the merged branch did. Then:
@@ -682,7 +712,12 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
     // answer {"name":"operations/1","done":true,"response":{"name":"folders/7","displayName":"a"}}, long_running {done: done, result: response}
     // GET /folders/7 → state
 }
-#[tokio::test] async fn a_patterned_identity_reads_by_bare_or_full_id() { /* pattern "folders/{id}" */ }
+#[tokio::test] async fn a_patterned_identity_reads_by_bare_or_full_id() {
+    // pattern "folders/{id}": a create stores under "folders/7"; GET /folders/7 and GET by "folders/7" → state (read_context's key read);
+    // PATCH /folders/7 updates that record (no second record under "7"); DELETE /folders/7 → both reads 404
+}
+#[tokio::test] async fn a_nested_route_reaches_a_patterned_parent_by_its_bare_id() { /* parent stored "folders/7": GET /folders/7/files relates it (follow's reference read) */ }
+#[tokio::test] async fn a_type_with_no_pattern_makes_one_key_read() { /* counting state store: a missed read makes exactly the get calls it makes on main */ }
 #[tokio::test] async fn an_alternate_member_reaches_the_same_record() {
     // identity TemplateId, alternates [Alias] on a type fix 5 does not detect; create {Alias: "welcome"};
     // GET /templates/welcome and GET /templates/{TemplateId} both state, same body;
@@ -728,7 +763,8 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
     // DELETE /things/{slug} → the earlier record is gone; a new create is stored under its slug
 }
 #[tokio::test] async fn a_revision_that_adds_a_pattern_still_reaches_bare_keyed_records() {
-    // create stored under "7"; revision adds pattern "folders/{id}"; GET /folders/7 and GET by "folders/7" both → state
+    // create stored under "7"; revision adds pattern "folders/{id}"; GET /folders/7 and GET by "folders/7" both → state;
+    // PATCH by "folders/7" updates the record stored under "7"; DELETE by "folders/7" removes it
 }
 
 // mb-import/tests/it/world_tier0.rs
@@ -754,7 +790,7 @@ The cascades come from here: about 80 checks across blind7-10, plus 132 (header 
 - Prerequisite: `claude/effect-members` (blind11 fixes 6, 12, 15) merged; it edits `write_memory.rs` too.
 - Modify: `crates/mb-protocols/src/call.rs`. In the `write_state` update and action arms, after a 2xx, call `transitions::apply(..)`. Each return keeps the `WriteOutcome` Task 5's table gives it.
 - Modify: `crates/mb-protocols/src/call/write_memory.rs`. For a `Replace`, `onto_record` replaces instead of merging. The request members laid onto the held record (the merge `claude/effect-members` adds for fix 6) come from `records::request_record(rt, op, body)` (Task 5, Decision 10), not the whole body; a `Replace` replaces with that value too.
-- Test: `crates/mb-protocols/tests/it/described_kinds.rs` (new)
+- Test: `crates/mb-protocols/tests/it/described_kinds.rs` (Task 3's stub; this task fills it and edits no other file in `mb-protocols/tests/it`)
 
 **Interfaces:**
 - Consumes: `Described::op` (Task 3); `apply` kind/target (Task 1); `records::request_record` (Task 5).
@@ -798,7 +834,7 @@ About 42 checks across blind7-10, plus 32 in blind11.
   - `crates/mb-protocols/src/call/list_query.rs` (add `ListQuery.lifecycle: Option<lifecycle::Exclusion>`, filled by `of`; `matches` excludes soft-deleted records unless `listed_with` is sent);
   - `crates/mb-protocols/src/call/repeats.rs` (`described_conflict` from Task 8 skips records that `lifecycle::Exclusion` marks soft-deleted, so a soft-deleted record's unique values are free again).
 - Prerequisite: #253 (`claude/engine-error-bodies`) merged; `not_found` builds on its not-found status and body.
-- Test: `crates/mb-protocols/tests/it/described_lifecycle.rs` (new)
+- Test: `crates/mb-protocols/tests/it/described_lifecycle.rs` (Task 3's stub; this task fills it and edits no other file in `mb-protocols/tests/it`)
 
 **Interfaces:**
 - Consumes: `Described::state_value` (Task 3); `ListQuery` (Task 9); `repeats::described_conflict` (Task 8); the delete arm as Task 6 left it.
@@ -844,7 +880,7 @@ About 68 checks across blind7-10.
     - `repeated_record`: its idempotency guard also counts the described header;
   - `crates/mb-protocols/src/call/value_index.rs` (`same_values`: the same guard);
   - `crates/mb-engine/src/guards.rs` (`carries_an_idempotency_key(bundle, op, call, described: Option<&str>)`: true also when the call carries the described idempotency header).
-- Test: `crates/mb-protocols/tests/it/described_conflicts.rs` (new)
+- Test: `crates/mb-protocols/tests/it/described_conflicts.rs` (Task 3's stub; this task fills it and edits no other file in `mb-protocols/tests/it`)
 
 **Interaction with today's idempotency-key paths.** Today a create that carries a header the contract names as an idempotency key (`carries_an_idempotency_key`) skips `repeated_record` and `same_values`: a repeat may be a retry, so it is no conflict, and it is generated as a new create. With a described `idempotency` header:
 1. `replays::replayed` runs first. A key already kept for this op in this session answers the kept response. Nothing else runs: no generation, no unique check, no store write.
@@ -896,7 +932,7 @@ The biggest mechanism across blind7-10: about 175 checks.
   - `crates/mb-protocols/src/call/runs.rs`: `position` takes a described `page`/`offset` parameter;
   - `crates/mb-protocols/src/call/pages.rs`: `slot`/`header_slot` take a described `response`/`response_header`;
   - `crates/mb-protocols/src/call/cursors.rs`: a described cursor parameter is shown.
-- Test: `crates/mb-protocols/tests/it/described_lists.rs` (new)
+- Test: `crates/mb-protocols/tests/it/described_lists.rs` (Task 3's stub; this task fills it and edits no other file in `mb-protocols/tests/it`)
 
 **Interfaces:**
 - Consumes: `Described::op` (Task 3).
@@ -951,17 +987,25 @@ The biggest mechanism across blind7-10: about 175 checks.
 **Files:**
 - Create: `crates/mb-protocols/src/call/state_lists.rs`
 - Modify: `crates/mb-protocols/src/call.rs` (`prepare`: a described list tries `state_lists::answer` before generation; `complete`'s seeding and `write_state`'s create arm call `state_lists::mark_listed`)
-- Test: `crates/mb-protocols/tests/it/described_state_lists.rs` (new)
+- Modify: `crates/mb-protocols/src/call/lists.rs`: `in_collection` becomes `pub(super)` so `state_lists` reuses it; its body does not change.
+- Test: `crates/mb-protocols/tests/it/described_state_lists.rs` (Task 3's stub)
 
 **Interfaces:**
-- Consumes: `list_query::{of, matches, sort, page}` (Tasks 9 and 7); `rt.collections()`; `Engine::held_answer`/`serve_stored`.
+- Consumes: `list_query::{of, matches, sort, page}` (Tasks 9 and 7); `lists::in_collection` (which reads `rt.collections()`); `collection_of`; `Engine::held_answer`/`serve_stored`.
 - Produces: `state_lists::answer(state: &mut StateAccess<'_>, plan: &CallPlan<'_>, call: &OperationCall) -> Option<GeneratedResponse>`, tagged `Source::State`.
-  - It gathers the held records of the item type, at most `MAX_SCAN`, then matches, sorts and pages them.
+  - It gathers the held records of the item type, at most `MAX_SCAN`, keeps those **in the collection** the call's path names (the membership rule below), then matches, sorts and pages them.
+  - **Membership rule.** A held record is in the collection when either:
+    - its id is in the collection's persisted member list (the `#listed` mark's `ids`, below), or
+    - `lists::in_collection` says so, reused as it is: a route with no path parameters is one collection; else `rt.collections()` (this process's in-memory placement, empty after a rebuild), else every path parameter is held by a member tied to it.
+    The persisted list is what survives a rebuild: `Collections` is in memory and every `put_world`/`patch_world` rebuild empties it, so without the list a child whose members do not name its parent would be dropped after a revision, and nothing else would place it. The member fallback cannot mix other parents' children in: it requires, for each path parameter, a member tied to that parameter holding the call's value, so a child of `p2` with a parent member does not match `p1`, and a child of `p2` with no parent member is in `p2`'s list only. `lists::in_collection` is not changed and is still what `stored_rest` uses for undescribed lists.
   - It places the page at `answer.records`, else at the list member `lists::list_parts` finds.
   - It writes the next position at `paging.response` or `response_header`.
   - It fills the envelope's other required members as `held_answer` does.
   - It returns `None`, so the list is generated, when the collection was neither listed nor written this session, or the answer does not validate.
-  - **"Listed or written" is kept in the state store, not in memory.** `Collections` is reset by every rebuild, including the one each `put_world`/`patch_world` triggers. A session-scoped mark under `mb_state::INTERNAL_TYPE`, `#listed/<item type>/<collection key>`, is written when a list of that collection is seeded and when a create lands in it. `answer` reads the mark. After a rebuild, the next described list is answered from state; it is not generated and seeded again (`WriteOrigin::Seeded`), so model records are never mixed into a collection that holds real ones. The mark costs one store read per described list. It is written once per collection and session.
+  - **"Listed or written", and membership, are kept in the state store, not in memory.** `Collections` is reset by every rebuild, including the one each `put_world`/`patch_world` triggers. A session-scoped record under `mb_state::INTERNAL_TYPE`, `#listed/<item type>/<collection key>` (the collection key is the one `collection_of` in `call.rs` gives, so `/parents/p1/children` and `/parents/p2/children` have separate marks), holds `{ids: [..]}`: the ids of the records the seeding placed there, and of each create that landed there since. `mark_listed` writes it when a list of that collection is seeded (all the seeded ids at once) and appends the new id when a create lands in it (one upsert per create into a described collection). `answer` reads the mark once per described list; with no mark it returns `None` and the list is generated and seeded as today. After a rebuild, the next described list is answered from state with the same members it had before; it is not generated and seeded again (`WriteOrigin::Seeded`), so model records are never mixed into a collection that holds real ones.
+    - A deleted record needs no mark update: it is no longer held, so it is not gathered.
+    - The list is capped at `MAX_SCAN` ids. A collection that would pass the cap stops being answered from state (`answer` returns `None`, the list is generated as today), so a list from state never drops a member silently.
+    - Two creates into one collection in the same session at the same moment can race on the upsert and lose one id. That record is still found by the member fallback when its members name the parent, and otherwise it leaves the list until the next seeding. This is accepted and stated in `state_lists.rs`'s module doc.
   - Records stored before a revision that changed the type's identity member are gathered like any other held record of the type; their stored key does not matter to a list.
 
 - [ ] **Step 1: Write the failing tests**
@@ -977,6 +1021,13 @@ The biggest mechanism across blind7-10: about 175 checks.
     // list (generated, seeded), create; put a revision (rebuild); list → source state, exactly the seeded items plus the created one,
     // no new Seeded records, provider called twice not three times
 }
+#[tokio::test] async fn a_nested_list_keeps_its_parents_children_across_a_rebuild() {
+    // described list GET /parents/{p}/children whose child schema has no member naming the parent.
+    // List p1 (generated, seeded: c1, c2), list p2 (seeded: c3), create c4 under p1; put a revision (rebuild, Collections empty);
+    // list p1 → source state, exactly c1, c2, c4 (no c3); list p2 → exactly c3; provider called three times, not five.
+    // A second contract variant whose children carry parentId: the same answers, so the member fallback and the mark agree.
+}
+#[tokio::test] async fn a_collection_past_the_cap_is_generated() { /* MAX_SCAN ids in the mark, one more create: the next list is source llm */ }
 #[tokio::test] async fn lists_after_an_identity_change_still_hold_earlier_records() {}
 ```
 
@@ -990,7 +1041,7 @@ The biggest mechanism across blind7-10: about 175 checks.
 **Files:**
 - Create: `crates/mb-protocols/src/call/derived.rs`
 - Modify: `crates/mb-protocols/src/call.rs` (`serve_held` and the generated-answer path of a held record call `derived::fill`), `crates/mb-protocols/src/call/state_lists.rs` (each item)
-- Test: `crates/mb-protocols/tests/it/described_derived.rs` (new)
+- Test: `crates/mb-protocols/tests/it/described_derived.rs` (Task 3's stub; this task fills it and edits no other file in `mb-protocols/tests/it`)
 
 **Interfaces:**
 - Consumes: `Described::type_desc` (`parent`, `derived`); `rt.collections()`; `StateAccess::list`.
