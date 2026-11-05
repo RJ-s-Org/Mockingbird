@@ -217,6 +217,95 @@ pub enum WorldCommand {
     },
     /// Print the JSON Schema of world descriptions.
     Schema,
+    /// Replace the overlay of a contract version's world description with
+    /// a JSON document (`-` for stdin), adding a revision. Prints what was
+    /// applied and what was refused.
+    Put {
+        /// The mock.
+        mock: String,
+        /// The overlay document (JSON; `-` reads stdin).
+        file: PathBuf,
+        #[command(flatten)]
+        write: WorldWriteArgs,
+    },
+    /// Merge a JSON merge patch (`-` for stdin; `null` removes an entry)
+    /// into the newest overlay, adding a revision.
+    Patch {
+        /// The mock.
+        mock: String,
+        /// The merge patch (JSON; `-` reads stdin).
+        file: PathBuf,
+        #[command(flatten)]
+        write: WorldWriteArgs,
+    },
+    /// List a contract version's world description revisions, newest first.
+    Revisions {
+        /// The mock.
+        mock: String,
+        /// The contract version [default: the active one].
+        #[arg(long, value_name = "N")]
+        version: Option<u64>,
+    },
+    /// Add a new revision holding an earlier revision's overlay, validated
+    /// again.
+    Restore {
+        /// The mock.
+        mock: String,
+        /// The revision to restore.
+        revision: u64,
+        #[command(flatten)]
+        write: WorldWriteArgs,
+    },
+    /// List the overlay entries added, removed and changed between two
+    /// revisions (`0` is the empty overlay).
+    Diff {
+        /// The mock.
+        mock: String,
+        /// The contract version [default: the active one].
+        #[arg(long, value_name = "N")]
+        version: Option<u64>,
+        /// The older revision [default: the one before --to].
+        #[arg(long, value_name = "R")]
+        from: Option<u64>,
+        /// The newer revision [default: the newest].
+        #[arg(long, value_name = "R")]
+        to: Option<u64>,
+    },
+}
+
+/// Where and as whom `world put|patch|restore` writes.
+#[derive(Args, Debug)]
+#[non_exhaustive]
+pub struct WorldWriteArgs {
+    /// The contract version [default: the active one].
+    #[arg(long, value_name = "N")]
+    pub version: Option<u64>,
+    /// Who writes it [default: user; restore: the restored revision's
+    /// author].
+    #[arg(long, value_parser = ["agent", "llm", "user"])]
+    pub author: Option<String>,
+    /// Write only if the newest revision is this one (`0` for none yet);
+    /// sent as `If-Match`.
+    #[arg(long, value_name = "R")]
+    pub expect_revision: Option<u64>,
+}
+
+impl WorldWriteArgs {
+    fn query(&self) -> Vec<(&'static str, String)> {
+        self.author.iter().map(|a| ("author", a.clone())).collect()
+    }
+
+    fn headers(&self) -> Vec<(&'static str, String)> {
+        self.expect_revision
+            .iter()
+            .map(|r| ("if-match", r.to_string()))
+            .collect()
+    }
+}
+
+/// The path segment of a contract version: its number, else `active`.
+fn version_segment(version: Option<u64>) -> String {
+    version.map_or_else(|| "active".to_string(), |v| v.to_string())
 }
 
 impl WorkflowCommand {
@@ -732,6 +821,103 @@ pub async fn run_workflow(
         }
         WorkflowCommand::World(WorldCommand::Schema) => {
             Err(ClientError::Other(anyhow!("world schema is printed above")))
+        }
+        WorkflowCommand::World(cmd @ (WorldCommand::Put { .. } | WorldCommand::Patch { .. })) => {
+            let (method, content_type, mock, file, write) = match cmd {
+                WorldCommand::Put { mock, file, write } => (Method::PUT, None, mock, file, write),
+                WorldCommand::Patch { mock, file, write } => (
+                    Method::PATCH,
+                    Some("application/merge-patch+json"),
+                    mock,
+                    file,
+                    write,
+                ),
+                _ => return Err(ClientError::Other(anyhow!("not a world write"))),
+            };
+            let doc = read_json(&file)?;
+            let version = version_segment(write.version);
+            let (query, headers) = (write.query(), write.headers());
+            api_with(
+                admin_url,
+                token,
+                workspace,
+                ApiRequest {
+                    query: &query,
+                    headers: &headers,
+                    body: Some(doc),
+                    content_type,
+                    ..ApiRequest::new(method, &["mocks", &mock, "contracts", &version, "world"])
+                },
+            )
+            .await
+        }
+        WorkflowCommand::World(WorldCommand::Revisions { mock, version }) => {
+            let version = version_segment(version);
+            api.send(
+                Method::GET,
+                &["mocks", &mock, "contracts", &version, "world", "revisions"],
+                None,
+            )
+            .await
+        }
+        WorkflowCommand::World(WorldCommand::Restore {
+            mock,
+            revision,
+            write,
+        }) => {
+            let version = version_segment(write.version);
+            let revision = revision.to_string();
+            let (query, headers) = (write.query(), write.headers());
+            api_with(
+                admin_url,
+                token,
+                workspace,
+                ApiRequest {
+                    query: &query,
+                    headers: &headers,
+                    // Mutating requests carry a JSON content type.
+                    body: Some(json!({})),
+                    ..ApiRequest::new(
+                        Method::POST,
+                        &[
+                            "mocks",
+                            &mock,
+                            "contracts",
+                            &version,
+                            "world",
+                            "revisions",
+                            &revision,
+                            "restore",
+                        ],
+                    )
+                },
+            )
+            .await
+        }
+        WorkflowCommand::World(WorldCommand::Diff {
+            mock,
+            version,
+            from,
+            to,
+        }) => {
+            let version = version_segment(version);
+            let query: Vec<(&str, String)> = [("from", from), ("to", to)]
+                .into_iter()
+                .filter_map(|(k, v)| v.map(|v| (k, v.to_string())))
+                .collect();
+            api_with(
+                admin_url,
+                token,
+                workspace,
+                ApiRequest {
+                    query: &query,
+                    ..ApiRequest::new(
+                        Method::GET,
+                        &["mocks", &mock, "contracts", &version, "world", "diff"],
+                    )
+                },
+            )
+            .await
         }
         WorkflowCommand::Api(_) => Err(ClientError::Other(anyhow!("api is sent by path"))),
         WorkflowCommand::SnapshotExport(_) => {
@@ -1496,6 +1682,63 @@ pub async fn api(
     api.request(method, url, body.map(Body::Json)).await
 }
 
+/// One workspace-scoped Admin API request with headers and a body of any
+/// JSON media type, for [`api_with`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ApiRequest<'a> {
+    pub method: Method,
+    pub segments: &'a [&'a str],
+    pub query: &'a [(&'a str, String)],
+    /// Extra request headers, e.g. `If-Match`.
+    pub headers: &'a [(&'a str, String)],
+    pub body: Option<Value>,
+    /// The body's media type; `application/json` when `None`.
+    pub content_type: Option<&'static str>,
+}
+
+impl<'a> ApiRequest<'a> {
+    /// A request with no query, headers or body.
+    #[must_use]
+    pub fn new(method: Method, segments: &'a [&'a str]) -> Self {
+        Self {
+            method,
+            segments,
+            query: &[],
+            headers: &[],
+            body: None,
+            content_type: None,
+        }
+    }
+}
+
+/// Sends `req` under the `workspace` workspace, as [`api`] does.
+///
+/// # Errors
+///
+/// As [`api`]; [`ClientError::Other`] too when the body cannot be encoded.
+pub async fn api_with(
+    admin_url: &str,
+    token: Option<&str>,
+    workspace: &str,
+    req: ApiRequest<'_>,
+) -> Result<Option<Value>, ClientError> {
+    let api = AdminClient::new(admin_url, token, workspace)?;
+    let mut url = api.ws_url(req.segments);
+    if !req.query.is_empty() {
+        url.query_pairs_mut()
+            .extend_pairs(req.query.iter().map(|(k, v)| (*k, v.as_str())));
+    }
+    let body = match (req.body, req.content_type) {
+        (Some(v), Some(content_type)) => Some(Body::Bytes {
+            bytes: serde_json::to_vec(&v).context("cannot encode the request body")?,
+            content_type,
+        }),
+        (b, _) => b.map(Body::Json),
+    };
+    api.request_with(req.method, url, body, req.headers).await
+}
+
 /// The largest non-JSON body [`api_path`] returns.
 const MAX_RAW_BODY: usize = 1 << 20;
 
@@ -1528,7 +1771,9 @@ pub async fn api_path(
     let base = api.base.as_str().trim_end_matches('/');
     let url = Url::parse(&format!("{base}/api/v1{path}"))
         .map_err(|e| ClientError::Usage(format!("invalid path {path:?}: {e}")))?;
-    let resp = api.send_request(method, url, body.map(Body::Json)).await?;
+    let resp = api
+        .send_request(method, url, body.map(Body::Json), &[])
+        .await?;
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -1643,20 +1888,36 @@ impl AdminClient {
         url: Url,
         body: Option<Body>,
     ) -> Result<Option<Value>, ClientError> {
-        let resp = self.send_request(method, url, body).await?;
+        self.request_with(method, url, body, &[]).await
+    }
+
+    /// [`Self::request`] with extra request headers.
+    async fn request_with(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Body>,
+        headers: &[(&str, String)],
+    ) -> Result<Option<Value>, ClientError> {
+        let resp = self.send_request(method, url, body, headers).await?;
         Self::parse(resp).await
     }
 
-    /// Sends the request and returns the response, whatever its status.
+    /// Sends the request with extra `headers` and returns the response,
+    /// whatever its status.
     async fn send_request(
         &self,
         method: Method,
         url: Url,
         body: Option<Body>,
+        headers: &[(&str, String)],
     ) -> Result<reqwest::Response, ClientError> {
         let mut req = self.http.request(method, url.clone());
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
+        }
+        for (name, value) in headers {
+            req = req.header(*name, value);
         }
         req = match body {
             Some(Body::Json(v)) => req.json(&v),

@@ -1156,3 +1156,749 @@ async fn get_world_on_pre_existing_version_is_revision_0() {
         json!({"/operations/getWidget/not_found": "user"})
     );
 }
+
+/// Any request: the status, content type and JSON body (`null` when empty).
+async fn call(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    ctype: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> (u16, String, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer editor")
+        .header(header::CONTENT_TYPE, ctype);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("{status}: {e}: {}", String::from_utf8_lossy(&bytes)))
+    };
+    (status, ctype, body)
+}
+
+/// An admin with `widgets` at contract version 1 ([`V1`]): the router, the
+/// world URI of version 1, and the widget's resource type.
+async fn widgets_v1() -> (AdminState, Router, String, String) {
+    let (st, app) = admin().await;
+    let uploaded = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        V1.as_bytes().to_vec(),
+    )
+    .await;
+    let version = uploaded["version"].as_i64().unwrap();
+    let t = widget_type(&compile(V1));
+    (
+        st,
+        app,
+        format!("{BASE}/widgets/contracts/{version}/world"),
+        t,
+    )
+}
+
+async fn put_world(app: &Router, uri: &str, doc: &Value) -> Value {
+    let (status, _, body) = call(
+        app,
+        Method::PUT,
+        uri,
+        "application/json",
+        &[],
+        doc.to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    body
+}
+
+async fn patch_world(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+    patch: &Value,
+) -> (u16, String, Value) {
+    call(
+        app,
+        Method::PATCH,
+        uri,
+        "application/merge-patch+json",
+        headers,
+        patch.to_string().into_bytes(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn put_world_stores_applied_only_and_reports_refused() {
+    let (_st, app, uri, t) = widgets_v1().await;
+    let result = put_world(
+        &app,
+        &uri,
+        &json!({
+            "version": 1,
+            "types": {t.clone(): {"identity": {"member": "nope"}}},
+            "operations": {
+                "getWidget": {"not_found": 404, "bogus": true},
+                "createWidget": {"answer": {"record": "/../"}},
+                "Nope": {"kind": "read"},
+            },
+        }),
+    )
+    .await;
+    assert_eq!(result["revision"], 1, "{result}");
+    assert_eq!(
+        result["applied"],
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}}),
+        "{result}"
+    );
+    let refused: BTreeMap<String, String> = result["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap().to_string(),
+                r["code"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let escaped = t.replace('~', "~0").replace('/', "~1");
+    assert_eq!(
+        refused
+            .get(&format!("/types/{escaped}/identity/member"))
+            .map(String::as_str),
+        Some("unresolved"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused
+            .get("/operations/getWidget/bogus")
+            .map(String::as_str),
+        Some("unknown_key"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused
+            .get("/operations/createWidget/answer/record")
+            .map(String::as_str),
+        Some("unresolved"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused.get("/operations/Nope").map(String::as_str),
+        Some("unresolved"),
+        "{refused:?}"
+    );
+
+    // Only the applied entries are stored.
+    let (status, _, stored) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/revisions/1"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 200, "{stored}");
+    assert_eq!(stored["document"], result["applied"]);
+    assert_eq!(stored["author"], "user");
+    assert_eq!(stored["revision"], 1);
+
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(view["revision"], 1);
+    assert_eq!(view["refused"], json!([]), "{view}");
+    assert_eq!(
+        view["authors"],
+        json!({"/operations/getWidget/not_found": "user"})
+    );
+
+    // A PUT replaces the overlay whole, and `author` names who wrote it.
+    let (status, _, result) = call(
+        &app,
+        Method::PUT,
+        &format!("{uri}?author=agent"),
+        "application/json",
+        &[],
+        json!({"operations": {"listWidgets": {"order": {"member": "name"}}}})
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 201, "{result}");
+    assert_eq!(result["revision"], 2);
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(
+        view["authors"],
+        json!({"/operations/listWidgets/order": "agent"}),
+        "{view}"
+    );
+    assert!(
+        view["world"]["operations"]["getWidget"]
+            .get("not_found")
+            .is_none(),
+        "{view}"
+    );
+
+    // A body that is not JSON, or not sent as JSON, changes nothing.
+    let (status, ctype, body) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[],
+        b"{".to_vec(),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(ctype, "application/problem+json");
+    let (status, ctype, _) = call(&app, Method::PUT, &uri, "text/plain", &[], b"{}".to_vec()).await;
+    assert_eq!(status, 415);
+    assert_eq!(ctype, "application/problem+json");
+    let (status, _, list) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/revisions"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 200, "{list}");
+    let revisions: Vec<i64> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["revision"].as_i64().unwrap())
+        .collect();
+    assert_eq!(revisions, vec![2, 1], "newest first: {list}");
+    assert_eq!(list[0]["author"], "agent");
+    assert!(list[0].get("document").is_none(), "{list}");
+}
+
+#[tokio::test]
+async fn patch_world_merges_and_bumps_revision() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    // A patch on a version with no revision merges into an empty overlay.
+    let (status, _, first) = patch_world(
+        &app,
+        &uri,
+        &[],
+        &json!({"operations": {"getWidget": {"not_found": 404}}}),
+    )
+    .await;
+    assert_eq!(status, 201, "{first}");
+    assert_eq!(first["revision"], 1);
+    let (status, _, second) = patch_world(
+        &app,
+        &format!("{uri}?author=agent"),
+        &[],
+        &json!({"operations": {"listWidgets": {"order": {"member": "name"}}}}),
+    )
+    .await;
+    assert_eq!(status, 201, "{second}");
+    assert_eq!(second["revision"], 2);
+    assert_eq!(
+        second["applied"]["operations"],
+        json!({"getWidget": {"not_found": 404}, "listWidgets": {"order": {"member": "name"}}}),
+        "{second}"
+    );
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(
+        view["authors"],
+        json!({"/operations/getWidget/not_found": "user", "/operations/listWidgets/order": "agent"}),
+        "{view}"
+    );
+
+    // `null` removes an entry, as JSON merge patch does.
+    let (status, _, third) =
+        patch_world(&app, &uri, &[], &json!({"operations": {"getWidget": null}})).await;
+    assert_eq!(status, 201, "{third}");
+    assert_eq!(third["revision"], 3);
+    assert_eq!(
+        third["applied"]["operations"],
+        json!({"listWidgets": {"order": {"member": "name"}}})
+    );
+
+    // `application/json` is taken as a merge patch too; other types are not.
+    let (status, _, fourth) = call(
+        &app,
+        Method::PATCH,
+        &uri,
+        "application/json",
+        &[],
+        json!({"operations": {"getWidget": {"not_found": 404}}})
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 201, "{fourth}");
+    assert_eq!(fourth["revision"], 4);
+    let (status, ctype, _) =
+        call(&app, Method::PATCH, &uri, "text/plain", &[], b"{}".to_vec()).await;
+    assert_eq!(status, 415);
+    assert_eq!(ctype, "application/problem+json");
+}
+
+#[tokio::test]
+async fn stale_if_match_is_412() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    for _ in 0..3 {
+        put_world(
+            &app,
+            &uri,
+            &json!({"operations": {"getWidget": {"not_found": 404}}}),
+        )
+        .await;
+    }
+    // An assistant and a person both patch from revision 3.
+    let (status, _, agent) = patch_world(
+        &app,
+        &format!("{uri}?author=agent"),
+        &[("if-match", "3")],
+        &json!({"operations": {"listWidgets": {"order": {"member": "name"}}}}),
+    )
+    .await;
+    assert_eq!(status, 201, "{agent}");
+    assert_eq!(agent["revision"], 4);
+    let late = json!({"operations": {"listWidgets": {"order": {"member": "id"}}}});
+    let (status, ctype, problem) = patch_world(&app, &uri, &[("if-match", "\"3\"")], &late).await;
+    assert_eq!(status, 412, "{problem}");
+    assert_eq!(ctype, "application/problem+json");
+    assert_eq!(problem["code"], "revision_conflict", "{problem}");
+    assert_eq!(problem["status"], 412);
+    // A PUT with a stale If-Match is refused the same way.
+    let (status, _, problem) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[("if-match", "3")],
+        late.to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 412, "{problem}");
+    assert_eq!(problem["code"], "revision_conflict");
+    // Without If-Match, the patch applies on top of revision 4.
+    let (status, _, person) = patch_world(&app, &uri, &[], &json!({"operations": {"getWidget": {"not_found": null}, "listWidgets": {"order": {"descending": true}}}})).await;
+    assert_eq!(status, 201, "{person}");
+    assert_eq!(person["revision"], 5);
+    assert_eq!(
+        person["applied"]["operations"],
+        json!({"listWidgets": {"order": {"member": "name", "descending": true}}}),
+        "{person}"
+    );
+    // A current If-Match applies; one that is not a revision number is a 400.
+    let (status, _, body) = patch_world(&app, &uri, &[("if-match", "5")], &json!({})).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["revision"], 6);
+    let (status, ctype, body) =
+        patch_world(&app, &uri, &[("if-match", "latest")], &json!({})).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(ctype, "application/problem+json");
+    // If-Match 0 means "no revision yet".
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let (status, _, body) = patch_world(&app, &uri, &[("if-match", "0")], &json!({})).await;
+    assert_eq!(status, 201, "{body}");
+    let (status, _, body) = patch_world(&app, &uri, &[("if-match", "0")], &json!({})).await;
+    assert_eq!(status, 412, "{body}");
+}
+
+#[tokio::test]
+async fn put_over_256k_is_413() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let padded = |len: usize| {
+        let mut doc = String::from(r#"{"version":1,"pad":""#);
+        let fill = len - doc.len() - 2;
+        doc.push_str(&"a".repeat(fill));
+        doc.push_str("\"}");
+        assert_eq!(doc.len(), len);
+        doc.into_bytes()
+    };
+    let max = mb_mcm::world::MAX_BYTES;
+    for len in [max + 1, 5 * 1024 * 1024] {
+        let (status, ctype, problem) = call(
+            &app,
+            Method::PUT,
+            &uri,
+            "application/json",
+            &[],
+            padded(len),
+        )
+        .await;
+        assert_eq!(status, 413, "{len}: {problem}");
+        assert_eq!(ctype, "application/problem+json");
+        assert_eq!(problem["code"], "too_large", "{problem}");
+        let (status, _, problem) = patch_world(
+            &app,
+            &uri,
+            &[],
+            &serde_json::from_slice(&padded(len)).unwrap(),
+        )
+        .await;
+        assert_eq!(status, 413, "{len}: {problem}");
+    }
+    // At the limit it is read (and the unknown key refused).
+    let (status, _, result) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[],
+        padded(max),
+    )
+    .await;
+    assert_eq!(status, 201, "{result}");
+    assert_eq!(result["refused"][0]["path"], "/pad");
+    assert_eq!(result["refused"][0]["code"], "unknown_key");
+
+    // Too deep is a 422 naming the path.
+    let mut deep = json!(1);
+    for _ in 0..33 {
+        deep = json!([deep]);
+    }
+    let (status, ctype, problem) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[],
+        json!({"x": deep}).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 422, "{problem}");
+    assert_eq!(ctype, "application/problem+json");
+    assert_eq!(problem["code"], "invalid");
+    assert!(
+        problem["path"].as_str().unwrap().starts_with("/x/0/0"),
+        "{problem}"
+    );
+
+    // A pointer that does not parse is a 422 naming it.
+    let (status, _, problem) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[],
+        json!({"operations": {"createWidget": {"answer": {"record": "result"}}}})
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 422, "{problem}");
+    assert_eq!(
+        problem["path"], "/operations/createWidget/answer/record",
+        "{problem}"
+    );
+
+    // Entries that are not of the format's shape are a 422 naming them.
+    for (doc, path) in [
+        (
+            json!({"operations": {"createWidget": {"changes": {"name": {"from_request": "/name", "bogus": 1}}}}}),
+            "/operations/createWidget/changes/name/bogus",
+        ),
+        (
+            json!({"operations": {"listWidgets": {"kind": "fetch"}}}),
+            "/operations/listWidgets/kind",
+        ),
+        (
+            json!({"operations": {"listWidgets": {"filters": [{"param": "q", "kind": "fuzzy"}]}}}),
+            "/operations/listWidgets/filters/0",
+        ),
+        (
+            json!({"types": {"widget": {"derived": {"total": {"kind": "avg", "of": "widget"}}}}}),
+            "/types/widget/derived/total",
+        ),
+        (json!({"operations": []}), "/operations"),
+        (json!({"version": "one"}), "/version"),
+    ] {
+        let (status, ctype, problem) = call(
+            &app,
+            Method::PUT,
+            &uri,
+            "application/json",
+            &[],
+            doc.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(status, 422, "{doc}: {problem}");
+        assert_eq!(ctype, "application/problem+json");
+        assert_eq!(problem["code"], "invalid", "{problem}");
+        assert_eq!(problem["path"], path, "{doc}: {problem}");
+    }
+    // None of it was stored.
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(view["revision"], 1, "{view}");
+}
+
+#[tokio::test]
+async fn restore_adds_a_new_revision() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let (_, _, first) = patch_world(
+        &app,
+        &format!("{uri}?author=agent"),
+        &[],
+        &json!({"operations": {"getWidget": {"not_found": 404}}}),
+    )
+    .await;
+    assert_eq!(first["revision"], 1);
+    put_world(
+        &app,
+        &uri,
+        &json!({"operations": {"listWidgets": {"order": {"member": "name"}}}}),
+    )
+    .await;
+
+    let restore = format!("{uri}/revisions/1/restore");
+    let (status, _, restored) = call(
+        &app,
+        Method::POST,
+        &restore,
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 201, "{restored}");
+    assert_eq!(restored["revision"], 3);
+    assert_eq!(restored["applied"], first["applied"]);
+    let (_, _, third) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/revisions/3"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(third["document"], first["applied"]);
+    // It keeps the restored revision's author unless told otherwise.
+    assert_eq!(third["author"], "agent");
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(view["world"]["operations"]["getWidget"]["not_found"], 404);
+    assert!(
+        view["world"]["operations"]["listWidgets"]
+            .get("order")
+            .is_none(),
+        "{view}"
+    );
+
+    let (status, _, restored) = call(
+        &app,
+        Method::POST,
+        &format!("{restore}?author=user"),
+        "application/json",
+        &[("if-match", "3")],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 201, "{restored}");
+    let (_, _, fourth) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/revisions/4"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(fourth["author"], "user");
+    let (status, _, problem) = call(
+        &app,
+        Method::POST,
+        &restore,
+        "application/json",
+        &[("if-match", "3")],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 412, "{problem}");
+    assert_eq!(problem["code"], "revision_conflict");
+
+    // A missing revision is a 404; restoring needs a JSON content type.
+    for path in ["revisions/9/restore", "revisions/9"] {
+        let method = if path.ends_with("restore") {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        let (status, ctype, problem) = call(
+            &app,
+            method,
+            &format!("{uri}/{path}"),
+            "application/json",
+            &[],
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, 404, "{path}: {problem}");
+        assert_eq!(ctype, "application/problem+json");
+    }
+    let (status, _, _) = call(&app, Method::POST, &restore, "text/plain", &[], Vec::new()).await;
+    assert_eq!(status, 415);
+}
+
+#[tokio::test]
+async fn diff_lists_changed_pointers() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    put_world(
+        &app,
+        &uri,
+        &json!({"operations": {
+            "getWidget": {"not_found": 404},
+            "listWidgets": {"order": {"member": "name"}},
+        }}),
+    )
+    .await;
+    put_world(
+        &app,
+        &uri,
+        &json!({"operations": {
+            "listWidgets": {"order": {"member": "id"}, "paging": {"style": "page"}},
+        }}),
+    )
+    .await;
+    let (status, _, diff) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/diff?from=1&to=2"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 200, "{diff}");
+    assert_eq!(
+        diff["added"],
+        json!(["/operations/listWidgets/paging/style"]),
+        "{diff}"
+    );
+    assert_eq!(
+        diff["removed"],
+        json!(["/operations/getWidget/not_found"]),
+        "{diff}"
+    );
+    assert_eq!(
+        diff["changed"],
+        json!(["/operations/listWidgets/order/member"]),
+        "{diff}"
+    );
+    // Revision 0 is the empty overlay; `to` defaults to the newest and
+    // `from` to the one before it.
+    let (_, _, from0) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/diff?from=0&to=1"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        from0["added"],
+        json!([
+            "/operations/getWidget/not_found",
+            "/operations/listWidgets/order/member"
+        ]),
+        "{from0}"
+    );
+    assert_eq!(from0["removed"], json!([]));
+    let (_, _, default) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/diff"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(default["added"], diff["added"], "{default}");
+    assert_eq!(default["from"], 1);
+    assert_eq!(default["to"], 2);
+    let (status, ctype, problem) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/diff?from=1&to=7"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 404, "{problem}");
+    assert_eq!(ctype, "application/problem+json");
+}
+
+#[tokio::test]
+async fn heuristic_author_is_refused() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let doc = json!({"operations": {"getWidget": {"not_found": 404}}})
+        .to_string()
+        .into_bytes();
+    for author in ["heuristic", "robot"] {
+        let (status, ctype, problem) = call(
+            &app,
+            Method::PUT,
+            &format!("{uri}?author={author}"),
+            "application/json",
+            &[],
+            doc.clone(),
+        )
+        .await;
+        assert_eq!(status, 400, "{author}: {problem}");
+        assert_eq!(ctype, "application/problem+json");
+        let (status, _, _) =
+            patch_world(&app, &format!("{uri}?author={author}"), &[], &json!({})).await;
+        assert_eq!(status, 400, "{author}");
+    }
+    let view = send(&app, Method::GET, &uri, "application/json", Vec::new()).await;
+    assert_eq!(view["revision"], 0);
+    for author in ["agent", "llm", "user"] {
+        let (status, _, body) = call(
+            &app,
+            Method::PUT,
+            &format!("{uri}?author={author}"),
+            "application/json",
+            &[],
+            doc.clone(),
+        )
+        .await;
+        assert_eq!(status, 201, "{author}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn world_writes_need_credentials() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(&uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+}

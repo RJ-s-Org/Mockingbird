@@ -540,6 +540,87 @@ fn tools() -> Vec<Tool> {
             destructive: false,
         },
         Tool {
+            name: "put_world",
+            title: "Replace a contract version's world description",
+            description: "Write the overlay of a contract version's world description (the format is `mockingbird world schema`; every key is optional), replacing the previous overlay, as a new revision that applies at once. Entries that don't resolve against the contract are refused (unknown_key, unresolved, not_applicable, invalid) and not stored; the rest apply. Answers {version, revision, applied, refused}. Prefer patch_world to change a few entries. expect_revision makes the write fail with 412 revision_conflict unless that is the newest revision.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                    "world": o("The overlay world description, e.g. {\"version\": 1, \"operations\": {\"getWidget\": {\"not_found\": 404}}}."),
+                    "author": world_author(),
+                    "expect_revision": n("Write only if this is the newest revision (0 for none yet)."),
+                }),
+                &["mock", "world"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "patch_world",
+            title: "Patch a contract version's world description",
+            description: "Merge a JSON merge patch (RFC 7396; null removes an entry) into the newest overlay of a contract version's world description, as a new revision that applies at once. Entries that don't resolve against the contract are refused and not stored; the rest apply. Answers {version, revision, applied, refused}; fix the refused entries. Without expect_revision it applies on top of the newest revision; with it, it fails with 412 revision_conflict unless that is the newest.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                    "patch": o("The merge patch, e.g. {\"types\": {\"folder\": {\"identity\": {\"member\": \"name\"}}}}."),
+                    "author": world_author(),
+                    "expect_revision": n("Write only if this is the newest revision (0 for none yet)."),
+                }),
+                &["mock", "patch"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "list_world_revisions",
+            title: "List world description revisions",
+            description: "The revisions of a contract version's world description, newest first: number, author, who wrote it and when.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                }),
+                &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "restore_world_revision",
+            title: "Restore a world description revision",
+            description: "Add a new revision holding an earlier revision's overlay, validated again against the contract version. Answers {version, revision, applied, refused}.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                    "revision": n("The revision to restore."),
+                    "author": world_author(),
+                    "expect_revision": n("Restore only if this is the newest revision."),
+                }),
+                &["mock", "revision"],
+            ),
+            read_only: false,
+            destructive: false,
+        },
+        Tool {
+            name: "diff_world",
+            title: "Compare world description revisions",
+            description: "The JSON pointers of the overlay entries added, removed and changed from one revision to another (0 is the empty overlay). Default: the newest revision against the one before it.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                    "from": n("The older revision; default the one before `to`."),
+                    "to": n("The newer revision; default the newest."),
+                }),
+                &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
             name: "get_draft",
             title: "Review a draft contract",
             description: "Review a draft import: operations with confidence and warnings; pass operation for its full definition. Without version, the newest draft.",
@@ -818,6 +899,44 @@ fn opt_bool(args: &Value, key: &str) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// The `author` property of the world write tools.
+fn world_author() -> Value {
+    json!({ "type": "string", "enum": ["agent", "llm", "user"], "description": "Who writes it: agent (you, a coding assistant), llm or user. Default user; for restore_world_revision, the restored revision's author." })
+}
+
+/// The contract version path segment of a world tool: `version`, else
+/// `active`.
+fn version_arg(args: &Value) -> Result<String, ToolError> {
+    match args.get("version").filter(|v| !v.is_null()) {
+        None => Ok("active".to_string()),
+        Some(v) => v
+            .as_u64()
+            .map(|v| v.to_string())
+            .ok_or_else(|| ToolError("version is not a version number".into())),
+    }
+}
+
+/// The `author` query and `If-Match` header of a world write tool.
+#[allow(clippy::type_complexity)]
+fn world_write_args(
+    args: &Value,
+) -> Result<(Vec<(&'static str, String)>, Vec<(&'static str, String)>), ToolError> {
+    let query = opt_str(args, "author")
+        .map(|a| ("author", a))
+        .into_iter()
+        .collect();
+    let headers = match args.get("expect_revision").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(v) => vec![(
+            "if-match",
+            v.as_u64()
+                .ok_or_else(|| ToolError("expect_revision is not a revision number".into()))?
+                .to_string(),
+        )],
+    };
+    Ok((query, headers))
+}
+
 fn opt_u64(args: &Value, key: &str) -> Option<u64> {
     args.get(key).and_then(Value::as_u64)
 }
@@ -1058,6 +1177,13 @@ impl McpServer {
             body,
         )
         .await?;
+        Ok(out.unwrap_or_else(|| json!({ "ok": true })))
+    }
+
+    /// Sends a workspace request with headers or a non-JSON media type.
+    async fn ws_with(&self, req: client::ApiRequest<'_>) -> ToolResult {
+        let out =
+            client::api_with(&self.admin_url, self.token.as_deref(), &self.workspace, req).await?;
         Ok(out.unwrap_or_else(|| json!({ "ok": true })))
     }
 
@@ -1330,17 +1456,106 @@ impl McpServer {
                 .await
             }
             "get_world" => {
-                let version = match a.get("version").filter(|v| !v.is_null()) {
-                    None => "active".to_string(),
-                    Some(v) => v
-                        .as_u64()
-                        .ok_or_else(|| ToolError("version is not a version number".into()))?
-                        .to_string(),
-                };
+                let version = version_arg(a)?;
                 self.ws(
                     Method::GET,
                     &["mocks", str_arg(a, "mock")?, "contracts", &version, "world"],
                     &[],
+                    None,
+                )
+                .await
+            }
+            "put_world" | "patch_world" => {
+                let (method, key, content_type) = if name == "put_world" {
+                    (Method::PUT, "world", None)
+                } else {
+                    (Method::PATCH, "patch", Some("application/merge-patch+json"))
+                };
+                let doc = a
+                    .get(key)
+                    .filter(|v| v.is_object())
+                    .cloned()
+                    .ok_or_else(|| ToolError(format!("{key} must be a JSON object")))?;
+                let version = version_arg(a)?;
+                let (query, headers) = world_write_args(a)?;
+                self.ws_with(client::ApiRequest {
+                    query: &query,
+                    headers: &headers,
+                    body: Some(doc),
+                    content_type,
+                    ..client::ApiRequest::new(
+                        method,
+                        &["mocks", str_arg(a, "mock")?, "contracts", &version, "world"],
+                    )
+                })
+                .await
+            }
+            "list_world_revisions" => {
+                let version = version_arg(a)?;
+                self.ws(
+                    Method::GET,
+                    &[
+                        "mocks",
+                        str_arg(a, "mock")?,
+                        "contracts",
+                        &version,
+                        "world",
+                        "revisions",
+                    ],
+                    &[],
+                    None,
+                )
+                .await
+            }
+            "restore_world_revision" => {
+                let version = version_arg(a)?;
+                let revision = opt_u64(a, "revision")
+                    .ok_or_else(|| ToolError("revision is not a revision number".into()))?
+                    .to_string();
+                let (query, headers) = world_write_args(a)?;
+                self.ws_with(client::ApiRequest {
+                    query: &query,
+                    headers: &headers,
+                    // Mutating requests carry a JSON content type.
+                    body: Some(json!({})),
+                    ..client::ApiRequest::new(
+                        Method::POST,
+                        &[
+                            "mocks",
+                            str_arg(a, "mock")?,
+                            "contracts",
+                            &version,
+                            "world",
+                            "revisions",
+                            &revision,
+                            "restore",
+                        ],
+                    )
+                })
+                .await
+            }
+            "diff_world" => {
+                let version = version_arg(a)?;
+                let mut query = Vec::new();
+                for key in ["from", "to"] {
+                    if let Some(v) = a.get(key).filter(|v| !v.is_null()) {
+                        let n = v
+                            .as_u64()
+                            .ok_or_else(|| ToolError(format!("{key} is not a revision number")))?;
+                        query.push((key, n.to_string()));
+                    }
+                }
+                self.ws(
+                    Method::GET,
+                    &[
+                        "mocks",
+                        str_arg(a, "mock")?,
+                        "contracts",
+                        &version,
+                        "world",
+                        "diff",
+                    ],
+                    &query,
                     None,
                 )
                 .await

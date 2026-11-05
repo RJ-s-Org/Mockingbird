@@ -3588,6 +3588,7 @@ dependencies = [
  "chrono",
  "futures",
  "http-body-util",
+ "json-patch",
  "mb-ext",
  "metrics 0.24.6",
  "metrics-util 0.20.4",

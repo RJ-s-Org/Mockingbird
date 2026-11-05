@@ -21,6 +21,15 @@ mockingbird contracts activate orders 2
 # text (--json prints the Admin API answer); and the description format.
 mockingbird world show orders --version 2
 mockingbird world schema
+# Write it as revisions: put replaces the overlay, patch merges a JSON merge
+# patch (null removes an entry); each answers what applied and what was
+# refused. --expect-revision N refuses the write (412 revision_conflict)
+# unless N is the newest revision; --author is agent, llm or user (default).
+mockingbird world patch orders patch.json --author agent --expect-revision 3
+mockingbird world put orders world.json
+mockingbird world revisions orders
+mockingbird world diff orders --from 3 --to 4
+mockingbird world restore orders 3
 
 # A documentation, HAR or Postman import is a draft; approve it after review
 # (the newest draft without a version; --no-activate approves without serving).
