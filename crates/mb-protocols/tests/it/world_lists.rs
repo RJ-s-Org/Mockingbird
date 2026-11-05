@@ -133,6 +133,30 @@ impl Api {
         (status, body)
     }
 
+    /// A `GET` of `uri` sent with `headers`.
+    async fn get_with(&self, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+        let mut req = Request::builder().method("GET").uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let resp = self
+            .router
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
     async fn get(&self, uri: &str) -> Value {
         let (status, body) = self.call("GET", uri, None).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
@@ -2317,6 +2341,75 @@ async fn a_start_beside_the_page_size_in_its_brackets_pages() {
     .await;
 }
 
+/// [`second_item_by`]'s list, where `second` is no later page: the model answers it.
+async fn second_is_generated(params: &str, first: &str, second: &str) {
+    let list = format!(
+        r##"    get:
+      operationId: listTasks
+      parameters:
+{params}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {TASK_ARRAY}"##
+    );
+    let three = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "open"),
+    ]);
+    let other = json!([stored_task("t9", "Z", "open")]);
+    let api = api_of(
+        &stored_pages(&list),
+        true,
+        vec![Ok(three.to_string()), Ok(other.to_string())],
+    );
+    assert_eq!(
+        api.get(&format!("/tasks?{first}")).await,
+        json!([stored_task("t1", "A", "open")])
+    );
+    assert_eq!(api.get(&format!("/tasks?{second}")).await, other);
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A keyset bound in the page size's bracket family (`page[after]` from 1 beside
+/// `page[size]`) is no page number: what comes after an id is not the run's second page.
+#[tokio::test]
+async fn a_bound_in_the_page_size_s_brackets_is_no_page_number() {
+    second_is_generated(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[after]\", in: query, schema: {type: integer, minimum: 1}}",
+        "page%5Bsize%5D=1",
+        "page%5Bsize%5D=1&page%5Bafter%5D=2",
+    )
+    .await;
+}
+
+/// A cursor in the page size's bracket family from 0 (`page[cursor]`) is no offset.
+#[tokio::test]
+async fn a_cursor_in_the_page_size_s_brackets_is_no_offset() {
+    second_is_generated(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[cursor]\", in: query, schema: {type: integer, minimum: 0, default: 0}}",
+        "page%5Bsize%5D=1",
+        "page%5Bsize%5D=1&page%5Bcursor%5D=1",
+    )
+    .await;
+}
+
+/// A page number counting from 0 by its schema (`page_no`, default and minimum 0) says
+/// two things, and the list is not paged from its first page.
+#[tokio::test]
+async fn a_page_number_counting_from_zero_is_no_offset() {
+    a_bounded_integer_is_no_page(
+        "        - {name: page_no, in: query, schema: {type: integer, minimum: 0, default: 0}}",
+        "page_no=1",
+    )
+    .await;
+}
+
 /// `depth` from 1 with no `default` is no page number: nothing names it one.
 #[tokio::test]
 async fn a_depth_from_one_with_no_default_is_no_page_number() {
@@ -4179,4 +4272,101 @@ async fn an_empty_list_with_a_bodiless_accepted_stays() {
     let (status, body) = api.call("GET", "/orders", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body, json!([]));
+}
+
+/// [`api_of`] over `NESTED` with consistency on and a scenario `quiet` that changes
+/// nothing but is selected.
+fn nested_with_scenario(script: Vec<Result<String, LlmError>>) -> Api {
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let mut rt = MockRuntime::new(
+        "lists",
+        Arc::new(compile(NESTED.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.consistency = true;
+    rt.scenarios.insert(
+        "quiet".into(),
+        mb_protocols::ScenarioRuntime {
+            spec: mb_engine::ScenarioSpec {
+                name: "quiet".into(),
+                ..mb_engine::ScenarioSpec::default()
+            },
+            ..mb_protocols::ScenarioRuntime::default()
+        },
+    );
+    Api {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    }
+}
+
+/// A forced status decides the answer: an empty list stays the forced `200`, not the
+/// declared `204`.
+#[tokio::test]
+async fn a_forced_status_keeps_an_empty_list() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api
+        .get_with(
+            "/orders?email=nobody@example.com",
+            &[("x-mockingbird-status", "200")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.is_array(), "{body}");
+}
+
+/// Under a scenario the answer is the scenario's: an empty list stays a `200`.
+#[tokio::test]
+async fn a_scenario_keeps_an_empty_list() {
+    let api = nested_with_scenario(vec![Ok(json!([]).to_string())]);
+    let (status, body) = api
+        .get_with("/orders", &[("x-mockingbird-scenario", "quiet")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
+}
+
+/// A parameter of another type than the member one object down (`email` an integer)
+/// filters nothing.
+#[tokio::test]
+async fn a_nested_member_of_another_type_is_no_filter() {
+    let contract = NESTED.replace(
+        "- {name: email, in: query, schema: {type: string}}",
+        "- {name: email, in: query, schema: {type: integer}}",
+    );
+    assert!(contract.contains("{name: email, in: query, schema: {type: integer}}"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?email=5").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// One object down a parameter names a member only by its very name: `emails`, the
+/// plural, reaches no `billing_address.email`, and nothing goes.
+#[tokio::test]
+async fn a_nested_member_is_named_by_its_very_name() {
+    let contract = NESTED.replace("{name: email, in: query,", "{name: emails, in: query,");
+    assert!(contract.contains("name: emails,"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?emails=ann@example.com").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// The comma-separated `ids=2,3` reaches the model as the two integers, not as the
+/// text `"2,3"`. (An array parameter filters no scalar member, so the answer is the
+/// model's as it gave it.)
+#[tokio::test]
+async fn a_comma_separated_array_reaches_the_model_split() {
+    let answer = json!([order(2, "bob@example.com"), order(3, "cy@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?ids=2,3").await;
+    assert_eq!(order_ids(&body), [2, 3], "{body}");
+    let prompt = api.prompt(0);
+    assert!(prompt.contains(r#""query":{"ids":[2,3]}"#), "{prompt}");
 }

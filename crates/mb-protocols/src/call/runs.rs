@@ -11,16 +11,20 @@
 //! list (no `const` or `enum`, no bare `id`, naming no member of the items) beside the
 //! page size, whose `default` and `minimum` are both `1` (a page number) or both `0` (an
 //! offset), or that declares that `minimum` and no `default` where its name says it is
-//! one, it sits in the page size's bracket family, or the route requires it; and that
-//! the contract confirms as one: the answer declares one integer member named as it,
-//! beside the list or in an object beside it (Zoho's `page_context.page`, Box's
-//! `offset`), or the parameter's words name it (WooCommerce's bare array's `page`,
-//! `page[number]`, `pageNo`, `Offset`, `page[offset]`: brackets split the words), or it
-//! is of the page size's bracket family (`page[start]` beside `page[size]`). An integer
-//! with such bounds and no such evidence (`min_rating`, `depth`) is none. Of two confirmed, only one named `page` or `offset` is; and one so named whose
-//! schema counts the other way (Trello's `page` from `0`) leaves the list as it was. A
-//! request asks for the first page when it carries the parameter at `1` (or `0`), or not
-//! at all.
+//! one or it is a position of the page size's bracket family (being required says
+//! nothing: a required, echoed `week` from 1 is a filter); and that the contract
+//! confirms as one: the answer declares one integer member named as it, beside the
+//! list or in an object beside it (Zoho's `page_context.page`, Box's `offset`), or the
+//! parameter's words name it (WooCommerce's bare array's `page`, `page[number]`,
+//! `pageNo`, `Offset`, `page[offset]`: brackets split the words), or it is a position
+//! of the page size's bracket family: `page[start]` beside `page[size]`, its bracket
+//! word one of [`POSITION_WORDS`]. A bound or a cursor of that family (`page[after]`,
+//! `page[before]`, `page[cursor]`) says where a page starts by an item, not by a count,
+//! and is none. An integer with such bounds and no such evidence (`min_rating`,
+//! `depth`) is none. Of two confirmed, only one named `page` or `offset` is; and one so
+//! named whose schema counts the other way (Trello's `page` from `0`, a `page_no` from
+//! `0`) leaves the list as it was. A request asks for the first page when it carries the
+//! parameter at `1` (or `0`), or not at all.
 //!
 //! A run is kept once per route, path values and other query values (the request's but
 //! the page's and the page size's), in one of [`pages::MAX_CUTS`] places those pick,
@@ -201,24 +205,36 @@ fn named(name: &str) -> Option<Style> {
     (page && rest_numbers && words.len() <= 2).then_some(Style::Number)
 }
 
-/// Whether `name` and the page size's `size_param` are of one paging bracket family:
+/// Bracket words that say a page starts at a count: `page[start]`, `page[number]`,
+/// `page[offset]`. A bound or cursor (`page[after]`, `page[cursor]`) is none of them.
+const POSITION_WORDS: [&str; 9] = [
+    "start", "number", "num", "no", "offset", "index", "idx", "skip", "position",
+];
+
+/// Whether `name` is a position of the page size `size_param`'s paging bracket family:
 /// `page[start]` beside `page[size]`. The shared base must name pages (its words are
-/// `page`), so `q[min_stars]` beside `q[per_page]` is no family.
-fn same_family(name: &str, size_param: &str) -> bool {
-    let base = |n: &str| {
+/// `page`), so `q[min_stars]` beside `q[per_page]` is no family; and `name`'s own
+/// bracket word must be one of [`POSITION_WORDS`], so `page[after]`, a keyset bound,
+/// is no position.
+fn family_position(name: &str, size_param: &str) -> bool {
+    let split = |n: &str| {
         let open = n.find('[')?;
-        n.ends_with(']').then(|| n[..open].to_lowercase())
+        let inner = n.strip_suffix(']')?.get(open + 1..)?;
+        Some((n[..open].to_lowercase(), inner.to_string()))
     };
-    match (base(name), base(size_param)) {
-        (Some(a), Some(b)) => {
-            a == b
-                && !a.is_empty()
-                && mb_mcm::words(&a)
-                    .iter()
-                    .all(|w| w.eq_ignore_ascii_case("page"))
-        }
-        _ => false,
-    }
+    let (Some((base, inner)), Some((size_base, _))) = (split(name), split(size_param)) else {
+        return false;
+    };
+    let inner = mb_mcm::words(&inner);
+    base == size_base
+        && !base.is_empty()
+        && mb_mcm::words(&base)
+            .iter()
+            .all(|w| w.eq_ignore_ascii_case("page"))
+        && !inner.is_empty()
+        && inner
+            .iter()
+            .all(|w| POSITION_WORDS.contains(&w.to_lowercase().as_str()))
 }
 
 /// The query parameter of `op` that says where a page starts, beside page size
@@ -252,13 +268,13 @@ fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option
             values.all(|v| v == first).then_some(first)
         };
         let said = named(name);
-        let family = same_family(name, size_param);
+        let family = family_position(name, size_param);
         let style = match (bound("default"), bound("minimum")) {
             (Some(d), Some(m)) if d == 1.0 && m == 1.0 => Style::Number,
             (Some(d), Some(m)) if d == 0.0 && m == 0.0 => Style::Offset,
-            // A `minimum` alone, where the name or the page size's bracket family says
-            // more (`page[number]`, `Offset`, `page[start]`). Being required says
-            // nothing: a required, echoed `week` from 1 is a filter.
+            // A `minimum` alone, where the name or a position of the page size's
+            // bracket family says more (`page[number]`, `Offset`, `page[start]`).
+            // Being required says nothing: a required, echoed `week` from 1 is a filter.
             (None, Some(m)) if m == 1.0 && (said.is_some() || family) => Style::Number,
             (None, Some(m)) if m == 0.0 && (said.is_some() || family) => Style::Offset,
             _ => continue,
@@ -665,18 +681,37 @@ pub(super) async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::same_family;
+    use super::family_position;
 
     #[test]
     fn a_paging_bracket_family_is_one() {
-        assert!(same_family("page[start]", "page[size]"));
-        assert!(same_family("Page[Offset]", "page[limit]"));
+        assert!(family_position("page[start]", "page[size]"));
+        assert!(family_position("Page[Offset]", "page[limit]"));
+        assert!(family_position("page[number]", "page[size]"));
     }
 
     #[test]
     fn a_bracket_family_that_does_not_page_is_none() {
-        assert!(!same_family("q[min_stars]", "q[per_page]"));
-        assert!(!same_family("filter[min]", "filter[limit]"));
-        assert!(!same_family("start", "size"));
+        assert!(!family_position("q[min_stars]", "q[per_page]"));
+        assert!(!family_position("filter[min]", "filter[limit]"));
+        assert!(!family_position("start", "size"));
+    }
+
+    /// A keyset bound or cursor of the page size's family says where a page starts by
+    /// an item, not by a count.
+    #[test]
+    fn a_bound_or_cursor_of_the_family_is_no_position() {
+        for name in [
+            "page[after]",
+            "page[before]",
+            "page[cursor]",
+            "page[since]",
+            "page[until]",
+            "page[from]",
+            "page[to]",
+            "page[]",
+        ] {
+            assert!(!family_position(name, "page[size]"), "{name}");
+        }
     }
 }

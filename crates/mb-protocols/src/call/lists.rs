@@ -33,7 +33,8 @@
 //!
 //! A parameter that names no member of the items, but one member one object down
 //! (`email` for `billing_address.email`), filters on that one when exactly one object
-//! member of the items declares a member so named, under the same guards: `street`,
+//! member of the items declares a member of that very name (ignoring case, with no
+//! plural or stem: `emails` reaches no `email` there), under the same guards: `street`,
 //! which both `billing_address` and `shipping_address` declare, names neither.
 //!
 //! A parameter that names no member changes nothing, whatever its value: a bound
@@ -197,8 +198,8 @@ pub(super) fn filtered_member<'a>(
 /// The member one object down of the items `item_parts` describe that query parameter
 /// `param`, declared by `query`, names, with the object member holding it: when no
 /// member of the items is named so, and exactly one of their object members declares
-/// one so named (`email` in `billing_address`), the two declaring the one same type, as
-/// [`filtered_member`] has it.
+/// one of that very name, ignoring case (`email` in `billing_address`; `emails` names
+/// none), the two declaring the one same type, as [`filtered_member`] has it.
 fn nested_filtered_member<'a>(
     bundle: &'a mb_mcm::Bundle,
     query: Option<&'a Value>,
@@ -219,7 +220,13 @@ fn nested_filtered_member<'a>(
         if !object {
             return None;
         }
-        Some((parent, named_member(bundle, &parts, param)?))
+        // One object down, only the very name (ignoring case) counts: a plural or
+        // stem (`emails` for `email`) widens the guess past what the name says.
+        let member = named_member(bundle, &parts, param)?;
+        member
+            .name
+            .eq_ignore_ascii_case(param)
+            .then_some((parent, member))
     });
     let (parent, member) = found.next()?;
     if found.next().is_some() {
