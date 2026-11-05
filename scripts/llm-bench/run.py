@@ -461,6 +461,11 @@ def run_server_suites(
     jobs = getattr(args, "server_jobs", 1) or 1
     if jobs > 1:
         cmd += ["--jobs", str(jobs)]
+    world = getattr(args, "world", None) or "none"
+    if world != "none":
+        cmd += ["--world", world]
+        if getattr(args, "author", None):
+            cmd += ["--author", args.author]
     rcs = []
     suites = [s.strip() for s in (args.suites or "").split(",") if s.strip()] or [None]
     for suite in suites:
@@ -931,6 +936,10 @@ def main() -> int:
     p.add_argument("--server-jobs", type=int, default=1,
                    help="server_suites.py --jobs: journey/consistency/SSE units in flight per model (default 1)")
     p.add_argument("--skip-server", action="store_true", help="engine workload only")
+    p.add_argument("--world", choices=("none", "derived", "agent"), default="none",
+                   help="server_suites.py --world: the world description the mocks run with (default none)")
+    p.add_argument("--author", choices=("claude", "stub"),
+                   help="server_suites.py --author for --world agent (default claude)")
 
     args = ap.parse_args()
     if args.cmd == "preflight":

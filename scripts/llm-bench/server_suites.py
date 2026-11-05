@@ -103,6 +103,13 @@ directory and free ports; so does one process per (model, suite), which is safe
 too: ports are picked under a lock file in the temp directory and held until the
 server is ready.
 
+World descriptions: `--world none|derived|agent` (default none) sets the description
+each suite's mocks run with. `derived` writes Mockingbird's heuristic description back
+as a revision; `agent` has a coding agent write one per contract, blind, before the
+suites run (cached per contract hash; `--author stub` is free). Rows of a run with a
+world carry `world`, its proxy label and server log end in `@<world>`, and each write
+is recorded in `<out>/world-applied.jsonl`. See world_author.py and the README.
+
 Standard library only. Makes no LLM calls itself.
 """
 
@@ -134,6 +141,10 @@ import zlib
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import world_author  # noqa: E402
+from world_author import WORLDS  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
@@ -342,6 +353,13 @@ def slug_of(model):
     return model.replace("/", "__")
 
 
+def run_label(model, suite, args):
+    """The proxy label and server log name of a (model, suite) run: `<slug>~<suite>`, and
+    `@<world>` after it when the run writes a world description (`--world`)."""
+    world = getattr(args, "world", "none") or "none"
+    return f"{slug_of(model)}~{suite}" + ("" if world == "none" else f"@{world}")
+
+
 def session_slug(model):
     """`slug_of(model)` with every character a header value may not carry
     unquoted (such as the `@` of a variant like `x/y@nojson`) as `-`."""
@@ -352,9 +370,9 @@ class Sink:
     """Appends rows to <out>/server.jsonl; safe across concurrent processes
     (flock) and across the threads of --jobs (a lock per sink)."""
 
-    def __init__(self, out, model, suite):
+    def __init__(self, out, model, suite, world="none"):
         self.path = os.path.join(out, "server.jsonl")
-        self.model, self.suite = model, suite
+        self.model, self.suite, self.world = model, suite, world
         self.rows = []
         self.lock = threading.Lock()
 
@@ -365,6 +383,8 @@ class Sink:
             row["ttfe_ms"] = None if ttfe_ms is None else round(ttfe_ms, 1)
         row["source"] = source
         row["detail"] = detail
+        if self.world != "none":
+            row["world"] = self.world
         line = (json.dumps(row, ensure_ascii=False) + "\n").encode()
         mark = "ok " if ok else "BAD"
         lat = "-" if latency_ms is None else f"{latency_ms / 1000:.1f}s"
@@ -525,10 +545,10 @@ class Server:
     def __init__(self, args, suite, mocks):
         self.args, self.suite, self.mocks = args, suite, mocks
         self.dir = tempfile.mkdtemp(prefix=f"mb-bench-{suite}-")
-        self.base_url = f"{args.proxy_base.rstrip('/')}/r/{slug_of(args.model)}~{suite}/api/v1"
+        self.base_url = f"{args.proxy_base.rstrip('/')}/r/{run_label(args.model, suite, args)}/api/v1"
         logs = os.path.join(args.out, "server-logs")
         os.makedirs(logs, exist_ok=True)
-        self.log_path = os.path.join(logs, f"{slug_of(args.model)}~{suite}.log")
+        self.log_path = os.path.join(logs, f"{run_label(args.model, suite, args)}.log")
         self.proc = None
         self.log = None
 
@@ -7506,6 +7526,12 @@ def main():
                         "against each suite's server; 1 (default) runs them in order. Import stays sequential")
     p.add_argument("--suites-parallel", action="store_true",
                    help="run the suites at once, each on its own server (in flight: suites x --jobs)")
+    p.add_argument("--world", choices=WORLDS, default="none",
+                   help="the world description each mock runs with: none (no revision; the default), "
+                        "derived (Mockingbird's heuristic description written back as a revision) or agent "
+                        "(a coding agent's, authored blind from the contract and cached per contract hash; "
+                        "see world_author.py)")
+    world_author.add_author_args(p)
     args = p.parse_args()
     if args.jobs < 1:
         p.error("--jobs must be at least 1")
@@ -7515,11 +7541,18 @@ def main():
     if not os.path.exists(args.binary):
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
+    world_author.resolve_paths(args)
+    args.authored = {}
     if args.journey:
         # --journey alone means the journeys suite; each journey runs once.
         args.journey = list(dict.fromkeys(args.journey))
         args.suite = args.suite or ["journeys"]
     suites = list(args.suite or DEFAULT_SUITES)
+    if args.world == "agent":
+        # Authored (or read from the cache) before any suite runs, so a suite never
+        # waits on authoring and every suite of the run uses the same descriptions.
+        contracts = [os.path.join(REPO, c) for s in suites for c, _, _ in RUNNERS[s][0].values()]
+        args.authored = world_author.ensure_authored(contracts, args, args.out)
     if args.suites_parallel:
         # A suite's server log is named by model and suite, so each runs once.
         suites = list(dict.fromkeys(suites))
@@ -7533,11 +7566,13 @@ def main():
 def run_suite(suite, args):
     """Runs one suite on its own server; True when it broke."""
     mocks, runner = RUNNERS[suite]
-    sink = Sink(args.out, args.model, suite)
-    print(f"{args.model} / {suite}", file=sys.stderr)
+    world = getattr(args, "world", "none") or "none"
+    sink = Sink(args.out, args.model, suite, world)
+    print(f"{args.model} / {suite}" + ("" if world == "none" else f" / world {world}"), file=sys.stderr)
     failed = False
     try:
         with Server(args, suite, mocks) as srv:
+            apply_worlds(srv, args, suite, mocks)
             runner(srv, sink, args)
     except Exception as e:  # one broken suite must not stop the others
         failed = True
@@ -7555,10 +7590,28 @@ def run_suite(suite, args):
     return failed
 
 
+def apply_worlds(srv, args, suite, mocks):
+    """Writes the run's world description (`--world`) onto every mock of the suite before
+    its checks run, and records each write in <out>/world-applied.jsonl. `none` writes
+    nothing. A write the server refuses as a whole fails the suite."""
+    world = getattr(args, "world", "none") or "none"
+    if world == "none" or not mocks:
+        return
+    import world_author
+    for name, (contract, _, _) in mocks.items():
+        entry = (getattr(args, "authored", None) or {}).get(os.path.abspath(os.path.join(REPO, contract)))
+        rec = world_author.apply_world(srv.api, name, world, entry)
+        rec.update({"ts": world_author.utc_now(), "model": args.model, "suite": suite,
+                    "contract": contract, "refused_n": len(rec.get("refused") or [])})
+        world_author.append_jsonl(os.path.join(args.out, "world-applied.jsonl"), rec)
+        print(f"  world {world} on {name}: revision {rec.get('revision')}, {rec['refused_n']} refused",
+              file=sys.stderr)
+
+
 def provider_mix(args, suite):
     """The suite's calls per serving provider, from the bench proxy's /stats
     (`Fireworks 412 (98.6%), Darkbloom 6 (1.4%)`); None when the proxy has none."""
-    label = f"{slug_of(args.model)}~{suite}"
+    label = run_label(args.model, suite, args)
     try:
         with urllib.request.urlopen(f"{args.proxy_base.rstrip('/')}/stats", timeout=5) as r:
             stats = json.load(r)
