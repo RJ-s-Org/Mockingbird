@@ -3827,15 +3827,18 @@ fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generate
     }
 }
 
-/// Client errors that say who asks, how or how often, never that a record is missing.
-const NOT_OF_A_RECORD: [u16; 14] = [
-    401, 403, 405, 406, 407, 408, 411, 413, 414, 415, 426, 428, 429, 431,
+/// Client errors that say who asks, how or how often, or that the record is there but
+/// in a state that refuses the call (a conflict, a failed precondition, a range or an
+/// expectation it cannot meet), never that a record is missing.
+const NOT_OF_A_RECORD: [u16; 18] = [
+    401, 403, 405, 406, 407, 408, 409, 411, 412, 413, 414, 415, 416, 417, 426, 428, 429, 431,
 ];
 
 /// The status `op` declares for a read of what is not there when it declares no
 /// `404` (a `4XX` range declares one) and no `default`: a declared `410`, which by
 /// its status says the resource is gone; else the one client error it declares by
-/// code that is not about who asks, how or how often ([`NOT_OF_A_RECORD`]), as an API
+/// code that is not about who asks, how or how often, nor about a record's state
+/// ([`NOT_OF_A_RECORD`]), as an API
 /// answering every refusal with one status (a `400` or a `422`) answers this one too.
 /// A `403` never stands in, whatever its description says, and keeps the problem+json
 /// `404`; nor does one of two such statuses, as which fits is not said.
@@ -3929,6 +3932,28 @@ paths:
         assert_eq!(missing_status(&op_of(two)), None);
         let limited = r#"        "429": {description: "Slow down."}"#;
         assert_eq!(missing_status(&op_of(limited)), None);
+    }
+
+    /// A conflict or a failed precondition says the record is there, not that it is
+    /// missing: the problem+json `404` stays.
+    #[test]
+    fn a_conflict_or_precondition_is_not_a_missing_record() {
+        for (code, description) in [
+            ("409", "Conflict - the thing is locked."),
+            (
+                "412",
+                "Precondition failed: the If-Match tag does not match.",
+            ),
+            ("416", "Range not satisfiable."),
+            ("417", "Expectation failed."),
+        ] {
+            let responses = format!("        \"{code}\": {{description: \"{description}\"}}");
+            assert_eq!(missing_status(&op_of(&responses)), None, "{code}");
+        }
+        // Beside one that stands in, it is not a second candidate.
+        let beside = r#"        "409": {description: "Conflict."}
+        "422": {description: "Refused."}"#;
+        assert_eq!(missing_status(&op_of(beside)), Some(422));
     }
 
     #[test]

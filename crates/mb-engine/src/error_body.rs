@@ -10,7 +10,8 @@
 //!   one named `parameter` or `param` ([`with_reasons`]). A path-like member the
 //!   contract shows to hold a URI (its `format`, or an example that is a URL or an
 //!   absolute path, as a request URI reads) is not the violated field. An array of error objects gets one
-//!   violation per item. Each change is kept only while the body still validates.
+//!   violation per item, its message that violation's reason; a single error object
+//!   names the first violation's field and keeps every reason in its message. Each change is kept only while the body still validates.
 //! - A code-like member (`code`, `type`, `ErrorCode`, `error_code`: a scalar whose
 //!   name is `type` or ends in the word `code`) whose schema does not fix its value
 //!   ([`writes_code`]) is the contract's to say, often in prose (an error-code table in
@@ -297,7 +298,8 @@ type Change = (String, Value);
 /// them (see the module's documentation): `reasons` in arrays of strings named as
 /// messages, and each of `violations` in the path-like and pointer members of one
 /// item of an array of error objects (the last one in the items past them), with its
-/// reason in that item's message-like member. Each change is kept only while the body
+/// reason in that item's message-like member. Outside such an array, the first
+/// violation names the field and the message-like member keeps every reason. Each change is kept only while the body
 /// still validates; a body not valid to begin with is left as it is.
 #[must_use]
 pub fn with_reasons(
@@ -325,7 +327,7 @@ pub fn with_reasons(
             violations,
         },
         &mut String::new(),
-        0,
+        None,
         0,
         &mut changes,
     );
@@ -400,9 +402,10 @@ fn holds_uri(schema: Option<&Value>, defs: &Map<String, Value>) -> bool {
 }
 
 /// Collects [`with_reasons`]' changes to `value`, declared by `schema`, at `at` in
-/// the body and in item `item` of the nearest array of error objects. Whether
-/// `value`, an object, or one nested in it outside an array, names the violated
-/// field.
+/// the body and in item `item` of the nearest array of error objects (`None` outside
+/// one: the first violation names the field, and the message keeps every reason).
+/// Whether `value`, an object, or one nested in it outside an array, names the
+/// violated field.
 ///
 /// A member named as a pointer takes a body violation's JSON pointer (a pointer is
 /// into the request document); one named as a parameter (`parameter`, `param`) takes
@@ -414,7 +417,7 @@ fn walk_body(
     schema: Option<&Value>,
     walk: &Walk<'_>,
     at: &mut String,
-    item: usize,
+    item: Option<usize>,
     depth: usize,
     out: &mut Vec<Change>,
 ) -> bool {
@@ -433,13 +436,14 @@ fn walk_body(
                 let len = at.len();
                 at.push('/');
                 at.push_str(&i.to_string());
-                let _ = walk_body(v, item_schema, walk, at, i, depth + 1, out);
+                let _ = walk_body(v, item_schema, walk, at, Some(i), depth + 1, out);
                 at.truncate(len);
             }
             false
         }
         Value::Object(members) => {
-            let violation = violations.get(item.min(violations.len().saturating_sub(1)));
+            let violation =
+                violations.get(item.unwrap_or(0).min(violations.len().saturating_sub(1)));
             let mut names_field = false;
             for (name, member) in members {
                 let folded = folded(name);
@@ -492,8 +496,12 @@ fn walk_body(
                     at.truncate(len);
                 }
             }
-            // A field named in it: its message is that violation's.
-            if names_field && let Some(violation) = violation {
+            // A field named in an item of an array of errors: its message is that
+            // violation's. Outside one, the message keeps every reason.
+            if names_field
+                && item.is_some()
+                && let Some(violation) = violation
+            {
                 let message = MESSAGE_FIELDS.iter().find_map(|wanted| {
                     let wanted = folded(wanted);
                     members
@@ -792,6 +800,31 @@ mod tests {
         assert_eq!(out["errors"][1]["source"]["pointer"], "/address/city");
         // Past the violations, the last one.
         assert_eq!(out["errors"][2]["field"], "address.city");
+    }
+
+    /// A flat error shape (`{message, field}`) names one field, but its message keeps
+    /// every reason: only an item of an array of errors is one violation's.
+    #[test]
+    fn a_flat_error_keeps_every_reason_in_its_message() {
+        let schema = json!({"type": "object", "properties": {
+            "message": {"type": "string"},
+            "field": {"type": "string"}
+        }});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body = json!({"message": "r1; r2", "field": "x"});
+        let reasons = vec!["r1".to_string(), "r2".to_string()];
+        let violations = [violation("/name", "r1"), violation("/size", "r2")];
+        let out = with_reasons(&validator, body, &reasons, &violations);
+        assert_eq!(out["message"], "r1; r2");
+        assert_eq!(out["field"], "name");
+
+        // Nested under the root, not in an array: still the whole message.
+        let schema = json!({"type": "object", "properties": {"error": schema}});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body = json!({"error": {"message": "r1; r2", "field": "x"}});
+        let out = with_reasons(&validator, body, &reasons, &violations);
+        assert_eq!(out["error"]["message"], "r1; r2");
+        assert_eq!(out["error"]["field"], "name");
     }
 
     #[test]
