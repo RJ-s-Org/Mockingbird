@@ -31,6 +31,11 @@
 //! no `const`, parts the items' `enum` allows, and a parameter's own `enum` only beside
 //! one on the items.
 //!
+//! A parameter that names no member of the items, but one member one object down
+//! (`email` for `billing_address.email`), filters on that one when exactly one object
+//! member of the items declares a member so named, under the same guards: `street`,
+//! which both `billing_address` and `shipping_address` declare, names neither.
+//!
 //! A parameter that names no member changes nothing, whatever its value: a bound
 //! (`before`, `oldest`) or a search naming an item's id leaves it in, as which side of
 //! the bound the rest is on, and whether the bound is in it, is not said by the
@@ -63,6 +68,11 @@
 //! rest is, or by a later page number or offset ([`runs`]). An answer that left its
 //! declared list member out altogether gave no page at all: it gets the member as `[]`
 //! ([`absent_list`]), and the store fills that page the same way ([`stored_page`]).
+//!
+//! A list read that declares a bodiless `2xx` beside its list answer (a `204` "No order
+//! matches.") answers that status with no body when its list is left with no items
+//! ([`no_content`]): by the model, the filters or the delete markers. Not under a
+//! scenario or a forced status.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -181,6 +191,51 @@ pub(super) fn filtered_member<'a>(
     }
     let declared = query?.get("properties")?.get(param)?;
     let member = named_member(bundle, item_parts, param)?;
+    fits_param(bundle, declared, member)
+}
+
+/// The member one object down of the items `item_parts` describe that query parameter
+/// `param`, declared by `query`, names, with the object member holding it: when no
+/// member of the items is named so, and exactly one of their object members declares
+/// one so named (`email` in `billing_address`), the two declaring the one same type, as
+/// [`filtered_member`] has it.
+fn nested_filtered_member<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    query: Option<&'a Value>,
+    item_parts: &[&'a Value],
+    param: &str,
+) -> Option<(&'a str, Member<'a>)> {
+    if mb_mcm::is_generic_id(param) || named_member(bundle, item_parts, param).is_some() {
+        return None;
+    }
+    let declared = query?.get("properties")?.get(param)?;
+    let mut found = declared_names(item_parts).into_iter().filter_map(|parent| {
+        let schema = item_parts
+            .iter()
+            .find_map(|p| p.get("properties")?.get(parent))?;
+        let (parts, _) = schema_parts(bundle, Some(schema));
+        let object = types_of(&parts).into_iter().eq(["object"])
+            || (types_of(&parts).is_empty() && parts.iter().any(|p| p.get("properties").is_some()));
+        if !object {
+            return None;
+        }
+        Some((parent, named_member(bundle, &parts, param)?))
+    });
+    let (parent, member) = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some((parent, fits_param(bundle, declared, member)?))
+}
+
+/// `member`, when query parameter schema `declared` fits it as a filter: both declare
+/// the one same type (no real number), the member is no `const`, and a parameter's own
+/// `enum` stands beside one of the member's.
+fn fits_param<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    declared: &'a Value,
+    member: Member<'a>,
+) -> Option<Member<'a>> {
     let (param_parts, _) = schema_parts(bundle, Some(declared));
     let types = member.types();
     // A real number (a coordinate) is matched within a margin, if at all, and a
@@ -368,17 +423,29 @@ enum Test {
 
 /// A filter: the member, the values it asks of it, and how.
 struct Filter<'a> {
+    /// The object member of the item holding the member, when it is one object down.
+    parent: Option<&'a str>,
     member: &'a str,
     values: Vec<Value>,
     test: Test,
+}
+
+impl Filter<'_> {
+    /// What `item` holds under the filter's member, where it holds it.
+    fn held<'v>(&self, item: &'v Value) -> Option<&'v Value> {
+        match self.parent {
+            Some(parent) => item.get(parent)?.get(self.member),
+            None => item.get(self.member),
+        }
+    }
 }
 
 /// Whether `item` holds another value than the filter's under its member: one of the
 /// same shape, so a missing member, another shape, or `null` other than in a reference
 /// says nothing.
 fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
-    let (member, wanted) = (filter.member, &filter.values);
-    let Some(held) = item.get(member) else {
+    let wanted = &filter.values;
+    let Some(held) = filter.held(item) else {
         return false;
     };
     let (loose, reference) = match filter.test {
@@ -580,6 +647,7 @@ fn filters_of<'a, 'c>(
             filters.push((
                 param.as_str(),
                 Filter {
+                    parent: None,
                     member: member.name,
                     values,
                     test: Test::Equal {
@@ -594,9 +662,28 @@ fn filters_of<'a, 'c>(
             filters.push((
                 param.as_str(),
                 Filter {
+                    parent: None,
                     member: element.name,
                     values,
                     test: Test::HoldsAny,
+                },
+            ));
+        } else if let Some((parent, member)) =
+            nested_filtered_member(bundle, query, item_parts, param)
+            && let Some(values) = wanted(&member, raw)
+        {
+            let loose = member.is_free_text()
+                && !values.iter().any(|v| v.as_str().is_some_and(holds_a_digit));
+            filters.push((
+                param.as_str(),
+                Filter {
+                    parent: Some(parent),
+                    member: member.name,
+                    values,
+                    test: Test::Equal {
+                        loose,
+                        reference: is_reference(member.name),
+                    },
                 },
             ));
         }
@@ -607,7 +694,7 @@ fn filters_of<'a, 'c>(
 /// Whether `item` holds what `filter` asks, as a member of the same shape: a missing
 /// member or `null` holds nothing.
 fn holds_wanted(item: &Value, filter: &Filter<'_>) -> bool {
-    let Some(held) = item.get(filter.member).filter(|held| !held.is_null()) else {
+    let Some(held) = filter.held(item).filter(|held| !held.is_null()) else {
         return false;
     };
     match filter.test {
@@ -892,6 +979,43 @@ pub(super) async fn collection_records(
         out.push(item);
     }
     Some(out)
+}
+
+/// The bodiless success status `op`, a list read, declares beside its list answer
+/// (BigCommerce's `204` "No order matches."): the one `2xx` code other than the list's
+/// whose response has no body. An empty list answers it (see [`no_content`]).
+fn no_content_status(op: &Operation) -> Option<u16> {
+    let list = op.success_output()?;
+    list.schema.as_ref()?;
+    let mut bodiless = op.outputs.iter().filter_map(|o| match o.status {
+        mb_mcm::StatusSelector::Code(code)
+            if (200..300).contains(&code) && o.schema.is_none() && o.status != list.status =>
+        {
+            Some(code)
+        }
+        _ => None,
+    });
+    let one = bodiless.next()?;
+    bodiless.next().is_none().then_some(one)
+}
+
+/// A list answer `generated` of `op` left with no items, as the bodiless status the
+/// operation declares beside its list for that ([`no_content_status`]), with no body.
+/// Any other answer stays as it is.
+pub(super) fn no_content(op: &Operation, generated: &mut GeneratedResponse) {
+    if !(200..300).contains(&generated.status) {
+        return;
+    }
+    let empty = generated
+        .body
+        .as_ref()
+        .and_then(mb_engine::consistency::list_items)
+        .is_some_and(Vec::is_empty);
+    if let (true, Some(status)) = (empty, no_content_status(op)) {
+        generated.status = status;
+        generated.body = None;
+        generated.content_type = None;
+    }
 }
 
 /// The declared list member of `op`'s list answer `body`, an object, that the body

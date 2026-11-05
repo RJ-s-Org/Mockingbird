@@ -10,11 +10,14 @@
 //! The parameter is known by the contract's structure: an integer query parameter of the
 //! list (no `const` or `enum`, no bare `id`, naming no member of the items) beside the
 //! page size, whose `default` and `minimum` are both `1` (a page number) or both `0` (an
-//! offset), and that the contract confirms as one: the answer declares one integer member
-//! named as it, beside the list or in an object beside it (Zoho's `page_context.page`,
-//! Box's `offset`), or the parameter is named `page` or `offset` (WooCommerce's bare
-//! array). An integer with such bounds and no such evidence (`min_rating`, `depth`) is
-//! none. Of two confirmed, only one named `page` or `offset` is; and one so named whose
+//! offset), or that declares that `minimum` and no `default` where its name says it is
+//! one, it sits in the page size's bracket family, or the route requires it; and that
+//! the contract confirms as one: the answer declares one integer member named as it,
+//! beside the list or in an object beside it (Zoho's `page_context.page`, Box's
+//! `offset`), or the parameter's words name it (WooCommerce's bare array's `page`,
+//! `page[number]`, `pageNo`, `Offset`, `page[offset]`: brackets split the words), or it
+//! is of the page size's bracket family (`page[start]` beside `page[size]`). An integer
+//! with such bounds and no such evidence (`min_rating`, `depth`) is none. Of two confirmed, only one named `page` or `offset` is; and one so named whose
 //! schema counts the other way (Trello's `page` from `0`) leaves the list as it was. A
 //! request asks for the first page when it carries the parameter at `1` (or `0`), or not
 //! at all.
@@ -175,16 +178,54 @@ fn echo_of(bundle: &mb_mcm::Bundle, op: &Operation, list: &str, name: &str) -> O
     found.next().is_none().then_some(one)
 }
 
+/// Words beside `page` that still name a page number: `page[number]`, `pageNo`.
+const PAGE_NUMBER_WORDS: [&str; 5] = ["number", "num", "no", "index", "idx"];
+
+/// How a parameter's name says it counts: by its [`mb_mcm::words`] (brackets split, so
+/// `page[number]` is `page number`), an `offset` among them is an offset, and `page`
+/// alone or with a word of [`PAGE_NUMBER_WORDS`] a page number. `per_page`, a size,
+/// is neither.
+fn named(name: &str) -> Option<Style> {
+    let words: Vec<String> = mb_mcm::words(name)
+        .into_iter()
+        .map(str::to_lowercase)
+        .collect();
+    if words.iter().any(|w| w == "offset") && words.iter().all(|w| w == "offset" || w == "page") {
+        return Some(Style::Offset);
+    }
+    let page = words.iter().filter(|w| *w == "page").count() == 1;
+    let rest_numbers = words
+        .iter()
+        .filter(|w| *w != "page")
+        .all(|w| PAGE_NUMBER_WORDS.contains(&w.as_str()));
+    (page && rest_numbers && words.len() <= 2).then_some(Style::Number)
+}
+
+/// Whether `name` and the page size's `size_param` are of one bracket family:
+/// `page[start]` beside `page[size]`.
+fn same_family(name: &str, size_param: &str) -> bool {
+    let base = |n: &str| {
+        let open = n.find('[')?;
+        n.ends_with(']').then(|| n[..open].to_lowercase())
+    };
+    match (base(name), base(size_param)) {
+        (Some(a), Some(b)) => !a.is_empty() && a == b,
+        _ => false,
+    }
+}
+
 /// The query parameter of `op` that says where a page starts, beside page size
 /// `size_param`, as the contract confirms it (see the module's doc).
 fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option<Position> {
-    let declared = op.input.query.as_ref()?.get("properties")?.as_object()?;
-    let (list, item_parts) = answer_lists(bundle, op)?;
-    let named = |name: &str| match mb_mcm::joined_name(name).as_str() {
-        "page" => Some(Style::Number),
-        "offset" => Some(Style::Offset),
-        _ => None,
+    let query = op.input.query.as_ref()?;
+    let declared = query.get("properties")?.as_object()?;
+    let required = |name: &str| {
+        query
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
     };
+    let (list, item_parts) = answer_lists(bundle, op)?;
     let mut found: Vec<Position> = Vec::new();
     for (name, schema) in declared {
         if name == size_param
@@ -209,13 +250,22 @@ fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option
             let first = values.next()?;
             values.all(|v| v == first).then_some(first)
         };
+        let said = named(name);
+        let family = same_family(name, size_param);
         let style = match (bound("default"), bound("minimum")) {
             (Some(d), Some(m)) if d == 1.0 && m == 1.0 => Style::Number,
             (Some(d), Some(m)) if d == 0.0 && m == 0.0 => Style::Offset,
+            // A `minimum` alone, where the name or the route says more (Terraform's
+            // `page[number]`, Postmark's required `Offset`).
+            (None, Some(m)) if m == 1.0 && (said.is_some() || family || required(name)) => {
+                Style::Number
+            }
+            (None, Some(m)) if m == 0.0 && (said.is_some() || family || required(name)) => {
+                Style::Offset
+            }
             _ => continue,
         };
         // A name saying the other way (Trello's `page` from 0) leaves it unknown.
-        let said = named(name);
         if said.is_some_and(|said| said != style) {
             return None;
         }
@@ -223,7 +273,7 @@ fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option
             .as_deref()
             .and_then(|list| echo_of(bundle, op, list, name));
         // Bounds alone (`min_rating`, `depth`) are no evidence.
-        if echo.is_none() && said.is_none() {
+        if echo.is_none() && said.is_none() && !family {
             continue;
         }
         found.push(Position {

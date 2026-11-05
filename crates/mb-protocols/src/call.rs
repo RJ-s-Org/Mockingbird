@@ -1392,6 +1392,16 @@ pub(crate) async fn complete(
                 )
                 .await;
             }
+            // A list left with nothing answers the bodiless status declared for that.
+            if is_query
+                && target_id.is_none()
+                && answered.is_none()
+                && plan.forced_status.is_none()
+                && plan.scenario.is_none()
+                && deleted::applies(rt, plan)
+            {
+                lists::no_content(op, &mut generated);
+            }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 // The answer as the model gave it, before a fresh id replaces one a stored
                 // record holds: whether it is that record (see [`repeats`]).

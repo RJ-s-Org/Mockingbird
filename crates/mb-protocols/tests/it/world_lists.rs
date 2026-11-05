@@ -2225,14 +2225,106 @@ async fn page_two_is_generated(list: &str, param: &str) {
     assert_eq!(api.provider.requests().len(), 4);
 }
 
-/// A page number with a `minimum` but no `default` is not known to be one.
+/// A `page` with a `minimum` of 1 but no `default` is a page number by its name and
+/// its echo: page 2 is the stored rest.
 #[tokio::test]
-async fn a_page_with_no_default_is_unchanged() {
+async fn a_page_with_no_default_is_a_page_number() {
     let list = BY_PAGE.replace(
         "{type: integer, minimum: 1, default: 1}",
         "{type: integer, minimum: 1}",
     );
-    page_two_is_generated(&list, "page").await;
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, false).to_string()
+    ));
+    let api = api_of(&stored_pages(&list), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1&page=1").await;
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    assert_eq!(second["page_context"]["page"], 2, "{second}");
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A bare array of three paged by `params` beside page size `size`, cut to one: the
+/// first page `first` (a query) is the first item, and `second` the second, with one
+/// model call.
+async fn second_item_by(params: &str, first: &str, second: &str) {
+    let list = format!(
+        r##"    get:
+      operationId: listTasks
+      parameters:
+{params}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {TASK_ARRAY}"##
+    );
+    let answer = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "open"),
+    ]);
+    let api = api_of(&stored_pages(&list), true, vec![Ok(answer.to_string())]);
+    assert_eq!(
+        api.get(&format!("/tasks?{first}")).await,
+        json!([stored_task("t1", "A", "open")])
+    );
+    assert_eq!(
+        api.get(&format!("/tasks?{second}")).await,
+        json!([stored_task("t2", "B", "open")])
+    );
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A bracketed `page[number]` from 1 with no `default`, beside `page[size]`, is a page
+/// number.
+#[tokio::test]
+async fn a_bracketed_page_number_with_no_default_pages() {
+    second_item_by(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[number]\", in: query, schema: {type: integer, minimum: 1}}",
+        "page%5Bsize%5D=1&page%5Bnumber%5D=1",
+        "page%5Bsize%5D=1&page%5Bnumber%5D=2",
+    )
+    .await;
+}
+
+/// A required `Offset` from 0 with no `default`, beside `limit`, is an offset.
+#[tokio::test]
+async fn a_required_offset_with_no_default_pages() {
+    second_item_by(
+        "        - {name: limit, in: query, required: true, schema: {type: integer, minimum: 1}}
+        - {name: Offset, in: query, required: true, schema: {type: integer, minimum: 0}}",
+        "limit=1&Offset=0",
+        "limit=1&Offset=1",
+    )
+    .await;
+}
+
+/// An integer from 0 in the page size's bracket family (`page[start]` beside
+/// `page[size]`) is an offset, though its own words name none.
+#[tokio::test]
+async fn a_start_beside_the_page_size_in_its_brackets_pages() {
+    second_item_by(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[start]\", in: query, schema: {type: integer, minimum: 0}}",
+        "page%5Bsize%5D=1&page%5Bstart%5D=0",
+        "page%5Bsize%5D=1&page%5Bstart%5D=1",
+    )
+    .await;
+}
+
+/// `depth` from 1 with no `default` is no page number: nothing names it one.
+#[tokio::test]
+async fn a_depth_from_one_with_no_default_is_no_page_number() {
+    a_bounded_integer_is_no_page(
+        "        - {name: depth, in: query, schema: {type: integer, minimum: 1}}",
+        "depth=2",
+    )
+    .await;
 }
 
 /// A `page` whose schema counts from 0 (Trello's) says two things: nothing changes.
@@ -3918,4 +4010,120 @@ async fn a_reused_model_token_finds_no_earlier_walk() {
     assert_eq!(api.get("/tasks?limit=2").await, later);
     let third = api.get("/tasks?limit=1&cursor=abc").await;
     assert_eq!(ids_in(&third, "data"), ["t2"], "{third}");
+}
+
+/// Orders whose buyer's `email` sits one object down, in `billing_address`, and whose
+/// list declares a bodiless `204` for no match beside its `200` array.
+const NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - {name: email, in: query, schema: {type: string}}
+        - {name: street, in: query, schema: {type: string}}
+        - {name: ids, in: query, style: form, explode: false, schema: {type: array, items: {type: integer}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Order"}}
+        "204": {description: No order matches.}
+  /carts:
+    get:
+      operationId: listCarts
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Order"}}
+components:
+  schemas:
+    Address:
+      type: object
+      properties:
+        street: {type: string}
+    Order:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        billing_address:
+          type: object
+          properties:
+            street: {type: string}
+            email: {type: string}
+        shipping_address: {$ref: "#/components/schemas/Address"}
+"##;
+
+fn order(id: u64, email: &str) -> Value {
+    json!({
+        "id": id,
+        "billing_address": {"street": "Main", "email": email},
+        "shipping_address": {"street": "Elm"},
+    })
+}
+
+fn order_ids(body: &Value) -> Vec<u64> {
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_u64().unwrap())
+        .collect()
+}
+
+/// `email` names no member of the orders but one of `billing_address`, the only object
+/// declaring it: the orders of another buyer go.
+#[tokio::test]
+async fn a_filter_reaches_a_member_one_object_down() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?email=ann@example.com").await;
+    assert_eq!(order_ids(&body), [1], "{body}");
+}
+
+/// `street`, which both addresses declare, names neither: nothing goes.
+#[tokio::test]
+async fn a_member_two_objects_declare_is_no_filter() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?street=Nowhere").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// A list a filter leaves empty, of an operation declaring a bodiless `204` beside its
+/// list, answers that `204` with no body.
+#[tokio::test]
+async fn an_empty_list_answers_its_declared_no_content() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api
+        .call("GET", "/orders?email=nobody@example.com", None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(body, Value::Null);
+}
+
+/// A list declaring no `204` answers an empty list as its `200`; with consistency off,
+/// the declared `204` changes nothing.
+#[tokio::test]
+async fn an_empty_list_with_no_declared_no_content_stays() {
+    let api = api_of(NESTED, true, vec![Ok(json!([]).to_string())]);
+    assert_eq!(api.get("/carts").await, json!([]));
+    let api = api_of(NESTED, false, vec![Ok(json!([]).to_string())]);
+    assert_eq!(api.get("/orders").await, json!([]));
+}
+
+/// A `form` array that does not explode is one comma-separated value: `ids=1,2` is
+/// two integers, not text refused as one.
+#[tokio::test]
+async fn a_comma_separated_array_is_accepted() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?ids=1,2").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
 }

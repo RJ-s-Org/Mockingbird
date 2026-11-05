@@ -52,6 +52,42 @@ fn a_parameter_description_is_kept_on_its_schema() {
     assert_eq!(query["limit"], json!({"type": "integer"}));
 }
 
+/// A Swagger 2 array's `collectionFormat` is kept as the OpenAPI 3 `style` and
+/// `explode` it stands for: `csv` (the default) a comma-separated `form`, `pipes` and
+/// `ssv` delimited; `multi` repeats the key, as an exploded `form` does.
+#[test]
+fn a_collection_format_is_kept_as_its_style() {
+    let contract = br#"{
+  "swagger": "2.0",
+  "info": {"title": "T", "version": "1"},
+  "paths": {"/tasks": {"get": {
+    "operationId": "listTasks",
+    "parameters": [
+      {"name": "ids", "in": "query", "type": "array", "items": {"type": "integer"}},
+      {"name": "tags", "in": "query", "type": "array", "items": {"type": "string"}, "collectionFormat": "pipes"},
+      {"name": "words", "in": "query", "type": "array", "items": {"type": "string"}, "collectionFormat": "ssv"},
+      {"name": "kinds", "in": "query", "type": "array", "items": {"type": "string"}, "collectionFormat": "multi"},
+      {"name": "limit", "in": "query", "type": "integer"}
+    ],
+    "responses": {"200": {"description": "ok"}}
+  }}}
+}"#;
+    let bundle = compile(contract).unwrap();
+    let op = bundle.operation("listTasks").unwrap();
+    let query = &op.input.query.as_ref().unwrap()["properties"];
+    let style = |name: &str| {
+        (
+            query[name]["x-style"].clone(),
+            query[name]["x-explode"].clone(),
+        )
+    };
+    assert_eq!(style("ids"), (json!("form"), json!(false)));
+    assert_eq!(style("tags"), (json!("pipeDelimited"), json!(false)));
+    assert_eq!(style("words"), (json!("spaceDelimited"), json!(false)));
+    assert_eq!(style("kinds"), (json!("form"), json!(true)));
+    assert_eq!(query["limit"], json!({"type": "integer"}));
+}
+
 fn read(dir: &str, name: &str) -> Vec<u8> {
     let path = format!("{}/../../fixtures/{dir}/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read(path).unwrap()

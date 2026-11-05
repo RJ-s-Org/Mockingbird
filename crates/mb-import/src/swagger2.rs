@@ -92,10 +92,12 @@ fn params_schema(params: &[&Value], location: &str) -> Option<Value> {
         {
             continue;
         }
-        props.insert(
-            name.to_owned(),
-            crate::schema::with_param_description(inline_param_schema(p), p),
-        );
+        let schema = crate::schema::with_param_description(inline_param_schema(p), p);
+        let schema = match location {
+            "query" => crate::schema::with_collection_format(schema, p),
+            _ => schema,
+        };
+        props.insert(name.to_owned(), schema);
         if p.get("required").and_then(Value::as_bool) == Some(true) || location == "path" {
             required.push(Value::String(name.to_owned()));
         }
