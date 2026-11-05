@@ -336,6 +336,17 @@ mod tests {
         );
     }
 
+    /// A delimited array whose key is repeated anyway (`ids=1,2&ids=3`) is lenient:
+    /// each value is split on the delimiter, and the parts are one array in order.
+    #[test]
+    fn a_repeated_key_of_a_delimited_array_splits_each_value() {
+        let schema = json!({"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}, "x-style": "form", "x-explode": false},
+        }});
+        let out = decode(pairs("ids=1,2&ids=3"), Some(&schema), &Map::new());
+        assert_eq!(Value::Object(out), json!({"ids": [1, 2, 3]}));
+    }
+
     #[test]
     fn nests_without_a_schema() {
         let out = decode(

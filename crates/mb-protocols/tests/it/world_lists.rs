@@ -4677,3 +4677,182 @@ components:
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(order_ids(&body["data"]), [1, 2], "{body}");
 }
+
+/// One cart, read with no id, whose own record holds a list of lines, beside a bodiless
+/// `204` for no cart at all.
+const CART: &str = r##"
+openapi: 3.0.0
+info: {title: Shop, version: "1"}
+paths:
+  /cart:
+    get:
+      operationId: getCart
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Cart"}
+        "204": {description: No active cart.}
+components:
+  schemas:
+    Cart:
+      type: object
+      required: [id, total, items]
+      properties:
+        id: {type: integer}
+        total: {type: number}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              sku: {type: string}
+              qty: {type: integer}
+"##;
+
+/// A record whose list of lines is empty is still that record: an empty cart (its own
+/// `id` and `total` beside the lines) stays a `200` with the cart, never the `204`.
+#[tokio::test]
+async fn an_empty_singleton_cart_stays() {
+    let answer = json!({"id": 1, "total": 0, "items": []});
+    let api = api_of(CART, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/cart", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, answer);
+}
+
+/// A record with no identity of its own is still no list container when it declares a
+/// member that is no paging or count metadata (a real-number `total`).
+#[tokio::test]
+async fn an_empty_record_with_no_identity_stays() {
+    let contract = CART
+        .replace("required: [id, total, items]", "required: [total, items]")
+        .replace("        id: {type: integer}\n", "");
+    assert!(!contract.contains("id: {type: integer}"));
+    let answer = json!({"total": 0, "items": []});
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/cart", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, answer);
+}
+
+/// An envelope holding only its list and paging or count metadata (an integer count, a
+/// `has_more` flag, a cursor echoing the `cursor` parameter, links that are URLs, a
+/// fixed kind) is a list container: left empty, it answers the declared `204`.
+#[tokio::test]
+async fn an_empty_envelope_of_paging_metadata_answers_no_content() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [open, closed]}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: {type: string, enum: [list]}
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id]
+                      properties:
+                        id: {type: integer}
+                        status: {type: string, enum: [open, closed]}
+                  total_count: {type: integer}
+                  has_more: {type: boolean}
+                  cursor: {type: string}
+                  links:
+                    type: object
+                    properties:
+                      next: {type: string, format: uri}
+        "204": {description: No order matches.}
+"##;
+    let answer = json!({
+        "object": "list",
+        "data": [{"id": 1, "status": "open"}],
+        "total_count": 1,
+        "has_more": false,
+        "cursor": "c1",
+        "links": {"next": "https://example.com/orders?cursor=c2"},
+    });
+    let api = api_of(contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/orders?status=closed", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(body, Value::Null);
+}
+
+/// A page past the end that the store serves stays a `200` with an empty list, even
+/// where the list declares a bodiless `204`: only a generated answer becomes the `204`.
+/// Page 1 of the open tasks leaves `t2` for page 2; `t2` is done by then, so the served
+/// page 2 holds nothing, and no model call is made for it.
+#[tokio::test]
+async fn a_store_served_empty_page_stays_a_200() {
+    let contract = editable_pages().replace(
+        "                      has_more_page: {type: boolean}",
+        "                      has_more_page: {type: boolean}\n        \"204\": {description: No task matches.}",
+    );
+    assert!(contract.contains("No task matches."));
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, true).to_string()
+    ));
+    script.push(Ok(stored_task("t2", "B", "done").to_string()));
+    let api = api_of(&contract, true, script);
+    two_tasks(&api).await;
+    let (status, first) = api
+        .call("GET", "/tasks?per_page=1&page=1&status=open", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ids_in(&first, "data"), ["t1"], "{first}");
+    let (status, _) = api
+        .call("PATCH", "/tasks/t2", Some(json!({"status": "done"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, second) = api
+        .call("GET", "/tasks?per_page=1&page=2&status=open", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["data"], json!([]), "{second}");
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A nullable object parent (`nullable: true` in 3.0, `type: [object, "null"]` in 3.1)
+/// is an object one object down as any: `email` reaches `billing_address.email`, and an
+/// order whose `billing_address` is `null` holds no other email, so it stays.
+#[tokio::test]
+async fn a_nullable_object_parent_is_reached_one_object_down() {
+    let parent = "        billing_address:\n          type: object\n";
+    let nullable_30 = NESTED.replace(
+        parent,
+        "        billing_address:\n          type: object\n          nullable: true\n",
+    );
+    let nullable_31 = NESTED.replace("openapi: 3.0.0", "openapi: 3.1.0").replace(
+        parent,
+        "        billing_address:\n          type: [object, \"null\"]\n",
+    );
+    for contract in [nullable_30, nullable_31] {
+        assert!(contract.contains("nullable: true") || contract.contains("[object, \"null\"]"));
+        let mut unbilled = order(3, "cy@example.com");
+        unbilled["billing_address"] = Value::Null;
+        let answer = json!([
+            order(1, "ann@example.com"),
+            order(2, "bob@example.com"),
+            unbilled
+        ]);
+        let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+        let body = api.get("/orders?email=ann@example.com").await;
+        assert_eq!(order_ids(&body), [1, 3], "{body}");
+    }
+}
