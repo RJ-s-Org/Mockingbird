@@ -23,7 +23,8 @@
 //!   the API description). With an LLM, the body is written once per operation,
 //!   status and [`ErrorCause`] by the model, told the status and the cause, and kept
 //!   ([`crate::Engine::error_answer`]); the call's facts are then laid over it. Offline,
-//!   or when the model's answer fails, the faker's body stands.
+//!   or when the model's answer fails, the faker's body stands (a failed write is
+//!   asked for again after a minute).
 
 use mb_mcm::{Bundle, Operation};
 use serde_json::{Map, Value};
@@ -71,8 +72,34 @@ pub(crate) const MAX_ERROR_BODIES: usize = 512;
 /// What a written error body is kept under: (`<source digest>/<operation id>`,
 /// status, cause).
 pub(crate) type ErrorKey = (String, u16, ErrorCause);
-/// A written error body, set once (`None` when the model's answer failed).
-pub(crate) type ErrorCell = std::sync::Arc<tokio::sync::OnceCell<Option<Value>>>;
+/// How long a failed write is kept: past it, the next answer of that error asks the
+/// LLM again, so one transient provider error does not pin the faker's code.
+pub(crate) const FAILED_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A written error body (`None` when the model's answer failed), and when.
+#[derive(Clone, Debug)]
+pub(crate) struct Kept {
+    body: Option<Value>,
+    at: std::time::Instant,
+}
+
+impl Kept {
+    fn now(body: Option<Value>) -> Self {
+        Self {
+            body,
+            at: std::time::Instant::now(),
+        }
+    }
+
+    /// A failed write kept past [`FAILED_RETRY`]: to be written again.
+    fn stale(&self) -> bool {
+        self.body.is_none() && self.at.elapsed() >= FAILED_RETRY
+    }
+}
+
+/// A written error body, set once ([`Kept`]); a cell holding a stale failure is
+/// replaced by a new one.
+pub(crate) type ErrorCell = std::sync::Arc<tokio::sync::OnceCell<Kept>>;
 
 /// Why the mock answers an error itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -341,7 +368,7 @@ pub fn with_reasons(
             violations,
         },
         &mut String::new(),
-        None,
+        Scope::Outside,
         0,
         &mut changes,
     );
@@ -554,6 +581,19 @@ fn made_item(
     Some(Value::Object(item))
 }
 
+/// Where in a body [`walk_body`] is, as to the violations it names.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// Outside any array: the first violation names the field.
+    Outside,
+    /// In item `i` of an array of error objects ([`error_arrays`]): violation `i` (the
+    /// last one past them).
+    Item(usize),
+    /// In an item of another array (one nested in an error item, or one whose items
+    /// are no error objects): no violation is named.
+    Unrelated,
+}
+
 /// What [`walk_body`] lays over a body, and the definitions its schema reaches.
 struct Walk<'a> {
     defs: &'a Map<String, Value>,
@@ -615,8 +655,9 @@ fn holds_uri(schema: Option<&Value>, defs: &Map<String, Value>, pointer: bool) -
 }
 
 /// Collects [`with_reasons`]' changes to `value`, declared by `schema`, at `at` in
-/// the body and in item `item` of the nearest array of error objects (`None` outside
-/// one: the first violation names the field, and the message keeps every reason).
+/// the body, in `scope` ([`Scope`]: outside an array, the first violation names the
+/// field and the message keeps every reason; in an item of an array of error objects,
+/// that item's violation does; in another array's items, none does).
 /// Whether `value`, an object, or one nested in it outside an array, names the
 /// violated field.
 ///
@@ -630,7 +671,7 @@ fn walk_body(
     schema: Option<&Value>,
     walk: &Walk<'_>,
     at: &mut String,
-    item: Option<usize>,
+    scope: Scope,
     depth: usize,
     out: &mut Vec<Change>,
 ) -> bool {
@@ -645,18 +686,30 @@ fn walk_body(
     match value {
         Value::Array(items) => {
             let item_schema = items_schema(schema, defs);
+            // As `error_arrays` finds them: not one inside an error item.
+            let errors = !matches!(scope, Scope::Item(_))
+                && item_schema.is_some_and(|s| error_object(s, defs, 0));
             for (i, v) in items.iter().enumerate() {
                 let len = at.len();
                 at.push('/');
                 at.push_str(&i.to_string());
-                let _ = walk_body(v, item_schema, walk, at, Some(i), depth + 1, out);
+                let scope = if errors {
+                    Scope::Item(i)
+                } else {
+                    Scope::Unrelated
+                };
+                let _ = walk_body(v, item_schema, walk, at, scope, depth + 1, out);
                 at.truncate(len);
             }
             false
         }
         Value::Object(members) => {
-            let violation =
-                violations.get(item.unwrap_or(0).min(violations.len().saturating_sub(1)));
+            let last = violations.len().saturating_sub(1);
+            let violation = match scope {
+                Scope::Outside => violations.first(),
+                Scope::Item(i) => violations.get(i.min(last)),
+                Scope::Unrelated => None,
+            };
             let mut names_field = false;
             for (name, member) in members {
                 let folded = folded(name);
@@ -708,7 +761,7 @@ fn walk_body(
                         member_schema(schema, name, defs),
                         walk,
                         at,
-                        item,
+                        scope,
                         depth + 1,
                         out,
                     ) && member.is_object();
@@ -718,7 +771,7 @@ fn walk_body(
             // A field named in an item of an array of errors: its message is that
             // violation's. Outside one, the message keeps every reason.
             if names_field
-                && item.is_some()
+                && matches!(scope, Scope::Item(_))
                 && let Some(violation) = violation
             {
                 let message = MESSAGE_FIELDS.iter().find_map(|wanted| {
@@ -736,6 +789,14 @@ fn walk_body(
         }
         _ => false,
     }
+}
+
+/// What the engine writes an error body with (see [`Engine::error_writable`]).
+struct Writable<'a> {
+    provider: &'a dyn mb_llm::Provider,
+    variant: &'a mb_mcm::OutputVariant,
+    schema: &'a Value,
+    validator: std::sync::Arc<SchemaValidator>,
 }
 
 fn error_key(bundle: &Bundle, op: &Operation, status: u16, cause: ErrorCause) -> ErrorKey {
@@ -786,7 +847,8 @@ impl Engine {
     }
 
     /// Whether the error body for `status` and `cause` of `op` is already written (or
-    /// its writing failed and the faker's stands): answering it asks no LLM. A caller
+    /// its writing failed less than a minute ago and the faker's stands):
+    /// answering it asks no LLM. A caller
     /// admits the call's quota and rate limit before an answer that is not.
     #[must_use]
     pub fn error_kept(
@@ -802,13 +864,17 @@ impl Engine {
     pub(crate) fn error_kept_by(&self, key: &ErrorKey) -> bool {
         self.error_bodies
             .get(key)
-            .is_some_and(|cell| cell.initialized())
+            .is_some_and(|cell| cell.get().is_some_and(|kept| !kept.stale()))
     }
 
-    /// The cell `key`'s body is written into: the kept one, else a new one, which
-    /// drops another body when [`MAX_ERROR_BODIES`] are kept.
+    /// The cell `key`'s body is written into: the kept one, unless it holds a stale
+    /// failure ([`Kept::stale`]), which a new one replaces; else a new one, which drops
+    /// another body when [`MAX_ERROR_BODIES`] are kept.
     fn error_cell(&self, key: &ErrorKey) -> ErrorCell {
-        if let Some(cell) = self.error_bodies.get(key) {
+        if let Some(mut cell) = self.error_bodies.get_mut(key) {
+            if cell.get().is_some_and(Kept::stale) {
+                *cell = ErrorCell::default();
+            }
             return std::sync::Arc::clone(&cell);
         }
         if self.error_bodies.len() >= MAX_ERROR_BODIES {
@@ -826,7 +892,55 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn keep_error_body(&self, key: ErrorKey, body: Option<Value>) {
-        let _ = self.error_cell(&key).set(body);
+        let _ = self.error_cell(&key).set(Kept::now(body));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keep_error_body_at(
+        &self,
+        key: ErrorKey,
+        body: Option<Value>,
+        at: std::time::Instant,
+    ) {
+        let _ = self.error_cell(&key).set(Kept { body, at });
+    }
+
+    /// Whether this engine can write the error body for `status` of `op` itself (see
+    /// [`Self::error_answer`]): an LLM answers, the response is JSON with a code-like
+    /// member whose value its schema leaves open ([`writes_code`]), and the schema can
+    /// be asked for as it is (not an array root a JSON-mode provider is asked to wrap).
+    /// When it cannot, answering that error asks no LLM: a caller admits nothing for it.
+    #[must_use]
+    pub fn error_writable(&self, bundle: &Bundle, op: &Operation, status: u16) -> bool {
+        self.writable(bundle, op, status).is_some()
+    }
+
+    /// What [`Self::written_error`] writes with, when [`Self::error_writable`].
+    fn writable<'a>(
+        &'a self,
+        bundle: &Bundle,
+        op: &'a Operation,
+        status: u16,
+    ) -> Option<Writable<'a>> {
+        let provider = self.provider.as_deref()?;
+        let variant = op.output_for_status(status)?;
+        if crate::media::is_non_json(op, variant) {
+            return None;
+        }
+        let schema = variant.schema.as_ref()?;
+        if !writes_code(schema, &bundle.defs) {
+            return None;
+        }
+        let validator = self.validator(bundle, op, status, schema).ok()?;
+        if crate::guards::items_envelope(provider.capabilities(), validator.schema()) {
+            return None;
+        }
+        Some(Writable {
+            provider,
+            variant,
+            schema,
+            validator,
+        })
     }
 
     /// The validator of `op`'s response for `status`, when it has a JSON schema.
@@ -856,19 +970,12 @@ impl Engine {
         call: &OperationCall,
         usage: &mut Usage,
     ) -> Option<GeneratedResponse> {
-        let provider = self.provider.as_ref()?;
-        let variant = op.output_for_status(status)?;
-        if crate::media::is_non_json(op, variant) {
-            return None;
-        }
-        let schema = variant.schema.as_ref()?;
-        if !writes_code(schema, &bundle.defs) {
-            return None;
-        }
-        let validator = self.validator(bundle, op, status, schema).ok()?;
-        if crate::guards::items_envelope(provider.capabilities(), validator.schema()) {
-            return None;
-        }
+        let Writable {
+            provider,
+            variant,
+            schema,
+            validator,
+        } = self.writable(bundle, op, status)?;
         let key = error_key(bundle, op, status, cause);
         let cell = self.error_cell(&key);
         let body = cell
@@ -904,7 +1011,7 @@ impl Engine {
                 };
                 let answer = self
                     .generate_with_llm(
-                        provider.as_ref(),
+                        provider,
                         &validator,
                         messages,
                         &format,
@@ -913,14 +1020,15 @@ impl Engine {
                     )
                     .await;
                 match answer {
-                    Ok(answer) => Some(answer.value),
+                    Ok(answer) => Kept::now(Some(answer.value)),
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, status, %reason, "the error body was not written: the faker's is served");
-                        None
+                        Kept::now(None)
                     }
                 }
             })
             .await
+            .body
             .clone()?;
         validator.is_valid(&body).then(|| GeneratedResponse {
             status,
@@ -1019,6 +1127,47 @@ mod tests {
         assert_eq!(out["errors"][1]["source"]["pointer"], "/address/city");
         // Past the violations, the last one.
         assert_eq!(out["errors"][2]["field"], "address.city");
+    }
+
+    /// Only an array of error objects ([`error_arrays`]) has one violation per item: a
+    /// path-like member in the items of another array (one nested in an error item,
+    /// or one whose items name no violation themselves) is left as it is.
+    #[test]
+    fn only_an_array_of_errors_is_filled_per_item() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "errors": {"type": "array", "items": {"type": "object", "properties": {
+                    "field": {"type": "string"},
+                    "message": {"type": "string"},
+                    "details": {"type": "array", "items": {"type": "object", "properties": {
+                        "field": {"type": "string"}
+                    }}}
+                }}},
+                "links": {"type": "array", "items": {"type": "object", "properties": {
+                    "meta": {"type": "object", "properties": {
+                        "info": {"type": "object", "properties": {"path": {"type": "string"}}}
+                    }}
+                }}}
+            }
+        });
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body = json!({
+            "errors": [
+                {"field": "a", "message": "b", "details": [{"field": "d0"}, {"field": "d1"}]},
+                {"field": "a", "message": "b"}
+            ],
+            "links": [{"meta": {"info": {"path": "l0"}}}, {"meta": {"info": {"path": "l1"}}}]
+        });
+        let reasons = vec!["r1".to_string(), "r2".to_string()];
+        let violations = [violation("/name", "r1"), violation("/size", "r2")];
+        let out = with_reasons(&validator, body, &reasons, &violations);
+        assert_eq!(out["errors"][0]["field"], "name");
+        assert_eq!(out["errors"][1]["field"], "size");
+        assert_eq!(out["errors"][0]["details"][0]["field"], "d0", "{out}");
+        assert_eq!(out["errors"][0]["details"][1]["field"], "d1", "{out}");
+        assert_eq!(out["links"][0]["meta"]["info"]["path"], "l0", "{out}");
+        assert_eq!(out["links"][1]["meta"]["info"]["path"], "l1", "{out}");
     }
 
     /// A flat error shape (`{message, field}`) names one field, but its message keeps
@@ -1347,5 +1496,27 @@ mod tests {
         engine.keep_error_body(("d/new".into(), 400, ErrorCause::Invalid), None);
         assert_eq!(engine.error_bodies.len(), MAX_ERROR_BODIES);
         assert!(engine.error_kept_by(&("d/new".into(), 400, ErrorCause::Invalid)));
+    }
+
+    /// A failed write is kept for [`FAILED_RETRY`] only: a transient provider error
+    /// does not pin the faker's code for the engine's lifetime. A written body stays.
+    #[test]
+    fn a_failed_write_is_retried_after_a_while() {
+        let engine = Engine::new(None, crate::EngineConfig::default());
+        let long_ago = std::time::Instant::now()
+            .checked_sub(FAILED_RETRY + std::time::Duration::from_secs(1))
+            .unwrap();
+        let failed: ErrorKey = ("d/failed".into(), 400, ErrorCause::Invalid);
+        let fresh: ErrorKey = ("d/fresh".into(), 400, ErrorCause::Invalid);
+        let written: ErrorKey = ("d/written".into(), 400, ErrorCause::Invalid);
+        engine.keep_error_body_at(failed.clone(), None, long_ago);
+        engine.keep_error_body(fresh.clone(), None);
+        engine.keep_error_body_at(written.clone(), Some(json!({"code": "x"})), long_ago);
+        assert!(!engine.error_kept_by(&failed));
+        assert!(engine.error_kept_by(&fresh));
+        assert!(engine.error_kept_by(&written));
+        // The stale failure's cell is a new one, to be written again.
+        assert!(!engine.error_cell(&failed).initialized());
+        assert!(engine.error_cell(&written).initialized());
     }
 }

@@ -77,6 +77,19 @@ paths:
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
         "404": {description: Not found., content: {application/json: {schema: {$ref: "#/components/schemas/Typed"}}}}
+  /doohickeys:
+    post:
+      operationId: createDoohickey
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/NewItem"}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "400":
+          description: Invalid.
+          content:
+            application/json:
+              schema: {type: array, minItems: 1, items: {type: object, required: [code, message], properties: {code: {type: string}, message: {type: string}}}}
 components:
   schemas:
     NewItem:
@@ -507,4 +520,59 @@ async fn without_a_code_member_no_llm_and_no_auth() {
     assert_eq!(body_json(resp).await["errors"][0]["path"], "name");
     assert!(h.provider.as_ref().unwrap().requests().is_empty());
     assert_eq!(keys.0.load(Ordering::SeqCst), 0);
+}
+
+/// Offline, an invalid request is the faker's: no quota is admitted, no rate-limit
+/// token is taken and no credentials are checked, as the engine writes nothing.
+#[tokio::test]
+async fn offline_an_invalid_request_admits_nothing() {
+    let quota = Arc::new(Counted::default());
+    let guard = Arc::clone(&quota);
+    let limiter = Arc::new(RateLimiter::new(0.0, 2));
+    let limit = Arc::clone(&limiter);
+    let keys = Arc::new(Keys::default());
+    let keyed = keyed(Arc::clone(&keys));
+    let h = harness_with(None, move |rt| {
+        keyed(rt);
+        rt.ext.quota = guard;
+        rt.limits.rate = Some(limit);
+    });
+    for _ in 0..3 {
+        let resp = send(&h, post_keyed("/gizmos", r#"{"name": ""}"#, Some("good"))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(resp).await["error"]["type"].is_string());
+    }
+    assert_eq!(quota.0.load(Ordering::SeqCst), 0);
+    assert_eq!(keys.0.load(Ordering::SeqCst), 0);
+    assert!(limiter.try_acquire().is_ok());
+    assert!(limiter.try_acquire().is_ok());
+}
+
+/// An error body the engine cannot ask for (an array root, which a JSON-mode
+/// provider is asked to wrap) admits nothing either, and asks no LLM.
+#[tokio::test]
+async fn an_unwritable_error_body_admits_nothing() {
+    let quota = Arc::new(Counted::default());
+    let guard = Arc::clone(&quota);
+    let limiter = Arc::new(RateLimiter::new(0.0, 1));
+    let limit = Arc::clone(&limiter);
+    let inner = Arc::new(
+        ScriptedProvider::new(Vec::new()).with_capabilities(Capabilities {
+            json_schema: false,
+            json_mode: true,
+        }),
+    );
+    let provider: Arc<dyn Provider> = inner.clone();
+    let h = harness_of(Some(provider), Some(inner), move |rt| {
+        rt.ext.quota = guard;
+        rt.limits.rate = Some(limit);
+    });
+    for _ in 0..2 {
+        let resp = send(&h, post_json("/doohickeys", r#"{"name": ""}"#)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(resp).await[0]["code"].is_string());
+    }
+    assert_eq!(quota.0.load(Ordering::SeqCst), 0);
+    assert!(limiter.try_acquire().is_ok());
+    assert!(h.provider.as_ref().unwrap().requests().is_empty());
 }
