@@ -873,6 +873,114 @@ async fn unchanged_config_world_adds_no_revision() {
     );
 }
 
+/// Reconciles racing over the same world file (two replicas, or a watch
+/// reload beside a startup reconcile) store it once: each write names the
+/// revision it read as the newest, and one that lost the race re-reads.
+#[tokio::test]
+async fn racing_reconciles_store_the_world_file_once() {
+    for _ in 0..5 {
+        let ws = Workspace::new();
+        std::fs::write(ws.dir.path().join("orders.world.yaml"), ORDERS_WORLD).unwrap();
+        let store = store().await;
+        reconcile(store.as_ref(), no_state().as_ref(), &ws.load(BASIC))
+            .await
+            .unwrap();
+        let cfg = Arc::new(ws.load(&with_world()));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (store, cfg) = (store.clone(), cfg.clone());
+            tasks.push(tokio::spawn(async move {
+                reconcile(store.as_ref(), no_state().as_ref(), &cfg).await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let mock = store
+            .get_mock(DEFAULT_WORKSPACE, "orders")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.list_world_revisions(mock.id, 1).await.unwrap().len(),
+            1,
+            "the world file was stored more than once"
+        );
+    }
+}
+
+/// A world file far larger than any description could be is refused from
+/// its size, before it is read; the 256 KiB limit itself applies to the
+/// description (its JSON form), so a YAML file over 256 KiB that is mostly
+/// comments still applies.
+#[tokio::test]
+async fn an_oversized_world_file_is_refused_before_it_is_read() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    let comments = "# a comment line of the description\n".repeat(300 * 1024 / 36);
+    std::fs::write(&world, format!("{comments}{ORDERS_WORLD}")).unwrap();
+    let cfg = ws.load(&with_world());
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+
+    let huge = "# padding\n".repeat(2 * 1024 * 1024 / 10);
+    std::fs::write(&world, format!("{huge}{ORDERS_WORLD}")).unwrap();
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("orders.world.yaml"), "{msg}");
+    assert!(msg.contains("too_large"), "{msg}");
+}
+
+/// `--watch` watches each mock's `world:` file: editing only that file
+/// reloads it and adds a revision.
+#[tokio::test]
+async fn watch_reloads_an_edited_world_file() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    std::fs::write(&world, ORDERS_WORLD).unwrap();
+    ws.write(&with_world());
+    let store = store().await;
+    let state = no_state();
+    reconcile(store.as_ref(), state.as_ref(), &ws.load(&with_world()))
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let _watch = mockingbird::watch::spawn_with(
+        ws.config_path(),
+        store.clone(),
+        state,
+        Arc::new(|_: &mut FileConfig| Ok(())),
+    )
+    .unwrap();
+    // Let the watch arm and make its first read.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::fs::write(
+        &world,
+        "version: 1\noperations:\n  getOrder:\n    not_found: 404\n  deleteOrder:\n    kind: delete\n",
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = store.list_world_revisions(mock.id, 1).await.unwrap().len();
+        if n == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the world file edit was not reloaded: {n} revisions"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
     let mock = store
         .create_mock(

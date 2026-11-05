@@ -318,4 +318,29 @@ async fn snapshot_roundtrips_world() {
         .await
         .unwrap();
     assert_eq!(restored["document"], world, "{restored}");
+
+    // Entries the imported contract refuses are reported, not dropped
+    // silently.
+    let mut stale = world.clone();
+    stale["operations"]["noSuchOperation"] = json!({"not_found": 404});
+    std::fs::write(
+        full.join("worlds/orders.json"),
+        serde_json::to_vec(&stale).unwrap(),
+    )
+    .unwrap();
+    let again = start().await;
+    let out = snapshot::run(
+        &again.admin,
+        None,
+        "default",
+        SnapshotCommand::Import(SnapshotArgs { dir: full.clone() }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["restored_worlds"], 1, "{out}");
+    let refused = out["refused_world_entries"]["orders"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(refused.len(), 1, "{out}");
+    assert_eq!(refused[0]["path"], "/operations/noSuchOperation", "{out}");
 }

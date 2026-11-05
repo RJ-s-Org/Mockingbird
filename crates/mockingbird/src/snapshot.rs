@@ -978,6 +978,7 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
     let mut created = Vec::new();
     let mut restored = 0;
     let mut worlds = 0;
+    let mut refused_worlds = serde_json::Map::new();
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir.join("mocks")) {
         Ok(entries) => entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1053,7 +1054,7 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
                 .with_context(|| format!("reading {}", world_file.display()))?;
             let world: Value = serde_json::from_slice(&bytes)
                 .with_context(|| format!("{} is not JSON", world_file.display()))?;
-            client::api(
+            let answer = client::api(
                 api.admin_url,
                 api.token,
                 Some(api.workspace),
@@ -1066,6 +1067,24 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
             .map_err(api_error)
             .with_context(|| format!("restoring the world description of {name}"))?;
             worlds += 1;
+            // Entries the imported contract refuses are not stored: say so,
+            // or a partial restore would look complete.
+            if let Some(refused) = answer
+                .as_ref()
+                .and_then(|a| a["refused"].as_array())
+                .filter(|r| !r.is_empty())
+            {
+                for r in refused {
+                    tracing::warn!(
+                        mock = %name,
+                        path = %r["path"].as_str().unwrap_or_default(),
+                        code = %r["code"].as_str().unwrap_or_default(),
+                        "world description entry refused on import: {}",
+                        r["message"].as_str().unwrap_or_default()
+                    );
+                }
+                refused_worlds.insert(name.clone(), Value::Array(refused.clone()));
+            }
         }
         if let Some(default_scenario) = default_scenario {
             api.json(
@@ -1097,6 +1116,9 @@ async fn import(api: &Api<'_>, dir: &Path) -> anyhow::Result<Value> {
     }
     if worlds > 0 {
         out["restored_worlds"] = json!(worlds);
+    }
+    if !refused_worlds.is_empty() {
+        out["refused_world_entries"] = Value::Object(refused_worlds);
     }
     Ok(out)
 }

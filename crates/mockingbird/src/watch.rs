@@ -268,7 +268,7 @@ pub fn spawn_with_status(
     };
     watcher.add(&config_path)?;
     if let Ok(cfg) = file_config::load(&config_path) {
-        for path in contract_paths(&cfg) {
+        for path in watched_paths(&cfg) {
             watcher.add(&path)?;
         }
     }
@@ -306,7 +306,7 @@ pub fn spawn_with_status(
 }
 
 /// What a reload needs: the config, where it goes, and the watcher to add
-/// new contracts to.
+/// new contract and world files to.
 struct Reloader {
     config_path: PathBuf,
     store: Arc<dyn ControlStore>,
@@ -334,9 +334,9 @@ impl Reloader {
             Ok((cfg, report)) => {
                 self.status.succeeded();
                 if let Ok(mut w) = self.watcher.lock() {
-                    for contract in contract_paths(&cfg) {
-                        if let Err(error) = w.add(&contract) {
-                            tracing::warn!(error = %format!("{error:#}"), "cannot watch contract");
+                    for path in watched_paths(&cfg) {
+                        if let Err(error) = w.add(&path) {
+                            tracing::warn!(file = %path.display(), error = %format!("{error:#}"), "cannot watch a mock's file");
                         }
                     }
                 }
@@ -387,8 +387,13 @@ async fn load_and_reconcile(
     Ok((cfg, report))
 }
 
-fn contract_paths(cfg: &FileConfig) -> Vec<PathBuf> {
-    cfg.mocks.values().map(|m| m.contract.clone()).collect()
+/// The files besides the config whose edits reload it: each mock's
+/// `contract` and `world`.
+fn watched_paths(cfg: &FileConfig) -> Vec<PathBuf> {
+    cfg.mocks
+        .values()
+        .flat_map(|m| std::iter::once(m.contract.clone()).chain(m.world.clone()))
+        .collect()
 }
 
 #[cfg(test)]
