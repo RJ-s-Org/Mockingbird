@@ -286,13 +286,17 @@ impl Provider for Scripted {
 }
 
 fn router(answers: Vec<Value>) -> axum::Router {
+    router_for(CONTRACT, answers)
+}
+
+fn router_for(contract: &str, answers: Vec<Value>) -> axum::Router {
     let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let provider = Arc::new(Scripted {
         answers: Mutex::new(answers.into()),
     });
     let rt = MockRuntime::new(
         "m",
-        Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(provider as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -502,4 +506,183 @@ async fn an_integer_header_on_a_string_identity_stores_a_string_id() {
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(read["name"], "Lamp", "{read}");
     assert_eq!(read["id"], json!(id), "a string id: {read}");
+}
+
+/// Id headers that constrain their value beyond a type: a uuid `Widget-Id` beside a
+/// plain string identity; an `X-Gadget-Id` uuid on a 202 whose record declares no id;
+/// a patterned `X-Part-Id`; and a uuid `Asset-Id` beside a body
+/// that answers its own, non-uuid id.
+const CONSTRAINED: &str = r##"
+openapi: 3.0.0
+info: {title: Shop, version: "1"}
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {label: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Widget-Id: {schema: {type: string, format: uuid}}
+  /widgets/{widgetId}:
+    get:
+      operationId: getWidget
+      parameters: [{name: widgetId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /gadgets:
+    post:
+      operationId: createGadget
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {size: {type: string}}}}}
+      responses:
+        "202":
+          description: queued
+          headers:
+            X-Gadget-Id: {schema: {type: string, format: uuid}}
+  /gadgets/{gadgetId}:
+    get:
+      operationId: getGadget
+      parameters: [{name: gadgetId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
+  /parts:
+    post:
+      operationId: createPart
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {sku: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            X-Part-Id: {schema: {type: string, pattern: "^prt_[a-z0-9]{6}$"}}
+  /parts/{partId}:
+    get:
+      operationId: getPart
+      parameters: [{name: partId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Part"}}}}
+  /assets:
+    post:
+      operationId: createAsset
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Asset-Id: {schema: {type: string, format: uuid}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}
+  /assets/{assetId}:
+    get:
+      operationId: getAsset
+      parameters: [{name: assetId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Asset"}}}}
+components:
+  schemas:
+    Widget:
+      type: object
+      properties:
+        id: {type: string}
+        label: {type: string}
+    Gadget:
+      type: object
+      properties:
+        size: {type: string}
+    Part:
+      type: object
+      properties:
+        id: {type: string}
+        sku: {type: string}
+    Asset:
+      type: object
+      properties:
+        id: {type: string}
+        title: {type: string}
+"##;
+
+/// Whether `value` holds as the header schema `schema` (formats asserted).
+fn holds(schema: Value, value: &str) -> bool {
+    mb_engine::SchemaValidator::for_output(&schema)
+        .unwrap()
+        .is_valid_output(&json!(value))
+}
+
+/// A uuid id header beside a plain string identity: the minted id is a uuid, and a
+/// read by it finds the record.
+#[tokio::test]
+async fn a_uuid_id_header_mints_a_uuid_beside_a_plain_identity() {
+    let r = router_for(CONSTRAINED, vec![]);
+    for label in ["one", "two", "three"] {
+        let (status, headers, _) =
+            send(&r, "POST", "/widgets", Some(json!({"label": label}))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = header(&headers, "widget-id");
+        assert!(
+            holds(json!({"type": "string", "format": "uuid"}), &id),
+            "{id:?}"
+        );
+        let (status, headers, read) = send(&r, "GET", &format!("/widgets/{id}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(source(&headers), "state", "{read}");
+        assert_eq!(read["label"], label, "{read}");
+    }
+}
+
+/// A uuid id header on an accepted create whose record declares no identity member:
+/// the id is drawn as the header declares it, a uuid.
+#[tokio::test]
+async fn a_uuid_id_header_without_a_declared_identity_mints_a_uuid() {
+    let r = router_for(CONSTRAINED, vec![]);
+    for size in ["s", "xl"] {
+        let (status, headers, _) = send(&r, "POST", "/gadgets", Some(json!({"size": size}))).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = header(&headers, "x-gadget-id");
+        assert!(
+            holds(json!({"type": "string", "format": "uuid"}), &id),
+            "{id:?}"
+        );
+    }
+}
+
+/// A patterned id header: the minted id matches the pattern.
+#[tokio::test]
+async fn a_patterned_id_header_mints_a_matching_id() {
+    let r = router_for(CONSTRAINED, vec![]);
+    let (status, headers, _) = send(&r, "POST", "/parts", Some(json!({"sku": "A1"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = header(&headers, "x-part-id");
+    assert!(
+        holds(
+            json!({"type": "string", "pattern": "^prt_[a-z0-9]{6}$"}),
+            &id
+        ),
+        "{id:?}"
+    );
+    let (_, headers, read) = send(&r, "GET", &format!("/parts/{id}"), None).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["sku"], "A1", "{read}");
+}
+
+/// A body id that is no uuid is not copied into a uuid id header: the header keeps a
+/// value of its own schema.
+#[tokio::test]
+async fn a_body_id_breaking_the_headers_format_is_not_served_there() {
+    let r = router_for(CONSTRAINED, vec![json!({"id": "a_7", "title": "Logo"})]);
+    let (status, headers, body) = send(&r, "POST", "/assets", Some(json!({"title": "Logo"}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["id"], "a_7", "{body}");
+    let served = header(&headers, "asset-id");
+    assert_ne!(served, "a_7");
+    assert!(
+        holds(json!({"type": "string", "format": "uuid"}), &served),
+        "{served:?}"
+    );
 }

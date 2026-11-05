@@ -255,13 +255,17 @@ impl Provider for Scripted {
 }
 
 fn router(answers: Vec<Value>) -> axum::Router {
+    router_for(CONTRACT, answers)
+}
+
+fn router_for(contract: &str, answers: Vec<Value>) -> axum::Router {
     let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
     let provider = Arc::new(Scripted {
         answers: Mutex::new(answers.into()),
     });
     let rt = MockRuntime::new(
         "m",
-        Arc::new(compile(CONTRACT.as_bytes()).unwrap()),
+        Arc::new(compile(contract.as_bytes()).unwrap()),
         Arc::new(Engine::new(
             Some(provider as Arc<dyn Provider>),
             EngineConfig::default(),
@@ -508,5 +512,167 @@ async fn an_either_or_without_the_identity_is_no_alternate_key() {
     for path in ["/memberships/alice", "/memberships/acme"] {
         let (_, headers, read) = send(&r, "GET", path, None).await;
         assert_ne!(source(&headers), "state", "{path}: {read}");
+    }
+}
+
+/// Other spellings of an either-or: recipes keyed by `{slug}`, "the slug or id", with
+/// a `recipeId`; playlists the same but with only a foreign `ownerId`; spaces read by
+/// a `{key}` that is "the space's slug or id"; fonts by `{idOrName}`.
+const SPELLINGS: &str = r##"
+openapi: 3.0.0
+info: {title: Kitchen, version: "1"}
+paths:
+  /recipes:
+    post:
+      operationId: createRecipe
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {slug: {type: string}, title: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Recipe"}}}}
+  /recipes/{slug}:
+    get:
+      operationId: getRecipe
+      parameters:
+        - {name: slug, in: path, required: true, description: "The recipe's slug or id.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Recipe"}}}}
+  /playlists:
+    post:
+      operationId: createPlaylist
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {slug: {type: string}, title: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Playlist"}}}}
+  /playlists/{slug}:
+    get:
+      operationId: getPlaylist
+      parameters:
+        - {name: slug, in: path, required: true, description: "The playlist's slug or id.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Playlist"}}}}
+  /spaces:
+    post:
+      operationId: createSpace
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {slug: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Space"}}}}
+  /spaces/{key}:
+    get:
+      operationId: getSpace
+      parameters:
+        - {name: key, in: path, required: true, description: "The space's slug or id.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Space"}}}}
+  /fonts:
+    post:
+      operationId: createFont
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Font"}}}}
+  /fonts/{idOrName}:
+    get:
+      operationId: getFont
+      parameters:
+        - {name: idOrName, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Font"}}}}
+components:
+  schemas:
+    Recipe:
+      type: object
+      properties:
+        slug: {type: string}
+        recipeId: {type: string}
+        title: {type: string}
+    Playlist:
+      type: object
+      properties:
+        slug: {type: string}
+        ownerId: {type: string}
+        title: {type: string}
+    Space:
+      type: object
+      properties:
+        id: {type: string}
+        slug: {type: string}
+    Font:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+"##;
+
+/// A record keyed by its slug reads by the id that names its own kind (`recipeId`).
+#[tokio::test]
+async fn a_slug_keyed_record_reads_by_its_own_id() {
+    let r = router_for(
+        SPELLINGS,
+        vec![json!({"slug": "pho", "recipeId": "r_9", "title": "Pho"})],
+    );
+    send(
+        &r,
+        "POST",
+        "/recipes",
+        Some(json!({"slug": "pho", "title": "Pho"})),
+    )
+    .await;
+    for path in ["/recipes/pho", "/recipes/r_9"] {
+        let (status, headers, read) = send(&r, "GET", path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {read}");
+        assert_eq!(source(&headers), "state", "{path}: {read}");
+        assert_eq!(read["slug"], "pho", "{path}: {read}");
+    }
+}
+
+/// A slug-keyed record whose only `*Id` member names another kind (its owner): a bare
+/// `id` in "slug or id" is not that foreign key, so a read by the owner's id misses.
+#[tokio::test]
+async fn a_foreign_key_is_no_other_id() {
+    let r = router_for(
+        SPELLINGS,
+        vec![json!({"slug": "mix", "ownerId": "u_4", "title": "Mix"})],
+    );
+    send(
+        &r,
+        "POST",
+        "/playlists",
+        Some(json!({"slug": "mix", "title": "Mix"})),
+    )
+    .await;
+    let (_, headers, read) = send(&r, "GET", "/playlists/mix", None).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    let (_, headers, read) = send(&r, "GET", "/playlists/u_4", None).await;
+    assert_ne!(source(&headers), "state", "{read}");
+}
+
+/// A `{key}` its description calls the slug or id, and an `{idOrName}`: each reads the
+/// record by either member.
+#[tokio::test]
+async fn other_spellings_offer_the_alternate_key() {
+    let r = router_for(
+        SPELLINGS,
+        vec![
+            json!({"id": "sp_1", "slug": "ops"}),
+            json!({"id": 42, "name": "Inter"}),
+        ],
+    );
+    send(&r, "POST", "/spaces", Some(json!({"slug": "ops"}))).await;
+    send(&r, "POST", "/fonts", Some(json!({"name": "Inter"}))).await;
+    for (path, member, want) in [
+        ("/spaces/sp_1", "slug", json!("ops")),
+        ("/spaces/ops", "id", json!("sp_1")),
+        ("/fonts/42", "name", json!("Inter")),
+        ("/fonts/Inter", "id", json!(42)),
+    ] {
+        let (status, headers, read) = send(&r, "GET", path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {read}");
+        assert_eq!(source(&headers), "state", "{path}: {read}");
+        assert_eq!(read[member], want, "{path}: {read}");
     }
 }

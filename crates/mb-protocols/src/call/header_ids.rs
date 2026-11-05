@@ -9,7 +9,7 @@
 
 use mb_engine::consistency::property_schema;
 use mb_engine::headers::{IdentityHeaderKind, identity_header};
-use mb_engine::{Faker, GeneratedResponse, OperationCall};
+use mb_engine::{Faker, GeneratedResponse, OperationCall, SchemaValidator};
 use mb_mcm::{Binding, Operation};
 use mb_state::SessionKey;
 use serde_json::{Map, Value, json};
@@ -66,15 +66,21 @@ pub(super) async fn mint(
         return None;
     }
     let declared = record_id_schema(rt, t, field);
-    let header_integer = header.schema.get("type").and_then(Value::as_str) == Some("integer");
     let string_identity = declared
         .as_ref()
         .and_then(|d| d.get("type"))
         .and_then(Value::as_str)
         == Some("string");
+    let checks = IdChecks::new(rt, declared.as_ref(), &header.schema, !location)?;
     let carried = request_values(op, call);
     for _ in 0..ATTEMPTS {
-        let Some(id) = draw(rt, declared.as_ref(), &header.schema, header_integer) else {
+        let Some(id) = draw(
+            rt,
+            declared.as_ref(),
+            &header.schema,
+            string_identity,
+            &checks,
+        ) else {
             continue;
         };
         let Some(text) = id_string(&id) else {
@@ -89,12 +95,6 @@ pub(super) async fn mint(
         let value = match header.kind {
             IdentityHeaderKind::Id => text.clone(),
             IdentityHeaderKind::Location => item_url(path, call, page_url, &text),
-        };
-        // A string identity holds the id as a string, though the header serves it as
-        // an integer, so a read by it finds the record.
-        let id = match (&id, string_identity) {
-            (Value::Number(_), true) => Value::String(text.clone()),
-            _ => id,
         };
         tracing::debug!(
             mock = %rt.name,
@@ -111,7 +111,8 @@ pub(super) async fn mint(
 
 /// Serves the id `text` a create's answer holds in the header that names its record,
 /// when the contract declares one: the id itself, or the item's URL in a `Location` of
-/// the create's own collection. An integer header takes only an integer id.
+/// the create's own collection. An id header takes only an id its schema holds: an
+/// integer one an integer, a `format` or `pattern` one an id of that form.
 fn serve_answered(
     rt: &MockRuntime,
     (op, t, call): (&Operation, &str, &OperationCall),
@@ -127,13 +128,15 @@ fn serve_answered(
     };
     let value = match header.kind {
         IdentityHeaderKind::Id => {
-            let integer = header.schema.get("type").and_then(Value::as_str) == Some("integer");
-            if integer && text.parse::<i64>().is_err() {
+            let holds = IdChecks::new(rt, None, &header.schema, true)
+                .is_some_and(|checks| checks.header_holds(text));
+            if !holds {
                 return;
             }
             text.to_string()
         }
         IdentityHeaderKind::Location => {
+            // The header holds a URL, which no id constrains beyond its type.
             if !of_own_collection(rt, t, path) || !url_safe(text) {
                 return;
             }
@@ -218,27 +221,90 @@ fn record_id_schema(rt: &MockRuntime, t: &str, field: &str) -> Option<Value> {
         .find_map(|schema| property_schema(bundle, schema, field))
 }
 
+/// The checks a minted id passes: as the header serves it, and as the record holds it.
+struct IdChecks {
+    /// The header's schema, formats asserted; `None` for a `Location`, whose value is
+    /// the item's URL and not the id.
+    header: Option<SchemaValidator>,
+    /// Whether the header is an integer, so its value is read as one.
+    header_integer: bool,
+    /// The record's identity schema, when declared, formats asserted.
+    identity: Option<SchemaValidator>,
+}
+
+impl IdChecks {
+    /// The checks for an id held as `declared` and, when the header `serves_id` itself
+    /// (not a `Location`), served in a header of `header` schema; `None` when a schema
+    /// does not compile.
+    fn new(
+        rt: &MockRuntime,
+        declared: Option<&Value>,
+        header: &Value,
+        serves_id: bool,
+    ) -> Option<Self> {
+        let compile = |schema: &Value| SchemaValidator::for_output(&rt.bundle().with_defs(schema));
+        let header_integer = header.get("type").and_then(Value::as_str) == Some("integer");
+        Some(Self {
+            header: match serves_id {
+                true => Some(compile(header).ok()?),
+                false => None,
+            },
+            header_integer,
+            identity: declared.map(compile).transpose().ok()?,
+        })
+    }
+
+    /// Whether the header holds `text` as its value.
+    fn header_holds(&self, text: &str) -> bool {
+        let Some(header) = &self.header else {
+            return true;
+        };
+        let value = match self.header_integer {
+            true => match text.parse::<i64>() {
+                Ok(n) => Value::from(n),
+                Err(_) => return false,
+            },
+            false => Value::String(text.to_string()),
+        };
+        header.is_valid_output(&value)
+    }
+
+    /// Whether the record holds `id` as its identity.
+    fn identity_holds(&self, id: &Value) -> bool {
+        self.identity
+            .as_ref()
+            .is_none_or(|identity| identity.is_valid_output(id))
+    }
+}
+
 /// An id drawn as the record declares its identity, else as the header declares
-/// itself; an integer header takes only an integer.
+/// itself, else a plain string: the first both the header and the record hold. A
+/// string identity holds a number drawn for an integer header as its digits, so a read
+/// by the id the header serves finds the record.
 fn draw(
     rt: &MockRuntime,
     declared: Option<&Value>,
     header: &Value,
-    header_integer: bool,
+    string_identity: bool,
+    checks: &IdChecks,
 ) -> Option<Value> {
-    let fits = |v: &Value| match header_integer {
-        true => v.is_i64() || v.is_u64(),
-        false => v.is_string() || v.is_number(),
-    };
     let string = json!({"type": "string"});
-    let schemas = [declared, header_integer.then_some(header), Some(&string)];
+    let schemas = [declared, Some(header), Some(&string)];
     let mut rng = rand::rng();
     let faker = Faker::default();
     schemas
         .into_iter()
         .flatten()
         .map(|schema| faker.fake(&rt.bundle().with_defs(schema), &mut rng))
-        .find(|v| fits(v) && id_string(v).is_some_and(|s| !s.is_empty()))
+        .filter_map(|v| {
+            let text = id_string(&v).filter(|s| !s.is_empty())?;
+            let held = match (&v, string_identity) {
+                (Value::Number(_), true) => Value::String(text.clone()),
+                _ => v,
+            };
+            (checks.header_holds(&text) && checks.identity_holds(&held)).then_some(held)
+        })
+        .next()
 }
 
 /// Whether `id` can stand in a URL path segment as it is.

@@ -6491,12 +6491,17 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
         members.push(identity.to_string());
     }
     let is_id = |member: &str| mb_mcm::ends_with_words(member, "id");
-    // The one member other than the identity that is an id by its name, for a bare
-    // `id` alternative of a key that is none.
+    let declared_keys = index.identity_fields(t);
+    // The one member other than the identity that is an id of the record itself, for
+    // a bare `id` alternative of a key that is none: an id naming the record's own kind
+    // (`recipeId` on recipes), or one the type's operations identify it by. An id of
+    // another kind (`ownerId`) is a foreign key, never the record's.
     let other_id = || {
-        let mut ids = members
-            .iter()
-            .filter(|m| m.as_str() != identity && is_id(m));
+        let mut ids = members.iter().filter(|m| {
+            m.as_str() != identity
+                && is_id(m)
+                && (names_own_kind(m, t) || declared_keys.iter().any(|k| k == *m))
+        });
         match (ids.next(), ids.next()) {
             (Some(only), None) if !is_id(mb_mcm::leaf_member(identity)) => Some(only.clone()),
             _ => None,
@@ -6523,7 +6528,7 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
     // identify it by (a delete whose answer declares no key reads as its read does).
     let keys: Vec<&str> = std::iter::once(identity)
         .chain(op.identity.as_ref().and_then(|i| i.path_field.as_deref()))
-        .chain(index.identity_fields(t).iter().map(String::as_str))
+        .chain(declared_keys.iter().map(String::as_str))
         .collect();
     let mut offered: Vec<String> = Vec::new();
     for pair in either_or(&[param.as_str()]).into_iter().chain(either_or(
@@ -6550,6 +6555,22 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
     }
     offered.retain(|m| m != identity);
     offered
+}
+
+/// Whether the id `member` names type `t`'s own kind: its words before `id` are the
+/// type's name or its last words, plural aside (`recipeId` for `recipes`, `lineId`
+/// for `ticket_lines`).
+fn names_own_kind(member: &str, t: &str) -> bool {
+    let words = mb_mcm::words(mb_mcm::leaf_member(member));
+    let Some((_, before)) = words.split_last() else {
+        return false;
+    };
+    if before.is_empty() {
+        return false;
+    }
+    let named = mb_mcm::stem(&mb_mcm::joined_name(&before.concat()));
+    let kind = mb_mcm::words(t);
+    (0..kind.len()).any(|from| mb_mcm::stem(&mb_mcm::joined_name(&kind[from..].concat())) == named)
 }
 
 /// Words before an `or` that make the phrase no offer of two ways to name a record.
