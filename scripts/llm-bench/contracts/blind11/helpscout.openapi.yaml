@@ -1,0 +1,428 @@
+openapi: 3.0.3
+info:
+  title: Help Scout Mailbox API 2.0 (inboxes, conversations, threads and tags)
+  version: "2.0"
+  description: |
+    A subset of the Help Scout Mailbox API 2.0, written from its public reference
+    (developer.helpscout.com/mailbox-api). Requests send an OAuth2 bearer token. Bodies
+    are JSON; answers are HAL (`application/hal+json`): a resource carries `_links`
+    (`self` and related resources), and a list answers its items under
+    `_embedded.<name>` with a `page` object `{size, totalElements, totalPages, number}`
+    (`number` from 1) and `_links` `first`, `last`, `next` and `page`.
+
+    Inboxes (mailboxes) are set up in the Help Scout app and are only read here, at
+    `/v2/mailboxes`. A conversation lives in one inbox (`mailboxId`) and holds threads:
+    the customer's messages (`customer`), replies (`reply`) and private notes (`note`).
+    `POST /v2/conversations` needs `subject`, `customer` (by `id` or `email`; a customer
+    is created for an unknown email), `mailboxId`, `type` (`email`, `phone` or `chat`),
+    `status` and at least one thread. It answers 201 Created with a `Resource-ID`
+    header that holds the new conversation's id and a `Location` header with its URL;
+    the body holds `threadIds`, the ids of the created threads in the order they were
+    sent. Adding a note (`POST /v2/conversations/{id}/notes`) or a reply answers 201
+    with the new thread's id in `Resource-ID`. A conversation's threads are listed
+    newest first under `_embedded.threads`.
+
+    A conversation's `status` is `active`, `pending`, `closed` or `spam`. Changes go
+    through `PATCH /v2/conversations/{id}` with one JSON Patch operation
+    `{op, path, value}`: `replace` on `/subject`, `/status`, `/primaryCustomer.id` or
+    `/assignTo`, `move` on `/mailboxId`, `remove` on `/assignTo`. A patch answers
+    204 No Content and changes nothing else. Closing a conversation sets its
+    `closedAt`. `PUT /v2/conversations/{id}/tags` with `{tags: [...]}` replaces the
+    conversation's tags with the ones sent (204); tag names are lower case.
+    `DELETE /v2/conversations/{id}` deletes it (204); it then answers 404.
+
+    `GET /v2/conversations` lists `active` conversations by default, newest first
+    (`sortField=createdAt`, `sortOrder=desc`); `status` picks another status
+    (`active`, `pending`, `closed`, `spam`, `open`, or `all` for every one). The list
+    filters by `mailbox` (inbox ids), `tag` (tag names, comma-separated; a
+    conversation with any of them matches), `assigned_to`, `number`, `modifiedSince`
+    and `query`, a search expression such as `(subject:"refund")` or
+    `(tag:"vip" AND status:active)`. Pages hold 25 conversations; `page` picks one.
+
+    Errors answer `application/vnd.error+json`: `{logRef, message}` with, for a
+    validation error (400), `_embedded.errors`, each `{path, message, rejectedValue?, source}`
+    naming a field that was refused. A missing resource answers 404.
+servers:
+  - url: https://api.helpscout.net
+security:
+  - oauth2: []
+tags:
+  - name: Mailboxes
+  - name: Conversations
+  - name: Threads
+  - name: Tags
+paths:
+  /v2/mailboxes:
+    get:
+      tags: [Mailboxes]
+      operationId: listMailboxes
+      summary: List inboxes
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: The inboxes the token can read.
+          content:
+            application/hal+json:
+              schema:
+                type: object
+                properties:
+                  _embedded:
+                    type: object
+                    properties:
+                      mailboxes: {type: array, items: {$ref: "#/components/schemas/Mailbox"}}
+                  page: {$ref: "#/components/schemas/Page"}
+                  _links: {$ref: "#/components/schemas/Links"}
+  /v2/mailboxes/{mailboxId}:
+    parameters:
+      - {name: mailboxId, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Mailboxes]
+      operationId: getMailbox
+      summary: Get an inbox
+      responses:
+        "200":
+          description: The inbox.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Mailbox"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      summary: List conversations
+      description: "Active conversations, newest first, unless `status` or the sort say otherwise."
+      parameters:
+        - {name: mailbox, in: query, description: "Inbox ids, comma-separated.", schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [active, all, closed, open, pending, spam], default: active}}
+        - {name: tag, in: query, description: "Tag names, comma-separated; any of them matches.", schema: {type: string}}
+        - {name: assigned_to, in: query, schema: {type: integer}}
+        - {name: number, in: query, schema: {type: integer}}
+        - {name: modifiedSince, in: query, schema: {type: string, format: date-time}}
+        - {name: query, in: query, description: "A search expression, such as `(subject:\"refund\")`.", schema: {type: string}}
+        - {name: sortField, in: query, schema: {type: string, enum: [createdAt, customerEmail, customerName, mailboxid, modifiedAt, number, score, status, subject, waitingSince], default: createdAt}}
+        - {name: sortOrder, in: query, schema: {type: string, enum: [asc, desc], default: desc}}
+        - {name: embed, in: query, schema: {type: string, enum: [threads]}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: A page of conversations.
+          content:
+            application/hal+json:
+              schema:
+                type: object
+                properties:
+                  _embedded:
+                    type: object
+                    properties:
+                      conversations: {type: array, items: {$ref: "#/components/schemas/Conversation"}}
+                  page: {$ref: "#/components/schemas/Page"}
+                  _links: {$ref: "#/components/schemas/Links"}
+        "400": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Conversations]
+      operationId: createConversation
+      summary: Create a conversation
+      description: "Answers 201 with the id in `Resource-ID` and the created threads' ids in `threadIds`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ConversationInput"}
+      responses:
+        "201":
+          description: Created.
+          headers:
+            Resource-ID: {$ref: "#/components/headers/ResourceId"}
+            Location: {$ref: "#/components/headers/Location"}
+          content:
+            application/hal+json:
+              schema:
+                type: object
+                properties:
+                  threadIds: {type: array, items: {type: integer}}
+        "400": {$ref: "#/components/responses/Error"}
+  /v2/conversations/{conversationId}:
+    parameters:
+      - $ref: "#/components/parameters/conversationId"
+    get:
+      tags: [Conversations]
+      operationId: getConversation
+      summary: Get a conversation
+      parameters:
+        - {name: embed, in: query, schema: {type: string, enum: [threads]}}
+      responses:
+        "200":
+          description: The conversation.
+          content:
+            application/hal+json:
+              schema: {$ref: "#/components/schemas/Conversation"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Conversations]
+      operationId: updateConversation
+      summary: Update a conversation
+      description: "One JSON Patch operation; 204, and nothing else changes."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [op, path]
+              properties:
+                op: {type: string, enum: [add, move, remove, replace]}
+                path: {type: string, enum: [/subject, /status, /primaryCustomer.id, /assignTo, /mailboxId, /draft]}
+                value: {description: "The new value: a string for /subject and /status, a number for the ids."}
+      responses:
+        "204": {description: Updated.}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Conversations]
+      operationId: deleteConversation
+      summary: Delete a conversation
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/conversations/{conversationId}/tags:
+    parameters:
+      - $ref: "#/components/parameters/conversationId"
+    put:
+      tags: [Tags]
+      operationId: updateConversationTags
+      summary: Replace a conversation's tags
+      description: "The conversation's tags become the ones sent; a tag left out is removed."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tags]
+              properties:
+                tags: {type: array, items: {type: string}}
+      responses:
+        "204": {description: Updated.}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/conversations/{conversationId}/threads:
+    parameters:
+      - $ref: "#/components/parameters/conversationId"
+    get:
+      tags: [Threads]
+      operationId: listThreads
+      summary: List a conversation's threads
+      description: Newest first.
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: The threads.
+          content:
+            application/hal+json:
+              schema:
+                type: object
+                properties:
+                  _embedded:
+                    type: object
+                    properties:
+                      threads: {type: array, items: {$ref: "#/components/schemas/Thread"}}
+                  page: {$ref: "#/components/schemas/Page"}
+                  _links: {$ref: "#/components/schemas/Links"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/conversations/{conversationId}/notes:
+    parameters:
+      - $ref: "#/components/parameters/conversationId"
+    post:
+      tags: [Threads]
+      operationId: createNote
+      summary: Add a note
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: {type: string}
+                user: {type: integer}
+                status: {type: string, enum: [active, pending, closed]}
+      responses:
+        "201":
+          description: The note's id is in Resource-ID.
+          headers:
+            Resource-ID: {$ref: "#/components/headers/ResourceId"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/conversations/{conversationId}/reply:
+    parameters:
+      - $ref: "#/components/parameters/conversationId"
+    post:
+      tags: [Threads]
+      operationId: createReply
+      summary: Reply to the customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer, text]
+              properties:
+                customer: {type: object, properties: {id: {type: integer}}}
+                text: {type: string}
+                status: {type: string, enum: [active, pending, closed]}
+      responses:
+        "201":
+          description: The reply's id is in Resource-ID.
+          headers:
+            Resource-ID: {$ref: "#/components/headers/ResourceId"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    oauth2:
+      type: http
+      scheme: bearer
+  parameters:
+    conversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: {type: integer}
+  headers:
+    ResourceId:
+      description: The id of the created resource.
+      schema: {type: integer, example: 123}
+    Location:
+      description: The created resource's URL.
+      schema: {type: string, example: "https://api.helpscout.net/v2/conversations/123"}
+  responses:
+    Error:
+      description: "`{logRef, message}`, with `_embedded.errors` for a validation error."
+      content:
+        application/vnd.error+json:
+          schema:
+            type: object
+            properties:
+              logRef: {type: string}
+              message: {type: string, example: Bad request}
+              _embedded:
+                type: object
+                properties:
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path: {type: string, example: subject}
+                        message: {type: string, example: may not be empty}
+                        rejectedValue: {type: string}
+                        source: {type: string, example: JSON}
+  schemas:
+    Page:
+      type: object
+      properties:
+        size: {type: integer, example: 25}
+        totalElements: {type: integer}
+        totalPages: {type: integer}
+        number: {type: integer, description: This page's number; the first is 1.}
+    Links:
+      type: object
+      additionalProperties:
+        type: object
+        properties:
+          href: {type: string}
+          templated: {type: boolean}
+    Mailbox:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        slug: {type: string}
+        email: {type: string, format: email}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        _links: {$ref: "#/components/schemas/Links"}
+    Customer:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {type: string, enum: [customer]}
+        first: {type: string}
+        last: {type: string}
+        email: {type: string, format: email}
+    Tag:
+      type: object
+      properties:
+        id: {type: integer}
+        tag: {type: string, description: "The tag's name, in lower case."}
+        color: {type: string}
+    ThreadInput:
+      type: object
+      required: [type, text]
+      properties:
+        type: {type: string, enum: [customer, reply, note]}
+        text: {type: string}
+        customer: {type: object, properties: {id: {type: integer}, email: {type: string}}}
+    ConversationInput:
+      type: object
+      required: [subject, customer, mailboxId, type, status, threads]
+      properties:
+        subject: {type: string, minLength: 1}
+        customer:
+          type: object
+          description: An existing customer by id, or one by email (created when unknown).
+          properties:
+            id: {type: integer}
+            email: {type: string, format: email}
+            firstName: {type: string}
+            lastName: {type: string}
+        mailboxId: {type: integer}
+        type: {type: string, enum: [email, phone, chat]}
+        status: {type: string, enum: [active, pending, closed]}
+        threads: {type: array, minItems: 1, items: {$ref: "#/components/schemas/ThreadInput"}}
+        tags: {type: array, items: {type: string}}
+        assignTo: {type: integer, nullable: true}
+        autoReply: {type: boolean}
+        createdAt: {type: string, format: date-time}
+    Conversation:
+      type: object
+      properties:
+        id: {type: integer}
+        number: {type: integer, description: The number the conversation shows in the app.}
+        threads: {type: integer, description: How many threads it holds.}
+        type: {type: string, enum: [email, phone, chat]}
+        folderId: {type: integer}
+        status: {type: string, enum: [active, pending, closed, spam]}
+        state: {type: string, enum: [draft, published, deleted]}
+        subject: {type: string}
+        preview: {type: string}
+        mailboxId: {type: integer}
+        assignee: {type: object, nullable: true, properties: {id: {type: integer}, email: {type: string}}}
+        createdBy: {type: object, properties: {id: {type: integer}, type: {type: string}, email: {type: string}}}
+        createdAt: {type: string, format: date-time}
+        closedAt: {type: string, format: date-time, nullable: true}
+        userUpdatedAt: {type: string, format: date-time}
+        primaryCustomer: {$ref: "#/components/schemas/Customer"}
+        tags: {type: array, items: {$ref: "#/components/schemas/Tag"}}
+        _embedded:
+          type: object
+          properties:
+            threads: {type: array, items: {$ref: "#/components/schemas/Thread"}}
+        _links: {$ref: "#/components/schemas/Links"}
+    Thread:
+      type: object
+      properties:
+        id: {type: integer}
+        type: {type: string, enum: [customer, reply, note, chat, phone, message, lineitem]}
+        status: {type: string}
+        state: {type: string}
+        body: {type: string, description: The thread's text (HTML).}
+        source: {type: object, properties: {type: {type: string}, via: {type: string}}}
+        customer: {$ref: "#/components/schemas/Customer"}
+        createdBy: {type: object, properties: {id: {type: integer}, type: {type: string}}}
+        createdAt: {type: string, format: date-time}
+        _links: {$ref: "#/components/schemas/Links"}
