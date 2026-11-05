@@ -136,6 +136,54 @@ components:
     assert_eq!(no_target[0].operation.as_deref(), Some("getWidget"));
 }
 
+#[test]
+fn gaps_read_a_dotted_member_name_as_a_literal_property_first() {
+    // As validation and `member_at` read it: a property named `odata.id` is
+    // the identity member, so a create answering the record has a record.
+    let b = compile(
+        br##"
+openapi: 3.0.0
+info: {title: Dotted, version: "1"}
+paths:
+  /docs:
+    post:
+      operationId: createDoc
+      responses: {"201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}}
+  /docs/{docId}:
+    parameters: [{name: docId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getDoc
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}}
+components:
+  schemas:
+    Doc: {type: object, properties: {"odata.id": {type: string}, name: {type: string}}}
+"##,
+    )
+    .unwrap();
+    let t = b
+        .operation("getDoc")
+        .unwrap()
+        .resource_type
+        .clone()
+        .unwrap();
+    let mut authored = World::default();
+    authored.types.insert(
+        t.clone(),
+        serde_json::from_value(json!({"identity": {"member": "odata.id"}})).unwrap(),
+    );
+    let v = validate(&overlay(&tier0(&b), &authored), &b);
+    assert!(v.refused.is_empty(), "{:?}", v.refused);
+    assert_eq!(
+        v.applied.types[&t]
+            .identity
+            .as_ref()
+            .map(|i| i.member.as_str()),
+        Some("odata.id")
+    );
+    let all = gaps(&b, &v.applied, &v.refused);
+    assert!(codes(&all, GapCode::NoRecord).is_empty(), "{all:?}");
+}
+
 const GRAPHQL: &[u8] = br##"
 type Issue { id: ID! title: String version: Int }
 type Query { issue(id: ID!): Issue issues: [Issue!]! }

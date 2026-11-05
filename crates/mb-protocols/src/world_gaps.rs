@@ -274,8 +274,14 @@ fn is_object(b: &Bundle, schema: &Value) -> bool {
     !properties(b, schema).is_empty()
 }
 
-/// Whether `schema` has the dotted member `member`.
+/// Whether `schema` has the member `member`: a property with that whole name,
+/// or else the nested path its dots walk.
 fn has_member(b: &Bundle, schema: &Value, member: &str) -> bool {
+    // A property named with the whole member (e.g. `odata.id`) is that member,
+    // as validation and `member_at` read it; the dotted walk comes second.
+    if properties(b, schema).into_iter().any(|(k, _)| k == member) {
+        return true;
+    }
     let mut at = schema;
     for name in member.split('.') {
         match properties(b, at).into_iter().find(|(k, _)| *k == name) {
