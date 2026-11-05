@@ -28,6 +28,7 @@ mockingbird world schema
 mockingbird world patch orders patch.json --author agent --expect-revision 3
 mockingbird world put orders world.json
 mockingbird world revisions orders
+mockingbird world revision orders 3       # one revision, with its overlay
 mockingbird world diff orders --from 3 --to 4
 mockingbird world restore orders 3
 

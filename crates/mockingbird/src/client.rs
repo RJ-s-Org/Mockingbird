@@ -246,6 +246,17 @@ pub enum WorldCommand {
         #[arg(long, value_name = "N")]
         version: Option<u64>,
     },
+    /// Show one world description revision: its author, who wrote it and
+    /// when, and its overlay as stored.
+    Revision {
+        /// The mock.
+        mock: String,
+        /// The revision to show.
+        revision: u64,
+        /// The contract version [default: the active one].
+        #[arg(long, value_name = "N")]
+        version: Option<u64>,
+    },
     /// Add a new revision holding an earlier revision's overlay, validated
     /// again.
     Restore {
@@ -856,6 +867,28 @@ pub async fn run_workflow(
             api.send(
                 Method::GET,
                 &["mocks", &mock, "contracts", &version, "world", "revisions"],
+                None,
+            )
+            .await
+        }
+        WorkflowCommand::World(WorldCommand::Revision {
+            mock,
+            revision,
+            version,
+        }) => {
+            let version = version_segment(version);
+            let revision = revision.to_string();
+            api.send(
+                Method::GET,
+                &[
+                    "mocks",
+                    &mock,
+                    "contracts",
+                    &version,
+                    "world",
+                    "revisions",
+                    &revision,
+                ],
                 None,
             )
             .await

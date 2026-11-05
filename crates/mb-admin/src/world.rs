@@ -285,6 +285,17 @@ fn retain_entries(doc: &Value, keep: &BTreeSet<&str>) -> Value {
 /// It does nothing (`Ok(None)`) when `from` has no revision, when the
 /// revision sets no entry or is not a world description, or when `to`
 /// already has a revision.
+///
+/// The replay is not atomic: each revision is written expecting the one
+/// before it as the newest, and a concurrent write to `to` (a `PUT` or
+/// `PATCH` of `…/world`, a config-file reconcile) that lands between two of
+/// them ends the carry there, leaving that write on top. When it lands
+/// before the first, nothing is carried and `Ok(None)` is returned. When it
+/// lands later, `to` keeps the groups already written, oldest authors
+/// first, and the concurrent revision after them; the later authors'
+/// entries are not carried (a `PATCH` merged onto the partial overlay
+/// lacks them, a `PUT` replaced it anyway), and the returned revision is
+/// the last one carried, which is no longer the newest.
 pub async fn carry_forward(
     store: &dyn ControlStore,
     mock_id: Uuid,
@@ -360,7 +371,10 @@ async fn carry(
             .await;
         match revision {
             Ok(r) => added = Some(r),
-            // Someone else wrote to `to` first: theirs stands.
+            // Someone else wrote to `to` first: theirs stands. Past the
+            // first group this is a partial carry (see `carry_forward`):
+            // the groups written so far stay under theirs, the rest are
+            // dropped, and `added` is our last revision, not the newest.
             Err(StoreError::Conflict(_)) => break,
             Err(e) => return Err(e),
         }

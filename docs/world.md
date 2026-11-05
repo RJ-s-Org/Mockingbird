@@ -25,7 +25,7 @@ mockingbird world show orders --version 2 --json
 mockingbird world schema                   # the format, as JSON Schema
 ```
 
-The MCP tool is `get_world {mock, version?}`; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
+The MCP tool is `get_world {mock, version?}`, and `get_world_schema` answers the format's JSON Schema as `mockingbird world schema` prints it; the Admin API is `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`, with `version` a number or `active`. The answer:
 
 | Field | What it holds |
 | --- | --- |
@@ -55,6 +55,7 @@ A write sends an **overlay**: only the entries you want to set. The effective de
 | `put_world {mock, version?, world, author?, expect_revision?}` | `world put` | Replaces the overlay. |
 | `patch_world {mock, version?, patch, author?, expect_revision?}` | `world patch` | Merges a JSON merge patch (RFC 7396) into the overlay: `null` removes a key, arrays are replaced whole. |
 | `list_world_revisions {mock, version?}` | `world revisions` | Lists the revisions. |
+| `get_world_revision {mock, version?, revision}` | `world revision <mock> <r>` | One revision with its overlay as stored. |
 | `restore_world_revision {mock, version?, revision}` | `world restore` | Adds a new revision holding an older one's document, validated again. |
 | `diff_world {mock, version?, from, to}` | `world diff` | The JSON pointers added, removed and changed between two revisions. |
 
@@ -90,7 +91,7 @@ A new contract version (an upload, a config-file change, an approved import draf
 
 ## The format
 
-YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to the heuristics. `mockingbird world schema` prints the full JSON Schema.
+YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to the heuristics. `get_world_schema` (MCP) and `mockingbird world schema` give the full JSON Schema.
 
 **Types** (`types.<resource type>`):
 

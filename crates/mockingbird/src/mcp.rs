@@ -528,7 +528,7 @@ fn tools() -> Vec<Tool> {
         Tool {
             name: "get_world",
             title: "Show a contract version's world description",
-            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps (no_identity, no_target, no_record, skipped_route, refused) to fix. The format is `mockingbird world schema`.",
+            description: "The world description of a contract version: how its types and operations behave (identity, targets, lifecycle, order, not_found, ...), the author of each entry set by a revision (unlisted entries are heuristic), the revision number (0 when only the heuristics wrote it), refused entries, and gaps (no_identity, no_target, no_record, skipped_route, refused) to fix. The format is get_world_schema.",
             schema: obj(
                 json!({
                     "mock": mock(),
@@ -540,9 +540,17 @@ fn tools() -> Vec<Tool> {
             destructive: false,
         },
         Tool {
+            name: "get_world_schema",
+            title: "Show the world description format",
+            description: "The JSON Schema of world descriptions (what put_world and patch_world take and get_world answers under `world`), as `mockingbird world schema` prints it.",
+            schema: obj(json!({}), &[]),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
             name: "put_world",
             title: "Replace a contract version's world description",
-            description: "Write the overlay of a contract version's world description (the format is `mockingbird world schema`; every key is optional), replacing the previous overlay, as a new revision that applies at once. Entries that don't resolve against the contract are refused (unknown_key, unresolved, not_applicable, invalid) and not stored; the rest apply. Answers {version, revision, applied, refused}. Prefer patch_world to change a few entries. expect_revision makes the write fail with 412 revision_conflict unless that is the newest revision.",
+            description: "Write the overlay of a contract version's world description (the format is get_world_schema; every key is optional), replacing the previous overlay, as a new revision that applies at once. Entries that don't resolve against the contract are refused (unknown_key, unresolved, not_applicable, invalid) and not stored; the rest apply. Answers {version, revision, applied, refused}. Prefer patch_world to change a few entries. expect_revision makes the write fail with 412 revision_conflict unless that is the newest revision.",
             schema: obj(
                 json!({
                     "mock": mock(),
@@ -583,6 +591,21 @@ fn tools() -> Vec<Tool> {
                     "version": n("Contract version; default the active one."),
                 }),
                 &["mock"],
+            ),
+            read_only: true,
+            destructive: false,
+        },
+        Tool {
+            name: "get_world_revision",
+            title: "Read a world description revision",
+            description: "One revision of a contract version's world description: number, author, who wrote it and when, and its overlay document as stored.",
+            schema: obj(
+                json!({
+                    "mock": mock(),
+                    "version": n("Contract version; default the active one."),
+                    "revision": n("The revision to read."),
+                }),
+                &["mock", "revision"],
             ),
             read_only: true,
             destructive: false,
@@ -1501,6 +1524,29 @@ impl McpServer {
                         &version,
                         "world",
                         "revisions",
+                    ],
+                    &[],
+                    None,
+                )
+                .await
+            }
+            "get_world_schema" => serde_json::from_str(mb_mcm::world::SCHEMA)
+                .map_err(|e| ToolError(format!("the world schema is not JSON: {e}"))),
+            "get_world_revision" => {
+                let version = version_arg(a)?;
+                let revision = opt_u64(a, "revision")
+                    .ok_or_else(|| ToolError("revision is not a revision number".into()))?
+                    .to_string();
+                self.ws(
+                    Method::GET,
+                    &[
+                        "mocks",
+                        str_arg(a, "mock")?,
+                        "contracts",
+                        &version,
+                        "world",
+                        "revisions",
+                        &revision,
                     ],
                     &[],
                     None,

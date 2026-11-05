@@ -615,8 +615,26 @@ mod tests {
         }
         let world = SKILLS.iter().find(|s| s.name == "mockingbird-world");
         let named = world.map(|s| named_tools(s.text)).unwrap_or_default();
-        for tool in ["import_contract", "get_world", "patch_world", "call_mock"] {
+        for tool in [
+            "import_contract",
+            "get_world",
+            "get_world_schema",
+            "patch_world",
+            "call_mock",
+        ] {
             assert!(named.contains(&tool), "mockingbird-world names `{tool}`");
+        }
+    }
+
+    /// The world guide sends an MCP client to the format's schema and to
+    /// one revision's document, not only to the CLI.
+    #[test]
+    fn world_doc_names_the_schema_and_revision_tools() {
+        for tool in ["get_world_schema", "get_world_revision"] {
+            assert!(
+                named_tools(WORLD_DOC).contains(&tool),
+                "docs/world.md names `{tool}`"
+            );
         }
     }
 

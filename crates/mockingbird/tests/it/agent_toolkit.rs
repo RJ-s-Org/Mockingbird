@@ -1086,6 +1086,20 @@ fn mcp_get_world_matches_admin() {
             .unwrap_or_else(|| panic!("no get_world tool: {tools}"));
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
 
+        // The format is served to MCP clients as `mockingbird world schema`
+        // prints it.
+        let tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_world_schema")
+            .cloned()
+            .unwrap_or_else(|| panic!("no get_world_schema tool: {tools}"));
+        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+        let schema = mcp.tool("get_world_schema", json!({}));
+        assert_eq!(schema, json_file("crates/mb-mcm/schemas/world.v1.json"));
+        assert_eq!(schema, run_json(dir.path(), &["world", "schema"]));
+
         let admin = run_json(
             dir.path(),
             &[
@@ -1178,6 +1192,7 @@ fn mcp_and_cli_write_world_revisions() {
             ("put_world", false),
             ("patch_world", false),
             ("list_world_revisions", true),
+            ("get_world_revision", true),
             ("restore_world_revision", false),
             ("diff_world", true),
         ] {
@@ -1235,6 +1250,38 @@ fn mcp_and_cli_write_world_revisions() {
         let revisions = mcp.tool("list_world_revisions", json!({ "mock": "orders" }));
         assert_eq!(revisions[0]["revision"], 2, "{revisions}");
         assert_eq!(revisions[1]["author"], "agent", "{revisions}");
+        // One revision reads as the Admin API answers it, with its overlay.
+        let revision = mcp.tool(
+            "get_world_revision",
+            json!({ "mock": "orders", "revision": 1 }),
+        );
+        assert_eq!(revision["revision"], 1, "{revision}");
+        assert_eq!(revision["author"], "agent", "{revision}");
+        assert_eq!(revision["document"], patched["applied"], "{revision}");
+        let admin_revision = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "api",
+                "GET",
+                "/workspaces/default/mocks/orders/contracts/active/world/revisions/1",
+            ],
+        );
+        assert_eq!(revision, admin_revision);
+        let version = revision["version"].as_u64().unwrap();
+        assert_eq!(
+            mcp.tool(
+                "get_world_revision",
+                json!({ "mock": "orders", "version": version, "revision": 1 }),
+            ),
+            admin_revision
+        );
+        let error = mcp.tool_error(
+            "get_world_revision",
+            json!({ "mock": "orders", "revision": 99 }),
+        );
+        assert!(error.contains("99"), "{error}");
         let diff = mcp.tool("diff_world", json!({ "mock": "orders" }));
         assert_eq!(
             diff["removed"],
@@ -1281,6 +1328,29 @@ fn mcp_and_cli_write_world_revisions() {
         assert_eq!(patch["revision"], 5, "{patch}");
         let revisions = run_json(dir.path(), &[&admin[..], &["revisions", "orders"]].concat());
         assert_eq!(revisions.as_array().unwrap().len(), 5, "{revisions}");
+        let revision = run_json(
+            dir.path(),
+            &[&admin[..], &["revision", "orders", "4"]].concat(),
+        );
+        assert_eq!(revision["revision"], 4, "{revision}");
+        assert_eq!(revision["author"], revisions[1]["author"], "{revision}");
+        assert!(
+            revision["document"]["operations"][&op].is_object(),
+            "{revision}"
+        );
+        let revision = run_json(
+            dir.path(),
+            &[
+                &admin[..],
+                &["revision", "orders", "5", "--version", &version.to_string()],
+            ]
+            .concat(),
+        );
+        assert_eq!(revision["revision"], 5, "{revision}");
+        assert!(
+            revision["document"]["operations"][&op].is_null(),
+            "{revision}"
+        );
         let diff = run_json(
             dir.path(),
             &[&admin[..], &["diff", "orders", "--from", "4", "--to", "5"]].concat(),
