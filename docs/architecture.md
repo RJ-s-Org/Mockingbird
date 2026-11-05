@@ -45,7 +45,7 @@ A typical HA layout is two `control` replicas (one leader at a time) and an auto
 
 ## Request flow
 
-1. **Decode.** The adapter matches the call to an operation and validates its input. Invalid input gets the contract's declared 4xx or error shape, built without an LLM call.
+1. **Decode.** The adapter matches the call to an operation and validates its input. Invalid input gets the contract's declared 4xx or error shape, naming the violated field and the reasons; an open code member in it is written once per operation and status by the LLM, else by the faker.
 2. **Admission** (`mb.admission` span): the request size cap (`limits.max_request_bytes`, or the mock's own; 413, recorded), data-plane auth, the `mb-ext` tenant resolver and quota guard, then the mock's rate limit (429 with `Retry-After`, `mb_rate_limited_total`).
 3. **Plan and chaos.** Override headers and the active scenario are applied. When the mock (or the active scenario) has chaos and the call does not carry `X-Mockingbird-Chaos: off` with header overrides enabled: latency jitter is added, and with probability `error_rate` the call is answered with an injected error in the contract's error shape (or the protocol's native error), marked `X-Mockingbird-Chaos: error`. Counted in `mb_chaos_injected_total{mock,kind}`.
 4. **State lookup** (`mb.state`). The session (`X-Mockingbird-Session`, cookie or gRPC metadata; `default` otherwise) and related resources. When the state store fails, the mock serves statelessly and `/readyz` reports `degraded`.
