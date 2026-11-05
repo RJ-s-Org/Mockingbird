@@ -252,6 +252,13 @@ fn with(mut base: Map<String, Value>, extra: Value) -> Value {
     Value::Object(base)
 }
 
+/// The name of every tool the server offers (local ones included), for
+/// checks that instructions name only real tools.
+#[cfg(test)]
+pub(crate) fn tool_names() -> Vec<&'static str> {
+    tools().iter().map(|t| t.name).collect()
+}
+
 fn tools() -> Vec<Tool> {
     let mock = || s("Mock name.");
     let session_props = || json!({ "mock": s("Mock name."), "session": s("Session id.") });

@@ -35,6 +35,7 @@ pub const SKILLS: &[Skill] = &[
     skill!("mockingbird-mock-api"),
     skill!("mockingbird-deploy"),
     skill!("mockingbird-testing"),
+    skill!("mockingbird-world"),
 ];
 
 impl Skill {
@@ -573,6 +574,74 @@ mod tests {
             assert_eq!(s.front_matter("name"), Some(s.name), "{}", s.name);
             assert!(s.description().len() > 40, "{}", s.name);
             assert!(s.body().starts_with('#'), "{}", s.name);
+        }
+    }
+
+    /// The tool names a skill writes in code position: a snake_case word
+    /// starting with a verb the tools use (`get_world`, `patch_world {...}`).
+    /// Description keys (`path_param`, `soft_delete`) and codes
+    /// (`no_identity`) don't start with one.
+    fn named_tools(text: &str) -> Vec<&str> {
+        const VERBS: &[&str] = &[
+            "activate",
+            "admin",
+            "approve",
+            "call",
+            "configure",
+            "create",
+            "delete",
+            "diff",
+            "doctor",
+            "edit",
+            "export",
+            "get",
+            "import",
+            "init",
+            "list",
+            "patch",
+            "proxy",
+            "publish",
+            "put",
+            "reset",
+            "restore",
+            "seed",
+            "server",
+            "start",
+            "stop",
+            "test",
+            "update",
+            "validate",
+        ];
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|code| {
+                let end = code
+                    .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+                    .unwrap_or(code.len());
+                let word = &code[..end];
+                let (verb, rest) = word.split_once('_')?;
+                (VERBS.contains(&verb) && !rest.is_empty()).then_some(word)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skill_names_only_real_tools() {
+        let real = crate::mcp::tool_names();
+        for s in SKILLS {
+            for name in named_tools(s.text) {
+                assert!(
+                    real.contains(&name),
+                    "skill {} names `{name}`, which is no MCP tool",
+                    s.name
+                );
+            }
+        }
+        let world = SKILLS.iter().find(|s| s.name == "mockingbird-world");
+        let named = world.map(|s| named_tools(s.text)).unwrap_or_default();
+        for tool in ["import_contract", "get_world", "patch_world", "call_mock"] {
+            assert!(named.contains(&tool), "mockingbird-world names `{tool}`");
         }
     }
 
