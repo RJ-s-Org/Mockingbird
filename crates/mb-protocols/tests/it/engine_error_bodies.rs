@@ -115,7 +115,7 @@ components:
             type: object
             required: [source, detail]
             properties:
-              source: {type: object, required: [pointer], properties: {pointer: {type: string}}}
+              source: {type: object, required: [pointer], properties: {pointer: {type: string, default: /data/attributes/title}}}
               detail: {type: string}
     Sourced:
       type: object
@@ -235,7 +235,8 @@ async fn a_refused_body_names_the_violated_field() {
     assert_eq!(body["errors"][0]["path"], "name", "{body}");
 }
 
-/// A member named as a pointer takes the violated field as a JSON pointer.
+/// A member named as a pointer takes the violated field as a JSON pointer, even when
+/// the contract shows one for it (it starts with `/`, as a request URI does).
 #[tokio::test]
 async fn a_pointer_member_takes_a_json_pointer() {
     let h = harness(None);
@@ -245,6 +246,26 @@ async fn a_pointer_member_takes_a_json_pointer() {
     assert_eq!(body["errors"][0]["source"]["pointer"], "/name", "{body}");
     let detail = body["errors"][0]["detail"].as_str().unwrap();
     assert!(detail.contains("type"), "{body}");
+}
+
+/// Each violation has its own item of the error array, which grows past the one the
+/// faker drew.
+#[tokio::test]
+async fn each_violation_has_its_own_error_item() {
+    let h = harness(None);
+    let resp = send(&h, post_json("/gadgets", r#"{"name": 7, "size": "big"}"#)).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    let errors = body["errors"].as_array().unwrap();
+    let mut pointers: Vec<&str> = errors
+        .iter()
+        .map(|e| e["source"]["pointer"].as_str().unwrap())
+        .collect();
+    pointers.sort_unstable();
+    assert_eq!(pointers, ["/name", "/size"], "{body}");
+    for e in errors {
+        assert!(e["detail"].as_str().unwrap().contains("type"), "{body}");
+    }
 }
 
 /// A code-like member is the LLM's, asked once for the operation, status and cause;

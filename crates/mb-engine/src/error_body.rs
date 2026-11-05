@@ -9,12 +9,17 @@
 //!   pointer into a member named `pointer` and a query or path parameter's name into
 //!   one named `parameter` or `param` ([`with_reasons`]). A path-like member the
 //!   contract shows to hold a URI (its `format`, or an example that is a URL or an
-//!   absolute path, as a request URI reads) is not the violated field. An array of error objects gets one
-//!   violation per item, its message that violation's reason; a single error object
-//!   names the first violation's field and keeps every reason in its message. Each change is kept only while the body still validates.
+//!   absolute path, as a request URI reads) is not the violated field; a `pointer`
+//!   holds a URI only by its `format`, since a JSON pointer starts with `/` too. An
+//!   array of error objects gets one violation per item, its message that violation's
+//!   reason, and grows to one item per violation (its last item repeated, or, when
+//!   empty, items made of the members that name each violation); a single error
+//!   object names the first violation's field and keeps every reason in its message.
+//!   Each change is kept only while the body still validates.
 //! - A code-like member (`code`, `type`, `ErrorCode`, `error_code`: a scalar whose
-//!   name is `type` or ends in the word `code`) whose schema does not fix its value
-//!   ([`writes_code`]) is the contract's to say, often in prose (an error-code table in
+//!   name is `type` or ends in the word `code`, but not one holding a URI, as
+//!   problem+json's `type` does, nor an integer HTTP status such as `status_code`)
+//!   whose schema does not fix its value ([`writes_code`]) is the contract's to say, often in prose (an error-code table in
 //!   the API description). With an LLM, the body is written once per operation,
 //!   status and [`ErrorCause`] by the model, told the status and the cause, and kept
 //!   ([`crate::Engine::error_answer`]); the call's facts are then laid over it. Offline,
@@ -202,10 +207,18 @@ pub fn writes_code(schema: &Value, defs: &Map<String, Value>) -> bool {
             let members = b.get("properties").and_then(Value::as_object);
             members.into_iter().flatten().any(|(name, prop)| {
                 let prop_parts = branches(prop, defs);
-                let scalar = types(&prop_parts)
+                let kinds = types(&prop_parts);
+                let scalar = kinds
                     .iter()
                     .any(|t| matches!(*t, "string" | "integer" | "number"));
-                (code_like(name) && scalar && !fixed(&prop_parts)) || walk(prop, defs, depth + 1)
+                // A URI (problem+json's `type`) or an integer HTTP status
+                // (`status_code`) is no code the contract's prose says.
+                let uri =
+                    uri_format(&prop_parts) || shown_values(&prop_parts).any(|v| v.contains("://"));
+                let http_status =
+                    folded(name).ends_with("statuscode") && !kinds.contains(&"string");
+                (code_like(name) && scalar && !fixed(&prop_parts) && !uri && !http_status)
+                    || walk(prop, defs, depth + 1)
             }) || b
                 .get("items")
                 .is_some_and(|items| walk(items, defs, depth + 1))
@@ -318,6 +331,7 @@ pub fn with_reasons(
         .get("$defs")
         .and_then(Value::as_object)
         .unwrap_or(&no_defs);
+    let body = grown(validator, body, defs, violations);
     let _ = walk_body(
         &body,
         Some(root),
@@ -343,6 +357,201 @@ pub fn with_reasons(
         }
     }
     out
+}
+
+/// `body`, valid against `validator`, with each array of error objects in it
+/// ([`error_arrays`]) holding one item per violation where it held fewer: its last
+/// item repeated, or, when it is empty, items made of the members that name each
+/// violation ([`made_item`]). Each array grows as far as the body still validates.
+fn grown(
+    validator: &SchemaValidator,
+    body: Value,
+    defs: &Map<String, Value>,
+    violations: &[Violation],
+) -> Value {
+    if violations.is_empty() {
+        return body;
+    }
+    let mut arrays = Vec::new();
+    error_arrays(
+        &body,
+        Some(validator.schema()),
+        defs,
+        &mut String::new(),
+        0,
+        &mut arrays,
+    );
+    let mut out = body;
+    for (pointer, item_schema) in arrays {
+        let Some(Value::Array(items)) = out.pointer(&pointer) else {
+            continue;
+        };
+        let held = items.len();
+        if held >= violations.len() {
+            continue;
+        }
+        let extra: Vec<Value> = match items.last() {
+            Some(last) => violations[held..].iter().map(|_| last.clone()).collect(),
+            None => violations
+                .iter()
+                .map_while(|v| made_item(&item_schema, defs, v, 0))
+                .collect(),
+        };
+        for keep in (1..=extra.len()).rev() {
+            let mut candidate = out.clone();
+            let Some(Value::Array(slot)) = candidate.pointer_mut(&pointer) else {
+                break;
+            };
+            slot.extend(extra[..keep].iter().cloned());
+            if validator.is_valid(&candidate) {
+                out = candidate;
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Whether a member of this (folded) name names a violation: a path-like, parameter
+/// or pointer member.
+fn names_violation(folded: &str) -> bool {
+    folded == POINTER_FIELD || PATH_FIELDS.contains(&folded) || PARAMETER_FIELDS.contains(&folded)
+}
+
+/// Whether objects `schema` declares are error objects: a string member of theirs,
+/// or of an object one member down (JSON:API's `source.pointer`), names a violation.
+fn error_object(schema: &Value, defs: &Map<String, Value>, depth: usize) -> bool {
+    branches(schema, defs).into_iter().any(|b| {
+        b.get("properties")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .any(|(name, prop)| {
+                let parts = branches(prop, defs);
+                let kinds = types(&parts);
+                (names_violation(&folded(name)) && kinds.contains(&"string"))
+                    || (depth == 0 && kinds.contains(&"object") && error_object(prop, defs, 1))
+            })
+    })
+}
+
+/// The arrays of error objects in `value`, declared by `schema`: each one's JSON
+/// pointer in the body and its items' schema. An array inside one is not looked into.
+fn error_arrays(
+    value: &Value,
+    schema: Option<&Value>,
+    defs: &Map<String, Value>,
+    at: &mut String,
+    depth: usize,
+    out: &mut Vec<(String, Value)>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            let item_schema = items_schema(schema, defs);
+            if let Some(item_schema) = item_schema.filter(|s| error_object(s, defs, 0)) {
+                out.push((at.clone(), item_schema.clone()));
+                return;
+            }
+            for (i, v) in items.iter().enumerate() {
+                let len = at.len();
+                at.push('/');
+                at.push_str(&i.to_string());
+                error_arrays(v, item_schema, defs, at, depth + 1, out);
+                at.truncate(len);
+            }
+        }
+        Value::Object(members) => {
+            for (name, member) in members {
+                let len = at.len();
+                at.push('/');
+                at.push_str(&name.replace('~', "~0").replace('/', "~1"));
+                error_arrays(
+                    member,
+                    member_schema(schema, name, defs),
+                    defs,
+                    at,
+                    depth + 1,
+                    out,
+                );
+                at.truncate(len);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An error object `schema` declares, made of the members that name `violation`
+/// (as [`walk_body`] would fill them) and its message-like member holding the
+/// reason; `None` when no member names it.
+fn made_item(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    violation: &Violation,
+    depth: usize,
+) -> Option<Value> {
+    let in_body = violation.location == "body";
+    let mut item = Map::new();
+    for b in branches(schema, defs) {
+        let Some(props) = b.get("properties").and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, prop) in props {
+            if item.contains_key(name) {
+                continue;
+            }
+            let folded = folded(name);
+            let parts = branches(prop, defs);
+            let kinds = types(&parts);
+            if kinds.contains(&"string") {
+                let named = if folded == POINTER_FIELD {
+                    in_body
+                        .then(|| violation.json_pointer().map(str::to_string))
+                        .flatten()
+                } else if PARAMETER_FIELDS.contains(&folded.as_str()) {
+                    (!in_body).then(|| violation.field()).flatten()
+                } else if PATH_FIELDS.contains(&folded.as_str()) {
+                    violation.field()
+                } else {
+                    None
+                };
+                let named = named.filter(|_| !holds_uri(Some(prop), defs, folded == POINTER_FIELD));
+                if let Some(named) = named {
+                    item.insert(name.clone(), Value::String(named));
+                }
+            } else if depth == 0
+                && kinds.contains(&"object")
+                && let Some(nested) = made_item(prop, defs, violation, depth + 1)
+            {
+                item.insert(name.clone(), nested);
+            }
+        }
+    }
+    if item.is_empty() {
+        return None;
+    }
+    if depth == 0 {
+        let props: Vec<&Map<String, Value>> = branches(schema, defs)
+            .into_iter()
+            .filter_map(|b| b.get("properties").and_then(Value::as_object))
+            .collect();
+        let message = MESSAGE_FIELDS.iter().find_map(|wanted| {
+            let wanted = folded(wanted);
+            props.iter().find_map(|p| {
+                p.iter().find(|(name, prop)| {
+                    folded(name) == wanted
+                        && types(&branches(prop, defs)).contains(&"string")
+                        && !item.contains_key(*name)
+                })
+            })
+        });
+        if let Some((name, _)) = message {
+            item.insert(name.clone(), Value::String(violation.reason.clone()));
+        }
+    }
+    Some(Value::Object(item))
 }
 
 /// What [`walk_body`] lays over a body, and the definitions its schema reaches.
@@ -372,33 +581,37 @@ fn items_schema<'a>(schema: Option<&'a Value>, defs: &'a Map<String, Value>) -> 
         .find_map(|b| b.get("items").filter(|i| i.is_object()))
 }
 
-/// Whether a string `schema` declares holds a URI or URL, not a field's name: its
-/// `format` is one of URIs (`uri`, `uri-reference`, `iri`, `url`), or a value the
-/// contract shows for it (`example`, `examples`, `default`, `enum`) is a URL or an
-/// absolute path (`/v1/widgets`, as a request URI reads).
-fn holds_uri(schema: Option<&Value>, defs: &Map<String, Value>) -> bool {
-    let Some(schema) = schema else { return false };
-    let parts = branches(schema, defs);
-    let format = parts.iter().any(|b| {
+/// Whether a branch's `format` is one of URIs (`uri`, `uri-reference`, `iri`, `url`).
+fn uri_format(parts: &[&Value]) -> bool {
+    parts.iter().any(|b| {
         b.get("format")
             .and_then(Value::as_str)
             .is_some_and(|f| ["uri", "iri", "url"].iter().any(|p| f.starts_with(p)))
-    });
-    let shown = parts.iter().any(|b| {
-        let one = ["example", "default"]
-            .iter()
-            .filter_map(|k| b.get(*k))
-            .collect::<Vec<_>>();
+    })
+}
+
+/// The string values the contract shows for a member (`example`, `examples`,
+/// `default`, `enum`).
+fn shown_values<'a>(parts: &[&'a Value]) -> impl Iterator<Item = &'a str> {
+    parts.iter().flat_map(|b| {
+        let one = ["example", "default"].into_iter().filter_map(|k| b.get(k));
         let many = ["examples", "enum"]
-            .iter()
-            .filter_map(|k| b.get(*k).and_then(Value::as_array))
+            .into_iter()
+            .filter_map(|k| b.get(k).and_then(Value::as_array))
             .flatten();
-        one.into_iter()
-            .chain(many)
-            .filter_map(Value::as_str)
-            .any(|v| v.starts_with('/') || v.contains("://"))
-    });
-    format || shown
+        one.chain(many).filter_map(Value::as_str)
+    })
+}
+
+/// Whether a string `schema` declares holds a URI or URL, not a field's name: its
+/// `format` is one of URIs ([`uri_format`]), or, unless it is a `pointer` (a JSON
+/// pointer starts with `/` too), a value the contract shows for it is a URL or an
+/// absolute path (`/v1/widgets`, as a request URI reads).
+fn holds_uri(schema: Option<&Value>, defs: &Map<String, Value>, pointer: bool) -> bool {
+    let Some(schema) = schema else { return false };
+    let parts = branches(schema, defs);
+    uri_format(&parts)
+        || (!pointer && shown_values(&parts).any(|v| v.starts_with('/') || v.contains("://")))
 }
 
 /// Collects [`with_reasons`]' changes to `value`, declared by `schema`, at `at` in
@@ -461,8 +674,14 @@ fn walk_body(
                     } else {
                         None
                     };
-                    let named =
-                        named.filter(|_| !holds_uri(member_schema(schema, name, defs), defs));
+                    let uri = || {
+                        holds_uri(
+                            member_schema(schema, name, defs),
+                            defs,
+                            folded == POINTER_FIELD,
+                        )
+                    };
+                    let named = named.filter(|_| !uri());
                     if let Some(named) = named {
                         names_field = true;
                         out.push((pointer.clone(), Value::String(named)));
@@ -934,6 +1153,188 @@ mod tests {
         let out = with_reasons(&validator, body, &[], &[violation("/name", "r")]);
         assert_eq!(out["source"]["pointer"], "/name");
         assert_eq!(out["source"]["parameter"], "q");
+    }
+
+    /// A JSON pointer always starts with `/`: a pointer member whose example is one
+    /// (JSON:API's `source.pointer`) still takes the violated member's pointer, and
+    /// its item's message the reason. Only a URI `format` keeps a pointer as it is.
+    #[test]
+    fn a_pointer_with_a_pointer_example_is_filled() {
+        let schema = json!({"type": "object", "properties": {"errors": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "detail": {"type": "string"},
+                "source": {"type": "object", "properties": {
+                    "pointer": {"type": "string", "example": "/data/attributes/title"}
+                }}
+            }
+        }}}});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body =
+            json!({"errors": [{"detail": "d", "source": {"pointer": "/data/attributes/title"}}]});
+        let out = with_reasons(
+            &validator,
+            body,
+            &[],
+            &[violation("/data/attributes/name", "r")],
+        );
+        assert_eq!(
+            out["errors"][0]["source"]["pointer"],
+            "/data/attributes/name"
+        );
+        assert_eq!(out["errors"][0]["detail"], "r");
+
+        let schema = json!({"type": "object", "properties": {
+            "pointer": {"type": "string", "format": "uri-reference"}
+        }});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let out = with_reasons(
+            &validator,
+            json!({"pointer": "/x"}),
+            &[],
+            &[violation("/name", "r")],
+        );
+        assert_eq!(out["pointer"], "/x");
+    }
+
+    /// A `path` or `field` whose example is an absolute path reads as a request URI,
+    /// even one of a single step (`/name`, which could be a JSON pointer too): it is
+    /// left as it is, which is always valid.
+    #[test]
+    fn a_path_with_a_one_step_absolute_example_is_left() {
+        for name in ["path", "field"] {
+            let schema = json!({"type": "object", "properties": {
+                name: {"type": "string", "example": "/name"}
+            }});
+            let validator = SchemaValidator::new(&schema).unwrap();
+            let out = with_reasons(
+                &validator,
+                json!({name: "x"}),
+                &[],
+                &[violation("/size", "r")],
+            );
+            assert_eq!(out[name], "x", "{name}");
+        }
+    }
+
+    /// An array of error objects holds one item per violation: the last item is
+    /// repeated for the ones past it, and an empty array gets items made of the
+    /// members that name a violation. A growth the schema refuses is not kept.
+    #[test]
+    fn an_array_of_errors_grows_to_one_item_per_violation() {
+        let item = json!({"type": "object", "properties": {
+            "code": {"type": "string"},
+            "field": {"type": "string"},
+            "message": {"type": "string"},
+            "source": {"type": "object", "properties": {"pointer": {"type": "string"}}}
+        }});
+        let schema = json!({"type": "object", "properties": {
+            "errors": {"type": "array", "items": item}
+        }});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let violations = [
+            violation("/name", "r1"),
+            violation("/size", "r2"),
+            violation("/address/city", "r3"),
+        ];
+        let body = json!({"errors": [{"code": "c", "field": "a", "message": "b", "source": {"pointer": "p"}}]});
+        let out = with_reasons(&validator, body, &[], &violations);
+        let errors = out["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 3);
+        for (i, (field, reason, pointer)) in [
+            ("name", "r1", "/name"),
+            ("size", "r2", "/size"),
+            ("address.city", "r3", "/address/city"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(errors[i]["field"], *field);
+            assert_eq!(errors[i]["message"], *reason);
+            assert_eq!(errors[i]["source"]["pointer"], *pointer);
+            assert_eq!(errors[i]["code"], "c");
+        }
+
+        // Empty: items made of the naming members, the code left out.
+        let out = with_reasons(&validator, json!({"errors": []}), &[], &violations);
+        let errors = out["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 3);
+        assert_eq!(
+            errors[1],
+            json!({"field": "size", "message": "r2", "source": {"pointer": "/size"}})
+        );
+
+        // A query violation has no pointer: none is made for it.
+        let out = with_reasons(
+            &validator,
+            json!({"errors": []}),
+            &[],
+            &[located("query", "/limit", "r")],
+        );
+        assert_eq!(out["errors"], json!([{"field": "limit", "message": "r"}]));
+
+        // maxItems: grown as far as it allows.
+        let capped = json!({"type": "object", "properties": {
+            "errors": {"type": "array", "maxItems": 2, "items": item}
+        }});
+        let validator = SchemaValidator::new(&capped).unwrap();
+        let body = json!({"errors": [{"field": "a", "message": "b"}]});
+        let out = with_reasons(&validator, body, &[], &violations);
+        assert_eq!(out["errors"].as_array().unwrap().len(), 2);
+        assert_eq!(out["errors"][1]["field"], "size");
+
+        // An item that requires a member no violation names is not made up.
+        let strict = json!({"type": "object", "properties": {"errors": {"type": "array", "items": {
+            "type": "object",
+            "required": ["code"],
+            "properties": {"code": {"type": "string"}, "field": {"type": "string"}}
+        }}}});
+        let validator = SchemaValidator::new(&strict).unwrap();
+        let out = with_reasons(&validator, json!({"errors": []}), &[], &violations);
+        assert_eq!(out["errors"], json!([]));
+
+        // An array of strings is not an array of error objects.
+        let strings = json!({"type": "object", "properties": {
+            "errors": {"type": "array", "items": {"type": "string"}}
+        }});
+        let validator = SchemaValidator::new(&strings).unwrap();
+        let out = with_reasons(
+            &validator,
+            json!({"errors": []}),
+            &["r1".into()],
+            &violations,
+        );
+        assert_eq!(out["errors"], json!(["r1"]));
+    }
+
+    /// A member that holds a URI (problem+json's `type`) or an integer HTTP status
+    /// (`status_code`) is no code for the model to write.
+    #[test]
+    fn a_uri_or_an_http_status_is_no_code() {
+        let defs = Map::new();
+        let problem = json!({"type": "object", "properties": {
+            "type": {"type": "string", "format": "uri"},
+            "title": {"type": "string"},
+            "status": {"type": "integer"},
+            "detail": {"type": "string"}
+        }});
+        assert!(!writes_code(&problem, &defs));
+        let shown = json!({"type": "object", "properties": {
+            "type": {"type": "string", "example": "https://example.com/probs/out-of-stock"}
+        }});
+        assert!(!writes_code(&shown, &defs));
+        for name in ["status_code", "statusCode", "http_status_code"] {
+            let status = json!({"type": "object", "properties": {
+                name: {"type": "integer"},
+                "message": {"type": "string"}
+            }});
+            assert!(!writes_code(&status, &defs), "{name}");
+        }
+        let text_status =
+            json!({"type": "object", "properties": {"status_code": {"type": "string"}}});
+        assert!(writes_code(&text_status, &defs));
+        let country = json!({"type": "object", "properties": {"country_code": {"type": "string"}}});
+        assert!(writes_code(&country, &defs));
     }
 
     /// A full cache gives up one body for a new one, not all of them.
