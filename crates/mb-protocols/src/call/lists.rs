@@ -197,7 +197,7 @@ pub(super) fn filtered_member<'a>(
 }
 
 /// The names of the members the parts of an item declare, each once.
-fn declared_names<'a>(item_parts: &[&'a Value]) -> Vec<&'a str> {
+pub(super) fn declared_names<'a>(item_parts: &[&'a Value]) -> Vec<&'a str> {
     let mut names: Vec<&'a str> = Vec::new();
     for part in item_parts {
         for name in part
@@ -819,6 +819,79 @@ pub(super) async fn stored_page(
     member: &str,
 ) -> Option<Cut> {
     stored_records(state, (plan, call), t, body, None, Some(member)).await
+}
+
+/// The records the session holds for `op`'s list answer `body` as a whole, each as the
+/// items declare it ([`projected`]), for a page the mock orders and cuts itself
+/// ([`ranges`]): of the items' type, in the route's collection (see [`in_collection`]),
+/// holding what each of the query's filters asks, with an identity, and valid as an item
+/// of the answer, least recently written first. A route with no path parameter is read
+/// only as [`stored_rest`] reads one. `None`, and nothing is read, for a query holding a
+/// value that is no such filter (no record can be shown to answer it), or a list the
+/// store is not read for. The items' type `t` when their schema names no type of its own.
+pub(super) async fn collection_records(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: Option<&str>,
+    body: &Value,
+) -> Option<Vec<Value>> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let op = plan.op;
+    let schema = op.success_output()?.schema.as_ref()?;
+    let mut held = None;
+    let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
+    let items_schema = array_parts.iter().find_map(|p| p.get("items"))?;
+    let filters = filters_of(bundle, op.input.query.as_ref(), &item_parts, call, None);
+    if call
+        .query
+        .keys()
+        .any(|param| !filters.iter().any(|(name, _)| name == param))
+    {
+        return None;
+    }
+    let item_type = rt
+        .index()
+        .item_type(bundle, op, body)
+        .or_else(|| t.map(str::to_string))?;
+    if call.path_params.is_empty() {
+        let Binding::Http { path, .. } = &op.binding else {
+            return None;
+        };
+        if !rt.index().sole_written_list(path, &item_type) {
+            return None;
+        }
+    }
+    let field = item_identity(bundle, op, body);
+    let mut records = state.list(&plan.session, &item_type, MAX_STORED_REST).await;
+    records.reverse();
+    records.retain(|r| in_collection(rt, (plan, call), &item_type, &field, r));
+    let mut out: Vec<Value> = Vec::new();
+    let mut known: Vec<String> = Vec::new();
+    for r in &records {
+        let item = projected(bundle, Some(items_schema), &r.data, 0);
+        let Some(id) = mb_mcm::member_at(&item, &field).and_then(id_string) else {
+            continue;
+        };
+        if known.contains(&id)
+            || !filters
+                .iter()
+                .all(|(_, filter)| holds_wanted(&item, filter))
+        {
+            continue;
+        }
+        let valid = pages::with_items(body, vec![item.clone()]).is_some_and(|candidate| {
+            plan.engine
+                .serve_stored(bundle, op, &candidate, None)
+                .is_some()
+        });
+        if !valid {
+            continue;
+        }
+        known.push(id);
+        out.push(item);
+    }
+    Some(out)
 }
 
 /// The declared list member of `op`'s list answer `body`, an object, that the body

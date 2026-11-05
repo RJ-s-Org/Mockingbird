@@ -46,6 +46,7 @@ mod grpc;
 mod http_media;
 mod http_rest;
 mod identity_by_contract;
+mod if_none_match_range;
 mod in_segment_keys;
 mod nested_identity_patches;
 mod provider_policy;
