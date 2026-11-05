@@ -1164,6 +1164,7 @@ pub(super) async fn not_modified(
         dropped_effects: 0,
         new_record: false,
         patched: None,
+        headers: Vec::new(),
     })
 }
 

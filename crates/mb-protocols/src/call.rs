@@ -31,6 +31,7 @@ use crate::{
 mod cursors;
 mod deleted;
 mod envelopes;
+mod header_ids;
 mod lists;
 mod minted;
 #[cfg(test)]
@@ -756,7 +757,7 @@ pub(crate) async fn generate_narrowed(
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
     match prepare(rt, plan, call, response_schema).await {
-        Prepared::Answered(answer) => Ok(answer),
+        Prepared::Answered(answer) => Ok(*answer),
         Prepared::Pending(pending) => {
             generate_pending(rt, plan, call, *pending, response_schema).await
         }
@@ -850,7 +851,7 @@ pub(crate) async fn generate_pending(
 /// What [`prepare`] found: an answer that needs no generation, or the
 /// state a generation must take into account.
 pub(crate) enum Prepared<'a> {
-    Answered(GeneratedResponse),
+    Answered(Box<GeneratedResponse>),
     Pending(Box<Pending<'a>>),
 }
 
@@ -962,7 +963,9 @@ pub(crate) async fn prepare<'a>(
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(nothing_held(rt, plan, call, response_schema, &detail).await);
+        return Prepared::Answered(Box::new(
+            nothing_held(rt, plan, call, response_schema, &detail).await,
+        ));
     }
     // Whatever `unknown_ids` says: this one is known to be gone. A record found by
     // another member than its key (`/issues/{issue_iid}`) is not what the path named
@@ -985,7 +988,9 @@ pub(crate) async fn prepare<'a>(
     {
         let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(nothing_held(rt, plan, call, response_schema, &detail).await);
+        return Prepared::Answered(Box::new(
+            nothing_held(rt, plan, call, response_schema, &detail).await,
+        ));
     }
 
     // A read whose `If-None-Match` holds the stored record's entity tag: `304`, at once,
@@ -1001,7 +1006,7 @@ pub(crate) async fn prepare<'a>(
             .forces(rt, plan, call)
     {
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(answer);
+        return Prepared::Answered(Box::new(answer));
     }
 
     // A write sending a token its record held before is refused before generating.
@@ -1017,7 +1022,7 @@ pub(crate) async fn prepare<'a>(
             Ok(found) => tokens = found,
             Err(refusal) => {
                 state.touch(session).instrument(state_span()).await;
-                return Prepared::Answered(refusal);
+                return Prepared::Answered(Box::new(refusal));
             }
         }
     }
@@ -1071,7 +1076,7 @@ pub(crate) async fn prepare<'a>(
             if let Some(mut served) = served {
                 write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
                 state.touch(session).instrument(state_span()).await;
-                return Prepared::Answered(served);
+                return Prepared::Answered(Box::new(served));
             }
         }
         recalled = Some(earlier);
@@ -1082,7 +1087,7 @@ pub(crate) async fn prepare<'a>(
             .await
     {
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(served);
+        return Prepared::Answered(Box::new(served));
     }
 
     // The next page of a list this session cut, by the token it minted.
@@ -1095,7 +1100,7 @@ pub(crate) async fn prepare<'a>(
             .instrument(state_span())
             .await;
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(served);
+        return Prepared::Answered(Box::new(served));
     }
 
     let is_query = matches!(op.kind, OperationKind::Query);
@@ -1133,11 +1138,12 @@ pub(crate) async fn prepare<'a>(
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(served);
+        return Prepared::Answered(Box::new(served));
     }
 
     let earlier = match recalled {
@@ -1349,6 +1355,7 @@ pub(crate) async fn complete(
     // A new record whose id no draw could free: the answer is served, and
     // nothing else comes of it.
     let mut unstored = false;
+    let mut header_id: Option<Value> = None;
     // What state keeps of an answer holding its record in an envelope or a one-item
     // array is the record, and of a request the record it holds the same way.
     let held_in = op.identity.as_ref().filter(|i| i.record.is_some());
@@ -1477,6 +1484,15 @@ pub(crate) async fn complete(
                 )
                 .await;
                 next_numbers(rt, &mut state, session, t, &mut generated).await;
+                // An answer naming its record only in a header: the id is minted there.
+                header_id = header_ids::mint(
+                    rt,
+                    &mut state,
+                    (session, op, t, state_call),
+                    &mut generated,
+                    plan.page_url.as_deref(),
+                )
+                .await;
                 // A create answered for the id of a record held already does not replace
                 // it: nothing comes of it, and the answer agrees with the store. It is the
                 // refusal the prompt offered on that record, when it did; otherwise (a
@@ -1640,6 +1656,7 @@ pub(crate) async fn complete(
                         collection: collection.clone(),
                         origin,
                         held: target.is_some() && !generated.new_record,
+                        header_id: header_id.clone(),
                     },
                 )
                 .await;
@@ -5460,7 +5477,7 @@ async fn read_context(
                     .filter(|_| delete && rt.consistency && !param_is_id)
                     .map(String::as_str)
                     .collect();
-                match by_path_fields(state, session, t, &read_fields, id, owner).await {
+                let found = match by_path_fields(state, session, t, &read_fields, id, owner).await {
                     Some(hit) => Some(hit),
                     None => match identity.and_then(|i| i.path_field.as_deref()) {
                         Some(field) => by_path_fields(state, session, t, &[field], id, owner).await,
@@ -5474,6 +5491,13 @@ async fn read_context(
                         }
                         None => None,
                     },
+                };
+                match found {
+                    Some(hit) => Some(hit),
+                    None if rt.consistency => {
+                        by_alternate_member(state, session, (op, t), id, owner).await
+                    }
+                    None => None,
                 }
             }
         },
@@ -6463,6 +6487,234 @@ async fn by_path_fields(
     Some(found.clone())
 }
 
+/// The members of type `t`'s records that `op`'s target parameter names its record by
+/// besides the identity, when the parameter offers either of two of them: in its name
+/// (`templateIdOrAlias` names `TemplateId` and `Alias`) or in an either-or phrase of
+/// its description ("the project's id or slug", "its id or the alias"); see
+/// [`either_or`]. An alternative that is a bare `id` while the identity is no id by its
+/// name (an `Alias` key) is the one other member that is an id by its name. A member
+/// the description only mentions, or that a negation keeps out ("not its number"), is
+/// none, and so is a phrase neither of whose sides is a key of the record (the
+/// identity, the member the path parameter names, or one the type's operations
+/// identify it by): "the ID of the user or organization membership" offers two
+/// other members, not two keys. A parameter whose schema is not a string, or that
+/// offers fewer than two members, the identity counted, has none.
+fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
+    let Some(param) = target_param(op) else {
+        return Vec::new();
+    };
+    let declared = op
+        .input
+        .path
+        .as_ref()
+        .and_then(|p| p.get("properties"))
+        .and_then(|p| p.get(&param));
+    let is_string = declared
+        .and_then(|d| d.get("type"))
+        .and_then(Value::as_str)
+        .is_none_or(|t| t == "string");
+    if !is_string {
+        return Vec::new();
+    }
+    let description = declared
+        .and_then(|d| d.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let identity = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+    let index = rt.index();
+    let bundle = rt.bundle();
+    let read = index
+        .detail_reads
+        .get(t)
+        .and_then(|i| bundle.operations.get(*i)?.success_output()?.schema.as_ref());
+    let schema = index.record_schemas.get(t).or(read);
+    let scalar = |member: &str| {
+        schema
+            .and_then(|s| property_schema(bundle, s, member))
+            .and_then(|m| m.get("type").and_then(Value::as_str).map(str::to_string))
+            .is_some_and(|t| matches!(t.as_str(), "string" | "integer"))
+    };
+    let mut members: Vec<String> = type_members(rt, t)
+        .into_iter()
+        .filter(|m| scalar(m))
+        .collect();
+    if !members.iter().any(|m| m == identity) {
+        members.push(identity.to_string());
+    }
+    let is_id = |member: &str| mb_mcm::ends_with_words(member, "id");
+    let declared_keys = index.identity_fields(t);
+    // The one member other than the identity that is an id of the record itself, for
+    // a bare `id` alternative of a key that is none: an id naming the record's own kind
+    // (`recipeId` on recipes), or one the type's operations identify it by. An id of
+    // another kind (`ownerId`) is a foreign key, never the record's.
+    let other_id = || {
+        let mut ids = members.iter().filter(|m| {
+            m.as_str() != identity
+                && is_id(m)
+                && (names_own_kind(m, t) || declared_keys.iter().any(|k| k == *m))
+        });
+        match (ids.next(), ids.next()) {
+            (Some(only), None) if !is_id(mb_mcm::leaf_member(identity)) => Some(only.clone()),
+            _ => None,
+        }
+    };
+    // A bare `id` stands for the identity when the identity is an id by its name.
+    let bare_id = |runs: &[String]| {
+        (is_id(mb_mcm::leaf_member(identity)) && runs.iter().any(|r| r == "id"))
+            .then(|| identity.to_string())
+    };
+    let resolve = |runs: &[String]| {
+        runs.iter()
+            .find_map(|run| {
+                members
+                    .iter()
+                    .find(|m| mb_mcm::joined_name(m) == *run)
+                    .cloned()
+            })
+            .or_else(|| runs.iter().any(|r| r == "id").then(other_id).flatten())
+            .or_else(|| bare_id(runs))
+    };
+    // The members that name the record itself: the identity, the response field the
+    // path parameter names when it is another, and those the type's other operations
+    // identify it by (a delete whose answer declares no key reads as its read does).
+    let keys: Vec<&str> = std::iter::once(identity)
+        .chain(op.identity.as_ref().and_then(|i| i.path_field.as_deref()))
+        .chain(declared_keys.iter().map(String::as_str))
+        .collect();
+    let mut offered: Vec<String> = Vec::new();
+    for pair in either_or(&[param.as_str()]).into_iter().chain(either_or(
+        &description
+            .split(['.', ',', ';', ':', '!', '?', '(', ')'])
+            .collect::<Vec<_>>(),
+    )) {
+        let [Some(a), Some(b)] = pair.map(|runs| resolve(&runs)) else {
+            continue;
+        };
+        // An offer of two ways to name the record has the record's key on one side:
+        // "the user or organization" names two other records, not this one's keys.
+        if a == b || !keys.iter().any(|k| *k == a || *k == b) {
+            continue;
+        }
+        for m in [a, b] {
+            if !offered.contains(&m) {
+                offered.push(m);
+            }
+        }
+    }
+    if offered.len() < 2 {
+        return Vec::new();
+    }
+    offered.retain(|m| m != identity);
+    offered
+}
+
+/// Whether the id `member` names type `t`'s own kind: its words before `id` are the
+/// type's name or its last words, plural aside (`recipeId` for `recipes`, `lineId`
+/// for `ticket_lines`).
+fn names_own_kind(member: &str, t: &str) -> bool {
+    let words = mb_mcm::words(mb_mcm::leaf_member(member));
+    let Some((_, before)) = words.split_last() else {
+        return false;
+    };
+    if before.is_empty() {
+        return false;
+    }
+    let named = mb_mcm::stem(&mb_mcm::joined_name(&before.concat()));
+    let kind = mb_mcm::words(t);
+    (0..kind.len()).any(|from| mb_mcm::stem(&mb_mcm::joined_name(&kind[from..].concat())) == named)
+}
+
+/// Words before an `or` that make the phrase no offer of two ways to name a record.
+const NEGATIONS: [&str; 7] = ["not", "no", "never", "neither", "nor", "without", "except"];
+
+/// Words skipped after an `or` ("or its alias", "or the slug", "or by name").
+const LEADING: [&str; 7] = ["the", "its", "their", "a", "an", "by", "his"];
+
+/// The either-or phrases in `clauses` (a name, or a description cut at its
+/// punctuation): for each `or` with no negation before it in its clause, the words
+/// nearest it on either side, as the runs that may name a member, longest first (the
+/// last two words before it joined, then the last; the first two after it, then the
+/// first). `templateIdOrAlias` is `[["templateid", "id"], ["alias"]]`; "the order's
+/// id, not its order number" has none.
+fn either_or(clauses: &[&str]) -> Vec<[Vec<String>; 2]> {
+    let mut found = Vec::new();
+    for clause in clauses {
+        let words: Vec<String> = mb_mcm::words(clause)
+            .into_iter()
+            .map(str::to_lowercase)
+            // A possessive's `s` ("the template's id").
+            .filter(|w| w != "s")
+            .collect();
+        for (at, word) in words.iter().enumerate() {
+            if word != "or" {
+                continue;
+            }
+            let before = &words[..at];
+            if before.iter().any(|w| NEGATIONS.contains(&w.as_str())) {
+                continue;
+            }
+            let after: Vec<&String> = words[at + 1..]
+                .iter()
+                .skip_while(|w| LEADING.contains(&w.as_str()))
+                .collect();
+            let runs = |side: &[&String]| -> Vec<String> {
+                let mut runs = Vec::new();
+                if side.len() >= 2 {
+                    runs.push(format!("{}{}", side[0], side[1]));
+                }
+                if let Some(first) = side.first() {
+                    runs.push((*first).clone());
+                }
+                runs
+            };
+            let mut back: Vec<&String> = before.iter().rev().take(2).collect();
+            back.reverse();
+            let back_runs = match back.as_slice() {
+                [one, two] => vec![format!("{one}{two}"), (*two).clone()],
+                [one] => vec![(*one).clone()],
+                _ => Vec::new(),
+            };
+            let ahead: Vec<&String> = after.into_iter().take(2).collect();
+            let ahead_runs = runs(&ahead);
+            if !back_runs.is_empty() && !ahead_runs.is_empty() {
+                found.push([back_runs, ahead_runs]);
+            }
+        }
+    }
+    found
+}
+
+/// The one held record of type `t` that holds the path value `value`, which missed its
+/// key, in one of the members `op`'s parameter also names it by (see
+/// [`alternate_members`]): a template read by its id where its alias is its key. With
+/// `owner`, only one that is theirs; with two such records, none.
+async fn by_alternate_member(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (op, t): (&Operation, &str),
+    value: &str,
+    owner: Option<&Owner>,
+) -> Option<StoredResource> {
+    let rt = state.rt;
+    let members = alternate_members(rt, op, t);
+    if members.is_empty() {
+        return None;
+    }
+    let stored = state.list(session, t, MAX_SCAN).await;
+    let mut holding = stored.into_iter().filter(|r| {
+        members.iter().any(|field| {
+            mb_mcm::member_at(&r.data, field)
+                .and_then(id_string)
+                .is_some_and(|held| held == value)
+                && owner.is_none_or(|o| owner_fits(rt, session, r, o, field))
+        })
+    });
+    match (holding.next(), holding.next()) {
+        (Some(found), None) => Some(found),
+        _ => None,
+    }
+}
+
 /// State-store access for one call. The first failing call marks the mock
 /// degraded and makes the rest of the call stateless; a successful call
 /// clears the mark. While degraded, [`crate::StateHealth`] lets one call per
@@ -7298,6 +7550,8 @@ struct WriteRequest<'a> {
     origin: WriteOrigin,
     /// The session held what this writes to, so it cannot be marked deleted.
     held: bool,
+    /// The id a create's answer named its record by in a header (see [`header_ids`]).
+    header_id: Option<Value>,
 }
 
 /// Writes a 2xx answer to state: a call's create, update or delete, or
@@ -7315,6 +7569,7 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         collection,
         origin,
         held: was_held,
+        header_id,
     } = w;
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
@@ -7368,7 +7623,16 @@ async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
         return;
     }
     let data = generated.body.clone().or_else(|| request_body.cloned());
+    // A create that named its record in a header: the request is the record, under the
+    // header's id.
+    let header_id = header_id.and_then(|value| Some((id_string(&value)?, value)));
     let (id, data) = match op.kind {
+        OperationKind::Command(Effect::Create) if header_id.is_some() => {
+            let Some((id, value)) = header_id else { return };
+            let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+            let record = header_ids::record(rt, resource_type, request_body, field, value);
+            (id, Some(record))
+        }
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
             let Some(data) = data else { return };
@@ -7615,6 +7879,29 @@ mod tests {
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn an_either_or_phrase_offers_the_words_nearest_its_or() {
+        let runs = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            either_or(&["templateIdOrAlias"]),
+            vec![[runs(&["templateid", "id"]), runs(&["alias"])]]
+        );
+        assert_eq!(
+            either_or(&["The project's id or the slug"]),
+            vec![[runs(&["projectid", "id"]), runs(&["slug"])]]
+        );
+        assert_eq!(
+            either_or(&["id or order number"]),
+            vec![[runs(&["id"]), runs(&["ordernumber", "order"])]]
+        );
+        // A negation, a mention, a name with no `or`: none.
+        assert!(either_or(&["Not an id or a slug"]).is_empty());
+        assert!(either_or(&["The order's id", " not its order number"]).is_empty());
+        assert!(either_or(&["The user's id", " A username is not accepted"]).is_empty());
+        assert!(either_or(&["widgetId"]).is_empty());
+        assert!(either_or(&["or"]).is_empty());
+    }
 
     #[test]
     fn a_create_s_scope_is_noted_and_forgotten() {

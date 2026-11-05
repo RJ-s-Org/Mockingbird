@@ -1042,6 +1042,7 @@ impl Engine {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         })
     }
 }
