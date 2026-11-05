@@ -15,30 +15,47 @@
 //!
 //! `GET /api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world`
 //! ([`get_world`]) answers a version's effective description as a
-//! [`WorldView`].
+//! [`WorldView`]. The same path takes `PUT` ([`put_world`], a whole
+//! overlay) and `PATCH` ([`patch_world`], a JSON merge patch of the newest
+//! overlay), each adding a revision that holds only the entries that
+//! validate; `…/world/revisions[/{r}]` lists and reads revisions,
+//! `…/world/revisions/{r}/restore` adds one holding an earlier overlay, and
+//! `…/world/diff` compares two. A write with `If-Match: <revision>` applies
+//! only on top of that revision (else a 412 `revision_conflict`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use axum::body::Bytes;
 use axum::extract::State;
+use axum::extract::rejection::BytesRejection;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use futures::{StreamExt, TryStreamExt, stream};
 use mb_auth::Permission;
 
 use mb_import::world::tier0;
 use mb_mcm::Bundle;
-use mb_mcm::world::{Author, Refusal, RefusalCode, World, overlay, validate};
+use mb_mcm::world::{
+    Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
+    check_size, overlay, validate,
+};
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
 use mb_store::{
     ContractStatus, ContractVersion, ControlStore, Mock, NewWorldRevision, StoreError,
-    WorldRevision,
+    WorldRevision, WorldRevisionInfo,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AdminState;
 use crate::access::WsAccess;
-use crate::problem::{ApiResult, Json, Path, Problem};
+use crate::audit::snapshot;
+use crate::problem::{
+    ApiResult, Json, PROBLEM_CONTENT_TYPE, Path, Problem, Query, RequireJson, media_type,
+    unsupported_media_type,
+};
 
 /// How many earlier revisions [`effective_world`] reads, at most, to find
 /// which revision last set an entry. An entry unchanged for longer is
@@ -608,4 +625,916 @@ pub async fn get_world(
     let v = resolve_version(&st, &m, &version).await?;
     let eff = effective_world(st.store.as_ref(), m.id, v.version, &v.bundle).await?;
     Ok(Json(WorldView::new(v.version, eff)))
+}
+
+// ---------------------------------------------------------------------------
+// Authoring: put, patch, revisions, restore, diff.
+// ---------------------------------------------------------------------------
+
+/// The media type of a JSON merge patch (RFC 7396).
+pub const MERGE_PATCH_CONTENT_TYPE: &str = "application/merge-patch+json";
+
+/// How many times a write without `If-Match` is retried when another write
+/// lands between reading the newest revision and adding the next one.
+const WRITE_ATTEMPTS: usize = 4;
+
+/// The `code` of the 412 answering a stale `If-Match`.
+pub const REVISION_CONFLICT: &str = "revision_conflict";
+
+/// Path of one revision of a contract version's world description.
+#[derive(Deserialize, Debug)]
+pub struct RevisionPath {
+    pub mock: String,
+    pub version: String,
+    pub revision: i64,
+}
+
+/// Who writes a revision: `agent`, `llm` or `user`.
+#[derive(Deserialize, Debug, Default)]
+pub struct AuthorQuery {
+    /// `agent`, `llm` or `user` (default `user`; `heuristic` is refused).
+    pub author: Option<String>,
+}
+
+/// The two revisions to compare.
+#[derive(Deserialize, Debug, Default)]
+pub struct DiffQuery {
+    /// The older revision; `0` is the empty overlay. Default: the one before
+    /// `to`.
+    pub from: Option<i64>,
+    /// The newer revision; default the newest (`0` when there is none).
+    pub to: Option<i64>,
+}
+
+/// The answer to a write: the revision added, what of the document was
+/// applied (and stored) and what was refused.
+#[derive(Serialize, ToSchema, Debug)]
+pub struct WorldWriteResult {
+    /// The contract version written to.
+    pub version: i64,
+    /// The new revision's number.
+    pub revision: i64,
+    /// The entries that validate: the stored overlay.
+    #[schema(value_type = Object)]
+    pub applied: World,
+    /// The entries that did not validate; they are not stored.
+    #[schema(value_type = Vec<RefusalSchema>)]
+    pub refused: Vec<Refusal>,
+}
+
+/// One revision of a world description, without its document.
+#[derive(Serialize, ToSchema, Debug)]
+#[schema(as = WorldRevisionInfo)]
+pub struct RevisionInfoView {
+    pub id: Uuid,
+    /// The contract version it is attached to.
+    pub version: i64,
+    /// 1-based, increasing per contract version.
+    pub revision: i64,
+    #[schema(value_type = AuthorSchema)]
+    pub author: Author,
+    /// The subject of the caller that wrote it, when known.
+    pub created_by: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<WorldRevisionInfo> for RevisionInfoView {
+    fn from(r: WorldRevisionInfo) -> Self {
+        Self {
+            id: r.id,
+            version: r.version,
+            revision: r.revision,
+            author: r.author,
+            created_by: r.created_by,
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// One revision of a world description with its overlay document.
+#[derive(Serialize, ToSchema, Debug)]
+#[schema(as = WorldRevision)]
+pub struct RevisionView {
+    pub id: Uuid,
+    /// The contract version it is attached to.
+    pub version: i64,
+    /// 1-based, increasing per contract version.
+    pub revision: i64,
+    #[schema(value_type = AuthorSchema)]
+    pub author: Author,
+    /// The subject of the caller that wrote it, when known.
+    pub created_by: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The overlay as stored.
+    #[schema(value_type = Object)]
+    pub document: Value,
+}
+
+impl From<WorldRevision> for RevisionView {
+    fn from(r: WorldRevision) -> Self {
+        Self {
+            id: r.id,
+            version: r.version,
+            revision: r.revision,
+            author: r.author,
+            created_by: r.created_by,
+            created_at: r.created_at,
+            document: r.document,
+        }
+    }
+}
+
+/// The leaf pointers that differ between two revisions' overlays.
+#[derive(Serialize, ToSchema, Debug, PartialEq, Eq)]
+pub struct WorldDiff {
+    pub from: i64,
+    pub to: i64,
+    /// Leaves `to` has and `from` has not.
+    pub added: Vec<String>,
+    /// Leaves `from` has and `to` has not.
+    pub removed: Vec<String>,
+    /// Leaves both have, with different values.
+    pub changed: Vec<String>,
+}
+
+/// The problem of a refused world write: a [`Problem`] plus a machine
+/// readable `code` and, when it is about one place, the JSON `path` into
+/// the document.
+#[derive(Serialize, ToSchema, Debug)]
+pub struct WorldProblem {
+    /// Always `about:blank`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub title: String,
+    pub status: u16,
+    pub detail: String,
+    /// `too_large` (413), `invalid` (422) or `revision_conflict` (412).
+    pub code: String,
+    /// A JSON pointer into the document; empty for the whole document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// Why a world write failed.
+#[derive(Debug)]
+pub enum WorldError {
+    /// An ordinary problem (404, 400, 415, ...).
+    Problem(Problem),
+    /// A problem with a `code` and maybe a `path`.
+    Coded {
+        status: StatusCode,
+        title: &'static str,
+        code: &'static str,
+        path: Option<String>,
+        detail: String,
+    },
+}
+
+impl WorldError {
+    /// The 412 answering a write whose `If-Match` is not the newest revision.
+    fn conflict(detail: impl Into<String>) -> Self {
+        Self::Coded {
+            status: StatusCode::PRECONDITION_FAILED,
+            title: "Revision conflict",
+            code: REVISION_CONFLICT,
+            path: None,
+            detail: detail.into(),
+        }
+    }
+
+    /// The 413 or 422 of a document refused whole.
+    fn refused(r: Refusal) -> Self {
+        let (status, title) = match r.code {
+            RefusalCode::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "World description too large"),
+            _ => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid world description",
+            ),
+        };
+        Self::Coded {
+            status,
+            title,
+            code: r.code.as_str(),
+            path: Some(r.path),
+            detail: r.message,
+        }
+    }
+}
+
+impl From<Problem> for WorldError {
+    fn from(p: Problem) -> Self {
+        Self::Problem(p)
+    }
+}
+
+impl From<StoreError> for WorldError {
+    fn from(e: StoreError) -> Self {
+        Self::Problem(e.into())
+    }
+}
+
+impl IntoResponse for WorldError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Problem(p) => p.into_response(),
+            Self::Coded {
+                status,
+                title,
+                code,
+                path,
+                detail,
+            } => {
+                let body = WorldProblem {
+                    kind: "about:blank".into(),
+                    title: title.into(),
+                    status: status.as_u16(),
+                    detail,
+                    code: code.into(),
+                    path,
+                };
+                let body = serde_json::to_vec(&body).unwrap_or_default();
+                (status, [(header::CONTENT_TYPE, PROBLEM_CONTENT_TYPE)], body).into_response()
+            }
+        }
+    }
+}
+
+type WorldResult<T> = Result<T, WorldError>;
+
+/// The author `q` names: `agent`, `llm` or `user`, else `default`. A 400
+/// for `heuristic` (only the importer writes tier 0) or anything else.
+fn author_of(q: &AuthorQuery, default: Author) -> ApiResult<Author> {
+    match q.author.as_deref() {
+        None => Ok(default),
+        Some("agent") => Ok(Author::Agent),
+        Some("llm") => Ok(Author::Llm),
+        Some("user") => Ok(Author::User),
+        Some("heuristic") => Err(Problem::bad_request(
+            "author `heuristic` is the importer's (tier 0); write as `agent`, `llm` or `user`",
+        )),
+        Some(other) => Err(Problem::bad_request(format!(
+            "author {other:?} is not `agent`, `llm` or `user`"
+        ))),
+    }
+}
+
+/// The revision `If-Match` names (`3`, `"3"` or `W/"3"`; `0` for none yet),
+/// `None` when absent or `*`. A 400 when it is not a revision number.
+fn if_match(headers: &HeaderMap) -> ApiResult<Option<i64>> {
+    let Some(value) = headers.get(header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let text = value.to_str().unwrap_or_default().trim();
+    if text == "*" {
+        return Ok(None);
+    }
+    let bare = text.strip_prefix("W/").unwrap_or(text).trim_matches('"');
+    bare.parse::<i64>()
+        .ok()
+        .filter(|n| *n >= 0)
+        .map(Some)
+        .ok_or_else(|| {
+            Problem::bad_request(format!(
+                "If-Match {text:?} is not a world description revision number"
+            ))
+        })
+}
+
+/// A 415 unless the request's `Content-Type` is one of `accepted`.
+fn require_media(headers: &HeaderMap, accepted: &[&str]) -> ApiResult<()> {
+    match media_type(headers.get(header::CONTENT_TYPE)) {
+        Some(m) if accepted.contains(&m.as_str()) => Ok(()),
+        _ => Err(unsupported_media_type(
+            "this endpoint",
+            &accepted.join(" or "),
+        )),
+    }
+}
+
+/// The body, or a 413 `too_large` when it is over the route's limit.
+fn body_bytes(body: Result<Bytes, BytesRejection>) -> WorldResult<Bytes> {
+    body.map_err(|e| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            WorldError::refused(Refusal {
+                path: String::new(),
+                code: RefusalCode::TooLarge,
+                message: format!(
+                    "the description is over {} bytes; at most {} are accepted",
+                    mb_mcm::world::MAX_BYTES,
+                    mb_mcm::world::MAX_BYTES
+                ),
+            })
+        } else {
+            WorldError::Problem(Problem::new(e.status(), e.body_text()))
+        }
+    })
+}
+
+/// Parses JSON, a 400 problem when it is not.
+fn parse_json(bytes: &[u8]) -> WorldResult<Value> {
+    serde_json::from_slice(bytes).map_err(|e| {
+        WorldError::Problem(Problem::titled(
+            StatusCode::BAD_REQUEST,
+            "Malformed JSON",
+            format!("the body is not JSON: {e}"),
+        ))
+    })
+}
+
+/// The world description `doc` is, checked whole: at most
+/// [`mb_mcm::world::MAX_BYTES`] (413) and [`mb_mcm::world::MAX_DEPTH`]
+/// deep (422), of the format's shape and with pointers that parse (422
+/// naming the first entry that is not). The entries are validated against
+/// a bundle later, one by one.
+fn check_document(doc: &Value) -> WorldResult<World> {
+    let bytes = serde_json::to_vec(doc).map_err(StoreError::from)?;
+    check_size(&bytes).map_err(WorldError::refused)?;
+    let world = serde_json::from_value::<World>(doc.clone()).map_err(|e| {
+        WorldError::refused(Refusal {
+            path: shape_error_path(doc),
+            code: RefusalCode::Invalid,
+            message: format!("not a world description entry: {e}"),
+        })
+    })?;
+    if let Some(r) = bad_pointer(&world) {
+        return Err(WorldError::refused(r));
+    }
+    Ok(world)
+}
+
+/// The first request or answer pointer of `world` that does not parse.
+fn bad_pointer(world: &World) -> Option<Refusal> {
+    for (id, op) in &world.operations {
+        let base = format!("/operations/{}", escape(id));
+        let mut pointers: Vec<(String, &Pointer)> = Vec::new();
+        if let Some(r) = &op.request {
+            pointers.extend(
+                r.record
+                    .iter()
+                    .map(|p| (format!("{base}/request/record"), p)),
+            );
+            pointers.extend(
+                r.records
+                    .iter()
+                    .map(|p| (format!("{base}/request/records"), p)),
+            );
+        }
+        if let Some(a) = &op.answer {
+            pointers.extend(
+                a.record
+                    .iter()
+                    .map(|p| (format!("{base}/answer/record"), p)),
+            );
+            pointers.extend(
+                a.records
+                    .iter()
+                    .map(|p| (format!("{base}/answer/records"), p)),
+            );
+        }
+        for (member, change) in &op.changes {
+            if let ChangeDesc::FromRequest(p) = change {
+                pointers.push((format!("{base}/changes/{}/from_request", escape(member)), p));
+            }
+        }
+        for (path, pointer) in pointers {
+            if let Err(e) = Pointer::check(pointer.as_str()) {
+                return Some(Refusal {
+                    path,
+                    code: RefusalCode::Invalid,
+                    message: format!("`{pointer}` is not a JSON pointer: {e}"),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Whether a value deserializes as one entry type.
+type Parses = fn(&Value) -> bool;
+
+/// Where `doc` stops being of the [`World`] shape, for a document that does
+/// not deserialize: the type or operation that does not, and inside it the
+/// deepest member whose removal makes it deserialize. Empty when the
+/// document is not an object.
+fn shape_error_path(doc: &Value) -> String {
+    let Some(obj) = doc.as_object() else {
+        return String::new();
+    };
+    fn parses<T: serde::de::DeserializeOwned>(v: &Value) -> bool {
+        serde_json::from_value::<T>(v.clone()).is_ok()
+    }
+    let sections: [(&str, Parses); 2] = [
+        ("types", parses::<TypeDesc>),
+        ("operations", parses::<OpDesc>),
+    ];
+    for (section, ok) in sections {
+        let Some(items) = obj.get(section) else {
+            continue;
+        };
+        let Some(items) = items.as_object() else {
+            return format!("/{section}");
+        };
+        for (name, desc) in items {
+            if !ok(desc) {
+                return format!("/{section}/{}{}", escape(name), culprit(desc, ok));
+            }
+        }
+    }
+    if obj.contains_key("version") {
+        return "/version".into();
+    }
+    String::new()
+}
+
+/// The path, relative to `entry` (which `ok` refuses), of the deepest member
+/// whose removal alone makes `ok` accept it; empty when none does.
+fn culprit(entry: &Value, ok: Parses) -> String {
+    let mut path: Vec<String> = Vec::new();
+    'down: loop {
+        let mut node = entry;
+        for token in &path {
+            let next = match node {
+                Value::Object(m) => m.get(token.as_str()),
+                Value::Array(a) => token.parse::<usize>().ok().and_then(|i| a.get(i)),
+                _ => None,
+            };
+            match next {
+                Some(n) => node = n,
+                None => break 'down,
+            }
+        }
+        let children: Vec<String> = match node {
+            Value::Object(m) => m.keys().cloned().collect(),
+            Value::Array(a) => (0..a.len()).map(|i| i.to_string()).collect(),
+            _ => break,
+        };
+        for child in children {
+            let mut candidate = entry.clone();
+            remove_at(&mut candidate, &path, &child);
+            if ok(&candidate) {
+                path.push(child);
+                continue 'down;
+            }
+        }
+        break;
+    }
+    path.iter().map(|t| format!("/{}", escape(t))).collect()
+}
+
+/// Removes `child` of the node at `path` in `v`.
+fn remove_at(v: &mut Value, path: &[String], child: &str) {
+    let mut node = v;
+    for token in path {
+        node = match node {
+            Value::Object(m) => match m.get_mut(token.as_str()) {
+                Some(n) => n,
+                None => return,
+            },
+            Value::Array(a) => match token.parse::<usize>().ok().and_then(|i| a.get_mut(i)) {
+                Some(n) => n,
+                None => return,
+            },
+            _ => return,
+        };
+    }
+    match node {
+        Value::Object(m) => {
+            m.remove(child);
+        }
+        Value::Array(a) => {
+            if let Some(i) = child.parse::<usize>().ok().filter(|i| *i < a.len()) {
+                a.remove(i);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Validates `world` against `bundle` and stores what applies as the next
+/// revision of the version: when `expect` is set, only if the newest
+/// revision is that one (else a 412).
+async fn store_validated(
+    st: &AdminState,
+    m: &Mock,
+    v: &ContractVersion,
+    world: &World,
+    author: Author,
+    created_by: &str,
+    expect: Option<i64>,
+) -> WorldResult<(WorldRevision, Vec<Refusal>, World)> {
+    let Validation {
+        mut applied,
+        refused,
+    } = validate(world, &v.bundle);
+    // A type or operation left with no entry sets nothing.
+    applied.types.retain(|_, t| *t != TypeDesc::default());
+    applied.operations.retain(|_, op| *op != OpDesc::default());
+    let document = serde_json::to_value(&applied).map_err(StoreError::from)?;
+    let added = st
+        .store
+        .add_world_revision(
+            m.id,
+            v.version,
+            NewWorldRevision {
+                author,
+                document,
+                created_by: Some(created_by.to_string()),
+                expect,
+            },
+        )
+        .await;
+    match added {
+        Ok(r) => Ok((r, refused, applied)),
+        Err(StoreError::Conflict(d)) => Err(WorldError::conflict(d)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The overlay to write, built from the newest revision's document (`None`
+/// when there is none).
+type Build<'a> = &'a (dyn Fn(Option<&WorldRevision>) -> WorldResult<Value> + Send + Sync);
+
+/// Writes the overlay `build` makes from the newest revision as the next
+/// revision, checked whole and validated, and audits it as `action`.
+///
+/// With `If-Match`, the newest revision must be that one, else a 412.
+/// Without it the write applies on top of whatever is newest, built again
+/// if another write lands in between.
+#[allow(clippy::too_many_arguments)]
+async fn write(
+    st: &AdminState,
+    access: &WsAccess,
+    m: &Mock,
+    v: &ContractVersion,
+    author: Author,
+    expect: Option<i64>,
+    action: &str,
+    build: Build<'_>,
+) -> WorldResult<(StatusCode, Json<WorldWriteResult>)> {
+    let mut attempt = 0;
+    let (revision, refused, applied) = loop {
+        attempt += 1;
+        let latest = st.store.latest_world_revision(m.id, v.version).await?;
+        let current = latest.as_ref().map_or(0, |r| r.revision);
+        if let Some(n) = expect
+            && n != current
+        {
+            return Err(WorldError::conflict(format!(
+                "If-Match names revision {n}, but the newest revision of contract version {} is {current}",
+                v.version
+            )));
+        }
+        let world = check_document(&build(latest.as_ref())?)?;
+        match store_validated(
+            st,
+            m,
+            v,
+            &world,
+            author,
+            &access.principal.subject,
+            Some(current),
+        )
+        .await
+        {
+            Ok(done) => break done,
+            Err(WorldError::Coded { code, .. })
+                if code == REVISION_CONFLICT && expect.is_none() && attempt < WRITE_ATTEMPTS =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let info = RevisionInfoView::from(WorldRevisionInfo::from(&revision));
+    access
+        .audit(
+            &st.audit,
+            action,
+            format!("world:{}@{}", m.name, v.version),
+            None,
+            snapshot(&json!({
+                "revision": info.revision,
+                "author": info.author,
+                "refused": refused.len(),
+            })),
+        )
+        .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(WorldWriteResult {
+            version: v.version,
+            revision: revision.revision,
+            applied,
+            refused,
+        }),
+    ))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("author" = Option<String>, Query, description = "`agent`, `llm` or `user` (default `user`)"),
+        ("If-Match" = Option<String>, Header, description = "The revision this write is based on (`0` for none yet); a 412 when it is not the newest"),
+    ),
+    request_body(content = Object, description = "An overlay world description (`mockingbird world schema`); it replaces the overlay whole", content_type = "application/json"),
+    responses(
+        (status = 201, description = "Added as the next revision: the entries that validate are stored and apply at once; the refused ones are listed and not stored", body = WorldWriteResult),
+        (status = 400, description = "Malformed JSON, an unknown or `heuristic` author, a bad If-Match, or a version that is neither a number nor `active`", body = Problem, content_type = "application/problem+json"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
+        (status = 412, description = "`revision_conflict`: If-Match is not the newest revision", body = WorldProblem, content_type = "application/problem+json"),
+        (status = 413, description = "`too_large`: over 256 KiB", body = WorldProblem, content_type = "application/problem+json"),
+        (status = 415, body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "`invalid`: nested over 32 deep, not of the format's shape, or a pointer that does not parse; `path` names where", body = WorldProblem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn put_world(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(WorldPath { mock, version }): Path<WorldPath>,
+    Query(q): Query<AuthorQuery>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> WorldResult<(StatusCode, Json<WorldWriteResult>)> {
+    access.require(Permission::Edit)?;
+    require_media(&headers, &["application/json"])?;
+    let author = author_of(&q, Author::User)?;
+    let expect = if_match(&headers)?;
+    let bytes = body_bytes(body)?;
+    check_size(&bytes).map_err(WorldError::refused)?;
+    let doc = parse_json(&bytes)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = resolve_version(&st, &m, &version).await?;
+    let build = move |_: Option<&WorldRevision>| -> WorldResult<Value> { Ok(doc.clone()) };
+    write(&st, &access, &m, &v, author, expect, "world.put", &build).await
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("author" = Option<String>, Query, description = "`agent`, `llm` or `user` (default `user`)"),
+        ("If-Match" = Option<String>, Header, description = "The revision this patch is based on (`0` for none yet); a 412 when it is not the newest. Without it the patch applies to the newest."),
+    ),
+    request_body(content = Object, description = "A JSON merge patch (RFC 7396) of the newest revision's overlay; `null` removes an entry", content_type = "application/merge-patch+json"),
+    responses(
+        (status = 201, description = "The merged overlay, added as the next revision: the entries that validate are stored and apply at once; the refused ones are listed and not stored", body = WorldWriteResult),
+        (status = 400, description = "Malformed JSON, an unknown or `heuristic` author, a bad If-Match, or a version that is neither a number nor `active`", body = Problem, content_type = "application/problem+json"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
+        (status = 412, description = "`revision_conflict`: If-Match is not the newest revision", body = WorldProblem, content_type = "application/problem+json"),
+        (status = 413, description = "`too_large`: the patch or the merged overlay is over 256 KiB", body = WorldProblem, content_type = "application/problem+json"),
+        (status = 415, description = "Content-Type is not application/merge-patch+json or application/json", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "`invalid`: the merged overlay is nested over 32 deep, not of the format's shape, or has a pointer that does not parse; `path` names where", body = WorldProblem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn patch_world(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(WorldPath { mock, version }): Path<WorldPath>,
+    Query(q): Query<AuthorQuery>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> WorldResult<(StatusCode, Json<WorldWriteResult>)> {
+    access.require(Permission::Edit)?;
+    require_media(&headers, &[MERGE_PATCH_CONTENT_TYPE, "application/json"])?;
+    let author = author_of(&q, Author::User)?;
+    let expect = if_match(&headers)?;
+    let bytes = body_bytes(body)?;
+    check_size(&bytes).map_err(WorldError::refused)?;
+    let patch = parse_json(&bytes)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = resolve_version(&st, &m, &version).await?;
+    let build = move |latest: Option<&WorldRevision>| -> WorldResult<Value> {
+        let mut doc = latest.map_or_else(
+            || json!({ "version": mb_mcm::world::VERSION }),
+            |r| r.document.clone(),
+        );
+        json_patch::merge(&mut doc, &patch);
+        Ok(doc)
+    };
+    write(&st, &access, &m, &v, author, expect, "world.patch", &build).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/revisions",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = String, Path, description = "Contract version number, or `active`"),
+    ),
+    responses(
+        (status = 200, description = "The version's world description revisions, newest first", body = Vec<RevisionInfoView>),
+        (status = 400, body = Problem, content_type = "application/problem+json"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn list_revisions(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(WorldPath { mock, version }): Path<WorldPath>,
+) -> ApiResult<Json<Vec<RevisionInfoView>>> {
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = resolve_version(&st, &m, &version).await?;
+    let list = st.store.list_world_revisions(m.id, v.version).await?;
+    Ok(Json(list.into_iter().map(RevisionInfoView::from).collect()))
+}
+
+/// Revision `revision` of `v`, a 404 problem when there is none.
+async fn revision_of(
+    st: &AdminState,
+    m: &Mock,
+    v: &ContractVersion,
+    revision: i64,
+) -> ApiResult<WorldRevision> {
+    match st.store.get_world_revision(m.id, v.version, revision).await {
+        Ok(r) => Ok(r),
+        Err(StoreError::NotFound(_)) => Err(Problem::not_found(format!(
+            "contract version {} of mock {:?} has no world description revision {revision}",
+            v.version, m.name
+        ))),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/revisions/{revision}",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("revision" = i64, Path, description = "Revision number"),
+    ),
+    responses(
+        (status = 200, description = "The revision with its overlay document as stored", body = RevisionView),
+        (status = 400, body = Problem, content_type = "application/problem+json"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn get_revision(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(RevisionPath {
+        mock,
+        version,
+        revision,
+    }): Path<RevisionPath>,
+) -> ApiResult<Json<RevisionView>> {
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = resolve_version(&st, &m, &version).await?;
+    Ok(Json(revision_of(&st, &m, &v, revision).await?.into()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/revisions/{revision}/restore",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("revision" = i64, Path, description = "The revision to restore"),
+        ("author" = Option<String>, Query, description = "`agent`, `llm` or `user` (default: the restored revision's author)"),
+        ("If-Match" = Option<String>, Header, description = "The newest revision this restore expects; a 412 when it is not"),
+    ),
+    responses(
+        (status = 201, description = "The revision's document, validated again, added as the next revision", body = WorldWriteResult),
+        (status = 400, body = Problem, content_type = "application/problem+json"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
+        (status = 412, description = "`revision_conflict`", body = WorldProblem, content_type = "application/problem+json"),
+        (status = 415, description = "Content-Type is not application/json", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "`invalid`: the stored document is not a world description", body = WorldProblem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn restore_revision(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(RevisionPath {
+        mock,
+        version,
+        revision,
+    }): Path<RevisionPath>,
+    Query(q): Query<AuthorQuery>,
+    headers: HeaderMap,
+    _json: RequireJson,
+) -> WorldResult<(StatusCode, Json<WorldWriteResult>)> {
+    access.require(Permission::Edit)?;
+    let expect = if_match(&headers)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = resolve_version(&st, &m, &version).await?;
+    let old = revision_of(&st, &m, &v, revision).await?;
+    let author = author_of(&q, old.author)?;
+    let build = move |_: Option<&WorldRevision>| -> WorldResult<Value> { Ok(old.document.clone()) };
+    write(
+        &st,
+        &access,
+        &m,
+        &v,
+        author,
+        expect,
+        "world.restore",
+        &build,
+    )
+    .await
+}
+
+/// Each leaf of `v` (a scalar, or an empty object or array) by its JSON
+/// pointer.
+fn leaves(v: &Value, prefix: &str, out: &mut BTreeMap<String, Value>) {
+    match v {
+        Value::Object(m) if !m.is_empty() => {
+            for (k, child) in m {
+                leaves(child, &format!("{prefix}/{}", escape(k)), out);
+            }
+        }
+        Value::Array(a) if !a.is_empty() => {
+            for (i, child) in a.iter().enumerate() {
+                leaves(child, &format!("{prefix}/{i}"), out);
+            }
+        }
+        leaf => {
+            out.insert(prefix.to_string(), leaf.clone());
+        }
+    }
+}
+
+/// The leaves that differ from `from` to `to`.
+fn diff(from: &Value, to: &Value) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut a, mut b) = (BTreeMap::new(), BTreeMap::new());
+    leaves(from, "", &mut a);
+    leaves(to, "", &mut b);
+    let added = b.keys().filter(|k| !a.contains_key(*k)).cloned().collect();
+    let removed = a.keys().filter(|k| !b.contains_key(*k)).cloned().collect();
+    let changed = b
+        .iter()
+        .filter(|(k, v)| a.get(*k).is_some_and(|old| old != *v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    (added, removed, changed)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/diff",
+    tag = "contracts",
+    params(
+        ("ws" = String, Path, description = "Workspace name"),
+        ("mock" = String, Path, description = "Mock name"),
+        ("version" = String, Path, description = "Contract version number, or `active`"),
+        ("from" = Option<i64>, Query, description = "The older revision; `0` is the empty overlay (default: the one before `to`)"),
+        ("to" = Option<i64>, Query, description = "The newer revision (default: the newest)"),
+    ),
+    responses(
+        (status = 200, description = "The leaf pointers of the overlay documents added, removed and changed from `from` to `to`", body = WorldDiff),
+        (status = 400, body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such mock, version or revision", body = Problem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn diff_world(
+    State(st): State<AdminState>,
+    access: WsAccess,
+    Path(WorldPath { mock, version }): Path<WorldPath>,
+    Query(q): Query<DiffQuery>,
+) -> ApiResult<Json<WorldDiff>> {
+    access.require(Permission::Read)?;
+    let m = st.mock(&access.ws, &mock).await?;
+    let v = resolve_version(&st, &m, &version).await?;
+    let to = match q.to {
+        Some(n) => n,
+        None => st
+            .store
+            .latest_world_revision(m.id, v.version)
+            .await?
+            .map_or(0, |r| r.revision),
+    };
+    let from = q.from.unwrap_or((to - 1).max(0));
+    let mut docs = Vec::with_capacity(2);
+    for n in [from, to] {
+        docs.push(if n == 0 {
+            json!({ "version": mb_mcm::world::VERSION })
+        } else {
+            revision_of(&st, &m, &v, n).await?.document
+        });
+    }
+    let (added, removed, changed) = diff(&docs[0], &docs[1]);
+    Ok(Json(WorldDiff {
+        from,
+        to,
+        added,
+        removed,
+        changed,
+    }))
 }
