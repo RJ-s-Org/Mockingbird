@@ -1,0 +1,451 @@
+openapi: 3.0.3
+info:
+  title: BigCommerce Management API (catalog products and orders)
+  version: "2026-11"
+  description: |
+    A subset of the BigCommerce REST Management API, written from its public reference
+    (developer.bigcommerce.com: Catalog - Products V3 and Orders V2). Every path starts
+    with the store, `/stores/{store_hash}`, and every request sends the API account's
+    token in `X-Auth-Token`. Bodies are JSON; send `Accept: application/json`.
+
+    The two API versions answer in different shapes. Catalog V3 wraps every answer:
+    a single product as `{data: {...}, meta: {}}`, a list as
+    `{data: [...], meta: {pagination: {total, count, per_page, current_page, total_pages, links}}}`.
+    V3 lists are paged by `page` (from 1) and `limit` (default 50, at most 250) and
+    filtered by query parameters such as `name` (the exact product name), `sku`,
+    `keyword` and `id:in` (a comma-separated list of ids). V3 errors answer
+    `{status, title, type, errors}`. A product's `name` is unique in the store, and so
+    is a set `sku`: creating a product with a name or sku that is taken is refused with
+    409 Conflict. A product without one of its required fields (`name`, `type`,
+    `weight`, `price`) is refused with 422.
+
+    Orders V2 answers bare objects and bare arrays, with no envelope. Money fields are
+    decimal strings with four places, such as `"12.5000"`. An order is created with
+    `billing_address` and `products`: each product either names a catalog product by
+    `product_id` and `quantity`, whose price then comes from the catalog, or is a custom
+    line with `name`, `quantity`, `price_ex_tax` and `price_inc_tax`. The order's
+    `subtotal_ex_tax` is the sum of its lines' `price_ex_tax` times their quantities,
+    and `items_total` is the sum of the quantities. The lines are read at
+    `/v2/orders/{order_id}/products`.
+
+    An order's `status_id` names its state, with `status` its name: 0 Incomplete,
+    1 Pending, 2 Shipped, 3 Partially Shipped, 4 Refunded, 5 Cancelled, 6 Declined,
+    7 Awaiting Payment, 8 Awaiting Pickup, 9 Awaiting Shipment, 10 Completed,
+    11 Awaiting Fulfillment, 12 Manual Verification Required, 13 Disputed and
+    14 Partially Refunded. `PUT /v2/orders/{order_id}` sets the fields it is sent and
+    keeps the rest; sending `status_id` moves the order to that status.
+
+    `DELETE /v2/orders/{order_id}` archives the order (204): it is kept, with
+    `is_deleted` true, and still reads by its id, but it leaves `GET /v2/orders`,
+    which lists only orders that are not archived. `GET /v2/orders?is_deleted=true`
+    lists the archived ones. Order lists sort by `id`, lowest first, unless `sort`
+    says otherwise (`id`, `date_created`, `status_id`... with `:asc` or `:desc`), are
+    paged by `page` and `limit` (default 50), and filter on `email` (the billing
+    email), `status_id`, `min_id`, `max_id`, `customer_id` and the rest. A V2 list
+    with no orders to answer is 204 No Content, with no body. V2 errors answer an
+    array of `{status, message}`.
+servers:
+  - url: https://api.bigcommerce.com
+security:
+  - authToken: []
+tags:
+  - name: Products
+  - name: Orders
+  - name: Order Products
+paths:
+  /stores/{store_hash}/v3/catalog/products:
+    parameters:
+      - $ref: "#/components/parameters/store_hash"
+    get:
+      tags: [Products]
+      operationId: getProducts
+      summary: Get all products
+      parameters:
+        - {name: name, in: query, description: Products with exactly this name., schema: {type: string}}
+        - {name: sku, in: query, description: Products with this sku., schema: {type: string}}
+        - {name: keyword, in: query, description: Products whose name or description holds the keyword., schema: {type: string}}
+        - name: "id:in"
+          in: query
+          description: Products whose id is one of these.
+          style: form
+          explode: false
+          schema: {type: array, items: {type: integer}}
+        - {name: sort, in: query, schema: {type: string, enum: [id, name, sku, price, date_modified, date_last_imported]}}
+        - {name: direction, in: query, schema: {type: string, enum: [asc, desc]}}
+        - {name: page, in: query, description: The page to answer; the first is 1., schema: {type: integer, minimum: 1}}
+        - {name: limit, in: query, description: Products per page (default 50)., schema: {type: integer, minimum: 1, maximum: 250}}
+      responses:
+        "200":
+          description: A page of products.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Product"}
+                  meta: {$ref: "#/components/schemas/CollectionMeta"}
+        "422": {$ref: "#/components/responses/V3Error"}
+    post:
+      tags: [Products]
+      operationId: createProduct
+      summary: Create a product
+      description: "Name and sku are unique in the store; a taken one is refused with 409."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProductInput"}
+      responses:
+        "200":
+          description: The created product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProductAnswer"}
+        "409": {$ref: "#/components/responses/V3Error"}
+        "422": {$ref: "#/components/responses/V3Error"}
+  /stores/{store_hash}/v3/catalog/products/{product_id}:
+    parameters:
+      - $ref: "#/components/parameters/store_hash"
+      - {name: product_id, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Products]
+      operationId: getProductById
+      summary: Get a product
+      responses:
+        "200":
+          description: The product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProductAnswer"}
+        "404": {$ref: "#/components/responses/V3Error"}
+    put:
+      tags: [Products]
+      operationId: updateProduct
+      summary: Update a product
+      description: Sets the fields sent and keeps the rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProductInput"}
+      responses:
+        "200":
+          description: The updated product.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProductAnswer"}
+        "404": {$ref: "#/components/responses/V3Error"}
+        "409": {$ref: "#/components/responses/V3Error"}
+    delete:
+      tags: [Products]
+      operationId: deleteProductById
+      summary: Delete a product
+      responses:
+        "204": {description: Deleted.}
+  /stores/{store_hash}/v2/orders:
+    parameters:
+      - $ref: "#/components/parameters/store_hash"
+    get:
+      tags: [Orders]
+      operationId: getAllOrders
+      summary: Get all orders
+      description: "Orders that are not archived, lowest id first by default; 204 when none match."
+      parameters:
+        - {name: min_id, in: query, description: The lowest order id to answer., schema: {type: integer}}
+        - {name: max_id, in: query, description: The highest order id to answer., schema: {type: integer}}
+        - {name: customer_id, in: query, schema: {type: integer}}
+        - {name: email, in: query, description: The billing email of the orders., schema: {type: string}}
+        - {name: status_id, in: query, description: Orders in this status., schema: {type: integer}}
+        - {name: is_deleted, in: query, description: "true lists the archived orders.", schema: {type: boolean}}
+        - {name: sort, in: query, description: "Field and direction, such as `date_created:desc`.", schema: {type: string}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+        - {name: limit, in: query, description: Orders per page (default 50)., schema: {type: integer, minimum: 1, maximum: 250}}
+      responses:
+        "200":
+          description: The orders.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Order"}
+        "204": {description: No order matches.}
+    post:
+      tags: [Orders]
+      operationId: createAnOrder
+      summary: Create an order
+      description: "`billing_address` and `products` are required."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OrderInput"}
+      responses:
+        "200":
+          description: The created order.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "400": {$ref: "#/components/responses/V2Error"}
+  /stores/{store_hash}/v2/orders/count:
+    parameters:
+      - $ref: "#/components/parameters/store_hash"
+    get:
+      tags: [Orders]
+      operationId: getCountOrder
+      summary: Count orders by status
+      responses:
+        "200":
+          description: The number of orders in each status and in all.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  statuses:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: integer}
+                        name: {type: string}
+                        count: {type: integer}
+                  count: {type: integer}
+  /stores/{store_hash}/v2/orders/{order_id}:
+    parameters:
+      - $ref: "#/components/parameters/store_hash"
+      - $ref: "#/components/parameters/order_id"
+    get:
+      tags: [Orders]
+      operationId: getAnOrder
+      summary: Get an order
+      description: An archived order still reads, with `is_deleted` true.
+      responses:
+        "200":
+          description: The order.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "404": {$ref: "#/components/responses/V2Error"}
+    put:
+      tags: [Orders]
+      operationId: updateAnOrder
+      summary: Update an order
+      description: "Sets the fields sent and keeps the rest; `status_id` moves the order to that status."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OrderUpdate"}
+      responses:
+        "200":
+          description: The updated order.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Order"}
+        "404": {$ref: "#/components/responses/V2Error"}
+    delete:
+      tags: [Orders]
+      operationId: deleteAnOrder
+      summary: Archive an order
+      description: "The order is kept with `is_deleted` true and leaves the default order list."
+      responses:
+        "204": {description: Archived.}
+        "404": {$ref: "#/components/responses/V2Error"}
+  /stores/{store_hash}/v2/orders/{order_id}/products:
+    parameters:
+      - $ref: "#/components/parameters/store_hash"
+      - $ref: "#/components/parameters/order_id"
+    get:
+      tags: [Order Products]
+      operationId: getAllOrderProducts
+      summary: List an order's products
+      description: The order's lines, in the order they were added.
+      parameters:
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 250}}
+      responses:
+        "200":
+          description: The lines.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/OrderProduct"}
+        "404": {$ref: "#/components/responses/V2Error"}
+components:
+  securitySchemes:
+    authToken:
+      type: apiKey
+      in: header
+      name: X-Auth-Token
+  parameters:
+    store_hash:
+      name: store_hash
+      in: path
+      required: true
+      description: The store's hash.
+      schema: {type: string, example: abc123def}
+    order_id:
+      name: order_id
+      in: path
+      required: true
+      schema: {type: integer}
+  responses:
+    V3Error:
+      description: "A catalog error: `{status, title, type, errors}`."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: {type: integer, example: 409}
+              title: {type: string, example: "The product name is a duplicate"}
+              type: {type: string, example: /api-docs/getting-started/api-status-codes}
+              errors: {type: object, additionalProperties: {type: string}}
+    V2Error:
+      description: "An orders error: an array of `{status, message}`."
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                status: {type: integer, example: 404}
+                message: {type: string, example: "The requested resource was not found."}
+  schemas:
+    ProductInput:
+      type: object
+      required: [name, type, weight, price]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 250, description: Unique in the store.}
+        type: {type: string, enum: [physical, digital]}
+        sku: {type: string, maxLength: 255, description: Unique in the store when set.}
+        description: {type: string}
+        weight: {type: number}
+        price: {type: number}
+        categories: {type: array, items: {type: integer}}
+        inventory_level: {type: integer}
+        is_visible: {type: boolean}
+    Product:
+      type: object
+      properties:
+        id: {type: integer, readOnly: true}
+        name: {type: string}
+        type: {type: string, enum: [physical, digital]}
+        sku: {type: string}
+        description: {type: string}
+        weight: {type: number}
+        price: {type: number}
+        calculated_price: {type: number, readOnly: true}
+        inventory_level: {type: integer}
+        is_visible: {type: boolean}
+        date_created: {type: string, format: date-time}
+        date_modified: {type: string, format: date-time}
+    ProductAnswer:
+      type: object
+      properties:
+        data: {$ref: "#/components/schemas/Product"}
+        meta: {type: object}
+    CollectionMeta:
+      type: object
+      properties:
+        pagination:
+          type: object
+          properties:
+            total: {type: integer, description: Products that match in all.}
+            count: {type: integer, description: Products on this page.}
+            per_page: {type: integer}
+            current_page: {type: integer}
+            total_pages: {type: integer}
+            links:
+              type: object
+              properties:
+                previous: {type: string}
+                current: {type: string, example: "?page=1&limit=50"}
+                next: {type: string}
+    Address:
+      type: object
+      properties:
+        first_name: {type: string}
+        last_name: {type: string}
+        street_1: {type: string}
+        city: {type: string}
+        state: {type: string}
+        zip: {type: string}
+        country: {type: string}
+        country_iso2: {type: string}
+        email: {type: string, format: email}
+    OrderLineInput:
+      type: object
+      description: "A catalog product by `product_id`, or a custom line with `name` and its prices."
+      properties:
+        product_id: {type: integer}
+        name: {type: string}
+        quantity: {type: integer, minimum: 1}
+        price_ex_tax: {type: number}
+        price_inc_tax: {type: number}
+        sku: {type: string}
+      required: [quantity]
+    OrderInput:
+      type: object
+      required: [billing_address, products]
+      properties:
+        status_id: {type: integer, minimum: 0, maximum: 14}
+        customer_id: {type: integer, description: 0 for a guest.}
+        billing_address: {$ref: "#/components/schemas/Address"}
+        shipping_addresses: {type: array, items: {$ref: "#/components/schemas/Address"}}
+        products: {type: array, minItems: 1, items: {$ref: "#/components/schemas/OrderLineInput"}}
+        staff_notes: {type: string}
+        customer_message: {type: string}
+    OrderUpdate:
+      type: object
+      properties:
+        status_id: {type: integer, minimum: 0, maximum: 14}
+        billing_address: {$ref: "#/components/schemas/Address"}
+        products: {type: array, items: {$ref: "#/components/schemas/OrderLineInput"}}
+        staff_notes: {type: string}
+        customer_message: {type: string}
+    Order:
+      type: object
+      properties:
+        id: {type: integer, readOnly: true}
+        customer_id: {type: integer}
+        date_created: {type: string, description: "RFC 2822, such as `Tue, 05 Mar 2019 21:40:11 +0000`."}
+        date_modified: {type: string}
+        status_id: {type: integer}
+        status: {type: string, description: "The name of `status_id`, such as `Awaiting Fulfillment`."}
+        subtotal_ex_tax: {type: string, example: "62.6793"}
+        subtotal_inc_tax: {type: string, example: "67.8400"}
+        subtotal_tax: {type: string}
+        total_ex_tax: {type: string}
+        total_inc_tax: {type: string}
+        total_tax: {type: string}
+        items_total: {type: integer, description: The sum of the lines' quantities.}
+        items_shipped: {type: integer}
+        currency_code: {type: string, example: USD}
+        is_deleted: {type: boolean, description: true once the order is archived.}
+        staff_notes: {type: string}
+        customer_message: {type: string}
+        billing_address: {$ref: "#/components/schemas/Address"}
+        products:
+          type: object
+          properties:
+            url: {type: string}
+            resource: {type: string, example: /orders/100/products}
+    OrderProduct:
+      type: object
+      properties:
+        id: {type: integer}
+        order_id: {type: integer}
+        product_id: {type: integer, description: The catalog product; 0 for a custom line.}
+        name: {type: string}
+        sku: {type: string}
+        quantity: {type: integer}
+        base_price: {type: string, example: "12.5000"}
+        price_ex_tax: {type: string}
+        price_inc_tax: {type: string}
+        total_ex_tax: {type: string, description: price_ex_tax times quantity.}
+        total_inc_tax: {type: string}

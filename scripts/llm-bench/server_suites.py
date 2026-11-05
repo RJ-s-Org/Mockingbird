@@ -79,6 +79,13 @@ Suites (contracts are in-repo, so the bench is reproducible):
   Range header paging), Kubernetes config maps (label selectors, resourceVersion
   conflicts, merge patches) and PagerDuty incidents (a From header, de-duplication
   keys, include[]). Not in the default suites. Same rule; no check gates the rest.
+- journeys_blind11: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind11/`: BigCommerce products and orders (V3
+  envelopes beside bare V2 arrays, archived orders), Help Scout conversations (HAL,
+  Resource-ID headers, JSON Patch), Mux live streams (disable/enable actions, nested
+  playback ids), Postmark templates and message streams (aliases, ErrorCode, archive
+  and unarchive) and HCP Terraform workspaces (JSON:API, locks, variables). Not in the
+  default suites. Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -131,7 +138,7 @@ from xml.etree import ElementTree
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
           "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
-          "journeys_blind8", "journeys_blind9", "journeys_blind10")
+          "journeys_blind8", "journeys_blind9", "journeys_blind10", "journeys_blind11")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -6765,6 +6772,695 @@ def run_journeys_blind10(srv, sink, args):
     run_journey_table(BLIND10_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- eleventh blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind11/). They were picked for
+# API styles: two API versions in one store, a V3 `{data, meta.pagination}` envelope
+# beside bare V2 arrays, decimal strings for money, order totals computed from catalog
+# prices, a status machine by `status_id`, archiving as a soft delete with
+# `is_deleted`, and 204 for an empty list (BigCommerce), HAL answers under `_embedded`,
+# a 201 that names the new id in a `Resource-ID` header, JSON Patch operations that
+# answer 204, tags replaced by PUT, a status filter whose default is `active`, a search
+# expression in `query`, and `vnd.error` validation errors (Help Scout), a `data`
+# envelope, a stream state machine driven by `disable` and `enable` actions, a secret
+# key that is reset, playback ids as a nested resource, `limit`/`page` paging and
+# `{error: {type, messages}}` (Mux), PascalCase fields, templates named by id or by a
+# client alias, a layout filter, `Count`/`Offset` with `TotalCount`, client-chosen
+# stream ids, archiving with a purge date, and 422 errors told apart by `ErrorCode`
+# (Postmark), and JSON:API documents with kebab-case attributes, a workspace by id or
+# by organization and name, `search[name]`, `page[number]`/`page[size]` with
+# `meta.pagination`, a lock that refuses a second lock with 409, nested variables whose
+# key is unique per category, sensitive values that answer null, and safe delete
+# (HCP Terraform). No check gates the rest: a journey goes on with an id of its own when
+# a call gave none. A check asserts only what its contract promises a client. Do not
+# edit a check to suit results.
+BLIND11_CHECKS = {
+    "bigcommerce": [
+        "a created product keeps its name, sku and price", "a taken product name is refused with 409",
+        "a name filter finds the product", "limit 1 answers one product and the pagination",
+        "page 2 reaches the other product", "an order of catalog products totals its lines",
+        "the order's products are its lines", "an email filter lists the buyer's orders by id",
+        "status_id filters the orders", "a status update moves the order and keeps its lines",
+        "min_id answers the orders from that id", "an archived order leaves the list and reads as deleted",
+        "is_deleted true lists the archived order", "a list with no orders answers 204",
+    ],
+    "helpscout": [
+        "an inbox is listed and reads by its id", "a created conversation answers 201 with its Resource-ID",
+        "read matches the created conversation", "the customer thread holds its text",
+        "a note is added as the newest thread", "the default list holds the active conversations, newest first",
+        "status pending lists only the pending one", "the page counts every conversation with status all",
+        "a subject patch answers 204 and changes only the subject",
+        "a closed conversation lists under closed, not active", "a tags put replaces the tags",
+        "a query finds the conversation by its subject", "a deleted conversation is not found and leaves the list",
+        "a conversation without a subject is refused naming the field",
+    ],
+    "mux": [
+        "a created live stream is idle with a key and a public playback id", "read by id matches the created stream",
+        "a signed playback id is added to the stream", "a playback id reads by its id",
+        "a deleted playback id leaves the stream", "disable makes the stream disabled",
+        "status disabled lists the disabled stream", "enable makes the stream idle again",
+        "a reset gives the stream a new key", "stream_key finds the stream by its new key only",
+        "limit 1 pages answer one stream each", "a patch changes the fields sent and keeps the rest",
+        "an unknown latency mode is refused as invalid_parameters", "a deleted live stream is not found",
+    ],
+    "postmark": [
+        "a created template answers its id, alias and layout", "the template reads the same by id and by alias",
+        "a taken alias is refused with ErrorCode 1122", "an edit by alias changes the subject and keeps the body",
+        "LayoutTemplate lists the templates that use the layout",
+        "Count and Offset page the templates with their TotalCount", "a layout in use is not deleted",
+        "a deleted template answers ErrorCode 1101 by id and by alias",
+        "a created stream keeps its chosen ID and type", "a taken stream ID is refused with ErrorCode 1230",
+        "an edit renames the stream and keeps its type",
+        "an archived stream answers its purge date and leaves the list",
+        "IncludeArchivedStreams lists it archived, purged 45 days later", "unarchive brings the stream back",
+    ],
+    "terraform": [
+        "a created workspace keeps its name and settings", "the workspace reads the same by id and by name",
+        "a taken name is refused with 422", "search[name] finds the workspaces by name",
+        "page[size] 2 answers two workspaces and the pagination", "page[number] 2 reaches the last workspace",
+        "a lock locks the workspace with its reason", "a locked workspace refuses a second lock with 409",
+        "an unlock frees the workspace", "a patch changes only the attributes sent",
+        "a variable is created on the workspace", "a taken key in the same category is refused with 422",
+        "a sensitive variable answers a null value", "a safe-deleted workspace is not found by id or name",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND11_CHECKS)
+BLIND11_DIR = "scripts/llm-bench/contracts/blind11"
+# Contracts alone: no persona.
+BLIND11_MOCKS = {name: (f"{BLIND11_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND11_CHECKS}
+
+
+def bigcommerce_steps(j):
+    # Product names, skus and the buyer's email hold a tag made for this run, and every
+    # list filters on them, so the lists hold only what was made here.
+    j.headers.update({"x-auth-token": "bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    store = "/stores/bench7f3k2q"
+    products, orders = f"{store}/v3/catalog/products", f"{store}/v2/orders"
+    mug, poster = f"Bench Mug {tag}", f"Bench Poster {tag}"
+    buyer = f"buyer.{tag}@bench.example"
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**4, 10**6)
+
+    def data(answer):
+        return obj(obj(answer).get("data"))
+
+    def catalog(**query):
+        # `id:in` is a form list with explode false: its commas are sent as they are.
+        answer = obj(j.call("GET", f"{products}?{urllib.parse.urlencode(query, safe=',:')}"))
+        return ids_of(answer.get("data")), obj(obj(answer.get("meta")).get("pagination"))
+
+    def bought(**query):
+        answer = j.call("GET", orders, query=dict({"email": buyer}, **query))
+        return ids_of(answer if isinstance(answer, list) else [])
+
+    def lines_of(oid):
+        answer = j.call("GET", f"{orders}/{oid}/products")
+        return dicts(answer if isinstance(answer, list) else [])
+
+    made = data(j.call("POST", products, body={"name": mug, "type": "physical", "weight": 0.4, "price": 12.5,
+                                               "sku": f"MUG-{tag}"}))
+    j.check("a created product keeps its name, sku and price",
+            j.last["status"] == 200 and is_int(made.get("id")) and eq(made.get("name"), mug)
+            and eq(made.get("sku"), f"MUG-{tag}") and near(made.get("price"), 12.5, 0.001),
+            product={k: made.get(k) for k in ("id", "name", "sku", "price")})
+    p1 = own(made.get("id"))
+    taken = obj(j.call("POST", products, body={"name": mug, "type": "physical", "weight": 1, "price": 9}))
+    j.check("a taken product name is refused with 409", j.last["status"] == 409 and eq(taken.get("status"), 409),
+            error=taken)
+    p2 = own(data(j.call("POST", products, body={"name": poster, "type": "physical", "weight": 0.2, "price": 20,
+                                                 "sku": f"POSTER-{tag}"})).get("id"))
+    rows, pages = catalog(name=mug)
+    j.check("a name filter finds the product", rows == [p1] and eq(pages.get("total"), 1),
+            listed=rows, total=pages.get("total"))
+    # Sorted by name: "Bench Mug" comes before "Bench Poster".
+    paged = {"id:in": f"{p1},{p2}", "sort": "name", "direction": "asc", "limit": 1}
+    rows, pages = catalog(page=1, **paged)
+    j.check("limit 1 answers one product and the pagination",
+            rows == [p1] and eq(pages.get("total"), 2) and eq(pages.get("count"), 1)
+            and eq(pages.get("total_pages"), 2) and eq(pages.get("current_page"), 1),
+            listed=rows, pagination=pages)
+    rows, pages = catalog(page=2, **paged)
+    j.check("page 2 reaches the other product", rows == [p2] and eq(pages.get("current_page"), 2),
+            listed=rows, pagination=pages)
+    address = {"first_name": "Ana", "last_name": "Silva", "street_1": "12 Rua Augusta", "city": "Lisbon",
+               "state": "Lisboa", "zip": "1100-053", "country": "Portugal", "country_iso2": "PT", "email": buyer}
+    first = obj(j.call("POST", orders, body={"status_id": 11, "customer_id": 0, "billing_address": address,
+                                             "products": [{"product_id": p1, "quantity": 2},
+                                                          {"product_id": p2, "quantity": 1}]}))
+    j.check("an order of catalog products totals its lines",
+            j.last["status"] in (200, 201) and is_int(first.get("id")) and eq(first.get("status_id"), 11)
+            and eq(first.get("status"), "Awaiting Fulfillment") and eq(first.get("items_total"), 3)
+            and near(decimal_of(first.get("subtotal_ex_tax")), 45.0, 0.005) and first.get("is_deleted") is False,
+            order={k: first.get(k) for k in ("id", "status_id", "status", "items_total", "subtotal_ex_tax",
+                                             "is_deleted")})
+    o1 = own(first.get("id"))
+    lines = lines_of(o1)
+    mugs = by_key(lines, "product_id", p1)
+    j.check("the order's products are its lines",
+            len(lines) == 2 and {line.get("product_id"): line.get("quantity") for line in lines} == {p1: 2, p2: 1}
+            and near(decimal_of(mugs.get("base_price")), 12.5, 0.005)
+            and near(decimal_of(mugs.get("total_ex_tax")), 25.0, 0.005),
+            lines=[{k: line.get(k) for k in ("product_id", "quantity", "base_price", "total_ex_tax")}
+                   for line in lines])
+    second = obj(j.call("POST", orders, body={"status_id": 1, "billing_address": address, "products": [
+        {"name": f"Gift wrap {tag}", "quantity": 1, "price_ex_tax": 3, "price_inc_tax": 3.69}]}))
+    o2 = own(second.get("id"))
+    # The default sort is by id, lowest first.
+    rows = bought()
+    j.check("an email filter lists the buyer's orders by id", rows == sorted([o1, o2]), listed=rows)
+    rows = bought(status_id=1)
+    j.check("status_id filters the orders", rows == [o2], listed=rows)
+    moved = obj(j.call("PUT", f"{orders}/{o2}", body={"status_id": 5}))
+    read = obj(j.call("GET", f"{orders}/{o2}"))
+    j.check("a status update moves the order and keeps its lines",
+            eq(moved.get("status_id"), 5) and eq(moved.get("status"), "Cancelled") and eq(read.get("status_id"), 5)
+            and eq(read.get("items_total"), 1) and near(decimal_of(read.get("subtotal_ex_tax")), 3.0, 0.005),
+            answered=[moved.get("status_id"), moved.get("status")],
+            read={k: read.get(k) for k in ("status_id", "status", "items_total", "subtotal_ex_tax")})
+    later = max(o1, o2)
+    rows = bought(min_id=later)
+    j.check("min_id answers the orders from that id", rows == [later], listed=rows, min_id=later)
+    j.call("DELETE", f"{orders}/{o1}")
+    archived = j.last["status"]
+    rows = bought()
+    kept = obj(j.call("GET", f"{orders}/{o1}"))
+    j.check("an archived order leaves the list and reads as deleted",
+            archived == 204 and rows == [o2] and eq(kept.get("id"), o1) and kept.get("is_deleted") is True,
+            delete_status=archived, listed=rows, is_deleted=kept.get("is_deleted"))
+    rows = bought(is_deleted="true")
+    j.check("is_deleted true lists the archived order", rows == [o1], listed=rows)
+    j.call("GET", orders, query={"email": f"nobody.{tag}@bench.example"})
+    j.check("a list with no orders answers 204", j.last["status"] == 204 and not j.raw.strip(),
+            body=excerpt(j.raw))
+
+
+def helpscout_steps(j):
+    # Every conversation carries a tag made for this run, and every list filters on it,
+    # so the lists hold only the conversations made here.
+    j.headers.update(HELDOUT_AUTH)
+    tag = j.rng.randrange(10**5, 10**6)
+    mine, vip = f"bench-{tag}", f"vip-{tag}"
+    email = f"ana.{tag}@bench.example"
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**6, 10**8)
+
+    def created():
+        value = str(j.answer_headers.get("Resource-ID") or "").strip()
+        return int(value) if value.isdigit() else None
+
+    def conversation(cid):
+        return obj(j.call("GET", f"/v2/conversations/{cid}"))
+
+    def listed(**query):
+        page = obj(j.call("GET", "/v2/conversations", query=dict({"tag": mine}, **query)))
+        return ids_of(obj(page.get("_embedded")).get("conversations")), obj(page.get("page"))
+
+    def tags_of(thing):
+        return [t.get("tag") for t in dicts(thing.get("tags"))]
+
+    def patch(cid, path, value):
+        j.call("PATCH", f"/v2/conversations/{cid}", body={"op": "replace", "path": path, "value": value})
+        return j.last["status"]
+
+    def threads(cid):
+        return dicts(obj(obj(j.call("GET", f"/v2/conversations/{cid}/threads")).get("_embedded")).get("threads"))
+
+    page = obj(j.call("GET", "/v2/mailboxes"))
+    inbox = head(obj(page.get("_embedded")).get("mailboxes"))
+    box = inbox.get("id")
+    read = obj(j.call("GET", f"/v2/mailboxes/{box}")) if is_int(box) else {}
+    j.check("an inbox is listed and reads by its id",
+            is_int(box) and eq(read.get("id"), box) and eq(read.get("name"), inbox.get("name")),
+            listed={k: inbox.get(k) for k in ("id", "name")}, read={k: read.get(k) for k in ("id", "name")})
+    box = own(box)
+
+    def start(subject, status, text, tags):
+        answer = obj(j.call("POST", "/v2/conversations", body={
+            "subject": subject, "customer": {"email": email, "firstName": "Ana", "lastName": "Silva"},
+            "mailboxId": box, "type": "email", "status": status, "tags": tags,
+            "threads": [{"type": "customer", "customer": {"email": email}, "text": text}]}))
+        return created(), answer
+
+    subject = f"Refund for order {tag}"
+    a, answer = start(subject, "active", f"My order {tag} arrived broken, I would like a refund.", [mine])
+    thread_ids = answer.get("threadIds")
+    j.check("a created conversation answers 201 with its Resource-ID",
+            j.last["status"] == 201 and a is not None and isinstance(thread_ids, list) and len(thread_ids) == 1
+            and is_int(thread_ids[0]),
+            resource_id=j.answer_headers.get("Resource-ID"), threadIds=thread_ids)
+    a = own(a)
+    read = conversation(a)
+    j.check("read matches the created conversation",
+            eq(read.get("id"), a) and eq(read.get("subject"), subject) and eq(read.get("status"), "active")
+            and eq(read.get("mailboxId"), box) and eq(obj(read.get("primaryCustomer")).get("email"), email)
+            and tags_of(read) == [mine],
+            conversation={k: read.get(k) for k in ("id", "subject", "status", "mailboxId")},
+            customer=read.get("primaryCustomer"), tags=tags_of(read))
+    found = threads(a)
+    first_id = thread_ids[0] if isinstance(thread_ids, list) and thread_ids else None
+    j.check("the customer thread holds its text",
+            len(found) == 1 and eq(head(found).get("type"), "customer")
+            and (eq(head(found).get("id"), first_id) if first_id is not None else True)
+            and f"order {tag} arrived broken" in str(head(found).get("body")),
+            threads=[{k: t.get(k) for k in ("id", "type", "body")} for t in found])
+    text = f"Asked the warehouse about order {tag}."
+    j.call("POST", f"/v2/conversations/{a}/notes", body={"text": text})
+    added, note = j.last["status"], created()
+    found = threads(a)
+    j.check("a note is added as the newest thread",
+            added == 201 and note is not None and len(found) == 2 and eq(head(found).get("type"), "note")
+            and eq(head(found).get("id"), note) and text in str(head(found).get("body")),
+            status_code=added, resource_id=note, threads=[{k: t.get(k) for k in ("id", "type")} for t in found])
+    b, _ = start(f"Invoice copy {tag}", "pending", f"Please send the invoice for order {tag}.", [mine])
+    c, _ = start(f"Address change {tag}", "active", f"Please ship order {tag} to my office.", [mine])
+    b, c = own(b), own(c)
+    # Newest first: c was made after a, and b is pending.
+    rows, _ = listed()
+    j.check("the default list holds the active conversations, newest first", rows == [c, a], listed=rows)
+    rows, _ = listed(status="pending")
+    j.check("status pending lists only the pending one", rows == [b], listed=rows)
+    rows, counted = listed(status="all")
+    j.check("the page counts every conversation with status all",
+            same_items(rows, [a, b, c]) and eq(counted.get("totalElements"), 3) and eq(counted.get("number"), 1),
+            listed=rows, page=counted)
+    renamed = f"Refund for broken order {tag}"
+    status = patch(a, "/subject", renamed)
+    read = conversation(a)
+    j.check("a subject patch answers 204 and changes only the subject",
+            status == 204 and eq(read.get("subject"), renamed) and eq(read.get("status"), "active")
+            and eq(obj(read.get("primaryCustomer")).get("email"), email) and tags_of(read) == [mine],
+            patch_status=status, subject=read.get("subject"), conversation_status=read.get("status"))
+    patch(a, "/status", "closed")
+    read = conversation(a)
+    closed, _ = listed(status="closed")
+    active, _ = listed()
+    j.check("a closed conversation lists under closed, not active",
+            eq(read.get("status"), "closed") and instant(read.get("closedAt")) is not None and closed == [a]
+            and active == [c],
+            conversation_status=read.get("status"), closedAt=read.get("closedAt"), closed=closed, active=active)
+    j.call("PUT", f"/v2/conversations/{c}/tags", body={"tags": [vip]})
+    put = j.last["status"]
+    read = conversation(c)
+    left, _ = listed(status="all")
+    page = obj(j.call("GET", "/v2/conversations", query={"tag": vip, "status": "all"}))
+    tagged = ids_of(obj(page.get("_embedded")).get("conversations"))
+    j.check("a tags put replaces the tags",
+            put == 204 and tags_of(read) == [vip] and tagged == [c] and same_items(left, [a, b]),
+            put_status=put, tags=tags_of(read), vip=tagged, run_tag=left)
+    rows, _ = listed(status="all", query=f'(subject:"Invoice copy {tag}")')
+    j.check("a query finds the conversation by its subject", rows == [b], listed=rows)
+    j.call("DELETE", f"/v2/conversations/{b}")
+    deleted = j.last["status"]
+    conversation(b)
+    missing = j.last["status"]
+    rows, _ = listed(status="all")
+    j.check("a deleted conversation is not found and leaves the list",
+            deleted == 204 and missing == 404 and rows == [a], delete_status=deleted, read_status=missing,
+            listed=rows)
+    bad = obj(j.call("POST", "/v2/conversations", body={
+        "subject": "", "customer": {"email": email}, "mailboxId": box, "type": "email", "status": "active",
+        "threads": [{"type": "customer", "customer": {"email": email}, "text": "No subject here."}]}))
+    fields = [e.get("path") for e in dicts(obj(bad.get("_embedded")).get("errors"))]
+    j.check("a conversation without a subject is refused naming the field",
+            j.last["status"] == 400 and "subject" in fields, fields=fields, error=bad)
+
+
+def mux_steps(j):
+    # Streams carry a passthrough made for this run, and every list is judged on this
+    # run's streams only.
+    token = base64.b64encode(b"bench-token-id:bench-placeholder").decode()
+    j.headers.update({"authorization": f"Basic {token}"})
+    tag = j.rng.randrange(10**5, 10**6)
+    root = "/video/v1/live-streams"
+    main, backup = f"bench-{tag}-main", f"bench-{tag}-backup"
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_up(j, "", 44)
+
+    def data(answer):
+        return obj(obj(answer).get("data"))
+
+    def stream(sid):
+        return data(j.call("GET", f"{root}/{sid}"))
+
+    def listed(**query):
+        return ids_of(obj(j.call("GET", root, query=query)).get("data"))
+
+    def policies(thing):
+        return [p.get("policy") for p in dicts(thing.get("playback_ids"))]
+
+    made = data(j.call("POST", root, body={"playback_policies": ["public"], "latency_mode": "standard",
+                                           "reconnect_window": 60, "passthrough": main, "test": True,
+                                           "new_asset_settings": {"playback_policies": ["public"]}}))
+    key = given(made.get("stream_key"), None)
+    j.check("a created live stream is idle with a key and a public playback id",
+            j.last["status"] == 201 and given(made.get("id"), None) is not None and key is not None
+            and eq(made.get("status"), "idle") and policies(made) == ["public"] and eq(made.get("passthrough"), main)
+            and eq(made.get("latency_mode"), "standard"),
+            stream={k: made.get(k) for k in ("id", "status", "passthrough", "latency_mode")},
+            playback_ids=made.get("playback_ids"), has_key=key is not None)
+    s1 = own(made.get("id"))
+    public = given(head(made.get("playback_ids")).get("id"), None)
+    read = stream(s1)
+    j.check("read by id matches the created stream",
+            eq(read.get("id"), s1) and eq(read.get("passthrough"), main)
+            and (eq(read.get("stream_key"), key) if key else True)
+            and (ids_of(read.get("playback_ids")) == [public] if public else policies(read) == ["public"]),
+            stream={k: read.get(k) for k in ("id", "passthrough", "status")}, playback_ids=read.get("playback_ids"))
+    added = data(j.call("POST", f"{root}/{s1}/playback-ids", body={"policy": "signed"}))
+    status = j.last["status"]
+    signed = given(added.get("id"), None)
+    now = stream(s1)
+    j.check("a signed playback id is added to the stream",
+            status == 201 and eq(added.get("policy"), "signed") and signed is not None
+            and same_items(policies(now), ["public", "signed"]) and signed in ids_of(now.get("playback_ids")),
+            status_code=status, added=added, playback_ids=now.get("playback_ids"))
+    signed = own(signed)
+    one = data(j.call("GET", f"{root}/{s1}/playback-ids/{signed}"))
+    j.check("a playback id reads by its id", eq(one.get("id"), signed) and eq(one.get("policy"), "signed"),
+            playback_id=one)
+    j.call("DELETE", f"{root}/{s1}/playback-ids/{signed}")
+    removed = j.last["status"]
+    now = stream(s1)
+    j.check("a deleted playback id leaves the stream",
+            removed == 204 and signed not in ids_of(now.get("playback_ids")) and policies(now) == ["public"],
+            delete_status=removed, playback_ids=now.get("playback_ids"))
+    s2 = own(data(j.call("POST", root, body={"playback_policies": ["public"], "passthrough": backup,
+                                             "test": True})).get("id"))
+    j.call("PUT", f"{root}/{s1}/disable")
+    disabled = j.last["status"]
+    state = stream(s1).get("status")
+    j.check("disable makes the stream disabled", disabled == 200 and eq(state, "disabled"),
+            disable_status=disabled, stream_status=state)
+    rows = [s for s in listed(status="disabled", limit=100) if s in (s1, s2)]
+    j.check("status disabled lists the disabled stream", rows == [s1], listed=rows)
+    j.call("PUT", f"{root}/{s1}/enable")
+    enabled = j.last["status"]
+    state = stream(s1).get("status")
+    rows = [s for s in listed(status="idle", limit=100) if s in (s1, s2)]
+    j.check("enable makes the stream idle again", enabled == 200 and eq(state, "idle") and same_items(rows, [s1, s2]),
+            enable_status=enabled, stream_status=state, idle=rows)
+    fresh = data(j.call("POST", f"{root}/{s1}/reset-stream-key"))
+    reset = j.last["status"]
+    new_key = given(fresh.get("stream_key"), None)
+    kept = stream(s1).get("stream_key")
+    j.check("a reset gives the stream a new key",
+            reset == 201 and eq(fresh.get("id"), s1) and new_key is not None and new_key != key and eq(kept, new_key),
+            status_code=reset, changed=new_key is not None and new_key != key, read_matches=eq(kept, new_key))
+    by_new = listed(stream_key=new_key) if new_key else None
+    by_old = listed(stream_key=key) if key else None
+    j.check("stream_key finds the stream by its new key only",
+            by_new == [s1] and isinstance(by_old, list) and s1 not in by_old, by_new=by_new, by_old=by_old)
+    first, second = listed(limit=1, page=1), listed(limit=1, page=2)
+    j.check("limit 1 pages answer one stream each", len(first) == 1 and len(second) == 1 and first != second,
+            first=first, second=second)
+    patched = data(j.call("PATCH", f"{root}/{s1}", body={"latency_mode": "low", "reconnect_window": 0}))
+    read = stream(s1)
+    j.check("a patch changes the fields sent and keeps the rest",
+            eq(patched.get("latency_mode"), "low") and eq(read.get("latency_mode"), "low")
+            and eq(read.get("reconnect_window"), 0) and eq(read.get("passthrough"), main)
+            and (eq(read.get("stream_key"), new_key) if new_key else True),
+            answered={k: patched.get(k) for k in ("latency_mode", "reconnect_window")},
+            read={k: read.get(k) for k in ("latency_mode", "reconnect_window", "passthrough")})
+    bad = obj(j.call("POST", root, body={"playback_policies": ["public"], "latency_mode": "instant"}))
+    j.check("an unknown latency mode is refused as invalid_parameters",
+            j.last["status"] == 400 and eq(obj(bad.get("error")).get("type"), "invalid_parameters"), error=bad)
+    j.call("DELETE", f"{root}/{s2}")
+    deleted = j.last["status"]
+    gone = obj(j.call("GET", f"{root}/{s2}"))
+    j.check("a deleted live stream is not found",
+            deleted == 204 and j.last["status"] == 404 and eq(obj(gone.get("error")).get("type"), "not_found"),
+            delete_status=deleted, error=gone)
+
+
+def postmark_steps(j):
+    # Aliases and the stream ID hold a tag made for this run, and the template lists the
+    # checks judge exactly are filtered on this run's layout.
+    j.headers.update({"x-postmark-server-token": "bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    layout, welcome, receipt = f"layout-{tag}", f"welcome-{tag}", f"receipt-{tag}"
+    stream_id = f"news-{tag}"
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**6, 10**8)
+
+    def refused(answer, code):
+        return j.last["status"] == 422 and eq(obj(answer).get("ErrorCode"), code)
+
+    def template(key):
+        return obj(j.call("GET", f"/templates/{key}"))
+
+    def templates(**query):
+        answer = obj(j.call("GET", "/templates", query=query))
+        return ids_of(answer.get("Templates"), "TemplateId"), answer.get("TotalCount")
+
+    def streams(**query):
+        answer = obj(j.call("GET", "/message-streams", query=query or None))
+        return {s.get("ID"): s for s in dicts(answer.get("MessageStreams"))}
+
+    lid = own(obj(j.call("POST", "/templates", body={
+        "Name": f"Frame {tag}", "Alias": layout, "TemplateType": "Layout",
+        "HtmlBody": "<html><body>{{{@content}}}</body></html>", "TextBody": "{{{@content}}}"})).get("TemplateId"))
+    html = "<p>Hello {{name}}</p>"
+    made = obj(j.call("POST", "/templates", body={
+        "Name": f"Welcome {tag}", "Alias": welcome, "Subject": "Welcome, {{name}}", "HtmlBody": html,
+        "TextBody": "Hello {{name}}", "LayoutTemplate": layout}))
+    j.check("a created template answers its id, alias and layout",
+            j.last["status"] == 200 and is_int(made.get("TemplateId")) and eq(made.get("Alias"), welcome)
+            and eq(made.get("Name"), f"Welcome {tag}") and made.get("Active") is True
+            and eq(made.get("TemplateType"), "Standard") and eq(made.get("LayoutTemplate"), layout),
+            template=made)
+    tid = own(made.get("TemplateId"))
+    by_number, by_alias = template(tid), template(welcome)
+    j.check("the template reads the same by id and by alias",
+            eq(by_number.get("TemplateId"), tid) and eq(by_alias.get("TemplateId"), tid)
+            and eq(by_number.get("Alias"), welcome) and eq(by_alias.get("Alias"), welcome)
+            and eq(by_number.get("Subject"), "Welcome, {{name}}") and eq(by_alias.get("Subject"), "Welcome, {{name}}"),
+            by_id={k: by_number.get(k) for k in ("TemplateId", "Alias", "Subject")},
+            by_alias={k: by_alias.get(k) for k in ("TemplateId", "Alias", "Subject")})
+    taken = obj(j.call("POST", "/templates", body={"Name": "Another welcome", "Alias": welcome, "Subject": "Hi",
+                                                    "TextBody": "Hi"}))
+    j.check("a taken alias is refused with ErrorCode 1122", refused(taken, 1122), error=taken)
+    edited = obj(j.call("PUT", f"/templates/{welcome}", body={"Name": f"Welcome {tag}",
+                                                               "Subject": "Welcome aboard, {{name}}"}))
+    read = template(tid)
+    j.check("an edit by alias changes the subject and keeps the body",
+            eq(edited.get("TemplateId"), tid) and eq(read.get("Subject"), "Welcome aboard, {{name}}")
+            and eq(read.get("HtmlBody"), html) and eq(read.get("LayoutTemplate"), layout)
+            and eq(read.get("Alias"), welcome),
+            edited=edited, read={k: read.get(k) for k in ("Subject", "HtmlBody", "LayoutTemplate", "Alias")})
+    rid = own(obj(j.call("POST", "/templates", body={"Name": f"Receipt {tag}", "Alias": receipt,
+                                                     "Subject": "Your receipt", "TextBody": "Total: {{total}}"})
+                  ).get("TemplateId"))
+    rows, total = templates(Count=50, Offset=0, LayoutTemplate=layout)
+    j.check("LayoutTemplate lists the templates that use the layout", rows == [tid] and eq(total, 1),
+            listed=rows, TotalCount=total)
+    first, total = templates(Count=1, Offset=0)
+    second, again = templates(Count=1, Offset=1)
+    j.check("Count and Offset page the templates with their TotalCount",
+            len(first) == 1 and len(second) == 1 and first != second and is_int(total) and total >= 3
+            and eq(again, total),
+            first=first, second=second, TotalCount=[total, again])
+    busy = obj(j.call("DELETE", f"/templates/{layout}"))
+    refused_busy = refused(busy, 1130)
+    kept = template(lid)
+    j.check("a layout in use is not deleted", refused_busy and eq(kept.get("TemplateId"), lid),
+            error=busy, kept=kept.get("TemplateId"))
+    gone = obj(j.call("DELETE", f"/templates/{receipt}"))
+    removed = j.last["status"] == 200 and eq(gone.get("ErrorCode"), 0)
+    by_number = template(rid)
+    number_gone = refused(by_number, 1101)
+    by_alias = template(receipt)
+    j.check("a deleted template answers ErrorCode 1101 by id and by alias",
+            removed and number_gone and refused(by_alias, 1101), deleted=gone, by_id=by_number, by_alias=by_alias)
+    made = obj(j.call("POST", "/message-streams", body={"ID": stream_id, "Name": f"Newsletter {tag}",
+                                                        "MessageStreamType": "Broadcasts",
+                                                        "Description": "Monthly product news"}))
+    j.check("a created stream keeps its chosen ID and type",
+            j.last["status"] == 200 and eq(made.get("ID"), stream_id) and eq(made.get("Name"), f"Newsletter {tag}")
+            and eq(made.get("MessageStreamType"), "Broadcasts") and made.get("ArchivedAt") is None
+            and is_int(made.get("ServerID")),
+            stream=made)
+    taken = obj(j.call("POST", "/message-streams", body={"ID": stream_id, "Name": "Another stream",
+                                                         "MessageStreamType": "Transactional"}))
+    j.check("a taken stream ID is refused with ErrorCode 1230", refused(taken, 1230), error=taken)
+    edited = obj(j.call("PATCH", f"/message-streams/{stream_id}", body={"Name": f"Product news {tag}"}))
+    read = obj(j.call("GET", f"/message-streams/{stream_id}"))
+    j.check("an edit renames the stream and keeps its type",
+            eq(edited.get("Name"), f"Product news {tag}") and eq(read.get("Name"), f"Product news {tag}")
+            and eq(read.get("MessageStreamType"), "Broadcasts") and eq(read.get("Description"), "Monthly product news"),
+            edited={k: edited.get(k) for k in ("ID", "Name")},
+            read={k: read.get(k) for k in ("ID", "Name", "MessageStreamType", "Description")})
+    archived = obj(j.call("POST", f"/message-streams/{stream_id}/archive"))
+    purge = instant(archived.get("ExpectedPurgeDate"))
+    listed = streams()
+    j.check("an archived stream answers its purge date and leaves the list",
+            eq(archived.get("ID"), stream_id) and purge is not None and stream_id not in listed,
+            archived=archived, listed=sorted(str(k) for k in listed))
+    shown = obj(streams(IncludeArchivedStreams="true").get(stream_id))
+    at = instant(shown.get("ArchivedAt"))
+    j.check("IncludeArchivedStreams lists it archived, purged 45 days later",
+            at is not None and purge is not None and near((purge - at).total_seconds() / 86400, 45, 1.01),
+            stream={k: shown.get(k) for k in ("ID", "ArchivedAt", "ExpectedPurgeDate")},
+            purge=archived.get("ExpectedPurgeDate"))
+    back = obj(j.call("POST", f"/message-streams/{stream_id}/unarchive"))
+    listed = streams()
+    j.check("unarchive brings the stream back",
+            eq(back.get("ID"), stream_id) and "ArchivedAt" in back and back.get("ArchivedAt") is None
+            and stream_id in listed and obj(listed.get(stream_id)).get("ArchivedAt") is None,
+            unarchived=back, listed=sorted(str(k) for k in listed))
+
+
+def terraform_steps(j):
+    # The organization is new and named for this run, so its workspaces are the ones made
+    # here. Bodies are JSON:API documents.
+    j.headers.update(dict(HELDOUT_AUTH, **{"content-type": "application/vnd.api+json",
+                                          "accept": "application/vnd.api+json"}))
+    tag = j.rng.randrange(10**5, 10**6)
+    org = f"bench-{tag}"
+    base = f"/api/v2/organizations/{org}/workspaces"
+
+    def send(method, path, doc=None, query=None):
+        return j.call(method, path, query=query, data=None if doc is None else json.dumps(doc).encode())
+
+    def data(answer):
+        return obj(obj(answer).get("data"))
+
+    def attrs(thing):
+        return obj(obj(thing).get("attributes"))
+
+    def own(value):
+        return value if isinstance(value, str) and value else made_up(j, "ws-", 16)
+
+    def failed(answer, status):
+        return j.last["status"] == status and eq(str(head(obj(answer).get("errors")).get("status")), str(status))
+
+    def workspace(name, **attributes):
+        return data(send("POST", base, {"data": {"type": "workspaces", "attributes": dict({"name": name},
+                                                                                        **attributes)}}))
+
+    def read(wid):
+        return data(send("GET", f"/api/v2/workspaces/{wid}"))
+
+    def listed(**query):
+        page = obj(send("GET", base, query=query))
+        return [attrs(w).get("name") for w in dicts(page.get("data"))], obj(obj(page.get("meta")).get("pagination"))
+
+    def variables(wid):
+        return dicts(obj(send("GET", f"/api/v2/workspaces/{wid}/vars")).get("data"))
+
+    def variable(wid, **attributes):
+        return obj(send("POST", f"/api/v2/workspaces/{wid}/vars", {"data": {"type": "vars", "attributes": attributes}}))
+
+    send("POST", "/api/v2/organizations", {"data": {"type": "organizations", "attributes": {
+        "name": org, "email": f"ops.{tag}@bench.example"}}})
+    made = workspace("web-prod", **{"auto-apply": True, "terraform-version": "1.9.5", "execution-mode": "remote",
+                                    "description": "Production web"})
+    settings = attrs(made)
+    j.check("a created workspace keeps its name and settings",
+            j.last["status"] == 201 and eq(made.get("type"), "workspaces") and matches("ws-[A-Za-z0-9]{16}", made.get("id"))
+            and eq(settings.get("name"), "web-prod") and settings.get("auto-apply") is True
+            and eq(settings.get("terraform-version"), "1.9.5") and eq(settings.get("execution-mode"), "remote")
+            and settings.get("locked") is False,
+            id=made.get("id"), attributes={k: settings.get(k) for k in ("name", "auto-apply", "terraform-version",
+                                                                         "execution-mode", "locked")})
+    ws = own(made.get("id"))
+    by_number = read(ws)
+    by_name = data(send("GET", f"{base}/web-prod"))
+    j.check("the workspace reads the same by id and by name",
+            eq(by_number.get("id"), ws) and eq(by_name.get("id"), ws) and eq(attrs(by_number).get("name"), "web-prod")
+            and eq(attrs(by_name).get("name"), "web-prod"),
+            by_id=[by_number.get("id"), attrs(by_number).get("name")],
+            by_name=[by_name.get("id"), attrs(by_name).get("name")])
+    taken = obj(send("POST", base, {"data": {"type": "workspaces", "attributes": {"name": "web-prod"}}}))
+    j.check("a taken name is refused with 422", failed(taken, 422), errors=taken.get("errors"))
+    staging = own(workspace("web-staging").get("id"))
+    workspace("api-prod")
+    everything = ["web-prod", "web-staging", "api-prod"]
+    rows, _ = listed(**{"search[name]": "web"})
+    j.check("search[name] finds the workspaces by name", same_items(rows, ["web-prod", "web-staging"]), listed=rows)
+    first, pages = listed(**{"page[size]": 2, "page[number]": 1})
+    # One check judges the first page and the next judges page 2, so a short first page
+    # is one miss.
+    j.check("page[size] 2 answers two workspaces and the pagination",
+            len(first) == 2 and set(first) <= set(everything) and eq(pages.get("current-page"), 1)
+            and eq(pages.get("next-page"), 2) and eq(pages.get("total-pages"), 2) and eq(pages.get("total-count"), 3),
+            listed=first, pagination=pages)
+    rest, pages = listed(**{"page[size]": 2, "page[number]": 2})
+    j.check("page[number] 2 reaches the last workspace",
+            len(rest) == 1 and same_items(first + rest, everything) and eq(pages.get("current-page"), 2)
+            and "next-page" in pages and pages.get("next-page") is None,
+            first=first, listed=rest, pagination=pages)
+    reason = f"Maintenance window {tag}"
+    locked = data(send("POST", f"/api/v2/workspaces/{ws}/actions/lock", {"reason": reason}))
+    status = j.last["status"]
+    now = attrs(read(ws))
+    j.check("a lock locks the workspace with its reason",
+            status == 200 and attrs(locked).get("locked") is True and now.get("locked") is True
+            and eq(now.get("locked-reason"), reason),
+            lock_status=status, answered=attrs(locked).get("locked"),
+            read={k: now.get(k) for k in ("locked", "locked-reason")})
+    again = obj(send("POST", f"/api/v2/workspaces/{ws}/actions/lock", {"reason": "Another lock"}))
+    conflict = failed(again, 409)
+    now = attrs(read(ws))
+    j.check("a locked workspace refuses a second lock with 409",
+            conflict and now.get("locked") is True and eq(now.get("locked-reason"), reason),
+            errors=again.get("errors"), read={k: now.get(k) for k in ("locked", "locked-reason")})
+    unlocked = data(send("POST", f"/api/v2/workspaces/{ws}/actions/unlock"))
+    now = attrs(read(ws))
+    j.check("an unlock frees the workspace", attrs(unlocked).get("locked") is False and now.get("locked") is False,
+            answered=attrs(unlocked).get("locked"), read=now.get("locked"))
+    patched = data(send("PATCH", f"/api/v2/workspaces/{ws}", {"data": {"type": "workspaces", "attributes": {
+        "terraform-version": "1.10.0"}}}))
+    now = attrs(read(ws))
+    j.check("a patch changes only the attributes sent",
+            eq(attrs(patched).get("terraform-version"), "1.10.0") and eq(now.get("terraform-version"), "1.10.0")
+            and now.get("auto-apply") is True and eq(now.get("name"), "web-prod")
+            and eq(now.get("description"), "Production web") and eq(now.get("execution-mode"), "remote"),
+            read={k: now.get(k) for k in ("name", "terraform-version", "auto-apply", "description", "execution-mode")})
+    region = data(variable(ws, key="region", value="eu-west-1", category="terraform", hcl=False, sensitive=False,
+                           description="Deploy region"))
+    created = j.last["status"]
+    owner = obj(obj(obj(region.get("relationships")).get("configurable")).get("data")).get("id")
+    rows = variables(ws)
+    j.check("a variable is created on the workspace",
+            created == 201 and matches("var-[A-Za-z0-9]{16}", region.get("id")) and eq(attrs(region).get("key"), "region")
+            and eq(attrs(region).get("value"), "eu-west-1") and eq(attrs(region).get("category"), "terraform")
+            and eq(owner, ws) and [attrs(r).get("key") for r in rows] == ["region"],
+            status_code=created, variable=attrs(region), configurable=owner, listed=[attrs(r).get("key") for r in rows])
+    taken = variable(ws, key="region", value="us-east-1", category="terraform")
+    j.check("a taken key in the same category is refused with 422", failed(taken, 422), errors=taken.get("errors"))
+    secret = attrs(data(variable(ws, key="TF_TOKEN", value=f"s3cr3t-{tag}", category="env", sensitive=True)))
+    rows = variables(ws)
+    shown = attrs(next((r for r in rows if attrs(r).get("key") == "TF_TOKEN"), {}))
+    j.check("a sensitive variable answers a null value",
+            secret.get("sensitive") is True and "value" in secret and secret.get("value") is None
+            and shown.get("sensitive") is True and "value" in shown and shown.get("value") is None
+            and same_items([attrs(r).get("key") for r in rows], ["region", "TF_TOKEN"]),
+            created={k: secret.get(k) for k in ("key", "sensitive", "value")},
+            listed={k: shown.get(k) for k in ("key", "sensitive", "value")})
+    send("POST", f"/api/v2/workspaces/{staging}/actions/safe-delete")
+    deleted = j.last["status"]
+    gone = obj(send("GET", f"/api/v2/workspaces/{staging}"))
+    id_gone = failed(gone, 404)
+    by_name = obj(send("GET", f"{base}/web-staging"))
+    j.check("a safe-deleted workspace is not found by id or name",
+            deleted == 204 and id_gone and failed(by_name, 404),
+            delete_status=deleted, by_id=gone.get("errors"), by_name=by_name.get("errors"))
+
+
+BLIND11_JOURNEYS = {"bigcommerce": bigcommerce_steps, "helpscout": helpscout_steps, "mux": mux_steps,
+                    "postmark": postmark_steps, "terraform": terraform_steps}
+
+
+def run_journeys_blind11(srv, sink, args):
+    run_journey_table(BLIND11_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -6783,6 +7479,7 @@ RUNNERS = {
     "journeys_blind8": (BLIND8_MOCKS, run_journeys_blind8),
     "journeys_blind9": (BLIND9_MOCKS, run_journeys_blind9),
     "journeys_blind10": (BLIND10_MOCKS, run_journeys_blind10),
+    "journeys_blind11": (BLIND11_MOCKS, run_journeys_blind11),
 }
 
 
