@@ -1336,8 +1336,17 @@ fn is_array(b: &Bundle, schema: &Value) -> bool {
     walk(b, schema, &mut Seen::new(), 0)
 }
 
-/// The schema of a dotted member path such as `meta.id`.
+/// The schema of a member such as `meta.id`, read as [`crate::member_at`]
+/// reads a record: the property of that very name (an OData `odata.id`),
+/// else, for a dotted name no property has, the property each step names in
+/// turn.
 fn dotted_member<'a>(b: &'a Bundle, schema: &'a Value, member: &str) -> Option<&'a Value> {
+    if let Some(found) = property(b, schema, member) {
+        return Some(found);
+    }
+    if !member.contains('.') {
+        return None;
+    }
     member
         .split('.')
         .try_fold(schema, |s, name| property(b, s, name))
@@ -1652,6 +1661,37 @@ mod tests {
             vec![("/types/folder/unique/1/members/0", RefusalCode::Unresolved)]
         );
         assert_eq!(v.applied.types["folder"].unique.len(), 1);
+    }
+
+    #[test]
+    fn validate_reads_a_dotted_member_name_as_a_literal_property_first() {
+        // As `member_at` reads a record: a property named `odata.id` is that
+        // member, and a dotted walk is tried only when no property has the name.
+        let mut b = bundle(&[(
+            "GetDoc",
+            "GET",
+            "/docs/{doc_id}",
+            json!({"type": "object", "properties": {
+                "odata.id": {"type": "string"},
+                "meta": {"type": "object", "properties": {"etag": {"type": "string"}}}
+            }}),
+        )]);
+        typed(&mut b, "GetDoc", "doc", Some("doc_id"), "odata.id");
+        let w = world(json!({"types": {"doc": {
+            "identity": {"member": "odata.id"},
+            "unique": [{"members": ["meta.etag"]}]
+        }}}));
+        let v = validate(&w, &b);
+        assert_eq!(v.refused, vec![]);
+        assert_eq!(v.applied, w);
+
+        // Neither a literal property nor a nested path.
+        let w = world(json!({"types": {"doc": {"identity": {"member": "odata.uid"}}}}));
+        let v = validate(&w, &b);
+        assert_eq!(
+            paths(&v),
+            vec![("/types/doc/identity/member", RefusalCode::Unresolved)]
+        );
     }
 
     #[test]

@@ -175,3 +175,38 @@ components:
     assert_eq!(kind("deleteThing"), Some(OpKind::Delete));
     assert!(validate(&world, &b).refused.is_empty());
 }
+
+#[test]
+fn tier0_keeps_a_literal_dotted_identity_member() {
+    let mut b = mb_import::compile(
+        br##"
+openapi: 3.0.0
+info: {title: OData, version: "1"}
+paths:
+  /docs/{docId}:
+    parameters: [{name: docId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getDoc
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}}
+components:
+  schemas:
+    Doc: {type: object, properties: {"odata.id": {type: string}, name: {type: string}}}
+"##,
+    )
+    .unwrap();
+    // Whatever the heuristics chose, the record's id is the member named
+    // `odata.id` itself, which `member_at` reads before any dotted walk.
+    let op = b.operations.iter_mut().find(|o| o.id == "getDoc").unwrap();
+    let t = op.resource_type.get_or_insert_with(|| "doc".into()).clone();
+    op.identity = Some(mb_mcm::Identity {
+        path_param: Some("docId".into()),
+        field: "odata.id".into(),
+        input_field: None,
+        path_field: None,
+        record: None,
+    });
+    let world = tier0(&b);
+    let identity = world.types.get(&t).and_then(|d| d.identity.as_ref());
+    assert_eq!(identity.map(|i| i.member.as_str()), Some("odata.id"));
+    assert!(validate(&world, &b).refused.is_empty());
+}
