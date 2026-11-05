@@ -4,3 +4,4 @@
 #![cfg(test)]
 
 mod model;
+mod world_schema;

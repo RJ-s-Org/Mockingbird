@@ -1,6 +1,6 @@
 ---
 name: mockingbird
-description: Mock any API from its contract with Mockingbird - REST/OpenAPI, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT - with schema-valid, LLM-generated responses and per-session state. Use when the user wants a mock server, a fake or stub backend, an API sandbox, test doubles for an HTTP/gRPC/GraphQL/SOAP dependency, or to work against an API that does not exist yet. Start here; it routes to the setup, mock-api, deploy and testing skills.
+description: Mock any API from its contract with Mockingbird - REST/OpenAPI, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT - with schema-valid, LLM-generated responses and per-session state. Use when the user wants a mock server, a fake or stub backend, an API sandbox, test doubles for an HTTP/gRPC/GraphQL/SOAP dependency, or to work against an API that does not exist yet. Start here; it routes to the setup, mock-api, deploy, testing and world skills.
 ---
 
 # Mockingbird
@@ -13,6 +13,7 @@ Mockingbird imports an API contract and serves a running mock that answers with 
 | --- | --- | --- |
 | Install Mockingbird, pick an LLM (OpenRouter, Google AI Studio, Cloudflare AI Gateway, OpenAI, Anthropic, local, any OpenAI-compatible endpoint) | `mockingbird-setup` skill | `install.sh`, `mockingbird init`, `mockingbird llm configure/test` |
 | Mock an API from a contract, docs page, HAR or Postman collection; add scenarios, state, fixtures, chaos, events | `mockingbird-mock-api` skill | `import_contract`, `put_scenario`, `call_mock` |
+| Review or fix how a mock's contract behaves as a world (record identity, where answers hold the record, lifecycles, soft deletes, unique members, paging), after every import | `mockingbird-world` skill | `get_world`, `patch_world` |
 | Self-host for a team: Docker, Compose, Kubernetes/Helm, auth, expose to ChatGPT | `mockingbird-deploy` skill | `mockingbird server start`, Helm chart |
 | Use mocks in tests or CI | `mockingbird-testing` skill | `--offline`, sessions, request log |
 
@@ -35,6 +36,7 @@ When the `mockingbird` MCP server is connected, prefer its tools over shell comm
 - Setup and lifecycle: `doctor`, `list_llm_providers`, `init_config`, `configure_llm`, `test_llm`, `validate_contract`, `start_server`, `server_status`, `server_logs`, `stop_server`, `proxy_env`
 - Mocks: `list_mocks`, `get_mock`, `create_mock`, `update_mock`, `delete_mock`, `import_contract`, `list_contract_versions`, `activate_contract_version`
 - Drafts (imported documentation, HAR, Postman): `get_draft`, `edit_draft`, `approve_draft`
+- World descriptions (how a contract version behaves as a world, with its gaps): `get_world`, `get_world_schema`, `put_world`, `patch_world`, `list_world_revisions`, `get_world_revision`, `restore_world_revision`, `diff_world`
 - Behaviour: `list_scenarios`, `put_scenario`, `delete_scenario`, `list_llm_profiles`, `put_llm_profile`, `delete_llm_profile`
 - State and traffic: `call_mock`, `list_requests`, `get_request`, `list_sessions`, `export_session`, `seed_session`, `reset_session`
 - Events: `list_channels`, `publish_event`

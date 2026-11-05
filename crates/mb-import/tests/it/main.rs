@@ -19,6 +19,7 @@ mod perf;
 mod proto;
 mod security;
 mod swagger2;
+mod world_tier0;
 mod wsdl;
 
 #[cfg(feature = "smart")]

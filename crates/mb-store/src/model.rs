@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use mb_mcm::world::Author;
 use mb_mcm::{Bundle, Trigger};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -695,6 +696,61 @@ pub struct NewContractVersion {
     pub bundle: Bundle,
     pub status: ContractStatus,
     pub created_by: Option<String>,
+}
+
+/// One numbered revision of a contract version's authored world description
+/// (the overlay on its tier-0 description; see [`mb_mcm::world`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WorldRevision {
+    pub id: Uuid,
+    pub mock_id: Uuid,
+    /// The contract version it is attached to.
+    pub version: i64,
+    /// 1-based, increasing per contract version.
+    pub revision: i64,
+    /// Who wrote it.
+    pub author: Author,
+    /// The overlay document, stored as given (the caller validates it).
+    pub document: Value,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A [`WorldRevision`] without its document: what a listing shows.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WorldRevisionInfo {
+    pub id: Uuid,
+    pub mock_id: Uuid,
+    pub version: i64,
+    pub revision: i64,
+    pub author: Author,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&WorldRevision> for WorldRevisionInfo {
+    fn from(r: &WorldRevision) -> Self {
+        Self {
+            id: r.id,
+            mock_id: r.mock_id,
+            version: r.version,
+            revision: r.revision,
+            author: r.author,
+            created_by: r.created_by.clone(),
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// A revision to add with [`crate::ControlStore::add_world_revision`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewWorldRevision {
+    pub author: Author,
+    pub document: Value,
+    pub created_by: Option<String>,
+    /// When set, the write succeeds only if the version's newest revision is
+    /// this number (`0` for none yet); otherwise it is a `Conflict`.
+    pub expect: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]

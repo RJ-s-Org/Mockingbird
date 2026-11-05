@@ -14,6 +14,7 @@
 - [Protocols](protocols.md)
 - [Events and brokers](events.md)
 - [Smart import](import.md)
+- [World descriptions](world.md)
 - [Webhooks](webhooks.md)
 - [Coding agents and MCP](agents.md)
 - [Console and auth](console.md)

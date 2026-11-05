@@ -488,6 +488,10 @@ pub async fn approve(
         ensure_grpc_services_free(&st, &m, &v.bundle).await?;
     }
     let approved = st.store.approve_contract_version(m.id, number).await?;
+    // Carried now, not when the draft was made: the draft may have been
+    // edited and the source revised since. A description written on the
+    // draft itself stands.
+    crate::world::carry_forward_logged(st.store.as_ref(), m.id, number, &approved.bundle).await;
     let view = ContractVersionSummary::from(&approved);
     access
         .audit(

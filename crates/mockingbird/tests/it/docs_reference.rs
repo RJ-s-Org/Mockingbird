@@ -137,6 +137,22 @@ fn scan_values(
     }
 }
 
+/// The full example's world files apply whole to their contracts.
+#[test]
+fn full_example_world_files_validate() {
+    let cfg = full_example();
+    let mut checked = 0;
+    for (name, mock) in &cfg.mocks {
+        let Some(path) = &mock.world else { continue };
+        let bundle = mb_import::compile(&mb_import::read_source(&mock.contract).unwrap()).unwrap();
+        let doc: Value = serde_saphyr::from_str(&read(path)).unwrap();
+        let v = mb_admin::world::validated_overlay(&doc, &bundle).unwrap();
+        assert!(v.refused.is_empty(), "{name}: {:?}", v.refused);
+        checked += 1;
+    }
+    assert!(checked > 0, "no mock sets `world`");
+}
+
 #[test]
 fn every_config_key_is_documented() {
     let doc = read(&repo().join("docs/configuration.md"));

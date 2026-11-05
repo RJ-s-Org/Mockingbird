@@ -79,7 +79,7 @@ operations:
     kind: action
     type: folder
     target: { path_param: name }
-    changes: { parent: { from_request: destinationParent } }
+    changes: { parent: { from_request: /destinationParent } }
   DeleteFolder:
     kind: action
     type: folder

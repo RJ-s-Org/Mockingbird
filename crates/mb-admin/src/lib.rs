@@ -66,6 +66,7 @@ mod sessions;
 mod webhook;
 pub mod webhook_deliveries;
 mod workspaces;
+pub mod world;
 
 pub use access::{CurrentPrincipal, WsAccess, authenticate};
 pub use apikeys::{ApiKeyView, CreateApiKey, CreatedApiKey};
@@ -309,6 +310,32 @@ pub fn router(st: AdminState) -> Router {
         .route(
             "/mocks/{mock}/contracts/{version}/approve",
             post(drafts::approve),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/world",
+            // A larger body is a 413 `too_large` problem.
+            get(world::get_world)
+                .put(world::put_world)
+                .patch(world::patch_world)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    mb_mcm::world::MAX_BYTES,
+                )),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/world/revisions",
+            get(world::list_revisions),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/world/revisions/{revision}",
+            get(world::get_revision),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/world/revisions/{revision}/restore",
+            post(world::restore_revision),
+        )
+        .route(
+            "/mocks/{mock}/contracts/{version}/world/diff",
+            get(world::diff_world),
         )
         .route(
             "/mocks/{mock}/contracts/{version}/preview",

@@ -21,6 +21,10 @@ Prerequisite: a running server (`server_status`; start one with `start_server` o
 
 The first version is activated automatically; later imports need `activate: true` (or `activate_contract_version`). The mock is created if missing, mounted at `/<mock>` (`create_mock` / `update_mock` set `route_prefix`, `persona`, `llm_profile`, `chaos`, `limits`). In `mockingbird.yaml`, mocks are declared under `mocks.<name>.contract` instead, and are read-only through the API.
 
+### Review the world description
+
+After every import (and every `approve_draft`), call `get_world {mock, version}` and read its `gaps` first; pass `version`, the version number the import or approval answered, unless that version is now active (the world tools default to the active version, so without it you would read and change an older one): types with no identity, operations with no target, answers whose record could not be found, skipped routes, refused entries. Fix them from the contract and its documentation with `patch_world {mock, version, patch, author: "agent"}`, as the `mockingbird-world` skill describes, then check a create read back with `call_mock`. A new contract version carries the previous description forward; entries that no longer fit show up as gaps.
+
 ## 2. Call it
 
 `call_mock {method: "POST", path: "/orders/orders", body: {...}, session: "alice"}` (or curl `localhost:8080/...`). The result includes status, body and the `x-mockingbird-*` headers:

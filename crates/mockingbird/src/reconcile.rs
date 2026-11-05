@@ -9,16 +9,18 @@
 //! them with [`mock_label`] (`name` in `default`, else `workspace/name`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
 use chrono::Utc;
+use mb_mcm::world::Author;
 use mb_mcm::{Bundle, Trigger};
 use mb_state::StateStore;
 use mb_store::{
     ChannelSettings, ContractStatus, ControlStore, DEFAULT_WORKSPACE, LlmProfile, Mock,
-    MockEventSettings, NewContractVersion, NewMock, ResourceSource, Scenario, ScenarioRules,
-    routes_collide, validate_header_name, validate_mock_name, validate_route_prefix,
-    validate_workspace_name,
+    MockEventSettings, NewContractVersion, NewMock, NewWorldRevision, ResourceSource, Scenario,
+    ScenarioRules, StoreError, routes_collide, validate_header_name, validate_mock_name,
+    validate_route_prefix, validate_workspace_name,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -85,6 +87,9 @@ struct Prepared<'a> {
     bundle: Bundle,
     /// The `channels:` block, validated: channel id → (enabled, triggers).
     channels: BTreeMap<String, FileChannelSettings>,
+    /// The `world:` file's entries that validate against `bundle`, as the
+    /// overlay document a revision stores.
+    world: Option<serde_json::Value>,
 }
 
 /// A validated `channels:` entry: `(enabled, triggers)`.
@@ -433,6 +438,14 @@ async fn validate<'a>(
         }
 
         let channels = validate_channels(cfg, name, mock, &bundle)?;
+        let world = match &mock.world {
+            Some(path) => Some(
+                read_world(path, &bundle)
+                    .await
+                    .with_context(|| format!("mock {label:?}"))?,
+            ),
+            None => None,
+        };
         prepared.push(Prepared {
             workspace: ws,
             name,
@@ -442,6 +455,7 @@ async fn validate<'a>(
             source,
             bundle,
             channels,
+            world,
         });
     }
     // gRPC services are unique across every workspace (one shared
@@ -599,6 +613,7 @@ async fn apply_mock(
         .active_contract(mock.id)
         .await
         .with_context(|| format!("loading the active contract of mock {name:?}"))?;
+    let mut active_version = active.as_ref().map(|v| v.version);
     if active.map(|v| v.source_digest) != Some(p.digest.clone()) {
         let version = store
             .add_contract_version(
@@ -612,6 +627,13 @@ async fn apply_mock(
             )
             .await
             .with_context(|| format!("adding a contract version to mock {name:?}"))?;
+        // A world description is optional: the new version stands without it.
+        if let Err(e) =
+            mb_admin::world::carry_forward_into(store, mock.id, version.version, &version.bundle)
+                .await
+        {
+            tracing::warn!(mock = %name, version = version.version, error = %e, "cannot carry the world description forward");
+        }
         store
             .activate_contract_version(mock.id, version.version)
             .await
@@ -624,6 +646,13 @@ async fn apply_mock(
         report
             .new_versions
             .push((name.to_string(), version.version));
+        active_version = Some(version.version);
+        changed = true;
+    }
+
+    if let (Some(document), Some(version)) = (&p.world, active_version)
+        && apply_world(store, &mock, version, document).await?
+    {
         changed = true;
     }
 
@@ -684,6 +713,122 @@ async fn apply_mock(
         report.updated.push(name.to_string());
     }
     Ok(())
+}
+
+/// The largest `world:` file read: four times the description's own limit
+/// ([`mb_mcm::world::MAX_BYTES`], measured on its JSON form), room for YAML
+/// layout and comments.
+const MAX_WORLD_FILE_BYTES: u64 = 4 * mb_mcm::world::MAX_BYTES as u64;
+
+/// Reads a mock's `world:` file (YAML, or JSON for a `.json` file) and
+/// validates it against `bundle`: the overlay document of the entries that
+/// apply. Refused entries are logged at warn level.
+///
+/// # Errors
+///
+/// Fails, naming `path`, when the file cannot be read or parsed, or is
+/// refused whole (a file over 1 MiB, a description over 256 KiB, too deep,
+/// not of the format's shape).
+async fn read_world(path: &Path, bundle: &Bundle) -> anyhow::Result<serde_json::Value> {
+    let (file, bundle) = (path.to_path_buf(), bundle.clone());
+    // File reads and the whole-document checks block: keep them off the
+    // runtime.
+    let validation = tokio::task::spawn_blocking(move || {
+        // The 256 KiB limit is the description's (its JSON form); a file
+        // far over it is refused from its size before it is read.
+        let len = std::fs::metadata(&file)
+            .with_context(|| format!("cannot read world description {}", file.display()))?
+            .len();
+        if len > MAX_WORLD_FILE_BYTES {
+            bail!(
+                "world description {} is refused (too_large) at the document: the file is {len} bytes, over the 1 MiB a world file may be",
+                file.display()
+            );
+        }
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("cannot read world description {}", file.display()))?;
+        let doc: serde_json::Value = if file.extension().is_some_and(|e| e == "json") {
+            serde_json::from_str(&text).map_err(|e| anyhow!("{e}"))
+        } else {
+            serde_saphyr::from_str(&text).map_err(|e| anyhow!("{e}"))
+        }
+        .with_context(|| format!("cannot parse world description {}", file.display()))?;
+        mb_admin::world::validated_overlay(&doc, &bundle).map_err(|r| {
+            let at = if r.path.is_empty() {
+                "the document".to_string()
+            } else {
+                r.path
+            };
+            anyhow!(
+                "world description {} is refused ({}) at {at}: {}",
+                file.display(),
+                r.code.as_str(),
+                r.message
+            )
+        })
+    })
+    .await
+    .context("reading the world description did not finish")??;
+    for r in &validation.refused {
+        tracing::warn!(
+            file = %path.display(),
+            path = %r.path,
+            code = r.code.as_str(),
+            "world description entry refused: {}",
+            r.message
+        );
+    }
+    serde_json::to_value(&validation.applied).context("serializing the world description")
+}
+
+/// Adds `document` as the newest world description revision (by `user`)
+/// of `mock`'s contract `version`, unless the newest revision already holds
+/// it. Returns whether it added one.
+///
+/// Each write names the revision it read as the newest, so a reconcile
+/// racing another (two replicas, a watch reload beside an API write)
+/// neither adds the file twice nor lands on a write it did not see: on a
+/// conflict it reads the newest revision again and retries, a few times.
+async fn apply_world(
+    store: &dyn ControlStore,
+    mock: &Mock,
+    version: i64,
+    document: &serde_json::Value,
+) -> anyhow::Result<bool> {
+    const ATTEMPTS: usize = 5;
+    let label = mock_label(&mock.workspace, &mock.name);
+    for _ in 0..ATTEMPTS {
+        let latest = store
+            .latest_world_revision(mock.id, version)
+            .await
+            .with_context(|| format!("loading the world description of mock {label:?}"))?;
+        if latest.as_ref().is_some_and(|r| &r.document == document) {
+            return Ok(false);
+        }
+        let added = store
+            .add_world_revision(
+                mock.id,
+                version,
+                NewWorldRevision {
+                    author: Author::User,
+                    document: document.clone(),
+                    created_by: Some("file".into()),
+                    expect: Some(latest.map_or(0, |r| r.revision)),
+                },
+            )
+            .await;
+        match added {
+            Ok(_) => return Ok(true),
+            Err(StoreError::Conflict(_)) => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("saving the world description of mock {label:?}"));
+            }
+        }
+    }
+    bail!(
+        "saving the world description of mock {label:?}: other writers kept adding revisions ({ATTEMPTS} attempts)"
+    )
 }
 
 /// Makes a file mock's event settings and channel settings match its

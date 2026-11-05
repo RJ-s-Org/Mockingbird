@@ -147,14 +147,22 @@ async fn client(
 }
 
 /// Runs a workflow subcommand (`mocks update`, `drafts`, `contracts`,
-/// `api`) like [`client`].
+/// `world`, `api`) like [`client`]; `world show` without `--json` prints
+/// text.
 async fn workflow(
     admin_url: &str,
     token: Option<&str>,
     workspace: &str,
     cmd: WorkflowCommand,
 ) -> Result<(), Failure> {
-    print_client(client::run_workflow(admin_url, token, workspace, cmd).await)
+    let text = cmd.prints_world_text();
+    match client::run_workflow(admin_url, token, workspace, cmd).await {
+        Ok(Some(view)) if text => {
+            print!("{}", client::world_text(&view));
+            Ok(())
+        }
+        result => print_client(result),
+    }
 }
 
 /// Prints a client command's result: JSON on stdout, problem details on

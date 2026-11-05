@@ -1920,6 +1920,26 @@ async fn openapi_lists_all_paths() {
         ),
         ("/api/v1/mocks/{mock}/contracts/{version}/source", &["get"]),
         (
+            "/api/v1/mocks/{mock}/contracts/{version}/world",
+            &["get", "put", "patch"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/world/revisions",
+            &["get"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/world/revisions/{revision}",
+            &["get"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/world/revisions/{revision}/restore",
+            &["post"],
+        ),
+        (
+            "/api/v1/mocks/{mock}/contracts/{version}/world/diff",
+            &["get"],
+        ),
+        (
             "/api/v1/mocks/{mock}/contracts/{version}/activate",
             &["post"],
         ),
