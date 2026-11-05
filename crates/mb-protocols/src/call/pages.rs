@@ -1441,6 +1441,7 @@ pub(super) async fn mint(
                 collection: collection_of(op, call),
                 origin: WriteOrigin::Seeded,
                 held: false,
+                header_id: None,
             },
         )
         .await;

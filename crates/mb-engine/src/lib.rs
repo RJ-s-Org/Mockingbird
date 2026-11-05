@@ -351,6 +351,10 @@ pub struct GeneratedResponse {
     /// For a [`Source::Patched`] answer, the top-level members its local patch
     /// touched, when the model's own answer could be read to tell; `None` otherwise.
     pub patched: Option<PatchedMembers>,
+    /// Response headers the caller settled, served over the values the contract's
+    /// declared headers would otherwise get (the header naming a created record's id).
+    /// Empty from the engine.
+    pub headers: Vec<(String, String)>,
 }
 
 /// The top-level members of an answer a local patch touched, against the model's own
@@ -806,6 +810,7 @@ impl Engine {
                 dropped_effects: effects.dropped,
                 new_record: false,
                 patched: None,
+                headers: Vec::new(),
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -956,6 +961,7 @@ impl Engine {
                         dropped_effects: answer.effects.dropped,
                         new_record: false,
                         patched: answer.patched,
+                        headers: Vec::new(),
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -1100,6 +1106,7 @@ impl Engine {
                 dropped_effects: 0,
                 new_record: false,
                 patched: None,
+                headers: Vec::new(),
             };
             let schema = part
                 .ctx
@@ -1144,6 +1151,7 @@ impl Engine {
                 dropped_effects: 0,
                 new_record: false,
                 patched: None,
+                headers: Vec::new(),
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -1229,6 +1237,7 @@ impl Engine {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         })
     }
 
@@ -1325,6 +1334,7 @@ impl Engine {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1456,6 +1466,7 @@ impl Engine {
                 dropped_effects: 0,
                 new_record: false,
                 patched: None,
+                headers: Vec::new(),
             },
         };
         tracing::info!(operation = %op.id, status = code, "the call was refused with a declared error");
@@ -1502,6 +1513,7 @@ impl Engine {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         })
     }
 
@@ -1818,6 +1830,7 @@ impl Engine {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         }
     }
 
@@ -1867,6 +1880,7 @@ impl Engine {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         }
     }
 

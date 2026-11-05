@@ -543,8 +543,19 @@ async fn serve(
     log.delay = plan.delay;
     let entity_tag = call::entity_tag(rt, &plan, &call, &generated).await;
     let next_range = call::next_range(rt, &plan, &call, &generated);
+    let settled = generated.headers.clone();
     let mut resp =
         tracing::info_span!("mb.encode").in_scope(|| log.generated(as_xml(rt, op, generated)));
+    // Headers the call settled (a created record's id) stand over the declared ones'
+    // faker values; a scenario's still replace them.
+    for (name, value) in settled {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(&value),
+        ) {
+            resp.headers_mut().insert(name, value);
+        }
+    }
     add_headers(&mut resp, rt, op, plan.scenario);
     // The record's concurrency token, and a ranged page's next range, over the faker's
     // values (a scenario's stand).
@@ -1359,6 +1370,7 @@ mod tests {
             dropped_effects: 0,
             new_record: false,
             patched: None,
+            headers: Vec::new(),
         }
     }
 

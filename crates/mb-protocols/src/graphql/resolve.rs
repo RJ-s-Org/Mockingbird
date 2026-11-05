@@ -159,7 +159,7 @@ enum Route<'a, 'b> {
     /// With the query's other root fields, in one LLM call.
     Join(&'b super::batch::Batch, Box<call::Pending<'a>>),
     /// Without generating: an unknown id, a stored resource, a cached answer.
-    Answered(mb_engine::GeneratedResponse),
+    Answered(Box<mb_engine::GeneratedResponse>),
     /// On its own.
     Alone,
 }
@@ -462,7 +462,7 @@ async fn generate_in(
                                 .map_err(engine_failure),
                             }
                         }
-                        Route::Answered(answer) => Ok(answer),
+                        Route::Answered(answer) => Ok(*answer),
                         Route::Alone => {
                             call::generate_narrowed(rt, &plan, &call, narrowed.as_deref())
                                 .await

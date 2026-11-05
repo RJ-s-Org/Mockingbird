@@ -348,6 +348,7 @@ fn repeat_body(bundle: &Bundle, status: u16, member: &str) -> Value {
         dropped_effects: 0,
         new_record: false,
         patched: None,
+        headers: Vec::new(),
     };
     let out = offline()
         .refuse_repeated_value(

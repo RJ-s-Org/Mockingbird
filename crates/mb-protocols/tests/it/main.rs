@@ -15,6 +15,7 @@
 
 mod support;
 
+mod alternate_keys;
 mod api;
 mod backends;
 mod call;
@@ -43,6 +44,7 @@ mod events_ws;
 mod graphql;
 mod graphql_ws;
 mod grpc;
+mod header_identity;
 mod http_media;
 mod http_rest;
 mod identity_by_contract;
