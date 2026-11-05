@@ -23,8 +23,11 @@ pub const MAX_RELATED: usize = 20;
 pub const MAX_BODY_BYTES: usize = 8 * 1024;
 
 /// Maximum characters of the contract's API description (`info.description`)
-/// included in a prompt; a longer one is cut.
-pub const MAX_API_DESCRIPTION: usize = 2000;
+/// included in a prompt; a longer one is cut. Contracts state their error codes,
+/// lifecycle and list rules there, often after a few thousand characters, and the
+/// block opens the system message, the part providers cache across a contract's
+/// operations, so a long one costs little after the first call.
+pub const MAX_API_DESCRIPTION: usize = 6000;
 
 /// Maximum characters of an operation's summary included in a prompt; a
 /// longer one (a WSDL operation's `wsdl:documentation`, say) is cut.

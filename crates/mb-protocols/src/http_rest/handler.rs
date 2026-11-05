@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use futures::StreamExt;
+use mb_engine::error_body::{self, Violation};
 use mb_engine::{
     EngineError, GeneratedResponse, GenerationContext, OperationCall, SchemaValidator, Source,
 };
@@ -35,19 +36,6 @@ pub(super) const VALIDATION_HEADER: HeaderName =
     HeaderName::from_static("x-mockingbird-validation");
 /// The longest [`VALIDATION_HEADER`] value, in bytes.
 const MAX_VALIDATION_HEADER: usize = 2048;
-/// Properties of a declared error shape that carry the validation messages,
-/// most preferred first.
-const MESSAGE_FIELDS: [&str; 7] = [
-    "message",
-    "detail",
-    "error_description",
-    "description",
-    "msg",
-    "title",
-    "error",
-];
-/// How deep a message field is looked for in an error shape.
-const MAX_MESSAGE_DEPTH: usize = 3;
 const CHAOS_HEADER: HeaderName = HeaderName::from_static(crate::CHAOS_HEADER);
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const MULTIPART_CONTENT_TYPE: &str = "multipart/form-data";
@@ -339,7 +327,7 @@ async fn serve(
         .map(str::to_string);
 
     // 2. Decode and validate.
-    let mut errors = Vec::new();
+    let mut errors: Vec<Violation> = Vec::new();
     let path_params = coerce_params(
         raw_params
             .into_iter()
@@ -352,7 +340,11 @@ async fn serve(
         match serde_urlencoded::from_str::<Vec<(String, String)>>(uri.query().unwrap_or("")) {
             Ok(pairs) => pairs,
             Err(e) => {
-                errors.push(format!("query: {e}"));
+                errors.push(Violation {
+                    location: "query".into(),
+                    pointer: String::new(),
+                    reason: format!("query: {e}"),
+                });
                 Vec::new()
             }
         };
@@ -373,7 +365,11 @@ async fn serve(
     let body = match decoded {
         Ok(body) => body,
         Err(BodyDecodeError::Invalid(e)) => {
-            errors.push(e);
+            errors.push(Violation {
+                location: "body".into(),
+                pointer: String::new(),
+                reason: e,
+            });
             None
         }
         Err(BodyDecodeError::TooManyFields(n)) => {
@@ -400,7 +396,14 @@ async fn serve(
         check(&mut errors, "body", v.body.as_ref(), body.as_ref());
     }
     if !errors.is_empty() {
-        return invalid_input(rt, op, &errors, log);
+        // The entered span is not held across the await.
+        drop(decode);
+        let presented = Presented {
+            query: &raw_query,
+            key_verified: false,
+            admitted: None,
+        };
+        return invalid_input(rt, op, (headers, presented), &errors, log).await;
     }
     drop(decode);
 
@@ -921,29 +924,38 @@ async fn multipart_fields(
 }
 
 fn check(
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Violation>,
     location: &str,
     validator: Option<&SchemaValidator>,
     value: Option<&Value>,
 ) {
     if let (Some(v), Some(value)) = (validator, value)
-        && let Err(found) = v.validate(value)
+        && let Err(found) = v.validate_located(value)
     {
-        errors.extend(found.into_iter().map(|e| format!("{location}{e}")));
+        errors.extend(found.into_iter().map(|(pointer, e)| Violation {
+            location: location.to_string(),
+            pointer,
+            reason: format!("{location}{e}"),
+        }));
     }
 }
 
 /// The contract's 400, 422 or `default` error shape if it declares one,
-/// else problem+json 400. Never calls the LLM. The reasons go into the
-/// error shape's message-like string field when it has one, the
-/// [`VALIDATION_HEADER`] and the request record.
-fn invalid_input(
+/// else problem+json 400. The reasons go into the error shape's message-like
+/// members and the violated fields into its path-like ones (see
+/// [`mb_engine::error_body`]), and the reasons into the [`VALIDATION_HEADER`] and the
+/// request record. A code-like member of the shape is written by the LLM the provider
+/// policy picks for the caller, once per operation and status, when the caller's
+/// credentials hold; else the faker's.
+async fn invalid_input(
     rt: &MockRuntime,
     op: &Operation,
-    errors: &[String],
+    (headers, presented): (&HeaderMap, Presented<'_>),
+    violations: &[Violation],
     log: &mut CallLog,
 ) -> Response {
-    log.validation = errors.to_vec();
+    let errors: Vec<String> = violations.iter().map(|v| v.reason.clone()).collect();
+    log.validation.clone_from(&errors);
     let reasons = errors.join("; ");
     let declared = [
         StatusSelector::Code(400),
@@ -962,7 +974,42 @@ fn invalid_input(
                 StatusSelector::Code(c) => c,
                 StatusSelector::Default => 400,
             };
-            let mut rejected = filled_error(rt, op, variant, status, &reasons);
+            let writes = variant
+                .schema
+                .as_ref()
+                .is_some_and(|s| error_body::writes_code(s, &rt.bundle.defs));
+            let engine = match writes {
+                true => call::refusing_engine(rt, op, headers, presented, status).await,
+                false => None,
+            };
+            let base = match &engine {
+                Some(engine) => {
+                    engine
+                        .error_answer(
+                            &rt.bundle,
+                            op,
+                            &OperationCall {
+                                operation_id: op.id.clone(),
+                                ..OperationCall::default()
+                            },
+                            status,
+                            error_body::ErrorCause::Invalid,
+                        )
+                        .await
+                }
+                None => None,
+            };
+            let base = base.unwrap_or_else(|| {
+                rt.engine.fallback(
+                    &rt.bundle,
+                    op,
+                    variant,
+                    status,
+                    &OperationCall::default(),
+                    &GenerationContext::default(),
+                )
+            });
+            let mut rejected = with_facts(rt, op, base, &reasons, &errors, violations);
             rejected.source = Source::Rejected;
             log.generated(rejected)
         }
@@ -985,7 +1032,7 @@ fn filled_error(
     status: u16,
     message: &str,
 ) -> GeneratedResponse {
-    let mut generated = rt.engine.fallback(
+    let generated = rt.engine.fallback(
         &rt.bundle,
         op,
         variant,
@@ -993,8 +1040,39 @@ fn filled_error(
         &OperationCall::default(),
         &GenerationContext::default(),
     );
-    if let (Some(body), Some(schema)) = (generated.body.as_mut(), &variant.schema) {
-        set_message(body, schema, &rt.bundle.defs, message);
+    with_facts(rt, op, generated, message, &[message.to_string()], &[])
+}
+
+/// `generated`, an error body the mock made itself, holding the call's facts: its
+/// message-like member says `message`, arrays of messages hold `reasons`, and its
+/// path-like members name the fields of `violations` (see [`mb_engine::error_body`]).
+/// Rendered as XML when declared so.
+fn with_facts(
+    rt: &MockRuntime,
+    op: &Operation,
+    mut generated: GeneratedResponse,
+    message: &str,
+    reasons: &[String],
+    violations: &[Violation],
+) -> GeneratedResponse {
+    let schema = op
+        .output_for_status(generated.status)
+        .and_then(|v| v.schema.as_ref());
+    if let (Some(body), Some(schema)) = (generated.body.take(), schema) {
+        let mut set = body.clone();
+        error_body::set_message(&mut set, schema, &rt.bundle.defs, message);
+        let body = match rt.engine.error_validator(&rt.bundle, op, generated.status) {
+            Some(validator) => {
+                let base = if validator.is_valid(&set) || !validator.is_valid(&body) {
+                    set
+                } else {
+                    body
+                };
+                error_body::with_reasons(&validator, base, reasons, violations)
+            }
+            None => set,
+        };
+        generated.body = Some(body);
     }
     as_xml(rt, op, generated)
 }
@@ -1074,76 +1152,6 @@ fn header_text(text: &str, max: usize) -> String {
         })
         .take(max)
         .collect()
-}
-
-/// Writes `message` into the first message-like string property of
-/// `schema` (see [`MESSAGE_FIELDS`]), at the top level or nested in
-/// objects (Stripe's `error.message`), creating the objects on the way.
-fn set_message(body: &mut Value, schema: &Value, defs: &Map<String, Value>, message: &str) {
-    let Some(path) = message_path(schema, defs, 0) else {
-        return;
-    };
-    let mut at = body;
-    for (key, _) in &path[..path.len() - 1] {
-        let Value::Object(obj) = at else { return };
-        let slot = obj
-            .entry(key.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if slot.is_null() {
-            *slot = Value::Object(Map::new());
-        }
-        at = slot;
-    }
-    let (key, max_len) = &path[path.len() - 1];
-    if let Value::Object(obj) = at {
-        let text: String = match max_len {
-            Some(n) => message.chars().take(*n).collect(),
-            None => message.to_string(),
-        };
-        obj.insert(key.clone(), Value::String(text));
-    }
-}
-
-/// The property path to a message-like string field of `schema`, each
-/// step with the field's `maxLength`, preferring shallower fields.
-fn message_path(
-    schema: &Value,
-    defs: &Map<String, Value>,
-    depth: usize,
-) -> Option<Vec<(String, Option<usize>)>> {
-    let branches = form::branches(Some(schema), defs);
-    let props: Vec<&Map<String, Value>> = branches
-        .iter()
-        .filter_map(|b| b.get("properties").and_then(Value::as_object))
-        .collect();
-    for name in MESSAGE_FIELDS {
-        for p in &props {
-            let Some(prop) = p.get(name) else { continue };
-            let prop_branches = form::branches(Some(prop), defs);
-            let free_string = form::types(&prop_branches).contains(&"string")
-                && prop_branches
-                    .iter()
-                    .all(|b| b.get("enum").is_none() && b.get("const").is_none());
-            if free_string {
-                let max_len = prop_branches
-                    .iter()
-                    .find_map(|b| b.get("maxLength").and_then(Value::as_u64))
-                    .and_then(|n| usize::try_from(n).ok());
-                return Some(vec![(name.to_string(), max_len)]);
-            }
-        }
-    }
-    if depth + 1 >= MAX_MESSAGE_DEPTH {
-        return None;
-    }
-    props
-        .iter()
-        .flat_map(|p| p.iter())
-        .find_map(|(name, prop)| {
-            let mut path = message_path(prop, defs, depth + 1)?;
-            path.insert(0, (name.clone(), None));
-            Some(path)
-        })
 }
 
 /// The raw query as recorded (without credential parameters, the contract's API keys

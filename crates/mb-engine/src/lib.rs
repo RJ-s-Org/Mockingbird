@@ -56,6 +56,7 @@ pub mod compact;
 pub mod consistency;
 pub mod contract_values;
 mod encoded;
+pub mod error_body;
 pub mod extract;
 pub mod faker;
 pub mod guards;
@@ -552,6 +553,11 @@ pub struct Engine {
     guards: EngineGuards,
     /// Seeds the faker's draws (see [`seed`]); `None` draws at random.
     faker_seed: Option<u64>,
+    /// The error bodies the model wrote (see [`error_body`]), keyed by
+    /// (`<source digest>/<operation id>`, status, cause); `None` when its answer
+    /// failed. Each is written once: concurrent misses wait for the one generation.
+    /// At most [`error_body::MAX_ERROR_BODIES`]; a new one drops another.
+    error_bodies: DashMap<error_body::ErrorKey, error_body::ErrorCell>,
 }
 
 /// The schema a response answers and what it belongs to: the input of
@@ -645,6 +651,7 @@ impl Engine {
             schema_validators: DashMap::new(),
             fake_setups: DashMap::new(),
             guards: EngineGuards::default(),
+            error_bodies: DashMap::new(),
         }
     }
 
@@ -1282,32 +1289,52 @@ impl Engine {
     }
 
     /// A `404` for a resource the session does not hold: the operation's
-    /// declared `404` response (or its `default`), faker-filled; else its
-    /// declared `410`, rendered so; else a problem+json `404` body with
-    /// `detail`. Always tagged `State`.
-    pub fn not_found(
+    /// declared `404` response (or its `default`); else the status
+    /// it declares for that (a `410`, or its one declared
+    /// client error that is not about who asks); else a problem+json `404` body with
+    /// `detail`. A declared body is [`Engine::error_answer`]'s for
+    /// [`error_body::ErrorCause::Missing`], its message-like members saying `detail`.
+    /// Always tagged `State`.
+    pub async fn not_found(
         &self,
         bundle: &Bundle,
         op: &Operation,
         call: &OperationCall,
         detail: &str,
     ) -> GeneratedResponse {
-        let declared = op
+        let code = op
             .output_for_status(404)
-            .map(|variant| (404, variant))
-            .or_else(|| {
-                let code = missing_status(op)?;
-                Some((code, op.output_for_status(code)?))
-            })
-            .map(|(code, variant)| {
-                let ctx = GenerationContext {
-                    forced_status: Some(code),
-                    ..GenerationContext::default()
+            .map(|_| 404)
+            .or_else(|| missing_status(op));
+        let declared = match code {
+            Some(code) => {
+                self.error_answer(bundle, op, call, code, error_body::ErrorCause::Missing)
+                    .await
+            }
+            None => None,
+        };
+        let declared = declared.map(|mut response| {
+            let schema = op
+                .output_for_status(response.status)
+                .filter(|variant| !media::is_non_json(op, variant))
+                .and_then(|variant| variant.schema.as_ref());
+            if let (Some(schema), Some(body)) = (schema, response.body.take()) {
+                let mut body = body;
+                let unchanged = body.clone();
+                error_body::set_message(&mut body, schema, &bundle.defs, detail);
+                let body = match self.error_validator(bundle, op, response.status) {
+                    Some(validator) if validator.is_valid(&body) => {
+                        error_body::with_reasons(&validator, body, &[detail.to_string()], &[])
+                    }
+                    Some(validator) => {
+                        error_body::with_reasons(&validator, unchanged, &[detail.to_string()], &[])
+                    }
+                    None => body,
                 };
-                let mut response = self.fallback(bundle, op, variant, code, call, &ctx);
-                self.fill_contract_values(bundle, op, variant, &mut response, (&[], false));
-                response
-            });
+                response.body = Some(body);
+            }
+            response
+        });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
             status: 404,
             content_type: Some("application/problem+json".into()),
@@ -3800,18 +3827,42 @@ fn overlay_target(validator: &SchemaValidator, target: &StoredResource, generate
     }
 }
 
+/// Client errors that say who asks, how or how often, or that the record is there but
+/// in a state that refuses the call (a conflict, a failed precondition, a range or an
+/// expectation it cannot meet), never that a record is missing.
+const NOT_OF_A_RECORD: [u16; 18] = [
+    401, 403, 405, 406, 407, 408, 409, 411, 412, 413, 414, 415, 416, 417, 426, 428, 429, 431,
+];
+
 /// The status `op` declares for a read of what is not there when it declares no
 /// `404` (a `4XX` range declares one) and no `default`: a declared `410`, which by
-/// its status says the resource is gone. No other status stands in: a `403` is about
-/// who asks, whatever its description says, and keeps the problem+json `404`.
+/// its status says the resource is gone; else the one client error it declares by
+/// code that is not about who asks, how or how often, nor about a record's state
+/// ([`NOT_OF_A_RECORD`]), as an API
+/// answering every refusal with one status (a `400` or a `422`) answers this one too.
+/// A `403` never stands in, whatever its description says, and keeps the problem+json
+/// `404`; nor does one of two such statuses, as which fits is not said.
 fn missing_status(op: &Operation) -> Option<u16> {
     if op.output_for_status(404).is_some() {
         return None;
     }
-    op.outputs
+    if op
+        .outputs
         .iter()
         .any(|o| o.status == StatusSelector::Code(410))
-        .then_some(410)
+    {
+        return Some(410);
+    }
+    let mut candidates = op.outputs.iter().filter_map(|o| match o.status {
+        StatusSelector::Code(code)
+            if (400..500).contains(&code) && !NOT_OF_A_RECORD.contains(&code) =>
+        {
+            Some(code)
+        }
+        _ => None,
+    });
+    let only = candidates.next()?;
+    candidates.next().is_none().then_some(only)
 }
 
 #[cfg(test)]
@@ -3867,6 +3918,42 @@ paths:
         default: {description: "An error."}"#;
         assert_eq!(missing_status(&op_of(default)), None);
         assert_eq!(missing_status(&op_of("")), None);
+    }
+
+    #[test]
+    fn the_one_declared_client_error_stands_for_404() {
+        let one = r#"        "401": {description: "No key."}
+        "422": {description: "Refused."}"#;
+        assert_eq!(missing_status(&op_of(one)), Some(422));
+        let alone = r#"        "400": {description: "Bad request."}"#;
+        assert_eq!(missing_status(&op_of(alone)), Some(400));
+        let two = r#"        "400": {description: "Bad request."}
+        "422": {description: "Refused."}"#;
+        assert_eq!(missing_status(&op_of(two)), None);
+        let limited = r#"        "429": {description: "Slow down."}"#;
+        assert_eq!(missing_status(&op_of(limited)), None);
+    }
+
+    /// A conflict or a failed precondition says the record is there, not that it is
+    /// missing: the problem+json `404` stays.
+    #[test]
+    fn a_conflict_or_precondition_is_not_a_missing_record() {
+        for (code, description) in [
+            ("409", "Conflict - the thing is locked."),
+            (
+                "412",
+                "Precondition failed: the If-Match tag does not match.",
+            ),
+            ("416", "Range not satisfiable."),
+            ("417", "Expectation failed."),
+        ] {
+            let responses = format!("        \"{code}\": {{description: \"{description}\"}}");
+            assert_eq!(missing_status(&op_of(&responses)), None, "{code}");
+        }
+        // Beside one that stands in, it is not a second candidate.
+        let beside = r#"        "409": {description: "Conflict."}
+        "422": {description: "Refused."}"#;
+        assert_eq!(missing_status(&op_of(beside)), Some(422));
     }
 
     #[test]
