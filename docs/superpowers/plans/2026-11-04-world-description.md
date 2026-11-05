@@ -134,16 +134,19 @@
 Rules (each failing entry is dropped from `applied` and listed once):
 - **`operations` keys:** an operation id in the bundle, else `unresolved`.
 - **`types` keys:** a `resource_type` some operation has, or a key of `defs`, else `unresolved`.
-- **Members** (`identity.member`, `lifecycle.member`, `unique.members`, `concurrency.member`, `scope.member`, `filters.member`, `order.member`, `derived.*.member`, `changes` keys) must be a property of the type's record schema. The record schema is the success output of the type's read operation, or the first operation of that type, resolved through `answer.record` when set and `$ref` into `defs`. A member is a dotted path through nested properties.
+- **Members** (`identity.member`, `lifecycle.member`, `unique.members`, `unique.scope`, `concurrency.member`, `scope.member`, `filters.member`, `order.member`, `derived.*.member`, `changes` keys) must be a property of the type's record schema. The record schema is the success output of the type's read operation, or the first operation of that type, resolved through `answer.record` when set and `$ref` into `defs`. A member is a dotted path through nested properties.
 - **Parameters** (`target.path_param`, `scope.param`, `filters.param`, `paging.request`, `paging.size`, `listed_with.param`) must be declared on that operation, or on some list operation of the type for `listed_with`.
 - **Headers** (`concurrency.header`, `idempotency.header`, `paging.response_header`): declared request or response headers of the operation, or of the type's write operations for `concurrency`. On a non-HTTP operation they are `not_applicable`.
-- **Statuses** (`conflict`, `not_found`) must be declared responses on the operation, or on the type's writes.
+- **Statuses** (`conflict`, `not_found`) must be declared responses on the operation, or on the type's writes. On a non-HTTP operation (or a type with no HTTP operation) they are `not_applicable`.
 - **Pointers** (`request`, `answer`) must resolve inside the operation's request or success schema. `records` must point to an array.
 - **Other rules:**
   - `identity.pattern` holds exactly one `{id}`;
   - `lifecycle.initial` and `soft_delete.state` are in `states`, when `states` is non-empty;
   - `derived.of` names a type whose `parent.type` is this type;
-  - `transition` keys are the lifecycle member of the op's type;
+  - `transition` keys are the lifecycle member of the op's type; with no applied lifecycle for that type, every key is `unresolved`;
+  - a `unique` set whose `scope` does not resolve is refused whole, so it never widens to global uniqueness;
+  - a sub-object (`target`, `request`, `answer`, `concurrency`) whose every entry is refused is dropped, as `transition` is, so it cannot mask a lower tier; one authored empty stays;
+  - schema lookups through `$ref`s and `allOf`/`anyOf`/`oneOf` visit each schema at most once, so a self-referencing composition cannot blow up;
   - each unknown key in any `extra` is `unknown_key`.
 
 - [ ] **Step 1: Write the failing tests:**
@@ -236,7 +239,7 @@ Rules (each failing entry is dropped from `applied` and listed once):
 - Consumes: Tasks 1–4.
 - Produces:
   - `pub struct EffectiveWorld { pub world: World, pub authors: BTreeMap<String, Author>, pub revision: i64, pub refused: Vec<Refusal>, pub gaps: Vec<Gap> }`. `authors` maps each entry pointer set by the overlay (at the granularity of `/types/{t}/{field}` and `/operations/{op}/{field}`) to the author of the newest revision that set it. Every other entry is `heuristic`.
-  - `pub async fn effective_world(store: &dyn ControlStore, mock_id: Uuid, version: i64, bundle: &Bundle) -> Result<EffectiveWorld, StoreError>`: `tier0(bundle)` overlaid with the latest revision's document, validated, plus `gaps`. When there is no revision, `revision = 0`.
+  - `pub async fn effective_world(store: &dyn ControlStore, mock_id: Uuid, version: i64, bundle: &Bundle) -> Result<EffectiveWorld, StoreError>`: `overlay(tier0(bundle), validate(latest revision's document, bundle).applied)` plus `gaps`: the overlay is validated before it is laid over tier 0 (not after), so a stale, refused or emptied overlay entry falls back to tier 0's value instead of removing it. When there is no revision, `revision = 0`.
   - `pub async fn carry_forward(store: &dyn ControlStore, mock_id: Uuid, from: i64, to: i64, to_bundle: &Bundle) -> Result<Option<WorldRevision>, StoreError>`: copies `from`'s latest overlay, keeping only the entries `validate` applies against `to_bundle`, as revision 1 of `to`. It does nothing when `from` has no revision. It is called right after every new contract version is added.
 
 - [ ] **Step 1:** write the failing tests:
@@ -281,12 +284,13 @@ Rules (each failing entry is dropped from `applied` and listed once):
 **Interfaces:**
 - Consumes: Task 5's `effective_world`; Task 4's `add_world_revision`.
 - Produces:
-  - `PUT /mocks/{m}/contracts/{v}/world`: the body is an overlay `World`, and it replaces the overlay. It takes an optional `If-Match: <revision>`. `check_size` failures give 413/422. The answer is `201 WorldWriteResult { revision, applied: World, refused: Vec<Refusal> }`. Only `applied` is stored, so refused entries aren't saved. The author comes from the `author` query parameter (`agent`|`llm`|`user`, default `user`); `heuristic` is refused.
+  - `PUT /mocks/{m}/contracts/{v}/world`: the body is an overlay `World`, and it replaces the overlay. It takes an optional `If-Match: <revision>`. `check_size` failures give 413 (`RefusalCode::TooLarge`) or 422 (`invalid`, too deep). The answer is `201 WorldWriteResult { revision, applied: World, refused: Vec<Refusal> }`. Only `applied` is stored, so refused entries aren't saved. The author comes from the `author` query parameter (`agent`|`llm`|`user`, default `user`); `heuristic` is refused.
   - `PATCH` (same path, `application/merge-patch+json`): merges into the current overlay with `json_patch::merge`, then behaves as PUT.
   - `GET .../world/revisions` → `[WorldRevisionInfo]`; `GET .../world/revisions/{r}` → `WorldRevision`.
   - `POST .../world/revisions/{r}/restore`: adds a new revision whose document is `r`'s, validated again. The answer is `WorldWriteResult`.
   - `GET .../world/diff?from=a&to=b` → `{ added: [pointer], removed: [pointer], changed: [pointer] }`, at the leaf level of the overlay documents.
   - A conflict gives `412` problem `revision_conflict`.
+  - Some malformed entries fail deserialization of the whole `World` rather than reaching the validator: unknown keys inside externally tagged or enum-valued entries (`changes.a = {from_request: "/a", bogus: 1}`, `derived` kind `avg`, an unknown `OpKind` or `FilterKind`). Map that serde error to a 422 problem that names the JSON pointer (e.g. with `serde_path_to_error`), or make those enums tolerant. Check this in the Task 7 review.
   - MCP tools: `put_world {mock, version?, world, author?, expect_revision?}`, `patch_world {mock, version?, patch, author?, expect_revision?}`, `list_world_revisions`, `restore_world_revision`, `diff_world`.
   - CLI: `mockingbird world put|patch|revisions|restore|diff`.
 

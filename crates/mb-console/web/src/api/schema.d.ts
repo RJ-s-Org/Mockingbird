@@ -331,6 +331,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mocks/{mock}/contracts/{version}/world": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["contracts_get_world_default"];
+        /** @deprecated */
+        put: operations["contracts_put_world_default"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @deprecated */
+        patch: operations["contracts_patch_world_default"];
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/contracts/{version}/world/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["contracts_diff_world_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/contracts/{version}/world/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["contracts_list_revisions_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/contracts/{version}/world/revisions/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @deprecated */
+        get: operations["contracts_get_revision_default"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mocks/{mock}/contracts/{version}/world/revisions/{revision}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @deprecated */
+        post: operations["contracts_restore_revision_default"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mocks/{mock}/event-settings": {
         parameters: {
             query?: never;
@@ -825,6 +912,86 @@ export interface paths {
         get: operations["contracts_source"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["contracts_get_world"];
+        put: operations["contracts_put_world"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["contracts_patch_world"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["contracts_diff_world"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["contracts_list_revisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/revisions/{revision}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["contracts_get_revision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world/revisions/{revision}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["contracts_restore_revision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2193,6 +2360,174 @@ export interface components {
             name: string;
             role?: components["schemas"]["Role"] | null;
         };
+        /**
+         * @description The OpenAPI schema of [`Author`] (which lives in `mb-mcm`).
+         * @enum {string}
+         */
+        WorldAuthor: "heuristic" | "agent" | "llm" | "user";
+        /** @description The leaf pointers that differ between two revisions' overlays. */
+        WorldDiff: {
+            /** @description Leaves `to` has and `from` has not. */
+            added: string[];
+            /** @description Leaves both have, with different values. */
+            changed: string[];
+            /** Format: int64 */
+            from: number;
+            /** @description Leaves `from` has and `to` has not. */
+            removed: string[];
+            /** Format: int64 */
+            to: number;
+        };
+        /**
+         * @description The OpenAPI schema of [`Gap`] (which lives in `mb-protocols`): something
+         *     the description leaves open.
+         */
+        WorldGap: {
+            code: components["schemas"]["WorldGapCode"];
+            /** @description What is missing, for a person or an assistant to fix. */
+            message: string;
+            /** @description The operation it is about, when it is about one. */
+            operation?: string | null;
+            /** @description The resource type it is about, when it is about one. */
+            type?: string | null;
+        };
+        /**
+         * @description The OpenAPI schema of [`GapCode`] (which lives in `mb-protocols`).
+         * @enum {string}
+         */
+        WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused";
+        /**
+         * @description The problem of a refused world write: a [`Problem`] plus a machine
+         *     readable `code` and, when it is about one place, the JSON `path` into
+         *     the document.
+         */
+        WorldProblem: {
+            /** @description `too_large` (413), `invalid` (422) or `revision_conflict` (412). */
+            code: string;
+            detail: string;
+            /** @description A JSON pointer into the document; empty for the whole document. */
+            path?: string | null;
+            /** Format: int32 */
+            status: number;
+            title: string;
+            /** @description Always `about:blank`. */
+            type: string;
+        };
+        /**
+         * @description The OpenAPI schema of [`Refusal`] (which lives in `mb-mcm`): one entry
+         *     of a description that did not validate.
+         */
+        WorldRefusal: {
+            code: components["schemas"]["WorldRefusalCode"];
+            /** @description What is wrong, for a person or an assistant to fix. */
+            message: string;
+            /**
+             * @description A JSON pointer into the description naming the entry; empty for the
+             *     whole document.
+             */
+            path: string;
+        };
+        /**
+         * @description The OpenAPI schema of [`RefusalCode`] (which lives in `mb-mcm`).
+         * @enum {string}
+         */
+        WorldRefusalCode: "unknown_key" | "unresolved" | "not_applicable" | "invalid" | "too_large";
+        /** @description One revision of a world description with its overlay document. */
+        WorldRevision: {
+            author: components["schemas"]["WorldAuthor"];
+            /** Format: date-time */
+            created_at: string;
+            /** @description The subject of the caller that wrote it, when known. */
+            created_by?: string | null;
+            /** @description The overlay as stored. */
+            document: Record<string, never>;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int64
+             * @description 1-based, increasing per contract version.
+             */
+            revision: number;
+            /**
+             * Format: int64
+             * @description The contract version it is attached to.
+             */
+            version: number;
+        };
+        /** @description One revision of a world description, without its document. */
+        WorldRevisionInfo: {
+            author: components["schemas"]["WorldAuthor"];
+            /** Format: date-time */
+            created_at: string;
+            /** @description The subject of the caller that wrote it, when known. */
+            created_by?: string | null;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int64
+             * @description 1-based, increasing per contract version.
+             */
+            revision: number;
+            /**
+             * Format: int64
+             * @description The contract version it is attached to.
+             */
+            version: number;
+        };
+        /** @description A contract version's effective world description. */
+        WorldView: {
+            /**
+             * @description The author of each entry the overlay sets, keyed by JSON pointer
+             *     (`/types/{t}/{field}`, `/operations/{op}/{field}`); every entry not
+             *     listed is `heuristic`.
+             */
+            authors: {
+                [key: string]: components["schemas"]["WorldAuthor"];
+            };
+            /** @description What the description leaves open, including each refused entry. */
+            gaps: components["schemas"]["WorldGap"][];
+            /**
+             * @description The newest revision's entries that did not validate; they fall back
+             *     to tier 0.
+             */
+            refused: components["schemas"]["WorldRefusal"][];
+            /**
+             * Format: int64
+             * @description The newest revision's number; `0` when there is none.
+             */
+            revision: number;
+            /**
+             * Format: int64
+             * @description The contract version it describes (the active one's number for
+             *     `active`).
+             */
+            version: number;
+            /**
+             * @description The description: tier 0 overlaid with the newest revision's entries
+             *     that validate. Its format is `mockingbird world schema`.
+             */
+            world: Record<string, never>;
+        };
+        /**
+         * @description The answer to a write: the revision added, what of the document was
+         *     applied (and stored) and what was refused.
+         */
+        WorldWriteResult: {
+            /** @description The entries that validate: the stored overlay. */
+            applied: Record<string, never>;
+            /** @description The entries that did not validate; they are not stored. */
+            refused: components["schemas"]["WorldRefusal"][];
+            /**
+             * Format: int64
+             * @description The new revision's number.
+             */
+            revision: number;
+            /**
+             * Format: int64
+             * @description The contract version written to.
+             */
+            version: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -3504,6 +3839,433 @@ export interface operations {
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_world_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldView"];
+                };
+            };
+            /** @description The version is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock or version, or no active version */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_put_world_default: {
+        parameters: {
+            query?: {
+                /** @description `agent`, `llm` or `user` (default `user`) */
+                author?: string;
+            };
+            header?: {
+                /** @description The revision this write is based on (`0` for none yet); a 412 when it is not the newest */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description An overlay world description (`mockingbird world schema`); it replaces the overlay whole */
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Added as the next revision: the entries that validate are stored and apply at once; the refused ones are listed and not stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldWriteResult"];
+                };
+            };
+            /** @description Malformed JSON, an unknown or `heuristic` author, a bad If-Match, or a version that is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `revision_conflict`: If-Match is not the newest revision */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description `too_large`: over 256 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invalid`: nested over 32 deep, not of the format's shape, or a pointer that does not parse; `path` names where */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+        };
+    };
+    contracts_patch_world_default: {
+        parameters: {
+            query?: {
+                /** @description `agent`, `llm` or `user` (default `user`) */
+                author?: string;
+            };
+            header?: {
+                /** @description The revision this patch is based on (`0` for none yet); a 412 when it is not the newest. Without it the patch applies to the newest. */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description A JSON merge patch (RFC 7396) of the newest revision's overlay; `null` removes an entry */
+        requestBody: {
+            content: {
+                "application/merge-patch+json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description The merged overlay, added as the next revision: the entries that validate are stored and apply at once; the refused ones are listed and not stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldWriteResult"];
+                };
+            };
+            /** @description Malformed JSON, an unknown or `heuristic` author, a bad If-Match, or a version that is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `revision_conflict`: If-Match is not the newest revision */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description `too_large`: the patch or the merged overlay is over 256 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description Content-Type is not application/merge-patch+json or application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invalid`: the merged overlay is nested over 32 deep, not of the format's shape, or has a pointer that does not parse; `path` names where */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+        };
+    };
+    contracts_diff_world_default: {
+        parameters: {
+            query?: {
+                /** @description The older revision; `0` is the empty overlay (default: the one before `to`) */
+                from?: number;
+                /** @description The newer revision (default: the newest) */
+                to?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The leaf pointers of the overlay documents added, removed and changed from `from` to `to` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldDiff"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock, version or revision */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_list_revisions_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's world description revisions, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldRevisionInfo"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_revision_default: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+                /** @description Revision number */
+                revision: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The revision with its overlay document as stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldRevision"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_restore_revision_default: {
+        parameters: {
+            query?: {
+                /** @description `agent`, `llm` or `user` (default: the restored revision's author, `user` for a `heuristic` one) */
+                author?: string;
+            };
+            header?: {
+                /** @description The newest revision this restore expects; a 412 when it is not */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+                /** @description The revision to restore */
+                revision: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The revision's document, validated again, added as the next revision */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldWriteResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `revision_conflict` */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description Content-Type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invalid`: the stored document is not a world description */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
                 };
             };
         };
@@ -5849,6 +6611,447 @@ export interface operations {
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_world: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's effective world description with each overlaid entry's author, the refused entries and the gaps. A version with no revision answers tier 0 at revision 0. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldView"];
+                };
+            };
+            /** @description The version is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock or version, or no active version */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_put_world: {
+        parameters: {
+            query?: {
+                /** @description `agent`, `llm` or `user` (default `user`) */
+                author?: string;
+            };
+            header?: {
+                /** @description The revision this write is based on (`0` for none yet); a 412 when it is not the newest */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description An overlay world description (`mockingbird world schema`); it replaces the overlay whole */
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Added as the next revision: the entries that validate are stored and apply at once; the refused ones are listed and not stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldWriteResult"];
+                };
+            };
+            /** @description Malformed JSON, an unknown or `heuristic` author, a bad If-Match, or a version that is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `revision_conflict`: If-Match is not the newest revision */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description `too_large`: over 256 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invalid`: nested over 32 deep, not of the format's shape, or a pointer that does not parse; `path` names where */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+        };
+    };
+    contracts_patch_world: {
+        parameters: {
+            query?: {
+                /** @description `agent`, `llm` or `user` (default `user`) */
+                author?: string;
+            };
+            header?: {
+                /** @description The revision this patch is based on (`0` for none yet); a 412 when it is not the newest. Without it the patch applies to the newest. */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        /** @description A JSON merge patch (RFC 7396) of the newest revision's overlay; `null` removes an entry */
+        requestBody: {
+            content: {
+                "application/merge-patch+json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description The merged overlay, added as the next revision: the entries that validate are stored and apply at once; the refused ones are listed and not stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldWriteResult"];
+                };
+            };
+            /** @description Malformed JSON, an unknown or `heuristic` author, a bad If-Match, or a version that is neither a number nor `active` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `revision_conflict`: If-Match is not the newest revision */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description `too_large`: the patch or the merged overlay is over 256 KiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description Content-Type is not application/merge-patch+json or application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invalid`: the merged overlay is nested over 32 deep, not of the format's shape, or has a pointer that does not parse; `path` names where */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+        };
+    };
+    contracts_diff_world: {
+        parameters: {
+            query?: {
+                /** @description The older revision; `0` is the empty overlay (default: the one before `to`) */
+                from?: number;
+                /** @description The newer revision (default: the newest) */
+                to?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The leaf pointers of the overlay documents added, removed and changed from `from` to `to` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldDiff"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such mock, version or revision */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_list_revisions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's world description revisions, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldRevisionInfo"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_get_revision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+                /** @description Revision number */
+                revision: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The revision with its overlay document as stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldRevision"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    contracts_restore_revision: {
+        parameters: {
+            query?: {
+                /** @description `agent`, `llm` or `user` (default: the restored revision's author, `user` for a `heuristic` one) */
+                author?: string;
+            };
+            header?: {
+                /** @description The newest revision this restore expects; a 412 when it is not */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description Workspace name */
+                ws: string;
+                /** @description Mock name */
+                mock: string;
+                /** @description Contract version number, or `active` */
+                version: string;
+                /** @description The revision to restore */
+                revision: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The revision's document, validated again, added as the next revision */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorldWriteResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `revision_conflict` */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
+                };
+            };
+            /** @description Content-Type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invalid`: the stored document is not a world description */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["WorldProblem"];
                 };
             };
         };

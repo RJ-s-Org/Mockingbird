@@ -1136,6 +1136,13 @@ pub struct FileMock {
     pub workspace: String,
     /// Relative paths are resolved against the config file's directory by [`load`].
     pub contract: PathBuf,
+    /// A world description of the contract (YAML or JSON, see
+    /// `docs/world.md`). Relative paths are resolved against the config
+    /// file's directory by [`load`]. On reconcile it is validated against
+    /// the active contract and stored as a revision by `user` when its
+    /// entries differ from the newest revision's.
+    #[serde(default)]
+    pub world: Option<PathBuf>,
     /// Defaults to `/<name>`.
     #[serde(default)]
     pub route_prefix: Option<String>,
@@ -1355,6 +1362,7 @@ impl FileMock {
         Self {
             workspace: default_ws(),
             contract,
+            world: None,
             route_prefix: None,
             persona: None,
             llm_profile: None,
@@ -1870,6 +1878,11 @@ pub fn load(path: &Path) -> anyhow::Result<FileConfig> {
     for mock in cfg.mocks.values_mut() {
         if mock.contract.is_relative() {
             mock.contract = dir.join(&mock.contract);
+        }
+        if let Some(world) = &mut mock.world
+            && world.is_relative()
+        {
+            *world = dir.join(&*world);
         }
     }
     resolve_relative_paths(&mut cfg, &dir);

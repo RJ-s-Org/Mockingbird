@@ -10,6 +10,7 @@
 - [Mock an API skill](plugins/mockingbird/skills/mockingbird-mock-api/SKILL.md): import, call, scenarios, sessions, chaos, events
 - [Self-host skill](plugins/mockingbird/skills/mockingbird-deploy/SKILL.md): background server, Docker, Compose, Helm, auth, remote MCP
 - [Testing skill](plugins/mockingbird/skills/mockingbird-testing/SKILL.md): offline mode, fixtures, CI
+- [World skill](plugins/mockingbird/skills/mockingbird-world/SKILL.md): review and write a contract's world description (identity, record pointers, lifecycles, paging) after an import
 
 ## Docs
 
@@ -17,7 +18,7 @@
 - [Quickstart](docs/quickstart.md) and [Concepts](docs/concepts.md): serving, sessions, response sources, scenarios
 - [Proxy](docs/proxy.md): `mockingbird proxy` and `hosts:`, reaching mocks without changing the app
 - [Protocols](docs/protocols.md), [Events](docs/events.md): contract formats, overrides per protocol, AsyncAPI channels
-- [Smart import](docs/import.md), [Webhooks](docs/webhooks.md), [Console and auth](docs/console.md), [CLI](docs/cli.md), [Admin API](docs/admin-api.md)
+- [Smart import](docs/import.md), [World descriptions](docs/world.md), [Webhooks](docs/webhooks.md), [Console and auth](docs/console.md), [CLI](docs/cli.md), [Admin API](docs/admin-api.md)
 - [Configuration reference](docs/configuration.md): every `mockingbird.yaml` key
 - [Running locally](docs/deploy/local.md), [Docker Compose](docs/deploy/compose.md), [Kubernetes](docs/deploy/kubernetes.md), [GitOps and preview environments](docs/deploy/gitops.md)
 - [Operations runbook](docs/operations/runbook.md)

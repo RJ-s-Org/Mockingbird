@@ -29,6 +29,13 @@ use crate::{
     queued_progress, require_draft_status, sha256_hex, validate_header_name, validate_hosts,
     validate_mock_name, validate_mock_settings, validate_route_prefix, validate_workspace_name,
 };
+use crate::{
+    NewWorldRevision, WorldRevision, WorldRevisionInfo, parse_author, world_revision_conflict,
+};
+
+const WORLD_INFO_COLUMNS: &str = "id, mock_id, version, revision, author, created_by, created_at";
+const WORLD_COLUMNS: &str =
+    "id, mock_id, version, revision, author, document, created_by, created_at";
 
 /// Migrations table name, distinct from other crates' migrators that may share
 /// the same database.
@@ -314,6 +321,36 @@ fn mock_from_row(row: &SqliteRow) -> Result<Mock, StoreError> {
         webhooks: serde_json::from_str(&webhooks)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn world_info_from_row(row: &SqliteRow) -> Result<WorldRevisionInfo, StoreError> {
+    let id: String = row.try_get("id")?;
+    let mock_id: String = row.try_get("mock_id")?;
+    let author: String = row.try_get("author")?;
+    Ok(WorldRevisionInfo {
+        id: parse_uuid(&id)?,
+        mock_id: parse_uuid(&mock_id)?,
+        version: row.try_get("version")?,
+        revision: row.try_get("revision")?,
+        author: parse_author(&author)?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn world_from_row(row: &SqliteRow) -> Result<WorldRevision, StoreError> {
+    let info = world_info_from_row(row)?;
+    let document: String = row.try_get("document")?;
+    Ok(WorldRevision {
+        id: info.id,
+        mock_id: info.mock_id,
+        version: info.version,
+        revision: info.revision,
+        author: info.author,
+        document: serde_json::from_str(&document)?,
+        created_by: info.created_by,
+        created_at: info.created_at,
     })
 }
 
@@ -1021,6 +1058,126 @@ impl ControlStore for SqliteControlStore {
         tx.commit().await?;
         // Only an inactive version goes: the runtime has nothing to reload.
         Ok(true)
+    }
+
+    async fn add_world_revision(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        r: NewWorldRevision,
+    ) -> Result<WorldRevision, StoreError> {
+        let document = serde_json::to_string(&r.document)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM contract_versions WHERE mock_id = ? AND version = ?")
+                .bind(mock_id.to_string())
+                .bind(version)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_none() {
+            return Err(StoreError::NotFound(format!(
+                "contract version {version} of mock {mock_id}"
+            )));
+        }
+        let current: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(revision), 0) FROM world_revisions WHERE mock_id = ? AND version = ?",
+        )
+        .bind(mock_id.to_string())
+        .bind(version)
+        .fetch_one(&mut *tx)
+        .await?;
+        if let Some(expect) = r.expect
+            && expect != current
+        {
+            return Err(world_revision_conflict(version, expect, current));
+        }
+        let revision = WorldRevision {
+            id: Uuid::new_v4(),
+            mock_id,
+            version,
+            revision: current + 1,
+            author: r.author,
+            document: r.document,
+            created_by: r.created_by,
+            created_at: now(),
+        };
+        let sql = format!(
+            "INSERT INTO world_revisions ({WORLD_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(revision.id.to_string())
+            .bind(mock_id.to_string())
+            .bind(version)
+            .bind(revision.revision)
+            .bind(revision.author.as_str())
+            .bind(document)
+            .bind(&revision.created_by)
+            .bind(revision.created_at)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(revision)
+    }
+
+    async fn list_world_revisions(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<Vec<WorldRevisionInfo>, StoreError> {
+        let sql = format!(
+            "SELECT {WORLD_INFO_COLUMNS} FROM world_revisions WHERE mock_id = ? AND version = ? ORDER BY revision DESC"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .bind(version)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(world_info_from_row)
+            .collect()
+    }
+
+    async fn get_world_revision(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+        revision: i64,
+    ) -> Result<WorldRevision, StoreError> {
+        let sql = format!(
+            "SELECT {WORLD_COLUMNS} FROM world_revisions WHERE mock_id = ? AND version = ? AND revision = ?"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .bind(version)
+            .bind(revision)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(world_from_row)
+            .transpose()?
+            .ok_or_else(|| {
+                StoreError::NotFound(format!(
+                    "world revision {revision} of contract version {version} of mock {mock_id}"
+                ))
+            })
+    }
+
+    async fn latest_world_revision(
+        &self,
+        mock_id: Uuid,
+        version: i64,
+    ) -> Result<Option<WorldRevision>, StoreError> {
+        let sql = format!(
+            "SELECT {WORLD_COLUMNS} FROM world_revisions WHERE mock_id = ? AND version = ? ORDER BY revision DESC LIMIT 1"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(mock_id.to_string())
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(world_from_row)
+            .transpose()
     }
 
     async fn active_contract(&self, mock_id: Uuid) -> Result<Option<ContractVersion>, StoreError> {

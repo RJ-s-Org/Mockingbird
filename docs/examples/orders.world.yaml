@@ -1,0 +1,9 @@
+# The world description of the orders mock in mockingbird.full.yaml
+# (`mocks.orders.world`). Only the entries to set: the importer's
+# heuristics fill in the rest. See docs/world.md.
+version: 1
+operations:
+  getOrder:
+    not_found: 404
+  deleteOrder:
+    kind: delete

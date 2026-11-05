@@ -60,6 +60,7 @@ mod security;
 pub mod smart;
 mod swagger2;
 mod triggers;
+pub mod world;
 mod wsdl;
 
 pub use archive::{

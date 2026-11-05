@@ -1050,3 +1050,338 @@ fn start_server_refuses_a_profile_whose_key_is_missing() {
     assert!(err.contains("MB_TEST_NOWHERE_API_KEY"), "{err}");
     assert!(err.contains("offline"), "says how to start anyway: {err}");
 }
+
+#[test]
+fn cli_world_schema_prints_valid_json() {
+    let dir = tempdir();
+    let printed = run_json(dir.path(), &["world", "schema"]);
+    assert_eq!(printed, json_file("crates/mb-mcm/schemas/world.v1.json"));
+    assert!(printed["$schema"].is_string(), "{printed}");
+    assert_eq!(printed["type"], "object", "{printed}");
+}
+
+#[test]
+fn mcp_get_world_matches_admin() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    run_json(
+        dir.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let (mut mcp, admin_url, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml" }),
+        mcp_env,
+        || {},
+    );
+    assert_eq!(started["ready"], true, "{started}");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let tools = mcp.rpc("tools/list", json!({}));
+        let tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_world")
+            .cloned()
+            .unwrap_or_else(|| panic!("no get_world tool: {tools}"));
+        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+
+        // The format is served to MCP clients as `mockingbird world schema`
+        // prints it.
+        let tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_world_schema")
+            .cloned()
+            .unwrap_or_else(|| panic!("no get_world_schema tool: {tools}"));
+        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+        let schema = mcp.tool("get_world_schema", json!({}));
+        assert_eq!(schema, json_file("crates/mb-mcm/schemas/world.v1.json"));
+        assert_eq!(schema, run_json(dir.path(), &["world", "schema"]));
+
+        let admin = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "api",
+                "GET",
+                "/workspaces/default/mocks/orders/contracts/active/world",
+            ],
+        );
+        assert_eq!(admin["revision"], 0, "{admin}");
+        assert!(admin["world"]["operations"].is_object(), "{admin}");
+        let version = admin["version"].as_u64().unwrap();
+
+        let world = mcp.tool("get_world", json!({ "mock": "orders" }));
+        assert_eq!(world, admin);
+        let world = mcp.tool("get_world", json!({ "mock": "orders", "version": version }));
+        assert_eq!(world, admin);
+        let error = mcp.tool_error("get_world", json!({ "mock": "orders", "version": 99 }));
+        assert!(error.contains("99"), "{error}");
+
+        // The CLI answers the same JSON, and a human summary with the gaps
+        // first.
+        let shown = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "world",
+                "show",
+                "orders",
+                "--json",
+            ],
+        );
+        assert_eq!(shown, admin);
+        let shown = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "world",
+                "show",
+                "orders",
+                "--version",
+                &version.to_string(),
+                "--json",
+            ],
+        );
+        assert_eq!(shown, admin);
+        let out = bin()
+            .args(["--admin-url", &admin_url, "world", "show", "orders"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let gaps = text.find("Gaps").unwrap_or_else(|| panic!("{text}"));
+        let operations = text.find("Operations").unwrap_or_else(|| panic!("{text}"));
+        assert!(gaps < operations, "{text}");
+        assert!(text.contains("revision 0"), "{text}");
+    }));
+    mcp.tool("stop_server", json!({}));
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn mcp_and_cli_write_world_revisions() {
+    let dir = tempdir();
+    std::fs::copy(fixture(), dir.path().join("orders.yaml")).unwrap();
+    run_json(
+        dir.path(),
+        &["init", "--offline", "--contract", "orders.yaml"],
+    );
+    let (mut mcp, admin_url, started) = start_server_on_free_ports(
+        dir.path(),
+        &json!({ "config": "mockingbird.yaml" }),
+        mcp_env,
+        || {},
+    );
+    assert_eq!(started["ready"], true, "{started}");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let tools = mcp.rpc("tools/list", json!({}));
+        for (name, read_only) in [
+            ("put_world", false),
+            ("patch_world", false),
+            ("list_world_revisions", true),
+            ("get_world_revision", true),
+            ("restore_world_revision", false),
+            ("diff_world", true),
+        ] {
+            let tool = tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {name} tool: {tools}"));
+            assert_eq!(tool["annotations"]["readOnlyHint"], read_only, "{tool}");
+        }
+        let world = mcp.tool("get_world", json!({ "mock": "orders" }));
+        let (op, desc) = world["world"]["operations"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, d)| d["kind"].is_string())
+            .map(|(op, d)| (op.clone(), d.clone()))
+            .unwrap_or_else(|| panic!("{world}"));
+        let kind = desc["kind"].clone();
+
+        // A patch as the assistant: the valid entry applies, the unknown
+        // key is refused.
+        let patched = mcp.tool(
+            "patch_world",
+            json!({
+                "mock": "orders",
+                "patch": {"operations": {op.clone(): {"kind": kind.clone(), "bogus": 1}}},
+                "author": "agent",
+                "expect_revision": 0,
+            }),
+        );
+        assert_eq!(patched["revision"], 1, "{patched}");
+        assert_eq!(
+            patched["applied"]["operations"][&op]["kind"], kind,
+            "{patched}"
+        );
+        assert_eq!(patched["refused"][0]["code"], "unknown_key", "{patched}");
+        let world = mcp.tool("get_world", json!({ "mock": "orders" }));
+        assert_eq!(
+            world["authors"][format!("/operations/{op}/kind")],
+            "agent",
+            "{world}"
+        );
+        // A stale expect_revision is a revision conflict.
+        let error = mcp.tool_error(
+            "put_world",
+            json!({ "mock": "orders", "world": {}, "expect_revision": 0 }),
+        );
+        assert!(error.contains("revision_conflict"), "{error}");
+        let put = mcp.tool("put_world", json!({ "mock": "orders", "world": {} }));
+        assert_eq!(put["revision"], 2, "{put}");
+
+        let revisions = mcp.tool("list_world_revisions", json!({ "mock": "orders" }));
+        assert_eq!(revisions[0]["revision"], 2, "{revisions}");
+        assert_eq!(revisions[1]["author"], "agent", "{revisions}");
+        // One revision reads as the Admin API answers it, with its overlay.
+        let revision = mcp.tool(
+            "get_world_revision",
+            json!({ "mock": "orders", "revision": 1 }),
+        );
+        assert_eq!(revision["revision"], 1, "{revision}");
+        assert_eq!(revision["author"], "agent", "{revision}");
+        assert_eq!(revision["document"], patched["applied"], "{revision}");
+        let admin_revision = run_json(
+            dir.path(),
+            &[
+                "--admin-url",
+                &admin_url,
+                "api",
+                "GET",
+                "/workspaces/default/mocks/orders/contracts/active/world/revisions/1",
+            ],
+        );
+        assert_eq!(revision, admin_revision);
+        let version = revision["version"].as_u64().unwrap();
+        assert_eq!(
+            mcp.tool(
+                "get_world_revision",
+                json!({ "mock": "orders", "version": version, "revision": 1 }),
+            ),
+            admin_revision
+        );
+        let error = mcp.tool_error(
+            "get_world_revision",
+            json!({ "mock": "orders", "revision": 99 }),
+        );
+        assert!(error.contains("99"), "{error}");
+        let diff = mcp.tool("diff_world", json!({ "mock": "orders" }));
+        assert_eq!(
+            diff["removed"],
+            json!([format!("/operations/{op}/kind")]),
+            "{diff}"
+        );
+        let restored = mcp.tool(
+            "restore_world_revision",
+            json!({ "mock": "orders", "revision": 1 }),
+        );
+        assert_eq!(restored["revision"], 3, "{restored}");
+        assert_eq!(restored["applied"], patched["applied"]);
+
+        // The CLI writes the same way.
+        let file = dir.path().join("world.json");
+        std::fs::write(
+            &file,
+            json!({"operations": {op.clone(): {"kind": kind}}}).to_string(),
+        )
+        .unwrap();
+        let admin = ["--admin-url", admin_url.as_str(), "world"];
+        let put = run_json(
+            dir.path(),
+            &[
+                &admin[..],
+                &[
+                    "put",
+                    "orders",
+                    "world.json",
+                    "--author",
+                    "user",
+                    "--expect-revision",
+                    "3",
+                ],
+            ]
+            .concat(),
+        );
+        assert_eq!(put["revision"], 4, "{put}");
+        std::fs::write(&file, json!({"operations": {op.clone(): null}}).to_string()).unwrap();
+        let patch = run_json(
+            dir.path(),
+            &[&admin[..], &["patch", "orders", "world.json"]].concat(),
+        );
+        assert_eq!(patch["revision"], 5, "{patch}");
+        let revisions = run_json(dir.path(), &[&admin[..], &["revisions", "orders"]].concat());
+        assert_eq!(revisions.as_array().unwrap().len(), 5, "{revisions}");
+        let revision = run_json(
+            dir.path(),
+            &[&admin[..], &["revision", "orders", "4"]].concat(),
+        );
+        assert_eq!(revision["revision"], 4, "{revision}");
+        assert_eq!(revision["author"], revisions[1]["author"], "{revision}");
+        assert!(
+            revision["document"]["operations"][&op].is_object(),
+            "{revision}"
+        );
+        let revision = run_json(
+            dir.path(),
+            &[
+                &admin[..],
+                &["revision", "orders", "5", "--version", &version.to_string()],
+            ]
+            .concat(),
+        );
+        assert_eq!(revision["revision"], 5, "{revision}");
+        assert!(
+            revision["document"]["operations"][&op].is_null(),
+            "{revision}"
+        );
+        let diff = run_json(
+            dir.path(),
+            &[&admin[..], &["diff", "orders", "--from", "4", "--to", "5"]].concat(),
+        );
+        assert_eq!(
+            diff["removed"],
+            json!([format!("/operations/{op}/kind")]),
+            "{diff}"
+        );
+        let restored = run_json(
+            dir.path(),
+            &[&admin[..], &["restore", "orders", "4"]].concat(),
+        );
+        assert_eq!(restored["revision"], 6, "{restored}");
+        let out = bin()
+            .args(
+                [
+                    &admin[..],
+                    &["put", "orders", "world.json", "--expect-revision", "1"],
+                ]
+                .concat(),
+            )
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("revision_conflict"), "{stderr}");
+    }));
+    mcp.tool("stop_server", json!({}));
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

@@ -410,6 +410,7 @@ pub async fn upload(
             },
         )
         .await?;
+    crate::world::carry_forward_logged(st.store.as_ref(), m.id, added.version, &added.bundle).await;
     let added = store_warnings(&st, m.id, added.version, &warnings).await?;
     let stored = if activate {
         st.store

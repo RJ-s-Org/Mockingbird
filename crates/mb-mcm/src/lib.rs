@@ -19,6 +19,7 @@
 #![warn(missing_debug_implementations, missing_docs)]
 
 pub mod credentials;
+pub mod world;
 
 use std::fmt;
 use std::time::Duration;
@@ -950,6 +951,42 @@ impl Bundle {
             .collect()
     }
 
+    /// `schema` with its `$ref`s to `#/$defs/<name>` followed into
+    /// [`Bundle::defs`] (at most 16 hops, so a cycle ends); `schema` itself
+    /// when it is not such a reference or its definition is missing.
+    #[must_use]
+    pub fn resolve<'a>(&'a self, mut schema: &'a Value) -> &'a Value {
+        for _ in 0..16 {
+            let Some(target) = schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.strip_prefix("#/$defs/"))
+                .and_then(|rest| self.def_target(rest))
+            else {
+                break;
+            };
+            schema = target;
+        }
+        schema
+    }
+
+    /// The schema `rest` (a `$ref` after `#/$defs/`) names: a definition by
+    /// its name (raw, or RFC 6901-unescaped), or, split at the first `/`, a
+    /// definition followed by an RFC 6901 pointer into its interior
+    /// (`Folder/properties/meta`).
+    fn def_target(&self, rest: &str) -> Option<&Value> {
+        let unescape = |t: &str| t.replace("~1", "/").replace("~0", "~");
+        if let Some(d) = self
+            .defs
+            .get(rest)
+            .or_else(|| self.defs.get(&unescape(rest)))
+        {
+            return Some(d);
+        }
+        let (name, tail) = rest.split_once('/')?;
+        self.defs.get(&unescape(name))?.pointer(&format!("/{tail}"))
+    }
+
     /// Clone `schema` with this bundle's definitions attached as `$defs`, so
     /// it can be validated or faked standalone.
     #[must_use]
@@ -1347,6 +1384,65 @@ impl Operation {
         self.outputs
             .iter()
             .find(|o| o.status == StatusSelector::Default)
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use serde_json::{Map, json};
+
+    fn bundle(defs: Map<String, Value>) -> Bundle {
+        Bundle {
+            id: "t".into(),
+            title: "t".into(),
+            version: "1".into(),
+            description: None,
+            source_digest: String::new(),
+            operations: vec![],
+            defs,
+            protocol_payload: None,
+            channels: vec![],
+            webhooks: vec![],
+            api_key_names: None,
+        }
+    }
+
+    #[test]
+    fn resolve_follows_ref_into_definition_interior() {
+        let mut defs = Map::new();
+        defs.insert(
+            "X".into(),
+            json!({"type": "object", "properties": {
+                "y": {"$ref": "#/$defs/Y"},
+                "a~b": {"type": "integer"}
+            }}),
+        );
+        defs.insert("Y".into(), json!({"type": "string"}));
+        defs.insert("Odd/Name".into(), json!({"type": "boolean"}));
+        let b = bundle(defs);
+        assert_eq!(
+            b.resolve(&json!({"$ref": "#/$defs/X/properties/y"})),
+            &json!({"type": "string"})
+        );
+        assert_eq!(
+            b.resolve(&json!({"$ref": "#/$defs/X/properties/a~0b"})),
+            &json!({"type": "integer"})
+        );
+        // A definition whose name holds `/`, written escaped, still resolves.
+        assert_eq!(
+            b.resolve(&json!({"$ref": "#/$defs/Odd~1Name"})),
+            &json!({"type": "boolean"})
+        );
+        // A pointer to nothing is left as it is.
+        let missing = json!({"$ref": "#/$defs/X/properties/z"});
+        assert_eq!(b.resolve(&missing), &missing);
+        // Cycles stay bounded.
+        let mut defs = Map::new();
+        defs.insert("L".into(), json!({"$ref": "#/$defs/L"}));
+        let b = bundle(defs);
+        let l = json!({"$ref": "#/$defs/L"});
+        assert!(b.resolve(&l).get("$ref").is_some());
     }
 }
 

@@ -19,6 +19,7 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 | `0900_admin_session_grants` | Unreleased | Nullable `admin_sessions` columns (`claims`, `mapping_hash`, `refresh_token`, `refreshed_at`) so console roles can be re-derived after login. Additive; sessions from before keep their login roles. |
 | `1000_profile_output_mode` | Unreleased | Nullable `llm_profiles.output_mode` (`none`, `json_object`, `json_schema`). Additive; a profile written before reads its mode from `json_schema`, which is still written, so older nodes keep working during a rolling upgrade. |
 | `1100_import_job_tenant` | Unreleased | Nullable `import_jobs.tenant`: the tenant an import job is billed to, so whichever node runs it bills that tenant. Additive; a job queued before (or by an older node during a rolling upgrade) has none and is billed to `default`, as before. |
+| `1300_world_revisions` | Unreleased | The `world_revisions` table: numbered revisions of each contract version's authored world description, deleted with their version and mock. Additive; older nodes ignore it during a rolling upgrade, and a version with no revisions has the heuristic description only. |
 
 ### `0300_hardening` is additive
 

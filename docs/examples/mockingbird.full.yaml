@@ -163,6 +163,7 @@ mocks:
   orders:
     workspace: default
     contract: ../../fixtures/openapi/orders-3.0.yaml
+    world: orders.world.yaml
     route_prefix: /orders-api
     hosts: [orders.example.test]
     path_rewrite:

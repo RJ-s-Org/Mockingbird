@@ -9,14 +9,15 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, SubsecRound, TimeZone, Utc};
 use mb_mcm::Bundle;
 use mb_mcm::Trigger;
+use mb_mcm::world::Author;
 use mb_store::{
     AdminSession, AdminSessionGrant, ApiKey, AuditFilter, ChannelSettings, ChaosSettings,
     Consistency, ContractStatus, ControlChange, ControlStore, DEFAULT_WORKSPACE,
     DataPlaneAuthConfig, DataPlaneAuthMode, ImportJobStatus, ImportOutcome, ImportProgress,
     LatencyJitter, LlmProfile, Mock, MockBehavior, MockEventSettings, MockLimits, NewAuditEvent,
-    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, OidcPendingLogin,
-    RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter, ResourceSource, Scenario,
-    ScenarioRules, StoreError, UnknownIds, WebhookSigning, WebhookTarget,
+    NewContractVersion, NewImportJob, NewMock, NewRequestLogEntry, NewWorldRevision,
+    OidcPendingLogin, RETENTION_PRUNE_INTERVAL, RateLimit, RequestKind, RequestLogFilter,
+    ResourceSource, Scenario, ScenarioRules, StoreError, UnknownIds, WebhookSigning, WebhookTarget,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -106,6 +107,9 @@ macro_rules! conformance_checks {
             contract_version_infos_match_the_versions,
             latest_contract_version_by_status,
             request_log_summaries_match_the_entries,
+            world_revisions_number_from_one_per_version,
+            world_revision_expect_mismatch_conflicts,
+            world_revisions_go_with_the_mock,
         }
     };
 }
@@ -4239,5 +4243,225 @@ pub(crate) async fn request_log_summaries_match_the_entries(store: &Arc<dyn Cont
         (sizes[0].1, sizes[1].1, sizes[2].1, sizes[3]),
         (3, 4, 0, (7, 11)),
         "{sizes:?}"
+    );
+}
+
+fn world_revision(author: Author, doc: serde_json::Value, expect: Option<i64>) -> NewWorldRevision {
+    NewWorldRevision {
+        author,
+        document: doc,
+        created_by: Some("tester".into()),
+        expect,
+    }
+}
+
+pub(crate) async fn world_revisions_number_from_one_per_version(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "world-numbering").await;
+    for src in ["w1", "w2"] {
+        store
+            .add_contract_version(mock.id, new_version(ContractStatus::Approved, src))
+            .await
+            .expect("add version");
+    }
+    assert!(
+        store
+            .latest_world_revision(mock.id, 1)
+            .await
+            .expect("latest")
+            .is_none()
+    );
+    assert!(
+        store
+            .list_world_revisions(mock.id, 1)
+            .await
+            .expect("list")
+            .is_empty()
+    );
+
+    let doc1 = json!({"version": 1, "types": {"Order": {"identity": "id"}}});
+    let doc2 = json!({"version": 1, "operations": {"MoveFolder": {"kind": "action"}}});
+    let r1 = store
+        .add_world_revision(
+            mock.id,
+            1,
+            world_revision(Author::Agent, doc1.clone(), None),
+        )
+        .await
+        .expect("r1");
+    assert_eq!((r1.mock_id, r1.version, r1.revision), (mock.id, 1, 1));
+    assert_eq!(r1.author, Author::Agent);
+    assert_eq!(r1.document, doc1);
+    assert_eq!(r1.created_by.as_deref(), Some("tester"));
+    let r2 = store
+        .add_world_revision(mock.id, 1, world_revision(Author::User, doc2.clone(), None))
+        .await
+        .expect("r2");
+    assert_eq!(r2.revision, 2);
+    let other = store
+        .add_world_revision(mock.id, 2, world_revision(Author::Llm, doc1.clone(), None))
+        .await
+        .expect("v2 r1");
+    assert_eq!((other.version, other.revision), (2, 1));
+
+    let listed = store.list_world_revisions(mock.id, 1).await.expect("list");
+    let numbers: Vec<(i64, Author)> = listed.iter().map(|r| (r.revision, r.author)).collect();
+    assert_eq!(numbers, vec![(2, Author::User), (1, Author::Agent)]);
+    assert_eq!(listed[0].id, r2.id);
+    assert_eq!(listed[0].created_by.as_deref(), Some("tester"));
+    assert_eq!(listed[0].created_at, r2.created_at);
+
+    let got = store
+        .get_world_revision(mock.id, 1, 1)
+        .await
+        .expect("get r1");
+    assert_eq!(got, r1);
+    let latest = store
+        .latest_world_revision(mock.id, 1)
+        .await
+        .expect("latest")
+        .expect("a revision");
+    assert_eq!(latest, r2);
+    assert_eq!(latest.document, doc2);
+
+    let err = store
+        .get_world_revision(mock.id, 1, 9)
+        .await
+        .expect_err("no revision 9");
+    assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+    let err = store
+        .add_world_revision(
+            mock.id,
+            9,
+            world_revision(Author::Agent, doc1.clone(), None),
+        )
+        .await
+        .expect_err("no version 9");
+    assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+    let err = store
+        .add_world_revision(Uuid::new_v4(), 1, world_revision(Author::Agent, doc1, None))
+        .await
+        .expect_err("no such mock");
+    assert!(matches!(err, StoreError::NotFound(_)), "got {err:?}");
+}
+
+pub(crate) async fn world_revision_expect_mismatch_conflicts(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "world-expect").await;
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Active, "we"))
+        .await
+        .expect("add version");
+    let doc = json!({"version": 1});
+    let first = store
+        .add_world_revision(
+            mock.id,
+            1,
+            world_revision(Author::Agent, doc.clone(), Some(0)),
+        )
+        .await
+        .expect("expect 0 on no revisions");
+    assert_eq!(first.revision, 1);
+    let err = store
+        .add_world_revision(
+            mock.id,
+            1,
+            world_revision(Author::User, doc.clone(), Some(0)),
+        )
+        .await
+        .expect_err("revision 1 exists");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    let err = store
+        .add_world_revision(
+            mock.id,
+            1,
+            world_revision(Author::User, doc.clone(), Some(2)),
+        )
+        .await
+        .expect_err("revision 2 does not exist yet");
+    assert!(matches!(err, StoreError::Conflict(_)), "got {err:?}");
+    let second = store
+        .add_world_revision(
+            mock.id,
+            1,
+            world_revision(Author::User, doc.clone(), Some(1)),
+        )
+        .await
+        .expect("expect 1");
+    assert_eq!(second.revision, 2);
+    let third = store
+        .add_world_revision(mock.id, 1, world_revision(Author::Agent, doc, None))
+        .await
+        .expect("no expectation");
+    assert_eq!(third.revision, 3);
+    let listed = store.list_world_revisions(mock.id, 1).await.expect("list");
+    assert_eq!(listed.len(), 3, "a refused write adds nothing: {listed:?}");
+}
+
+pub(crate) async fn world_revisions_go_with_the_mock(store: &Arc<dyn ControlStore>) {
+    let mock = create(store, "world-cascade").await;
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Active, "wc1"))
+        .await
+        .expect("add v1");
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Approved, "wc2"))
+        .await
+        .expect("add v2");
+    for version in [1, 2] {
+        store
+            .add_world_revision(
+                mock.id,
+                version,
+                world_revision(Author::Agent, json!({"version": 1}), None),
+            )
+            .await
+            .expect("revision");
+    }
+
+    // Deleting a version takes its revisions, and a version added in its
+    // place starts from none.
+    assert!(
+        store
+            .delete_contract_version(mock.id, 2)
+            .await
+            .expect("delete v2")
+    );
+    assert!(
+        store
+            .list_world_revisions(mock.id, 2)
+            .await
+            .expect("list v2")
+            .is_empty()
+    );
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Approved, "wc2b"))
+        .await
+        .expect("re-add v2");
+    assert!(
+        store
+            .latest_world_revision(mock.id, 2)
+            .await
+            .expect("latest v2")
+            .is_none()
+    );
+
+    assert!(
+        store
+            .delete_mock(DEFAULT_WORKSPACE, "world-cascade")
+            .await
+            .expect("delete mock")
+    );
+    assert!(
+        store
+            .list_world_revisions(mock.id, 1)
+            .await
+            .expect("list v1")
+            .is_empty()
+    );
+    assert!(
+        store
+            .latest_world_revision(mock.id, 1)
+            .await
+            .expect("latest v1")
+            .is_none()
     );
 }

@@ -1,0 +1,476 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mockingbird world description",
+  "description": "How a compiled contract behaves as a world: identities, record pointers, lifecycles, paging and the rest. Every key is optional.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "types": {
+      "type": "object",
+      "description": "Keyed by resource type.",
+      "additionalProperties": {
+        "$ref": "#/$defs/type"
+      }
+    },
+    "operations": {
+      "type": "object",
+      "description": "Keyed by operation id.",
+      "additionalProperties": {
+        "$ref": "#/$defs/operation"
+      }
+    }
+  },
+  "$defs": {
+    "member": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A dotted path to a record member, e.g. `name` or `meta.id`."
+    },
+    "param": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A declared request parameter."
+    },
+    "header": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A declared header name."
+    },
+    "status": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599,
+      "description": "A declared response status."
+    },
+    "pointer": {
+      "type": "string",
+      "pattern": "^(/([^~]|~[01])*)+$",
+      "description": "An RFC 6901 JSON pointer, e.g. `/result/0`."
+    },
+    "pattern": {
+      "type": "string",
+      "pattern": "\\{id\\}",
+      "description": "A value pattern holding exactly one `{id}`, e.g. `folders/{id}`."
+    },
+    "type": {
+      "description": "How records of one resource type behave.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "parent": {
+          "$ref": "#/$defs/parent"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/lifecycle"
+        },
+        "unique": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unique"
+          }
+        },
+        "concurrency": {
+          "$ref": "#/$defs/concurrency"
+        },
+        "derived": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/derived"
+          }
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/member"
+        },
+        "pattern": {
+          "$ref": "#/$defs/pattern"
+        }
+      },
+      "required": [
+        "member"
+      ]
+    },
+    "parent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "member": {
+          "$ref": "#/$defs/member"
+        },
+        "path_param": {
+          "$ref": "#/$defs/param"
+        },
+        "pattern": {
+          "$ref": "#/$defs/pattern"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/member"
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "initial": {
+          "type": "string",
+          "minLength": 1
+        },
+        "soft_delete": {
+          "$ref": "#/$defs/soft_delete"
+        }
+      },
+      "required": [
+        "member"
+      ]
+    },
+    "soft_delete": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "listed_with": {
+          "$ref": "#/$defs/param_value"
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "param_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "param": {
+          "$ref": "#/$defs/param"
+        },
+        "value": true
+      },
+      "required": [
+        "param",
+        "value"
+      ]
+    },
+    "unique": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/member"
+          },
+          "minItems": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/member"
+        },
+        "conflict": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "required": [
+        "members"
+      ]
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "member": {
+          "$ref": "#/$defs/member"
+        },
+        "header": {
+          "$ref": "#/$defs/header"
+        },
+        "conflict": {
+          "$ref": "#/$defs/status"
+        }
+      }
+    },
+    "derived": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "count"
+            },
+            "of": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "of"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "sum"
+            },
+            "of": {
+              "type": "string",
+              "minLength": 1
+            },
+            "member": {
+              "$ref": "#/$defs/member"
+            },
+            "where": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "of",
+            "member"
+          ]
+        }
+      ]
+    },
+    "operation": {
+      "description": "How one operation acts on the world.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "create",
+            "read",
+            "list",
+            "update",
+            "replace",
+            "delete",
+            "action"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path_param": {
+              "$ref": "#/$defs/param"
+            },
+            "member": {
+              "$ref": "#/$defs/member"
+            }
+          }
+        },
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "record": {
+              "$ref": "#/$defs/pointer"
+            },
+            "records": {
+              "$ref": "#/$defs/pointer"
+            }
+          }
+        },
+        "answer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "record": {
+              "$ref": "#/$defs/pointer"
+            },
+            "records": {
+              "$ref": "#/$defs/pointer"
+            },
+            "long_running": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "done": {
+                  "$ref": "#/$defs/member"
+                },
+                "result": {
+                  "$ref": "#/$defs/member"
+                }
+              },
+              "required": [
+                "done",
+                "result"
+              ]
+            }
+          }
+        },
+        "transition": {
+          "type": "object"
+        },
+        "changes": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "from_request": {
+                    "$ref": "#/$defs/pointer"
+                  }
+                },
+                "required": [
+                  "from_request"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value": true
+                },
+                "required": [
+                  "value"
+                ]
+              }
+            ]
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "param": {
+              "$ref": "#/$defs/param"
+            },
+            "member": {
+              "$ref": "#/$defs/member"
+            }
+          },
+          "required": [
+            "param",
+            "member"
+          ]
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "param": {
+                "$ref": "#/$defs/param"
+              },
+              "member": {
+                "$ref": "#/$defs/member"
+              },
+              "kind": {
+                "enum": [
+                  "eq",
+                  "contains",
+                  "gte",
+                  "lte",
+                  "flag",
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "param",
+              "kind"
+            ]
+          }
+        },
+        "order": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "member": {
+              "$ref": "#/$defs/member"
+            },
+            "descending": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "member"
+          ]
+        },
+        "paging": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "style": {
+              "enum": [
+                "cursor",
+                "page",
+                "offset",
+                "next_url",
+                "header_cursor"
+              ]
+            },
+            "request": {
+              "$ref": "#/$defs/param"
+            },
+            "response": {
+              "$ref": "#/$defs/member"
+            },
+            "response_header": {
+              "$ref": "#/$defs/header"
+            },
+            "size": {
+              "$ref": "#/$defs/param"
+            }
+          },
+          "required": [
+            "style"
+          ]
+        },
+        "idempotency": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "$ref": "#/$defs/header"
+            }
+          },
+          "required": [
+            "header"
+          ]
+        },
+        "not_found": {
+          "$ref": "#/$defs/status"
+        }
+      }
+    }
+  }
+}

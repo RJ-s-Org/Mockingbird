@@ -422,6 +422,8 @@ async fn run_job(st: &AdminState, job: &ImportJob) -> Result<(), StoreError> {
         .await;
     let version = match completed {
         Ok(Some(v)) => {
+            // The world description is carried when the draft is approved,
+            // from the source and the draft as they are then.
             if !compile_warnings.is_empty() {
                 let stored = match serde_json::to_value(&compile_warnings) {
                     Ok(value) => {

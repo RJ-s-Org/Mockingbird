@@ -702,6 +702,285 @@ async fn reconcile_new_contract_digest_new_version() {
     );
 }
 
+#[tokio::test]
+async fn reconcile_carries_the_world_description_to_a_new_version() {
+    let ws = Workspace::new();
+    let cfg = ws.load(BASIC);
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let doc = json!({"version": 1, "operations": {"getOrder": {"not_found": 404}}});
+    store
+        .add_world_revision(
+            mock.id,
+            1,
+            mb_store::NewWorldRevision {
+                author: mb_mcm::world::Author::User,
+                document: doc.clone(),
+                created_by: Some("editor".into()),
+                expect: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut source = std::fs::read_to_string(fixture()).unwrap();
+    source.push_str("\n# edited\n");
+    std::fs::write(ws.dir.path().join("orders.yaml"), source).unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.new_versions, [("orders".to_string(), 2)]);
+    let carried = store
+        .latest_world_revision(mock.id, 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.document, doc);
+    assert_eq!(carried.author, mb_mcm::world::Author::User);
+}
+
+/// [`BASIC`] with `mocks.orders.world: orders.world.yaml`.
+fn with_world() -> String {
+    BASIC.replace(
+        "    contract: orders.yaml\n",
+        "    contract: orders.yaml\n    world: orders.world.yaml\n",
+    )
+}
+
+/// A world description of the orders fixture: one entry that resolves and
+/// one on an operation the contract does not have.
+const ORDERS_WORLD: &str = r#"
+version: 1
+operations:
+  getOrder:
+    not_found: 404
+  noSuchOperation:
+    not_found: 404
+"#;
+
+#[tokio::test]
+async fn config_world_file_becomes_a_revision() {
+    let ws = Workspace::new();
+    std::fs::write(ws.dir.path().join("orders.world.yaml"), ORDERS_WORLD).unwrap();
+    let cfg = ws.load(&with_world());
+    assert_eq!(
+        cfg.mocks["orders"].world.as_deref(),
+        Some(ws.dir.path().join("orders.world.yaml").as_path()),
+        "resolved against the config file's directory"
+    );
+    let store = store().await;
+    // The stale entry is refused (and logged), not a startup failure.
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let revision = store
+        .latest_world_revision(mock.id, 1)
+        .await
+        .unwrap()
+        .expect("a revision from the config file");
+    assert_eq!(revision.revision, 1);
+    assert_eq!(revision.author, mb_mcm::world::Author::User);
+    assert_eq!(
+        revision.document,
+        json!({"version": 1, "operations": {"getOrder": {"not_found": 404}}}),
+        "only the entries that validate are stored"
+    );
+
+    // A JSON file works too, and an unreadable one fails naming its path.
+    std::fs::write(
+        ws.dir.path().join("orders.world.json"),
+        r#"{"version": 1, "operations": {"getOrder": {"not_found": 404}}}"#,
+    )
+    .unwrap();
+    let cfg = ws.load(&BASIC.replace(
+        "    contract: orders.yaml\n",
+        "    contract: orders.yaml\n    world: orders.world.json\n",
+    ));
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let missing = ws.load(&BASIC.replace(
+        "    contract: orders.yaml\n",
+        "    contract: orders.yaml\n    world: missing.world.yaml\n",
+    ));
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &missing)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("missing.world.yaml"), "{err:#}");
+    assert_eq!(
+        store.list_world_revisions(mock.id, 1).await.unwrap().len(),
+        1,
+        "the JSON file holds the same entries, and a failed reconcile writes nothing"
+    );
+}
+
+#[tokio::test]
+async fn unchanged_config_world_adds_no_revision() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    std::fs::write(&world, ORDERS_WORLD).unwrap();
+    let cfg = ws.load(&with_world());
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    let again = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert!(again.is_empty(), "{again:?}");
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.list_world_revisions(mock.id, 1).await.unwrap().len(),
+        1
+    );
+
+    // Editing the file adds a revision on top.
+    std::fs::write(
+        &world,
+        "version: 1\noperations:\n  getOrder:\n    not_found: 404\n  deleteOrder:\n    kind: delete\n",
+    )
+    .unwrap();
+    let report = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+    assert_eq!(report.updated, ["orders"]);
+    let latest = store
+        .latest_world_revision(mock.id, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.revision, 2);
+    assert!(
+        latest.document["operations"]["deleteOrder"].is_object(),
+        "{}",
+        latest.document
+    );
+}
+
+/// Reconciles racing over the same world file (two replicas, or a watch
+/// reload beside a startup reconcile) store it once: each write names the
+/// revision it read as the newest, and one that lost the race re-reads.
+#[tokio::test]
+async fn racing_reconciles_store_the_world_file_once() {
+    for _ in 0..5 {
+        let ws = Workspace::new();
+        std::fs::write(ws.dir.path().join("orders.world.yaml"), ORDERS_WORLD).unwrap();
+        let store = store().await;
+        reconcile(store.as_ref(), no_state().as_ref(), &ws.load(BASIC))
+            .await
+            .unwrap();
+        let cfg = Arc::new(ws.load(&with_world()));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (store, cfg) = (store.clone(), cfg.clone());
+            tasks.push(tokio::spawn(async move {
+                reconcile(store.as_ref(), no_state().as_ref(), &cfg).await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let mock = store
+            .get_mock(DEFAULT_WORKSPACE, "orders")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.list_world_revisions(mock.id, 1).await.unwrap().len(),
+            1,
+            "the world file was stored more than once"
+        );
+    }
+}
+
+/// A world file far larger than any description could be is refused from
+/// its size, before it is read; the 256 KiB limit itself applies to the
+/// description (its JSON form), so a YAML file over 256 KiB that is mostly
+/// comments still applies.
+#[tokio::test]
+async fn an_oversized_world_file_is_refused_before_it_is_read() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    let comments = "# a comment line of the description\n".repeat(300 * 1024 / 36);
+    std::fs::write(&world, format!("{comments}{ORDERS_WORLD}")).unwrap();
+    let cfg = ws.load(&with_world());
+    let store = store().await;
+    reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap();
+
+    let huge = "# padding\n".repeat(2 * 1024 * 1024 / 10);
+    std::fs::write(&world, format!("{huge}{ORDERS_WORLD}")).unwrap();
+    let err = reconcile(store.as_ref(), no_state().as_ref(), &cfg)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("orders.world.yaml"), "{msg}");
+    assert!(msg.contains("too_large"), "{msg}");
+}
+
+/// `--watch` watches each mock's `world:` file: editing only that file
+/// reloads it and adds a revision.
+#[tokio::test]
+async fn watch_reloads_an_edited_world_file() {
+    let ws = Workspace::new();
+    let world = ws.dir.path().join("orders.world.yaml");
+    std::fs::write(&world, ORDERS_WORLD).unwrap();
+    ws.write(&with_world());
+    let store = store().await;
+    let state = no_state();
+    reconcile(store.as_ref(), state.as_ref(), &ws.load(&with_world()))
+        .await
+        .unwrap();
+    let mock = store
+        .get_mock(DEFAULT_WORKSPACE, "orders")
+        .await
+        .unwrap()
+        .unwrap();
+    let _watch = mockingbird::watch::spawn_with(
+        ws.config_path(),
+        store.clone(),
+        state,
+        Arc::new(|_: &mut FileConfig| Ok(())),
+    )
+    .unwrap();
+    // Let the watch arm and make its first read.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::fs::write(
+        &world,
+        "version: 1\noperations:\n  getOrder:\n    not_found: 404\n  deleteOrder:\n    kind: delete\n",
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = store.list_world_revisions(mock.id, 1).await.unwrap().len();
+        if n == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the world file edit was not reloaded: {n} revisions"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn api_mock(store: &Arc<dyn ControlStore>, name: &str) -> mb_store::Mock {
     let mock = store
         .create_mock(
