@@ -221,12 +221,17 @@ async fn write_memory(store: Arc<dyn StateStore>) {
     assert!(h.kept().await.is_empty());
 }
 
-/// A deleted record is a 404 with no LLM call, its marker stays out of what the session
-/// shows, and a reset forgets it.
+/// A deleted record is a 404 that generates no record (one call writes its body's
+/// code, kept for the operation), its marker stays out of what the session shows, and
+/// a reset forgets it.
 async fn deleted_markers(store: Arc<dyn StateStore>) {
     let h = harness(
         store,
-        vec![json!({"id": "i1"}), json!({"id": "i1", "title": "Back"})],
+        vec![
+            json!({"id": "i1"}),
+            json!({"code": 1101, "message": "gone"}),
+            json!({"id": "i1", "title": "Back"}),
+        ],
     );
     h.call("POST", "/items", Some(json!({"title": "A title"})))
         .await;
@@ -236,7 +241,7 @@ async fn deleted_markers(store: Arc<dyn StateStore>) {
         let (status, source) = h.call("GET", "/items/i1", None).await;
         assert_eq!((status, source.as_str()), (StatusCode::NOT_FOUND, "state"));
     }
-    assert_eq!(h.calls(), 1);
+    assert_eq!(h.calls(), 2);
     assert!(
         h.kept().await.iter().any(|d| d.id.starts_with("#deleted")),
         "{:?}",

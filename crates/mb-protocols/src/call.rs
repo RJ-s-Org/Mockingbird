@@ -495,6 +495,33 @@ pub(crate) async fn plan<'a>(
 }
 
 /// The admission and data-plane auth of [`plan`].
+/// The engine the provider policy picks for a call the mock refuses before planning it
+/// (a request failing its schema), to write its error's code (see
+/// [`mb_engine::error_body`]): the caller's tenant resolved and its credentials checked,
+/// with no quota or rate limit admitted, as that refusal costs at most one generation
+/// per operation, status and cause. `None` when either fails or the policy refuses.
+#[cfg(feature = "http-rest")]
+pub(crate) async fn refusing_engine(
+    rt: &MockRuntime,
+    op: &Operation,
+    headers: &HeaderMap,
+    presented: Presented<'_>,
+) -> Option<std::sync::Arc<mb_engine::Engine>> {
+    let call_info = CallInfo::new(&rt.name, &op.id, headers);
+    let tenancy = rt.ext.tenants.resolve(&call_info).await.ok()?;
+    authenticate(
+        rt,
+        &op.id,
+        &op.security,
+        headers,
+        presented.query,
+        presented.key_verified,
+    )
+    .await
+    .ok()?;
+    rt.engine_for(&tenancy).await.ok()
+}
+
 async fn admit_and_authenticate(
     rt: &MockRuntime,
     op: &Operation,
@@ -916,7 +943,7 @@ pub(crate) async fn prepare<'a>(
     {
         let detail = format!("{t} {id} does not exist in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
+        return Prepared::Answered(nothing_held(rt, plan, call, response_schema, &detail).await);
     }
     // Whatever `unknown_ids` says: this one is known to be gone. A record found by
     // another member than its key (`/issues/{issue_iid}`) is not what the path named
@@ -939,7 +966,7 @@ pub(crate) async fn prepare<'a>(
     {
         let detail = format!("{t} {id} was deleted in session {}", session.session);
         state.touch(session).instrument(state_span()).await;
-        return Prepared::Answered(nothing_held(rt, op, call, response_schema, &detail));
+        return Prepared::Answered(nothing_held(rt, plan, call, response_schema, &detail).await);
     }
 
     // A read whose `If-None-Match` holds the stored record's entity tag: `304`, at once,
@@ -1206,24 +1233,27 @@ fn serve_held(
 /// The answer to a read of a record the session does not hold, or deleted: a read
 /// answering the records an id has as an array has none (`[]`), when its schema allows
 /// that; any other answers its `404`.
-fn nothing_held(
+async fn nothing_held(
     rt: &MockRuntime,
-    op: &Operation,
+    plan: &CallPlan<'_>,
     call: &OperationCall,
     response_schema: Option<&Value>,
     detail: &str,
 ) -> GeneratedResponse {
+    let op = plan.op;
     let lists = op
         .identity
         .as_ref()
         .is_some_and(|i| i.record == Some(mb_mcm::RecordAt::Item));
-    lists
-        .then(|| {
+    if lists
+        && let Some(none) =
             rt.engine
                 .serve_stored(&rt.bundle, op, &Value::Array(Vec::new()), response_schema)
-        })
-        .flatten()
-        .unwrap_or_else(|| rt.engine.not_found(&rt.bundle, op, call, detail))
+    {
+        return none;
+    }
+    // The engine the provider policy chose for the call writes a declared body's code.
+    plan.engine.not_found(&rt.bundle, op, call, detail).await
 }
 
 /// A read of a member of its parent (see [`BundleIndex::member_reads`]), answered by

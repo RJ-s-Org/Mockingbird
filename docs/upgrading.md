@@ -31,6 +31,19 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Error bodies the mock makes name the call, and missing records answer the declared status
+
+No migration or configuration.
+
+- **Validation errors name the field**: a declared `400`/`422`/`default` error answered for a request failing its schema now holds the violated field in its path-like members (`path`, `field`, `parameter`, `param`, `property`; `pointer` takes `/name`), and the reasons in its message members and string arrays named `messages`, `errors`, `details` or `reasons`. Message members are matched case-insensitively, so a `Message` now holds the reasons too.
+- **One LLM call per operation, status and cause for an open code**: when such an error shape, or the declared body of a missing record's answer, has a code-like member (`type`, or a name ending in `code`) whose schema fixes no value, the LLM writes it once and the mock keeps it (per engine, emptied after 512 entries). A read of a deleted id still generates no record, but it is no longer free of LLM calls; offline mocks, and callers whose credentials fail, keep the faker's value. Recorded prompts gain these calls.
+- **A missing record with no declared `404`** answers the operation's one declared client error not about who asks (a `400` or a `422`, not a `401`, `403` or `429`) where it answered problem+json `404`.
+- **Rust API**: `Engine::not_found` is `async`. `SchemaValidator::validate_located` returns each violation with the pointer it is about.
+
+### The API description cap is 6000 characters
+
+Prompts show up to 6000 characters of the contract's API description, from 2000. A contract with a long description sends more prompt tokens on each system message; the block opens the cached prefix.
+
 ### Records in envelopes and one write's order
 
 No migration or configuration.
@@ -64,7 +77,7 @@ No migration or configuration. The importer keeps an OpenAPI 3, Swagger 2 or Asy
 - **WSDL documentation**: a WSDL's `wsdl:documentation` (of `definitions` and its services) is its API description; an operation's is its summary, and `xs:annotation/xs:documentation` becomes schema descriptions. A WSDL contract shows it once imported again. Every operation's and channel's `Summary:` line is now escaped, redacted and cut at 500 characters, and every hint line escaped, redacted and cut at 1000, so a summary with `<`, `&`, line breaks or a credential, or a hint with `<`, `&` or a credential, reads differently than before; plain text is unchanged.
 - **Bundle format**: `Bundle` gains an optional `description`. A bundle stored before this release loads with none and serializes byte for byte as before; one compiled with a description writes it as a top-level `description` member, which an older node ignores during a rolling upgrade.
 - **Recompile to show it**: a stored bundle has no description, so its prompts stay as they were until the contract is imported again (for a mock from the config file with a persistent control store, change a byte of the contract, as for [action routes](#action-routes-act-on-their-parent-resource)). `source_digest` is unchanged: it hashes the source, which already held the description, so response cache keys stay correct.
-- **More prompt tokens**: a contract with a description adds about 40 tokens plus up to 2000 characters of it to every system message. It comes right after the `API:` line, before anything per operation, so the cached prefix is shared across the contract's operations. A contract without one gets the prompt it did.
+- **More prompt tokens**: a contract with a description adds about 40 tokens plus up to 6000 characters of it to every system message (2000 before the cap was raised). It comes right after the `API:` line, before anything per operation, so the cached prefix is shared across the contract's operations. A contract without one gets the prompt it did.
 - **Credentials are redacted in contract text**: the API description, response descriptions, parameter descriptions, refusal-status descriptions and the descriptions inside the prompt's JSON Schema (also sent as the structured-output schema) now replace what looks like a credential with `[redacted]` ([what counts](concepts.md#how-an-answer-is-made)). A description that showed an example key or token now shows `[redacted]` in its place. Scope names, plain words and small numbers under a credential's name are kept. Each block is also cut after escaping, so a description full of `<` or `&` is now shorter than before in characters it covers. `mb_mcm::credentials::is_token_shaped` is new and shareable; nothing else uses it yet.
 - **Joint GraphQL prompts** show the `API:` line once, before the fields, where each field repeated it.
 - **Recorded prompts**: the system message changed for contracts with a description, so a snapshot or recording keyed on the exact prompt and taken before this release no longer replays for them.
