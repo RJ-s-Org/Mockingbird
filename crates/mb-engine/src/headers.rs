@@ -70,10 +70,42 @@ pub struct IdentityHeader {
 /// correlation id (`X-Request-Id`, `X-Trace-Id`, `X-Correlation-ID`).
 const CALL_ID_WORDS: [&str; 4] = ["request", "trace", "correlation", "span"];
 
+/// Words before `id` that name no kind of record, so the id is the created record's
+/// own: `Resource-ID`, `X-Object-Id`, `Entity-Id`.
+const RECORD_ID_WORDS: [&str; 5] = ["resource", "object", "entity", "record", "item"];
+
+/// Whether the words of an id header before its `id` (a leading `X` aside) name the
+/// record `op` creates: none, or only words naming no kind ([`RECORD_ID_WORDS`]), or
+/// the created type's own name, its last words, plural aside (`X-Job-Id` for `jobs`,
+/// `Line-Id` for `ticket_lines`). `X-Account-Id` on a job's create names another kind.
+fn names_created(op: &Operation, words: &[&str]) -> bool {
+    let Some((_, before)) = words.split_last() else {
+        return false;
+    };
+    let before = match before.split_first() {
+        Some((x, rest)) if x.eq_ignore_ascii_case("x") => rest,
+        _ => before,
+    };
+    if before
+        .iter()
+        .all(|w| RECORD_ID_WORDS.iter().any(|g| w.eq_ignore_ascii_case(g)))
+    {
+        return true;
+    }
+    let named = mb_mcm::stem(&mb_mcm::joined_name(&before.concat()));
+    let Some(t) = op.resource_type.as_deref() else {
+        return false;
+    };
+    let type_words = mb_mcm::words(t);
+    (0..type_words.len())
+        .any(|from| mb_mcm::stem(&mb_mcm::joined_name(&type_words[from..].concat())) == named)
+}
+
 /// The one header `op` declares for `status` (its exact variant, else `default`) that
 /// names a created record (see [`IdentityHeaderKind`]): an id header of a string or
 /// integer schema (no `enum`), or a `Location` of a string schema. A header naming the
-/// call, not a record (`X-Request-Id`), is none. With two id headers, or none, `None`;
+/// call, not a record (`X-Request-Id`), or another kind than the created one
+/// (`X-Account-Id` on a job's create), is none. With two id headers, or none, `None`;
 /// an id header wins over `Location`.
 #[must_use]
 pub fn identity_header(op: &Operation, status: u16) -> Option<IdentityHeader> {
@@ -92,7 +124,11 @@ pub fn identity_header(op: &Operation, status: u16) -> Option<IdentityHeader> {
         let names_the_call = words
             .iter()
             .any(|w| CALL_ID_WORDS.iter().any(|c| w.eq_ignore_ascii_case(c)));
-        words.len() > 1 && last_is_id && !names_the_call && of_type(schema, &["string", "integer"])
+        words.len() > 1
+            && last_is_id
+            && !names_the_call
+            && names_created(op, &words)
+            && of_type(schema, &["string", "integer"])
     });
     if let Some((name, schema)) = ids.next() {
         return ids.next().is_none().then(|| IdentityHeader {
@@ -287,7 +323,24 @@ paths:
           description: ok
           headers:
             ItemId: {schema: {type: string}}
-            Other-Id: {schema: {type: string}}
+            Resource-Id: {schema: {type: string}}
+  /jobs:
+    post:
+      operationId: job
+      responses:
+        "202":
+          description: ok
+          headers:
+            X-Account-Id: {schema: {type: string}}
+  /exports:
+    post:
+      operationId: export
+      responses:
+        "202":
+          description: ok
+          headers:
+            X-Account-Id: {schema: {type: string}}
+            X-Export-Id: {schema: {type: string}}
 "##,
         )
         .unwrap();
@@ -306,5 +359,9 @@ paths:
         // Two id headers: which is the record's is not known.
         assert_eq!(found("d"), None);
         assert_eq!(identity_header(b.operation("a").unwrap(), 200), None);
+        // An id of another kind than the created one is not its id.
+        let accepted = |op: &str| identity_header(b.operation(op).unwrap(), 202).map(|h| h.name);
+        assert_eq!(accepted("job"), None);
+        assert_eq!(accepted("export"), Some("X-Export-Id".into()));
     }
 }

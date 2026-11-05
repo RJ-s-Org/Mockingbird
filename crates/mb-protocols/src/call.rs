@@ -6437,12 +6437,14 @@ async fn by_path_fields(
 }
 
 /// The members of type `t`'s records that `op`'s target parameter names its record by
-/// besides the identity, when the parameter says it names it by either of two (or
-/// more) of them: a scalar member its name or description names (`templateIdOrAlias`
-/// names `TemplateId` and `Alias`; "the project's id or slug" names `slug`), and, when
-/// either names an `id` while the identity is no id by its name (an `Alias` key), the
-/// one other member that is an id by its name. A parameter whose schema is not a string,
-/// or that names fewer than two members, the identity counted, has none.
+/// besides the identity, when the parameter offers either of two of them: in its name
+/// (`templateIdOrAlias` names `TemplateId` and `Alias`) or in an either-or phrase of
+/// its description ("the project's id or slug", "its id or the alias"); see
+/// [`either_or`]. An alternative that is a bare `id` while the identity is no id by its
+/// name (an `Alias` key) is the one other member that is an id by its name. A member
+/// the description only mentions, or that a negation keeps out ("not its number"), is
+/// none. A parameter whose schema is not a string, or that offers fewer than two
+/// members, the identity counted, has none.
 fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
     let Some(param) = target_param(op) else {
         return Vec::new();
@@ -6464,9 +6466,6 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
         .and_then(|d| d.get("description"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let names = |member: &str| {
-        mb_mcm::names_member(&param, member) || mb_mcm::names_member(description, member)
-    };
     let identity = op.identity.as_ref().map_or("id", |i| i.field.as_str());
     let index = rt.index();
     let bundle = rt.bundle();
@@ -6481,29 +6480,118 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
             .and_then(|m| m.get("type").and_then(Value::as_str).map(str::to_string))
             .is_some_and(|t| matches!(t.as_str(), "string" | "integer"))
     };
-    let members: Vec<String> = type_members(rt, t)
+    let mut members: Vec<String> = type_members(rt, t)
         .into_iter()
         .filter(|m| scalar(m))
         .collect();
+    if !members.iter().any(|m| m == identity) {
+        members.push(identity.to_string());
+    }
     let is_id = |member: &str| mb_mcm::ends_with_words(member, "id");
-    let mut named: Vec<String> = members.iter().filter(|m| names(m)).cloned().collect();
-    if names("id") && !is_id(mb_mcm::leaf_member(identity)) {
+    // The one member other than the identity that is an id by its name, for a bare
+    // `id` alternative of a key that is none.
+    let other_id = || {
         let mut ids = members
             .iter()
             .filter(|m| m.as_str() != identity && is_id(m));
-        if let (Some(only), None) = (ids.next(), ids.next())
-            && !named.contains(only)
-        {
-            named.push(only.clone());
+        match (ids.next(), ids.next()) {
+            (Some(only), None) if !is_id(mb_mcm::leaf_member(identity)) => Some(only.clone()),
+            _ => None,
+        }
+    };
+    let resolve = |runs: &[String]| {
+        runs.iter()
+            .find_map(|run| {
+                members
+                    .iter()
+                    .find(|m| mb_mcm::joined_name(m) == *run)
+                    .cloned()
+            })
+            .or_else(|| runs.iter().any(|r| r == "id").then(other_id).flatten())
+    };
+    let mut offered: Vec<String> = Vec::new();
+    for pair in either_or(&[param.as_str()]).into_iter().chain(either_or(
+        &description
+            .split(['.', ',', ';', ':', '!', '?', '(', ')'])
+            .collect::<Vec<_>>(),
+    )) {
+        let [Some(a), Some(b)] = pair.map(|runs| resolve(&runs)) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        for m in [a, b] {
+            if !offered.contains(&m) {
+                offered.push(m);
+            }
         }
     }
-    let counted =
-        named.len() + usize::from(!named.iter().any(|m| m == identity) && names(identity));
-    if counted < 2 {
+    if offered.len() < 2 {
         return Vec::new();
     }
-    named.retain(|m| m != identity);
-    named
+    offered.retain(|m| m != identity);
+    offered
+}
+
+/// Words before an `or` that make the phrase no offer of two ways to name a record.
+const NEGATIONS: [&str; 7] = ["not", "no", "never", "neither", "nor", "without", "except"];
+
+/// Words skipped after an `or` ("or its alias", "or the slug", "or by name").
+const LEADING: [&str; 7] = ["the", "its", "their", "a", "an", "by", "his"];
+
+/// The either-or phrases in `clauses` (a name, or a description cut at its
+/// punctuation): for each `or` with no negation before it in its clause, the words
+/// nearest it on either side, as the runs that may name a member, longest first (the
+/// last two words before it joined, then the last; the first two after it, then the
+/// first). `templateIdOrAlias` is `[["templateid", "id"], ["alias"]]`; "the order's
+/// id, not its order number" has none.
+fn either_or(clauses: &[&str]) -> Vec<[Vec<String>; 2]> {
+    let mut found = Vec::new();
+    for clause in clauses {
+        let words: Vec<String> = mb_mcm::words(clause)
+            .into_iter()
+            .map(str::to_lowercase)
+            // A possessive's `s` ("the template's id").
+            .filter(|w| w != "s")
+            .collect();
+        for (at, word) in words.iter().enumerate() {
+            if word != "or" {
+                continue;
+            }
+            let before = &words[..at];
+            if before.iter().any(|w| NEGATIONS.contains(&w.as_str())) {
+                continue;
+            }
+            let after: Vec<&String> = words[at + 1..]
+                .iter()
+                .skip_while(|w| LEADING.contains(&w.as_str()))
+                .collect();
+            let runs = |side: &[&String]| -> Vec<String> {
+                let mut runs = Vec::new();
+                if side.len() >= 2 {
+                    runs.push(format!("{}{}", side[0], side[1]));
+                }
+                if let Some(first) = side.first() {
+                    runs.push((*first).clone());
+                }
+                runs
+            };
+            let mut back: Vec<&String> = before.iter().rev().take(2).collect();
+            back.reverse();
+            let back_runs = match back.as_slice() {
+                [one, two] => vec![format!("{one}{two}"), (*two).clone()],
+                [one] => vec![(*one).clone()],
+                _ => Vec::new(),
+            };
+            let ahead: Vec<&String> = after.into_iter().take(2).collect();
+            let ahead_runs = runs(&ahead);
+            if !back_runs.is_empty() && !ahead_runs.is_empty() {
+                found.push([back_runs, ahead_runs]);
+            }
+        }
+    }
+    found
 }
 
 /// The one held record of type `t` that holds the path value `value`, which missed its
@@ -7701,6 +7789,29 @@ mod tests {
     use mb_state::{MemoryStore, StateStore};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn an_either_or_phrase_offers_the_words_nearest_its_or() {
+        let runs = |v: &[&str]| v.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            either_or(&["templateIdOrAlias"]),
+            vec![[runs(&["templateid", "id"]), runs(&["alias"])]]
+        );
+        assert_eq!(
+            either_or(&["The project's id or the slug"]),
+            vec![[runs(&["projectid", "id"]), runs(&["slug"])]]
+        );
+        assert_eq!(
+            either_or(&["id or order number"]),
+            vec![[runs(&["id"]), runs(&["ordernumber", "order"])]]
+        );
+        // A negation, a mention, a name with no `or`: none.
+        assert!(either_or(&["Not an id or a slug"]).is_empty());
+        assert!(either_or(&["The order's id", " not its order number"]).is_empty());
+        assert!(either_or(&["The user's id", " A username is not accepted"]).is_empty());
+        assert!(either_or(&["widgetId"]).is_empty());
+        assert!(either_or(&["or"]).is_empty());
+    }
 
     #[test]
     fn a_create_s_scope_is_noted_and_forgotten() {

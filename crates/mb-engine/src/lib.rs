@@ -2677,8 +2677,7 @@ fn reflect(
                             None => {
                                 return reflected(
                                     validator,
-                                    op,
-                                    call,
+                                    (op, call, ctx.target),
                                     response,
                                     echo_request(validator, body, call.body.as_ref(), from_llm),
                                 );
@@ -2701,22 +2700,21 @@ fn reflect(
             body
         }
     };
-    reflected(validator, op, call, response, body)
+    reflected(validator, (op, call, ctx.target), response, body)
 }
 
 /// `response` answering `body`, with the path's identity forced on it unless it is a
 /// new record ([`reflect`]).
 fn reflected(
     validator: &SchemaValidator,
-    op: &Operation,
-    call: &OperationCall,
+    (op, call, target): (&Operation, &OperationCall, Option<&StoredResource>),
     mut response: GeneratedResponse,
     body: Value,
 ) -> GeneratedResponse {
     response.body = Some(if response.new_record {
         body
     } else {
-        force_identity(validator, op, call, body)
+        force_identity(validator, op, call, target, body)
     });
     response
 }
@@ -3062,7 +3060,7 @@ fn reassert_request(
     response.body = Some(if response.new_record {
         body
     } else {
-        force_identity(validator, op, call, body)
+        force_identity(validator, op, call, ctx.target, body)
     });
     response
 }
@@ -3571,6 +3569,7 @@ fn force_identity(
     validator: &SchemaValidator,
     op: &Operation,
     call: &OperationCall,
+    target: Option<&StoredResource>,
     body: Value,
 ) -> Value {
     let Some(identity) = &op.identity else {
@@ -3617,6 +3616,13 @@ fn force_identity(
     } else {
         identity.field.as_str()
     };
+    // A path value that reached a held record by another member than its key (a
+    // template read by its id where its alias is its key) names that record: its key
+    // keeps the held value, not the path's.
+    let id = match from_path.and(target) {
+        Some(target) if field == identity.field => held_key(identity, id, target).unwrap_or(id),
+        _ => id,
+    };
     if mb_mcm::member_at(record, field) == Some(id) {
         return body;
     }
@@ -3630,6 +3636,25 @@ fn force_identity(
         }
     }
     body
+}
+
+/// The key `target` holds, when the path value `id` reached it by another member than
+/// its key: the value is not its key, and the record's identity member holds the key
+/// it is stored under.
+fn held_key<'a>(
+    identity: &mb_mcm::Identity,
+    id: &Value,
+    target: &'a StoredResource,
+) -> Option<&'a Value> {
+    let text = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    let held = identity.id_in(&target.data)?;
+    (text(id).as_deref() != Some(target.id.as_str())
+        && text(held).as_deref() == Some(target.id.as_str()))
+    .then_some(held)
 }
 
 /// The members a path parameter that names both the key and another member may hold
@@ -4138,13 +4163,71 @@ components:
     }
 
     #[test]
+    fn a_path_value_that_reached_a_record_by_another_member_keeps_its_key() {
+        let bundle = mb_import::compile(
+            br##"
+openapi: 3.0.0
+info: {title: Tags, version: "1"}
+paths:
+  /tags/{name}:
+    parameters:
+      - {name: name, in: path, required: true, schema: {type: string}}
+    put:
+      operationId: putTag
+      requestBody:
+        content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Tag"}}}}
+components:
+  schemas:
+    Tag:
+      type: object
+      properties:
+        name: {type: string}
+        num: {type: integer}
+"##,
+        )
+        .unwrap();
+        let op = bundle.operation("putTag").unwrap().clone();
+        assert_eq!(op.identity.as_ref().unwrap().field, "name");
+        let schema = op.success_output().unwrap().schema.as_ref().unwrap();
+        let v = SchemaValidator::for_output(&bundle.with_reachable_defs(schema)).unwrap();
+        let mut path_params = Map::new();
+        path_params.insert("name".into(), json!("7"));
+        let call = OperationCall {
+            operation_id: "putTag".into(),
+            path_params,
+            ..OperationCall::default()
+        };
+        let answer = json!({"name": "7", "num": 7});
+        let held = StoredResource {
+            resource_type: "tag".into(),
+            id: "red".into(),
+            data: json!({"name": "red", "num": 7}),
+        };
+        // Reached by `num`: the key stays the held one.
+        let out = force_identity(&v, &op, &call, Some(&held), answer.clone());
+        assert_eq!(out, json!({"name": "red", "num": 7}));
+        // Nothing held, or held under the path value: the path's value.
+        let out = force_identity(&v, &op, &call, None, json!({"name": "x", "num": 7}));
+        assert_eq!(out, answer);
+        let under_path = StoredResource {
+            id: "7".into(),
+            data: json!({"name": "7", "num": 7}),
+            ..held
+        };
+        let out = force_identity(&v, &op, &call, Some(&under_path), json!({"name": "x"}));
+        assert_eq!(out, json!({"name": "7"}));
+    }
+
+    #[test]
     fn a_compound_path_value_goes_to_the_key_and_else_to_the_member_that_takes_it() {
         let (op, v) = apps("{type: string}");
         let answer = json!({"id": "a1", "name": "blue"});
         // Held already in either member: left as it is.
-        let out = force_identity(&v, &op, &by_path("blue", None), answer.clone());
+        let out = force_identity(&v, &op, &by_path("blue", None), None, answer.clone());
         assert_eq!(out, answer);
-        let out = force_identity(&v, &op, &by_path("b2", None), answer.clone());
+        let out = force_identity(&v, &op, &by_path("b2", None), None, answer.clone());
         assert_eq!(out, json!({"id": "b2", "name": "blue"}));
 
         let (uuid, v) = apps("{type: string, format: uuid}");
@@ -4153,6 +4236,7 @@ components:
             &v,
             &uuid,
             &by_path("green", None),
+            None,
             json!({"id": id, "name": "x"}),
         );
         assert_eq!(
@@ -4168,7 +4252,7 @@ components:
         let (op, v) = apps("{type: string}");
         let answer = json!({"id": "a2", "name": "green"});
         let call = by_path("blue", Some(json!({"id": "a2", "name": "green"})));
-        assert_eq!(force_identity(&v, &op, &call, answer.clone()), answer);
+        assert_eq!(force_identity(&v, &op, &call, None, answer.clone()), answer);
     }
 
     #[test]
@@ -4187,7 +4271,7 @@ components:
                 _ => json!({"apps": [{"id": "a1", "name": "other"}]}),
             };
             let v = SchemaValidator::new(&json!({})).unwrap();
-            let out = force_identity(&v, &op, &by_path("blue", None), answer.clone());
+            let out = force_identity(&v, &op, &by_path("blue", None), None, answer.clone());
             assert_eq!(out, answer, "{record:?}");
         }
     }

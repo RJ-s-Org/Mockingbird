@@ -51,6 +51,13 @@ paths:
         content: {application/json: {schema: {$ref: "#/components/schemas/NewTemplate"}}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}
+    patch:
+      operationId: patchTemplate
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/NewTemplate"}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}
     delete:
       operationId: deleteTemplate
       responses:
@@ -85,8 +92,69 @@ paths:
         - {name: badgeId, in: path, required: true, schema: {type: string}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Badge"}}}}
+  /users:
+    post:
+      operationId: createUser
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {username: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /users/{id}:
+    get:
+      operationId: getUser
+      parameters:
+        - {name: id, in: path, required: true, description: "The user's id. A username is not accepted.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /orders:
+    post:
+      operationId: createOrder
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {orderNumber: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /orders/{orderId}:
+    get:
+      operationId: getOrder
+      parameters:
+        - {name: orderId, in: path, required: true, description: "The order's id, not its order number.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /widgets/{widgetId}:
+    get:
+      operationId: getWidget
+      parameters:
+        - {name: widgetId, in: path, required: true, description: "The widget to read; the answer shows its name.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
 components:
   schemas:
+    User:
+      type: object
+      properties:
+        id: {type: string}
+        username: {type: string}
+    Order:
+      type: object
+      properties:
+        id: {type: string}
+        number: {type: integer}
+        orderNumber: {type: string}
+    Widget:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
     NewTemplate:
       type: object
       properties:
@@ -325,4 +393,76 @@ async fn an_id_parameter_does_not_match_another_member() {
     send(&r, "POST", "/badges", Some(json!({"label": "gold"}))).await;
     let (_, headers, read) = send(&r, "GET", "/badges/gold", None).await;
     assert_ne!(source(&headers), "state", "{read}");
+}
+
+/// An edit reached by the template's id, where its alias is its key, keeps the alias:
+/// the identity member is the held record's key, not the path value. By PUT and by
+/// PATCH, with the model's answer and without one.
+#[tokio::test]
+async fn an_edit_by_the_alternate_member_keeps_the_key() {
+    for (method, answer) in [
+        (
+            "PUT",
+            json!({"TemplateId": 7001, "Name": "Welcome", "Alias": "7001", "Subject": "Hello"}),
+        ),
+        ("PUT", Value::Null),
+        (
+            "PATCH",
+            json!({"TemplateId": 7001, "Name": "Welcome", "Alias": "welcome", "Subject": "Hello"}),
+        ),
+        ("PATCH", Value::Null),
+    ] {
+        let r = router(vec![
+            json!({"TemplateId": 7001, "Name": "Welcome", "Alias": "welcome"}),
+            answer,
+        ]);
+        send(
+            &r,
+            "POST",
+            "/templates",
+            Some(json!({"Name": "Welcome", "Alias": "welcome"})),
+        )
+        .await;
+        let (status, _, edited) = send(
+            &r,
+            method,
+            "/templates/7001",
+            Some(json!({"Subject": "Hello"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{method}: {edited}");
+        assert_eq!(edited["Alias"], "welcome", "{method}: {edited}");
+        assert_eq!(edited["TemplateId"], 7001, "{method}: {edited}");
+        for path in ["/templates/welcome", "/templates/7001"] {
+            let (_, headers, read) = send(&r, "GET", path, None).await;
+            assert_eq!(source(&headers), "state", "{method} {path}: {read}");
+            assert_eq!(read["Alias"], "welcome", "{method} {path}: {read}");
+            assert_eq!(read["TemplateId"], 7001, "{method} {path}: {read}");
+            assert_eq!(read["Subject"], "Hello", "{method} {path}: {read}");
+        }
+    }
+}
+
+/// A description that mentions another member without offering it as the value (a
+/// negation, a passing mention), or an id parameter whose description names a member,
+/// gives no other way to read the record: each read misses state.
+#[tokio::test]
+async fn a_mention_or_a_negation_is_no_alternate_key() {
+    let r = router(vec![
+        json!({"id": "u_1", "username": "alice"}),
+        json!({"id": "o_1", "number": 5, "orderNumber": "A-1"}),
+        json!({"id": "w_1", "name": "gizmo"}),
+    ]);
+    send(&r, "POST", "/users", Some(json!({"username": "alice"}))).await;
+    send(&r, "POST", "/orders", Some(json!({"orderNumber": "A-1"}))).await;
+    send(&r, "POST", "/widgets", Some(json!({"name": "gizmo"}))).await;
+    // Each held record reads from state by its id.
+    for path in ["/users/u_1", "/orders/o_1", "/widgets/w_1"] {
+        let (_, headers, read) = send(&r, "GET", path, None).await;
+        assert_eq!(source(&headers), "state", "{path}: {read}");
+    }
+    for path in ["/users/alice", "/orders/A-1", "/orders/5", "/widgets/gizmo"] {
+        let (_, headers, read) = send(&r, "GET", path, None).await;
+        assert_ne!(source(&headers), "state", "{path}: {read}");
+    }
 }

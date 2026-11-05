@@ -5,6 +5,7 @@
 //! segment under the create's path. The id is minted as the record's identity member
 //! declares it, the request is stored as the record under it, and the header serves
 //! the same id (a `Location` the item's URL), so a later read by it finds the record.
+//! A create whose answer holds its id serves that id in the same header.
 
 use mb_engine::consistency::property_schema;
 use mb_engine::headers::{IdentityHeaderKind, identity_header};
@@ -21,8 +22,8 @@ const ATTEMPTS: u32 = 8;
 
 /// Mints the id of the record `op`'s create (of type `t`) answered in a header, when
 /// its answer names it only there; serves it in `generated.headers` and returns it, to
-/// be stored with [`record`]. `None` (and nothing served) when the answer holds an id,
-/// the request asks for one (a client-chosen id, or a path value naming the record),
+/// be stored with [`record`]. When the answer holds an id, the header serves that one
+/// and `None` is returned. `None` (and nothing served) when the request asks for one (a client-chosen id, or a path value naming the record),
 /// no header names the record, or no fresh id can be drawn.
 pub(super) async fn mint(
     rt: &MockRuntime,
@@ -37,12 +38,17 @@ pub(super) async fn mint(
         .body
         .as_ref()
         .and_then(|b| mb_mcm::member_at(b, field))
-        .is_some_and(|v| !v.is_null());
+        .filter(|v| !v.is_null())
+        .and_then(id_string);
+    // The answer names its record: the header serves that same id.
+    if let Some(text) = answered_id {
+        serve_answered(rt, (op, t, call), generated, page_url, &text);
+        return None;
+    }
     let named_by_path = identity
         .and_then(|i| i.path_param.as_deref())
         .is_some_and(|param| call.path_params.contains_key(param));
-    if answered_id
-        || named_by_path
+    if named_by_path
         || mb_engine::guards::asked_identity(rt.bundle(), op, call).is_some()
         || !matches!(&generated.body, None | Some(Value::Object(_)))
     {
@@ -96,6 +102,44 @@ pub(super) async fn mint(
         return Some(id);
     }
     None
+}
+
+/// Serves the id `text` a create's answer holds in the header that names its record,
+/// when the contract declares one: the id itself, or the item's URL in a `Location` of
+/// the create's own collection. An integer header takes only an integer id.
+fn serve_answered(
+    rt: &MockRuntime,
+    (op, t, call): (&Operation, &str, &OperationCall),
+    generated: &mut GeneratedResponse,
+    page_url: Option<&str>,
+    text: &str,
+) {
+    let Some(header) = identity_header(op, generated.status) else {
+        return;
+    };
+    let Binding::Http { path, .. } = &op.binding else {
+        return;
+    };
+    let value = match header.kind {
+        IdentityHeaderKind::Id => {
+            let integer = header.schema.get("type").and_then(Value::as_str) == Some("integer");
+            if integer && text.parse::<i64>().is_err() {
+                return;
+            }
+            text.to_string()
+        }
+        IdentityHeaderKind::Location => {
+            let of_collection = item_read_path(rt, t)
+                .as_deref()
+                .is_some_and(|item| is_item_of(item, path));
+            if !of_collection || !url_safe(text) {
+                return;
+            }
+            let base = page_url.map_or_else(|| filled_path(path, call), str::to_string);
+            format!("{}/{text}", base.trim_end_matches('/'))
+        }
+    };
+    generated.headers.push((header.name, value));
 }
 
 /// The record a create named in a header stores: the members of `request` the type

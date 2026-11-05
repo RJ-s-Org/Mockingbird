@@ -80,8 +80,127 @@ paths:
       parameters: [{name: boardId, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Board"}}}}
+  /jobs:
+    post:
+      operationId: createJob
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {kind: {type: string}}}}}
+      responses:
+        "202":
+          description: accepted
+          headers:
+            X-Account-Id: {schema: {type: string}}
+  /jobs/{jobId}:
+    get:
+      operationId: getJob
+      parameters: [{name: jobId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}}
+  /accounts/{accountId}:
+    get:
+      operationId: getAccount
+      parameters: [{name: accountId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: object, properties: {id: {type: string}}}}}}
+  /exports:
+    post:
+      operationId: createExport
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {format: {type: string}}}}}
+      responses:
+        "202":
+          description: accepted
+          headers:
+            X-Export-Id: {schema: {type: string}}
+  /exports/{exportId}:
+    get:
+      operationId: getExport
+      parameters: [{name: exportId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Export"}}}}
+  /pings:
+    post:
+      operationId: createPing
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {note: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            X-Request-Id: {schema: {type: string}}
+  /pings/{pingId}:
+    get:
+      operationId: getPing
+      parameters: [{name: pingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ping"}}}}
+  /folders:
+    post:
+      operationId: createFolder
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Location: {schema: {type: string}}
+  /folders/{folderId}/contents/{entryId}:
+    get:
+      operationId: getFolderEntry
+      parameters:
+        - {name: folderId, in: path, required: true, schema: {type: string}}
+        - {name: entryId, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Folder"}}}}
+  /notes:
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {text: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Note-Id: {schema: {type: string}}
+          content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}
+  /notes/{noteId}:
+    get:
+      operationId: getNote
+      parameters: [{name: noteId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
 components:
   schemas:
+    Job:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string}
+    Export:
+      type: object
+      properties:
+        id: {type: string}
+        format: {type: string}
+    Ping:
+      type: object
+      properties:
+        id: {type: string}
+        note: {type: string}
+    Folder:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+    Note:
+      type: object
+      properties:
+        id: {type: string}
+        text: {type: string}
     NewTicket:
       type: object
       properties:
@@ -270,4 +389,78 @@ async fn a_location_header_is_the_new_records_url() {
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(read["name"], "Roadmap");
     assert_eq!(read["id"], id);
+}
+
+/// An id header naming another kind of record (the caller's account) is not the new
+/// job's id: nothing is stored under it. One naming the created kind is.
+#[tokio::test]
+async fn an_id_header_naming_another_kind_is_not_the_records() {
+    let r = router(vec![]);
+    let (status, headers, _) = send(&r, "POST", "/jobs", Some(json!({"kind": "sync"}))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let account = header(&headers, "x-account-id");
+    assert!(!account.is_empty() && !account.contains('/'), "{account:?}");
+    let (_, headers, read) = send(&r, "GET", &format!("/jobs/{account}"), None).await;
+    assert_ne!(source(&headers), "state", "{read}");
+
+    let (status, headers, _) = send(&r, "POST", "/exports", Some(json!({"format": "csv"}))).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let export = header(&headers, "x-export-id");
+    let (_, headers, read) = send(&r, "GET", &format!("/exports/{export}"), None).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["format"], "csv", "{read}");
+}
+
+/// A create answering only the call's own request id stores nothing under it.
+#[tokio::test]
+async fn a_request_id_header_stores_nothing() {
+    let r = router(vec![]);
+    let (status, headers, _) = send(&r, "POST", "/pings", Some(json!({"note": "hi"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let request = header(&headers, "x-request-id");
+    assert!(!request.is_empty() && !request.contains('/'), "{request:?}");
+    let (_, headers, read) = send(&r, "GET", &format!("/pings/{request}"), None).await;
+    assert_ne!(source(&headers), "state", "{read}");
+}
+
+/// A `Location` whose record is read deeper than one segment under the create's path
+/// names no item of it: the header is left to its declared value, and not made the
+/// create's URL.
+#[tokio::test]
+async fn a_location_off_the_item_route_is_left_alone() {
+    let r = router(vec![]);
+    let (status, headers, _) = send(&r, "POST", "/folders", Some(json!({"name": "Inbox"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let location = header(&headers, "location");
+    assert!(
+        !location.starts_with("http://localhost/folders"),
+        "{location:?}"
+    );
+}
+
+/// A create whose answer carries the record's id keeps it, and the id header declared
+/// beside it serves that same id; so does one whose answer leaves the id out and is
+/// given one.
+#[tokio::test]
+async fn a_body_id_is_served_in_the_id_header() {
+    let r = router(vec![
+        json!({"id": "n_1", "text": "first"}),
+        json!({"text": "second"}),
+    ]);
+    let (status, headers, body) = send(&r, "POST", "/notes", Some(json!({"text": "first"}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["id"], "n_1", "{body}");
+    assert_eq!(header(&headers, "note-id"), "n_1");
+    let (_, headers, read) = send(&r, "GET", "/notes/n_1", None).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["text"], "first", "{read}");
+
+    let (status, headers, body) = send(&r, "POST", "/notes", Some(json!({"text": "second"}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap_or_default().to_string();
+    assert!(!id.is_empty(), "{body}");
+    assert_eq!(header(&headers, "note-id"), id, "{body}");
+    let (_, headers, read) = send(&r, "GET", &format!("/notes/{id}"), None).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["text"], "second", "{read}");
 }
