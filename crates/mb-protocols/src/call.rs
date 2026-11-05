@@ -1809,6 +1809,26 @@ pub(crate) async fn complete(
             (foreign_key || unstored, retry),
         )
         .await;
+        // What state the record's entity tag stands for now, for a later `304`: the
+        // record acted on, or the one a create answered.
+        if (200..300).contains(&generated.status)
+            && !unstored
+            && !foreign_key
+            && let Some(t) = resource_type
+        {
+            let created = || {
+                let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+                generated
+                    .body
+                    .as_ref()
+                    .filter(|_| op.kind == OperationKind::Command(Effect::Create))
+                    .and_then(|b| mb_mcm::member_at(b, field))
+                    .and_then(id_string)
+            };
+            if let Some(id) = target_id.clone().or_else(created) {
+                tokens::after_answer(&mut state, plan, t, &id).await;
+            }
+        }
         // Served as it was answered, holding the record as state now has it.
         if let (Some(identity), Some(mut answer)) = (held_in, answered.take()) {
             if let (Some(record), Some(slot)) =

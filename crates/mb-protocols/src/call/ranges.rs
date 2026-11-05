@@ -14,7 +14,8 @@
 //! The page is made of what the session holds of the route's collection
 //! ([`lists::collection_records`]), first, and of the items the answer gave that the
 //! session does not hold under the same identity. Nothing is made up: an item holding no
-//! text or number under the field, or one outside the bounds, is left out; the rest are
+//! text or number under the field, or one outside the bounds, is left out (when no item
+//! holds the field, which an optional one may be, the list is left as answered); the rest are
 //! sorted by the field (a stable sort, so equal values keep the order above), and the
 //! first `max` of them served, at most [`MAX_RANGE`] (all of them, up to that, without a
 //! `max`). When more remain, the answer is the `206` and carries a `Next-Range` header
@@ -23,7 +24,8 @@
 //! declares with the same schema (`200`). A page that would not validate is left as the
 //! answer gave it.
 //!
-//! An LLM and `consistency: on` only, as [`deleted::applies`] says, for a plain call.
+//! An LLM and `consistency: on` only, as [`deleted::applies`] says, for a plain call: a
+//! scenario's or a forced status's answer is left as it is.
 
 use std::cmp::Ordering;
 
@@ -181,7 +183,7 @@ pub(super) async fn apply(
 ) {
     let rt = state.rt;
     let op = plan.op;
-    if !deleted::applies(rt, plan) {
+    if !deleted::applies(rt, plan) || !plain(plan) {
         return;
     }
     let Some((slot, range)) = requested(op, call) else {
@@ -223,10 +225,12 @@ pub(super) async fn apply(
         pool.push(item);
     }
     let key = range.field.as_str();
-    pool.retain(|item| {
-        item.get(key)
-            .is_some_and(|value| scalar_text(value).is_some() && range.holds(value))
-    });
+    let ranged = |item: &Value| item.get(key).and_then(scalar_text).is_some();
+    if !pool.iter().any(ranged) {
+        tracing::debug!(operation = %op.id, "no item holds the Range field; left as answered");
+        return;
+    }
+    pool.retain(|item| ranged(item) && range.holds(&item[key]));
     pool.sort_by(|a, b| range.directed(compare(&a[key], &b[key])));
     let max = range.max.unwrap_or(MAX_RANGE).min(MAX_RANGE);
     let more = pool.len() > max;

@@ -67,6 +67,18 @@
 //! whose stored copy does not show earlier writes yet (the read catches up, see
 //! [`write_memory`]), is answered as before. This needs `consistency: on` and a plain
 //! call over HTTP, not an LLM: nothing is generated.
+//!
+//! An entity tag stands for one state of the record, so a `304` also needs the record
+//! unchanged since its tag took that value. For a type some read of which declares
+//! both, each 2xx answer about a stored record keeps, per entity-tag member, the value
+//! and a digest of the record as stored (under the reserved type, like the tokens; a
+//! delete ends it). A write that changes the record while the member's value stays
+//! (an update sent with no `If-Match`, whose server-managed tag keeps its stored
+//! value) marks that value stale: no `304` for it until the value moves, and the read
+//! is answered as before, showing the change. A read keeps the digest of what it
+//! served under a tag still current. A record changed some other way (another write's
+//! effect) answers no `304` until a read serves it again. A record whose value was
+//! never kept answers no `304`.
 
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
@@ -83,6 +95,8 @@ const MAX_VALUE_CHARS: usize = 256;
 const IF_MATCH: &str = "if-match";
 /// The conditional read's header (RFC 9110 §13.1.2), lowercase.
 const IF_NONE_MATCH: &str = "if-none-match";
+/// Prefix of the documents keeping, per record, the state each entity tag stands for.
+const BASELINES: &str = "#etags";
 
 /// What a write found of its record's tokens, for its answer and for after it.
 #[derive(Default)]
@@ -483,6 +497,11 @@ fn holds(header: &str, values: &[String], held: &Value) -> bool {
 
 /// The document of `t` `id`'s tokens.
 fn key(t: &str, id: &str) -> String {
+    keyed(INDEX, t, id)
+}
+
+/// The document under `prefix` for `t` `id`.
+fn keyed(prefix: &str, t: &str, id: &str) -> String {
     let mut hasher = Sha256::new();
     for part in [t, id] {
         hasher.update(part.as_bytes());
@@ -490,7 +509,7 @@ fn key(t: &str, id: &str) -> String {
     }
     let digest = hasher.finalize();
     let hash: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    format!("{INDEX}/{hash}")
+    format!("{prefix}/{hash}")
 }
 
 /// What a write `plan` to `target` decides of its tokens, before any generation: the
@@ -836,6 +855,9 @@ pub(super) async fn after_update(
 /// index keeps the entry, which the bound takes out.
 pub(super) async fn forget(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) {
     state.delete(session, INTERNAL_TYPE, &key(t, id)).await;
+    state
+        .delete(session, INTERNAL_TYPE, &keyed(BASELINES, t, id))
+        .await;
 }
 
 /// The declared `ETag` response header of a 2xx answer, by its name as declared, with
@@ -909,14 +931,7 @@ fn as_entity_tag(value: String) -> String {
 /// it: its entity tags (RFC 9110 §8.8.3, as [`entity_tags`] reads them), or `None` for
 /// `*`. `None` overall for no such header, an empty one, or one too long to compare.
 fn if_none_match(op: &Operation, call: &OperationCall) -> Option<Option<Vec<String>>> {
-    let Some(Value::Object(declared)) = op.input.headers.as_ref().and_then(|s| s.get("properties"))
-    else {
-        return None;
-    };
-    if !declared
-        .keys()
-        .any(|name| name.eq_ignore_ascii_case(IF_NONE_MATCH))
-    {
+    if !declares_if_none_match(op) {
         return None;
     }
     let text = call
@@ -929,6 +944,135 @@ fn if_none_match(op: &Operation, call: &OperationCall) -> Option<Option<Vec<Stri
         None if text.split(',').any(|part| part.trim() == "*") => Some(None),
         None => None,
     }
+}
+
+/// Whether `op` declares an `If-None-Match` request header.
+fn declares_if_none_match(op: &Operation) -> bool {
+    let Some(Value::Object(declared)) = op.input.headers.as_ref().and_then(|s| s.get("properties"))
+    else {
+        return false;
+    };
+    declared
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(IF_NONE_MATCH))
+}
+
+/// Whether `op` is a conditional read: an HTTP read declaring a `304` and an
+/// `If-None-Match` request header.
+fn conditional_read(op: &Operation) -> bool {
+    matches!(op.binding, Binding::Http { .. })
+        && matches!(op.kind, OperationKind::Query)
+        && op
+            .outputs
+            .iter()
+            .any(|variant| variant.status == mb_mcm::StatusSelector::Code(304))
+        && declares_if_none_match(op)
+}
+
+/// A digest of a record's data, whatever its members' order.
+fn data_digest(data: &Value) -> String {
+    let digest = Sha256::digest(canonical(data).to_string().as_bytes());
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// After a 2xx answer of plain `plan` about stored `t` `id`, for a type some read of
+/// which is a [`conditional_read`]: what state each entity-tag member's value stands
+/// for (see the module's documentation). A value first seen, or moved, keeps the
+/// record's digest; a write that changed the record under the same value marks it
+/// stale; a read keeps the digest of what it served under a value not stale.
+pub(super) async fn after_answer(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    t: &str,
+    id: &str,
+) {
+    let rt = state.rt;
+    let op = plan.op;
+    if !rt.consistency
+        || !plain(plan)
+        || !matches!(op.binding, Binding::Http { .. })
+        || matches!(op.kind, OperationKind::Command(Effect::Delete))
+        || !rt
+            .bundle()
+            .operations
+            .iter()
+            .any(|read| read.resource_type.as_deref() == Some(t) && conditional_read(read))
+    {
+        return;
+    }
+    let session = &plan.session;
+    let Some(record) = state.get(session, t, id).await else {
+        return;
+    };
+    let Value::Object(held) = &record.data else {
+        return;
+    };
+    let digest = data_digest(&record.data);
+    let doc_id = keyed(BASELINES, t, id);
+    let was = state
+        .get(session, INTERNAL_TYPE, &doc_id)
+        .await
+        .and_then(|doc| match doc.data {
+            Value::Object(kept) => Some(kept),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let is_read = matches!(op.kind, OperationKind::Query);
+    let mut now = Map::new();
+    for (member, value) in held {
+        let Some(text) = as_text(value).filter(|_| etag_member(rt, t, member)) else {
+            continue;
+        };
+        let kept = was
+            .get(member)
+            .filter(|kept| kept.get("value").and_then(Value::as_str) == Some(text.as_str()));
+        let stands_for = match kept.map(|kept| kept.get("digest").and_then(Value::as_str)) {
+            // First seen, or moved: what the record is now.
+            None => Some(digest.clone()),
+            // Stale until it moves.
+            Some(None) => None,
+            Some(Some(_)) if is_read => Some(digest.clone()),
+            Some(Some(before)) if before == digest => Some(digest.clone()),
+            Some(Some(_)) => None,
+        };
+        now.insert(
+            member.clone(),
+            serde_json::json!({"value": text, "digest": stands_for}),
+        );
+    }
+    if now == was {
+        return;
+    }
+    state
+        .upsert(
+            session,
+            StoredResource {
+                resource_type: INTERNAL_TYPE.to_string(),
+                id: doc_id,
+                data: Value::Object(now),
+            },
+        )
+        .await;
+}
+
+/// Whether stored `target` is as it was when member `member` took value `value`: kept
+/// by [`after_answer`], not stale, and the record's digest the same.
+async fn unchanged_since(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    target: &StoredResource,
+    (member, value): (&str, &str),
+) -> bool {
+    let doc_id = keyed(BASELINES, &target.resource_type, &target.id);
+    let Some(doc) = state.get(session, INTERNAL_TYPE, &doc_id).await else {
+        return false;
+    };
+
+    let Some(kept) = doc.data.get(member) else {
+        return false;
+    };
+    kept.get("value").and_then(Value::as_str) == Some(value)
+        && kept.get("digest").and_then(Value::as_str) == Some(data_digest(&target.data).as_str())
 }
 
 /// The member of stored `target` holding its entity tag, with its value: the member
@@ -985,23 +1129,22 @@ pub(super) async fn not_modified(
 ) -> Option<GeneratedResponse> {
     let rt = state.rt;
     let op = plan.op;
-    if !rt.consistency
-        || !plain(plan)
-        || !matches!(op.binding, Binding::Http { .. })
-        || !matches!(op.kind, OperationKind::Query)
-        || !op
-            .outputs
-            .iter()
-            .any(|variant| variant.status == mb_mcm::StatusSelector::Code(304))
-    {
+    if !rt.consistency || !plain(plan) || !conditional_read(op) {
         return None;
     }
     let tags = if_none_match(op, call)?;
-    let (_, value) = current_etag(state, &plan.session, target, tags.as_deref()).await?;
+    let (member, value) = current_etag(state, &plan.session, target, tags.as_deref()).await?;
     let matched = tags
         .as_deref()
-        .is_none_or(|tags| holds(IF_MATCH, tags, &Value::String(value)));
+        .is_none_or(|tags| holds(IF_MATCH, tags, &Value::String(value.clone())));
     if !matched {
+        return None;
+    }
+    if !unchanged_since(state, &plan.session, target, (&member, &value)).await {
+        tracing::debug!(
+            operation = %op.id,
+            "If-None-Match holds a tag the record changed under; answered as before"
+        );
         return None;
     }
     tracing::info!(

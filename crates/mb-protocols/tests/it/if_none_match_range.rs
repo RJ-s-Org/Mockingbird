@@ -462,3 +462,83 @@ async fn a_list_without_a_readable_range_is_as_answered() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(names(&body), ["two", "one"], "no 206 declared: no slot");
 }
+
+/// An update sent with no `If-Match` that changes the event while its server-managed
+/// `etag` stays as stored: the old tag no longer answers `304`, which would hide the
+/// change from a caching client. A plain read before it keeps the `304`.
+#[tokio::test]
+async fn an_update_without_if_match_ends_the_304_of_the_old_tag() {
+    let h = harness(vec![
+        event("Planning", "\"e1\""),
+        event("Planning", "\"e1\""),
+        event("Planning (moved)", "\"e2\""),
+        event("Planning (moved)", "\"e1\""),
+        event("Planning (moved)", "\"e1\""),
+    ]);
+    h.create("/events", json!({"summary": "Planning"})).await;
+    let (status, _, _) = h.get("/events/ev1", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = h.get("/events/ev1", &[("If-None-Match", "\"e1\"")]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED, "a read changes nothing");
+
+    let (status, _, bytes) = h
+        .send(
+            "PATCH",
+            "/events/ev1",
+            Some(json!({"summary": "Planning (moved)"})),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    for _ in 0..2 {
+        let (status, _, body) = h.get("/events/ev1", &[("If-None-Match", "\"e1\"")]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the event changed under the same tag"
+        );
+        assert_eq!(body["summary"], "Planning (moved)", "{body}");
+    }
+}
+
+/// A `Range` over a member the items may leave out, which none of the answer's items
+/// hold: the list is as answered, not emptied.
+#[tokio::test]
+async fn a_range_over_a_member_no_item_holds_leaves_the_list_as_answered() {
+    let h = harness(vec![json!([{"id": "a1"}, {"id": "a2"}])]);
+    let (status, headers, body) = h.get("/apps", &[("Range", "name ..; max=10")]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body
+        .as_array()
+        .map(|items| items.iter().filter_map(|i| i["id"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(ids, ["a1", "a2"], "{body}");
+    assert_eq!(header(&headers, "next-range"), None);
+}
+
+/// A forced status decides the answer: a `Range` neither cuts nor reorders it, nor
+/// turns it into a `206`.
+#[tokio::test]
+async fn a_forced_status_is_not_paged_by_range() {
+    let h = harness(vec![
+        json!({"id": "a1", "name": "alpha"}),
+        json!({"id": "a2", "name": "beta"}),
+        json!([{"id": "a2", "name": "beta"}, {"id": "a1", "name": "alpha"}]),
+    ]);
+    h.create("/apps", json!({"name": "alpha"})).await;
+    h.create("/apps", json!({"name": "beta"})).await;
+    let (status, headers, body) = h
+        .get(
+            "/apps",
+            &[("Range", "name ..; max=1"), ("x-mockingbird-status", "200")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(names(&body), ["beta", "alpha"], "{body}");
+    assert_eq!(header(&headers, "next-range"), None);
+}
