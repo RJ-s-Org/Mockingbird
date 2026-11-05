@@ -578,40 +578,15 @@ mod tests {
     }
 
     /// The tool names a skill writes in code position: a snake_case word
-    /// starting with a verb the tools use (`get_world`, `patch_world {...}`).
+    /// starting with a verb some tool starts with (`get_world`,
+    /// `patch_world {...}`), the verbs taken from the tools themselves.
     /// Description keys (`path_param`, `soft_delete`) and codes
     /// (`no_identity`) don't start with one.
     fn named_tools(text: &str) -> Vec<&str> {
-        const VERBS: &[&str] = &[
-            "activate",
-            "admin",
-            "approve",
-            "call",
-            "configure",
-            "create",
-            "delete",
-            "diff",
-            "doctor",
-            "edit",
-            "export",
-            "get",
-            "import",
-            "init",
-            "list",
-            "patch",
-            "proxy",
-            "publish",
-            "put",
-            "reset",
-            "restore",
-            "seed",
-            "server",
-            "start",
-            "stop",
-            "test",
-            "update",
-            "validate",
-        ];
+        let verbs: std::collections::BTreeSet<&str> = crate::mcp::tool_names()
+            .into_iter()
+            .filter_map(|t| t.split_once('_').map(|(verb, _)| verb))
+            .collect();
         text.split('`')
             .skip(1)
             .step_by(2)
@@ -621,7 +596,7 @@ mod tests {
                     .unwrap_or(code.len());
                 let word = &code[..end];
                 let (verb, rest) = word.split_once('_')?;
-                (VERBS.contains(&verb) && !rest.is_empty()).then_some(word)
+                (verbs.contains(verb) && !rest.is_empty()).then_some(word)
             })
             .collect()
     }
@@ -642,6 +617,155 @@ mod tests {
         let named = world.map(|s| named_tools(s.text)).unwrap_or_default();
         for tool in ["import_contract", "get_world", "patch_world", "call_mock"] {
             assert!(named.contains(&tool), "mockingbird-world names `{tool}`");
+        }
+    }
+
+    /// A misspelling of any tool's verb is caught, not only the verbs a
+    /// fixed list happened to hold.
+    #[test]
+    fn named_tools_catches_every_verb() {
+        for word in ["open_key_setp", "patch_wrld"] {
+            let text = format!("call `{word}` then");
+            assert_eq!(named_tools(&text), vec![word]);
+        }
+        assert!(named_tools("`path_param` and `soft_delete`").is_empty());
+    }
+
+    /// The server instructions name only real tools and send an MCP-only
+    /// client to the world description after an import.
+    #[test]
+    fn instructions_name_real_tools_and_the_world() {
+        let real = crate::mcp::tool_names();
+        let text = crate::mcp::INSTRUCTIONS;
+        for name in named_tools(text) {
+            assert!(real.contains(&name), "INSTRUCTIONS names `{name}`");
+        }
+        assert!(named_tools(text).contains(&"get_world"), "{text}");
+        assert!(text.contains("gaps"), "{text}");
+    }
+
+    /// `docs/agents.md` states the number of tools the server has.
+    #[test]
+    fn agents_doc_counts_the_tools() {
+        let doc = include_str!("../../../docs/agents.md");
+        let n = crate::mcp::tool_names().len();
+        assert!(
+            doc.contains(&format!("exposes {n} tools")),
+            "docs/agents.md should say `exposes {n} tools`"
+        );
+    }
+
+    fn skill(name: &str) -> &'static str {
+        SKILLS
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.text)
+            .unwrap_or_default()
+    }
+
+    const WORLD_DOC: &str = include_str!("../../../docs/world.md");
+
+    /// A later import that isn't activated, or a draft, is not the active
+    /// version: the world tools default to `active`, so the guides say to
+    /// pass the imported version.
+    #[test]
+    fn world_guides_pass_the_imported_version() {
+        for (name, text) in [
+            ("mockingbird-world", skill("mockingbird-world")),
+            ("mockingbird-mock-api", skill("mockingbird-mock-api")),
+            ("docs/world.md", WORLD_DOC),
+        ] {
+            assert!(
+                text.contains("pass `version`"),
+                "{name} should tell the agent to pass `version` to get_world and patch_world"
+            );
+        }
+    }
+
+    /// The guides promise `mocks.<name>.world` only once the config file
+    /// takes it.
+    #[test]
+    fn config_world_is_documented_only_when_supported() {
+        let supported = serde_saphyr::from_str::<crate::file_config::FileMock>(
+            "contract: a.yaml\nworld: w.yaml\n",
+        )
+        .is_ok();
+        for (name, text) in [
+            ("mockingbird-world", skill("mockingbird-world")),
+            ("docs/world.md", WORLD_DOC),
+        ] {
+            assert_eq!(
+                text.contains("mocks.<name>.world"),
+                supported,
+                "{name}: `mocks.<name>.world` documented = {}, supported = {supported}",
+                !supported
+            );
+        }
+    }
+
+    /// A document over 256 KiB, nested too deep, of the wrong shape or with
+    /// a pointer that doesn't parse is refused whole (413 or 422), not
+    /// entry by entry; the guides say so.
+    #[test]
+    fn world_guides_tell_whole_refusals_from_entry_refusals() {
+        for (name, text) in [
+            ("mockingbird-world", skill("mockingbird-world")),
+            ("docs/world.md", WORLD_DOC),
+        ] {
+            for needle in ["413", "422", "stores nothing"] {
+                assert!(text.contains(needle), "{name} should mention {needle}");
+            }
+            assert!(
+                !text.contains("\n| `too_large` |") && !text.contains("- `too_large`:"),
+                "{name} lists too_large as an entry refusal"
+            );
+        }
+    }
+
+    /// The ```yaml and ```json blocks of the world guides.
+    fn fenced<'a>(text: &'a str, lang: &str) -> Vec<&'a str> {
+        let open = format!("```{lang}\n");
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(i) = rest.find(&open) {
+            let body = &rest[i + open.len()..];
+            let end = body.find("```").unwrap_or(body.len());
+            out.push(&body[..end]);
+            rest = &body[end..];
+        }
+        out
+    }
+
+    fn world_schema_errors(doc: &Value) -> Vec<String> {
+        let schema: Value = serde_json::from_str(mb_mcm::world::SCHEMA).unwrap();
+        let v = jsonschema::validator_for(&schema).unwrap();
+        let mut errs: Vec<String> = v.iter_errors(doc).map(|e| e.to_string()).collect();
+        if let Err(e) = serde_json::from_value::<mb_mcm::world::World>(doc.clone()) {
+            errs.push(e.to_string());
+        }
+        errs
+    }
+
+    /// The worked examples fit the published format.
+    #[test]
+    fn world_examples_fit_the_schema() {
+        for (name, text) in [
+            ("mockingbird-world", skill("mockingbird-world")),
+            ("docs/world.md", WORLD_DOC),
+        ] {
+            let yaml = fenced(text, "yaml");
+            assert!(!yaml.is_empty(), "{name} has no yaml example");
+            for block in yaml {
+                let doc: Value = serde_saphyr::from_str(block).unwrap();
+                assert_eq!(world_schema_errors(&doc), Vec::<String>::new(), "{name}");
+            }
+        }
+        let calls = fenced(skill("mockingbird-world"), "json");
+        assert!(!calls.is_empty());
+        for block in calls {
+            let args = block.trim().strip_prefix("patch_world").unwrap_or(block);
+            let args: Value = serde_json::from_str(args.trim()).unwrap();
+            assert_eq!(world_schema_errors(&args["patch"]), Vec::<String>::new());
         }
     }
 

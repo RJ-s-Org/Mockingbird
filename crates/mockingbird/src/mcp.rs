@@ -41,7 +41,7 @@ const KEY_PAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 /// Largest body `call_mock` returns inline.
 const MAX_INLINE_BODY: usize = 64 * 1024;
 
-const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
+pub(crate) const INSTRUCTIONS: &str = "Mockingbird serves mock APIs (REST, GraphQL, gRPC, SOAP, SSE, WebSocket, Kafka/AMQP/MQTT) from their contracts, with LLM-generated, schema-valid responses. Start with `doctor`. To set up: `list_llm_providers`, `init_config` (or `configure_llm`), `test_llm`, `start_server`. To mock an API: `import_contract`, then `get_world` (pass the imported `version` unless it was activated) and fix its `gaps` with `patch_world`, then `call_mock`; shape behaviour with `put_scenario`, `update_mock`, `seed_session`; inspect with `list_requests`. To run an app unchanged against mocks, start the server with `proxy: true` and export the variables from `proxy_env` in the app's shell instead of editing its base URLs. Never pass API keys as arguments: profiles hold references such as env:OPENROUTER_API_KEY that the user exports; if the key is not in this process's environment, `open_key_setup` lets the user type it into a local page that stores it in a private file. The `mockingbird://skills/…` resources hold the full guides.";
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Transport {
@@ -2194,6 +2194,11 @@ const PROMPTS: &[(&str, &str, &str)] = &[
         "mockingbird-testing",
         "Use Mockingbird mocks in tests and CI.",
     ),
+    (
+        "world",
+        "mockingbird-world",
+        "Review and fix how a mock's contract behaves as a world, after an import.",
+    ),
 ];
 
 fn prompts() -> Vec<Value> {
@@ -2922,6 +2927,16 @@ mod tests {
             .as_str()
             .unwrap_or_default();
         assert!(text.contains("use gemini"));
+        let r = s
+            .handle(
+                json!({"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"world"}}),
+            )
+            .await
+            .unwrap_or_default();
+        let text = r["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("get_world"), "{text}");
         let r = s
             .handle(json!({"jsonrpc":"2.0","id":3,"method":"nope"}))
             .await

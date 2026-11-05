@@ -11,23 +11,24 @@ The format is `mockingbird world schema` (JSON Schema). Every key is optional; a
 
 ## The loop
 
-1. **Read the gaps first.** After `import_contract` (or `approve_draft`), call `get_world {mock}`. The answer holds `world` (the effective description), `authors` (who set each entry; unlisted entries are `heuristic`), `revision` (`0` when only the heuristics wrote it), `refused` and `gaps`. Work through `gaps`:
+1. **Read the gaps first.** After `import_contract` (or `approve_draft`), call `get_world {mock, version}`: pass `version`, the version number the import or approval answered, unless that version is now the active one. Without it every world tool acts on the active version, and a later import that was not activated, or an unapproved draft, is not that version: you would review the old version's gaps and write onto it. The answer holds `world` (the effective description), `authors` (who set each entry; unlisted entries are `heuristic`), `revision` (`0` when only the heuristics wrote it), `refused` and `gaps`. Work through `gaps`:
    - `no_identity`: a type operations write to has no `identity`.
    - `no_target`: a read, update, replace, delete or action does not say which path parameter or body member names its record.
    - `no_record`: a create or update answer in which the record could not be found; say where with `answer.record` (or `answer.records`).
    - `skipped_route`: an HTTP route that is not served. It is reported, not fixable in the description; mention it to the user.
    - `refused`: an entry of the newest revision that did not validate (often after a contract change).
-2. **Write what the contract or its docs state.** For each gap, read that part of the contract and its documentation, then write the entries with `patch_world {mock, patch, author: "agent"}` (a JSON merge patch onto the current overlay; `null` removes a key, arrays are replaced whole). `put_world {mock, world, author: "agent"}` replaces the whole overlay instead. Record only what the contract or the documentation says. Do not guess a lifecycle, a uniqueness rule or a paging style from a field name; leave the key out and the heuristics keep deciding.
-3. **Read `refused` in the answer and fix those entries.** Every write answers `{revision, applied, refused}`. Only `applied` is stored. Each refusal names its JSON pointer and a code:
+2. **Write what the contract or its docs state.** For each gap, read that part of the contract and its documentation, then write the entries with `patch_world {mock, version, patch, author: "agent"}` (the same `version` as in step 1; a JSON merge patch onto the current overlay; `null` removes a key, arrays are replaced whole). `put_world {mock, world, author: "agent"}` replaces the whole overlay instead. Record only what the contract or the documentation says. Do not guess a lifecycle, a uniqueness rule or a paging style from a field name; leave the key out and the heuristics keep deciding.
+3. **Read `refused` in the answer and fix those entries.** A write that is accepted answers `{revision, applied, refused}`: the entries in `applied` are stored as the new revision, and each entry in `refused` is left out, with its JSON pointer and a code:
    - `unknown_key`: the format has no such key there (a typo such as `path_parm`). Check `mockingbird world schema`.
    - `unresolved`: it names an operation, type, member, parameter, header, status or schema location the contract does not have. Use the contract's exact names and operation ids.
    - `not_applicable`: it does not fit the operation's protocol, e.g. a header or a status on a GraphQL or gRPC operation.
-   - `invalid`: malformed (a pointer that does not parse, a pattern without exactly one `{id}`, a state not among the states).
-   - `too_large`: the document is over 256 KiB. Describe structure, never data.
+   - `invalid`: the entry is malformed (a pattern without exactly one `{id}`, a state not among the states, a `from_request` pointer that does not parse, or a pointer that does not reach into the schema).
+
+   Some mistakes refuse the whole write instead, and the server stores nothing: the tool call fails with a problem answer. A document over 256 KiB answers 413 (`too_large`; describe structure, never data). A document nested deeper than 32, of the wrong shape (a string where an object belongs, an unknown `kind`), or with a `request` or `answer` pointer that does not parse answers 422 (`invalid`), and its `path` names the first entry at fault. Fix that entry and send the write again.
 4. **Check it on the mock.** `call_mock` a create, then read the record back by the id the answer gave (and list it). If the read is a 404 or the list misses it, the identity, target or record pointers are still wrong: look at `get_world` again.
 5. **Never put values from traffic or credentials in a description.** It holds member names, parameter names, pointers, states and statuses from the contract. No ids, tokens, keys, customer data or recorded bodies.
 
-Each write adds a numbered revision attached to the contract version; it applies at once and never recompiles the contract. `list_world_revisions {mock}` lists them, `diff_world {mock, from, to}` shows which pointers changed, and `restore_world_revision {mock, revision}` adds a new revision holding an older one's document. All of them take `version` (default: the active contract version).
+Each write adds a numbered revision attached to the contract version; it applies at once and never recompiles the contract. `list_world_revisions {mock}` lists them, `diff_world {mock, from, to}` shows which pointers changed, and `restore_world_revision {mock, revision}` adds a new revision holding an older one's document. All of them take `version` (default: the active contract version); pass it whenever you work on a version that is not active.
 
 When someone else may write at the same time, pass `expect_revision` (the `revision` you read). A newer revision answers `412 revision_conflict`: call `get_world` again, redo the patch on what is there now, and write again.
 
@@ -111,4 +112,4 @@ Then check `refused` in its answer, `call_mock` a `CreateFolder` and read the fo
 
 ## Without MCP
 
-The same operations are CLI subcommands: `mockingbird world show <mock> [--version N] [--json]` (gaps first), `mockingbird world schema`, and `mockingbird world put|patch|revisions|restore|diff`. The Admin API path is `/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world` (`version` a number or `active`). In `mockingbird.yaml`, a config-file mock takes `mocks.<name>.world: <path>` (YAML or JSON); edit that file instead.
+The same operations are CLI subcommands: `mockingbird world show <mock> [--version N] [--json]` (gaps first), `mockingbird world schema`, and `mockingbird world put|patch|revisions|restore|diff`. The Admin API path is `/api/v1/workspaces/{ws}/mocks/{mock}/contracts/{version}/world` (`version` a number or `active`). A world file in `mockingbird.yaml` for config-file mocks is planned but not available yet; describe those mocks through these tools.
