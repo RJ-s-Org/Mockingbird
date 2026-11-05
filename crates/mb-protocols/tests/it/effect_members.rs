@@ -550,3 +550,90 @@ async fn another_types_record_held_by_ref_is_no_home_for_a_member_written_too_hi
     assert_eq!(rack["state"], "tagged", "{rack}");
     assert_eq!(rack["keeper"]["label"], "Ann", "{rack}");
 }
+
+const NESTED_KEY: &str = r##"
+openapi: 3.0.0
+info: {title: Keyed, version: "1"}
+paths:
+  /gadgets/{name}:
+    get:
+      operationId: readGadget
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
+  /widgets/{name}:
+    get:
+      operationId: readWidget
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /pings:
+    post:
+      operationId: createPing
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {gadget: {type: string}}}
+      responses:
+        "201": {description: made, content: {application/json: {schema: {$ref: "#/components/schemas/Ping"}}}}
+  /pings/{id}:
+    get:
+      operationId: getPing
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ping"}}}}
+components:
+  schemas:
+    Info:
+      type: object
+      properties:
+        name: {type: string}
+        revision: {type: string}
+    Gadget:
+      type: object
+      properties:
+        kind: {type: string}
+        phase: {type: string}
+        info: {$ref: "#/components/schemas/Info"}
+    Widget:
+      type: object
+      properties:
+        kind: {type: string}
+        info: {$ref: "#/components/schemas/Info"}
+    Ping:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        gadget: {type: string}
+"##;
+
+/// A record keyed by a nested member (`info.name`) whose effect repeats the key at the
+/// top level: the key stays where it was written, not moved onto the identity, and the
+/// rest of the effect applies.
+#[tokio::test]
+async fn an_effect_repeating_a_nested_key_at_the_top_still_applies() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "gadgets",
+        "g1",
+        json!({"kind": "Gadget", "phase": "idle", "info": {"name": "g1", "revision": "1"}}),
+    )
+    .await;
+    let answer = json!({"response": {"id": "p1", "gadget": "g1"}, "effects": [
+        {"type": "gadgets", "id": "g1", "set": {"name": "g1", "phase": "pinged"}},
+    ]});
+    let (_, effects) = call(
+        NESTED_KEY,
+        &state,
+        answer,
+        ("POST", "/pings", Some(json!({"gadget": "g1"}))),
+    )
+    .await;
+    let g = stored(&state, "gadgets", "g1").await;
+    assert_eq!(g["phase"], "pinged", "{effects} {g}");
+}

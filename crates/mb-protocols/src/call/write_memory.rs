@@ -517,7 +517,9 @@ pub(super) fn onto_record(
 /// does (`frozen` of a record keeping it under `attributes`), moved under that member:
 /// the effect wrote it one object too high. What the effect already wrote under that
 /// member wins over the moved one. An object member holding a record of its own
-/// ([`is_a_record`]) is no home. A member no object member declares, or more than one
+/// ([`is_a_record`]) is no home, and no member is moved onto one of the type's identity
+/// fields (`info.name`): an effect repeating the record's key at the top level does not
+/// thereby set its identity. A member no object member declares, or more than one
 /// does, stays where it was written, and so does all of `set` where the read's top level
 /// names no members, is a union, or is a map, any of which may hold it as written.
 pub(super) fn rehomed_members(
@@ -541,6 +543,7 @@ pub(super) fn rehomed_members(
         }
     }
     let at_top = |key: &str| top.properties.iter().any(|p| p.contains_key(key));
+    let identity = rt.index().identity_fields(t);
     let mut out = Map::new();
     let mut moved = Vec::new();
     for (key, value) in set {
@@ -553,7 +556,9 @@ pub(super) fn rehomed_members(
             .filter(|(_, level)| level.properties.iter().any(|p| p.contains_key(&key)))
             .collect();
         match declaring.as_slice() {
-            [(home, level)] if !level.union => moved.push(((*home).to_string(), key, value)),
+            [(home, level)] if !level.union && !identity.contains(&format!("{home}.{key}")) => {
+                moved.push(((*home).to_string(), key, value));
+            }
             _ => {
                 out.insert(key, value);
             }
