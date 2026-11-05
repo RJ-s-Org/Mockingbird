@@ -981,22 +981,21 @@ pub(super) async fn collection_records(
     Some(out)
 }
 
-/// The bodiless success status `op`, a list read, declares beside its list answer
-/// (BigCommerce's `204` "No order matches."): the one `2xx` code other than the list's
-/// whose response has no body. An empty list answers it (see [`no_content`]).
+/// The `204 No Content` that `op`, a list read, declares with no body beside its list
+/// answer (a `204` described as "No order matches."). An empty list answers it (see
+/// [`no_content`]). Only `204` means "nothing to return": a bodiless `202` (accepted,
+/// still processing) or `205` (reset the view) says something else.
 fn no_content_status(op: &Operation) -> Option<u16> {
+    const NO_CONTENT: u16 = 204;
     let list = op.success_output()?;
     list.schema.as_ref()?;
-    let mut bodiless = op.outputs.iter().filter_map(|o| match o.status {
-        mb_mcm::StatusSelector::Code(code)
-            if (200..300).contains(&code) && o.schema.is_none() && o.status != list.status =>
-        {
-            Some(code)
-        }
-        _ => None,
-    });
-    let one = bodiless.next()?;
-    bodiless.next().is_none().then_some(one)
+    if list.status == mb_mcm::StatusSelector::Code(NO_CONTENT) {
+        return None;
+    }
+    op.outputs
+        .iter()
+        .any(|o| o.status == mb_mcm::StatusSelector::Code(NO_CONTENT) && o.schema.is_none())
+        .then_some(NO_CONTENT)
 }
 
 /// A list answer `generated` of `op` left with no items, as the bodiless status the

@@ -4127,3 +4127,56 @@ async fn a_comma_separated_array_is_accepted() {
     let body = api.get("/orders?ids=1,2").await;
     assert_eq!(order_ids(&body), [1, 2], "{body}");
 }
+
+/// A required `week` from 1 with no `default`, echoed beside `per_page`, is a filter,
+/// not a page number: nothing in its name or brackets says it pages, so week 2 is the
+/// model's answer, not the stored rest.
+#[tokio::test]
+async fn a_required_echoed_integer_from_one_is_no_page_number() {
+    let list = BY_PAGE
+        .replace(
+            "- {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}",
+            "- {name: week, in: query, required: true, schema: {type: integer, minimum: 1}}",
+        )
+        .replace(
+            "required: [page, per_page, has_more_page]",
+            "required: [week, per_page, has_more_page]",
+        )
+        .replace(
+            "                      page: {type: integer}",
+            "                      week: {type: integer}",
+        );
+    assert!(list.contains("name: week") && list.contains("week: {type: integer}"));
+    let week = |tasks: &[Value], n: u64| {
+        json!({
+            "code": 0,
+            "data": tasks,
+            "page_context": {"week": n, "per_page": 1, "has_more_page": false},
+        })
+    };
+    let first = week(&[stored_task("t1", "A", "open")], 1);
+    let second = week(&[stored_task("t1", "A", "open")], 2);
+    let mut script = created("open");
+    script.push(Ok(first.to_string()));
+    script.push(Ok(second.to_string()));
+    let api = api_of(&stored_pages(&list), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?per_page=1&week=1").await, first);
+    assert_eq!(api.get("/tasks?per_page=1&week=2").await, second);
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A bodiless `202` beside the list is no "nothing matched": an empty list stays a
+/// `200 []`.
+#[tokio::test]
+async fn an_empty_list_with_a_bodiless_accepted_stays() {
+    let contract = NESTED.replace(
+        "\"204\": {description: No order matches.}",
+        "\"202\": {description: The report is still being prepared.}",
+    );
+    assert!(contract.contains("\"202\""));
+    let api = api_of(&contract, true, vec![Ok(json!([]).to_string())]);
+    let (status, body) = api.call("GET", "/orders", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
+}

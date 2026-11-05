@@ -201,15 +201,22 @@ fn named(name: &str) -> Option<Style> {
     (page && rest_numbers && words.len() <= 2).then_some(Style::Number)
 }
 
-/// Whether `name` and the page size's `size_param` are of one bracket family:
-/// `page[start]` beside `page[size]`.
+/// Whether `name` and the page size's `size_param` are of one paging bracket family:
+/// `page[start]` beside `page[size]`. The shared base must name pages (its words are
+/// `page`), so `q[min_stars]` beside `q[per_page]` is no family.
 fn same_family(name: &str, size_param: &str) -> bool {
     let base = |n: &str| {
         let open = n.find('[')?;
         n.ends_with(']').then(|| n[..open].to_lowercase())
     };
     match (base(name), base(size_param)) {
-        (Some(a), Some(b)) => !a.is_empty() && a == b,
+        (Some(a), Some(b)) => {
+            a == b
+                && !a.is_empty()
+                && mb_mcm::words(&a)
+                    .iter()
+                    .all(|w| w.eq_ignore_ascii_case("page"))
+        }
         _ => false,
     }
 }
@@ -219,12 +226,6 @@ fn same_family(name: &str, size_param: &str) -> bool {
 fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option<Position> {
     let query = op.input.query.as_ref()?;
     let declared = query.get("properties")?.as_object()?;
-    let required = |name: &str| {
-        query
-            .get("required")
-            .and_then(Value::as_array)
-            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
-    };
     let (list, item_parts) = answer_lists(bundle, op)?;
     let mut found: Vec<Position> = Vec::new();
     for (name, schema) in declared {
@@ -255,14 +256,11 @@ fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option
         let style = match (bound("default"), bound("minimum")) {
             (Some(d), Some(m)) if d == 1.0 && m == 1.0 => Style::Number,
             (Some(d), Some(m)) if d == 0.0 && m == 0.0 => Style::Offset,
-            // A `minimum` alone, where the name or the route says more (Terraform's
-            // `page[number]`, Postmark's required `Offset`).
-            (None, Some(m)) if m == 1.0 && (said.is_some() || family || required(name)) => {
-                Style::Number
-            }
-            (None, Some(m)) if m == 0.0 && (said.is_some() || family || required(name)) => {
-                Style::Offset
-            }
+            // A `minimum` alone, where the name or the page size's bracket family says
+            // more (`page[number]`, `Offset`, `page[start]`). Being required says
+            // nothing: a required, echoed `week` from 1 is a filter.
+            (None, Some(m)) if m == 1.0 && (said.is_some() || family) => Style::Number,
+            (None, Some(m)) if m == 0.0 && (said.is_some() || family) => Style::Offset,
             _ => continue,
         };
         // A name saying the other way (Trello's `page` from 0) leaves it unknown.
@@ -663,4 +661,22 @@ pub(super) async fn serve(
         .await;
     }
     Some(served)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_family;
+
+    #[test]
+    fn a_paging_bracket_family_is_one() {
+        assert!(same_family("page[start]", "page[size]"));
+        assert!(same_family("Page[Offset]", "page[limit]"));
+    }
+
+    #[test]
+    fn a_bracket_family_that_does_not_page_is_none() {
+        assert!(!same_family("q[min_stars]", "q[per_page]"));
+        assert!(!same_family("filter[min]", "filter[limit]"));
+        assert!(!same_family("start", "size"));
+    }
 }
