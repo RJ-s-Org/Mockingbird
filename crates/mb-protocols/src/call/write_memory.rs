@@ -512,6 +512,67 @@ pub(super) fn onto_record(
     )
 }
 
+/// `set`, an effect's members for a record of type `t`, with each top-level member the
+/// read schema does not declare at its top level, but exactly one of its object members
+/// does (`frozen` of a record keeping it under `attributes`), moved under that member:
+/// the effect wrote it one object too high. What the effect already wrote under that
+/// member wins over the moved one. A member no object member declares, or more than one
+/// does, stays where it was written, and so does all of `set` where the read's top level
+/// names no members, is a union, or is a map, any of which may hold it as written.
+pub(super) fn rehomed_members(
+    rt: &MockRuntime,
+    t: &str,
+    set: Map<String, Value>,
+) -> Map<String, Value> {
+    let bundle = rt.bundle();
+    let top = Level::of(bundle, read_schema(rt, t));
+    if top.union || top.map.is_some() || top.properties.is_empty() {
+        return set;
+    }
+    let mut homes: Vec<(&str, Level<'_>)> = Vec::new();
+    for (name, schema) in top.properties.iter().flat_map(|p| p.iter()) {
+        if homes.iter().any(|(n, _)| *n == name.as_str()) {
+            continue;
+        }
+        let level = Level::of(bundle, Some(schema));
+        if !level.properties.is_empty() {
+            homes.push((name.as_str(), level));
+        }
+    }
+    let at_top = |key: &str| top.properties.iter().any(|p| p.contains_key(key));
+    let mut out = Map::new();
+    let mut moved = Vec::new();
+    for (key, value) in set {
+        if key.contains('.') || at_top(&key) {
+            out.insert(key, value);
+            continue;
+        }
+        let declaring: Vec<&(&str, Level<'_>)> = homes
+            .iter()
+            .filter(|(_, level)| level.properties.iter().any(|p| p.contains_key(&key)))
+            .collect();
+        match declaring.as_slice() {
+            [(home, level)] if !level.union => moved.push(((*home).to_string(), key, value)),
+            _ => {
+                out.insert(key, value);
+            }
+        }
+    }
+    for (home, key, value) in moved {
+        let slot = out.entry(home).or_insert_with(|| Value::Object(Map::new()));
+        match slot {
+            Value::Object(members) => {
+                members.entry(key).or_insert(value);
+            }
+            // The effect gave the member another shape: the moved one stays as written.
+            _ => {
+                out.entry(key).or_insert(value);
+            }
+        }
+    }
+    out
+}
+
 /// What one level of a schema says of its members, by its `$ref`s and `allOf`s. A
 /// `oneOf` or `anyOf` branch says nothing for certain: another may be the one.
 #[derive(Default)]
@@ -2201,8 +2262,11 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 /// What of an effect's `set` may go on the target its update just stored: what the read
 /// schema declares at the top level (all of it where the schema names no members or a
 /// union may hold others), and of that not a path member, not what the request names at
-/// the top level (in its body or its query, as the answer settles), and not what would
-/// show another owner. A `readOnly` member may go on:
+/// the top level (in its body or its query) where the answer of `status` settles it, and
+/// not what would show another owner. An answer with the read's schema settles all the
+/// request names; one of another schema (an acknowledgement `{id, name}`) only what it
+/// declares, or all where it is a union or a map: a request member it leaves out reaches
+/// the record by an effect alone. A `readOnly` member may go on:
 /// a client cannot set it, and an effect is the server saying what followed. The check on
 /// identity comes before this, as for any effect.
 pub(super) fn own_effect_members(
@@ -2211,17 +2275,29 @@ pub(super) fn own_effect_members(
     call: &OperationCall,
     held: &StoredResource,
     set: &Map<String, Value>,
+    status: u16,
 ) -> Map<String, Value> {
     let t = held.resource_type.as_str();
     let bundle = rt.bundle();
     let level = Level::of(bundle, read_schema(rt, t));
+    let output = plan.op.output_for_status(status);
+    let whole = is_read_schema(rt, plan.op, output);
+    let answer = Level::of(bundle, output.and_then(|o| o.schema.as_ref()));
+    let answers = |key: &str| {
+        whole
+            || answer.union
+            || answer.map.is_some()
+            || answer.properties.iter().any(|p| p.contains_key(key))
+    };
     let declaring = !level.union && !level.properties.is_empty();
     let declared = |key: &str| level.properties.iter().find_map(|p| p.get(key));
     let index = rt.index();
     let paths = index.path_fields(t);
     let body = call.body.as_ref().and_then(Value::as_object);
     let named = |key: &str| {
-        body.is_some_and(|members| members.contains_key(key)) || call.query.contains_key(key)
+        answers(key)
+            && (body.is_some_and(|members| members.contains_key(key))
+                || call.query.contains_key(key))
     };
     // A member named for a parameter of this call's path, and holding its value.
     let shows_path = |key: &str| {
