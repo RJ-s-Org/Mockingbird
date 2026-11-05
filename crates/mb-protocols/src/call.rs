@@ -6443,8 +6443,11 @@ async fn by_path_fields(
 /// [`either_or`]. An alternative that is a bare `id` while the identity is no id by its
 /// name (an `Alias` key) is the one other member that is an id by its name. A member
 /// the description only mentions, or that a negation keeps out ("not its number"), is
-/// none. A parameter whose schema is not a string, or that offers fewer than two
-/// members, the identity counted, has none.
+/// none, and so is a phrase neither of whose sides is a key of the record (the
+/// identity, the member the path parameter names, or one the type's operations
+/// identify it by): "the ID of the user or organization membership" offers two
+/// other members, not two keys. A parameter whose schema is not a string, or that
+/// offers fewer than two members, the identity counted, has none.
 fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
     let Some(param) = target_param(op) else {
         return Vec::new();
@@ -6499,6 +6502,11 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
             _ => None,
         }
     };
+    // A bare `id` stands for the identity when the identity is an id by its name.
+    let bare_id = |runs: &[String]| {
+        (is_id(mb_mcm::leaf_member(identity)) && runs.iter().any(|r| r == "id"))
+            .then(|| identity.to_string())
+    };
     let resolve = |runs: &[String]| {
         runs.iter()
             .find_map(|run| {
@@ -6508,7 +6516,15 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
                     .cloned()
             })
             .or_else(|| runs.iter().any(|r| r == "id").then(other_id).flatten())
+            .or_else(|| bare_id(runs))
     };
+    // The members that name the record itself: the identity, the response field the
+    // path parameter names when it is another, and those the type's other operations
+    // identify it by (a delete whose answer declares no key reads as its read does).
+    let keys: Vec<&str> = std::iter::once(identity)
+        .chain(op.identity.as_ref().and_then(|i| i.path_field.as_deref()))
+        .chain(index.identity_fields(t).iter().map(String::as_str))
+        .collect();
     let mut offered: Vec<String> = Vec::new();
     for pair in either_or(&[param.as_str()]).into_iter().chain(either_or(
         &description
@@ -6518,7 +6534,9 @@ fn alternate_members(rt: &MockRuntime, op: &Operation, t: &str) -> Vec<String> {
         let [Some(a), Some(b)] = pair.map(|runs| resolve(&runs)) else {
             continue;
         };
-        if a == b {
+        // An offer of two ways to name the record has the record's key on one side:
+        // "the user or organization" names two other records, not this one's keys.
+        if a == b || !keys.iter().any(|k| *k == a || *k == b) {
             continue;
         }
         for m in [a, b] {

@@ -137,8 +137,29 @@ paths:
         - {name: widgetId, in: path, required: true, description: "The widget to read; the answer shows its name.", schema: {type: string}}
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}
+  /memberships:
+    post:
+      operationId: createMembership
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {user: {type: string}, organization: {type: string}}}}}
+      responses:
+        "201": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Membership"}}}}
+  /memberships/{membershipId}:
+    get:
+      operationId: getMembership
+      parameters:
+        - {name: membershipId, in: path, required: true, description: "The ID of the user or organization membership.", schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Membership"}}}}
 components:
   schemas:
+    Membership:
+      type: object
+      properties:
+        id: {type: string}
+        user: {type: string}
+        organization: {type: string}
     User:
       type: object
       properties:
@@ -462,6 +483,29 @@ async fn a_mention_or_a_negation_is_no_alternate_key() {
         assert_eq!(source(&headers), "state", "{path}: {read}");
     }
     for path in ["/users/alice", "/orders/A-1", "/orders/5", "/widgets/gizmo"] {
+        let (_, headers, read) = send(&r, "GET", path, None).await;
+        assert_ne!(source(&headers), "state", "{path}: {read}");
+    }
+}
+
+/// An either-or phrase whose two sides are members other than the identity ("the ID
+/// of the user or organization membership") offers no other way to name the record:
+/// a read by the user's value misses state.
+#[tokio::test]
+async fn an_either_or_without_the_identity_is_no_alternate_key() {
+    let r = router(vec![
+        json!({"id": "m_1", "user": "alice", "organization": "acme"}),
+    ]);
+    send(
+        &r,
+        "POST",
+        "/memberships",
+        Some(json!({"user": "alice", "organization": "acme"})),
+    )
+    .await;
+    let (_, headers, read) = send(&r, "GET", "/memberships/m_1", None).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    for path in ["/memberships/alice", "/memberships/acme"] {
         let (_, headers, read) = send(&r, "GET", path, None).await;
         assert_ne!(source(&headers), "state", "{path}: {read}");
     }

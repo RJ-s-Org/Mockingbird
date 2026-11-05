@@ -174,8 +174,30 @@ paths:
       parameters: [{name: noteId, in: path, required: true, schema: {type: string}}]
       responses:
         "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+  /things:
+    post:
+      operationId: createThing
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Thing-Id: {schema: {type: integer}}
+  /things/{thingId}:
+    get:
+      operationId: getThing
+      parameters: [{name: thingId, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
 components:
   schemas:
+    Thing:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
     Job:
       type: object
       properties:
@@ -463,4 +485,21 @@ async fn a_body_id_is_served_in_the_id_header() {
     let (_, headers, read) = send(&r, "GET", &format!("/notes/{id}"), None).await;
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(read["text"], "second", "{read}");
+}
+
+/// An integer id header on a type whose identity is a string: the minted id is a
+/// string of digits, served as the integer and stored as the string, so a read by it
+/// is the thing as sent.
+#[tokio::test]
+async fn an_integer_header_on_a_string_identity_stores_a_string_id() {
+    let r = router(vec![]);
+    let (status, headers, _) = send(&r, "POST", "/things", Some(json!({"name": "Lamp"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = header(&headers, "thing-id");
+    assert!(id.parse::<i64>().is_ok(), "an integer header: {id:?}");
+    let (status, headers, read) = send(&r, "GET", &format!("/things/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["name"], "Lamp", "{read}");
+    assert_eq!(read["id"], json!(id), "a string id: {read}");
 }

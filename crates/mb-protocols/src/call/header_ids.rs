@@ -23,8 +23,10 @@ const ATTEMPTS: u32 = 8;
 /// Mints the id of the record `op`'s create (of type `t`) answered in a header, when
 /// its answer names it only there; serves it in `generated.headers` and returns it, to
 /// be stored with [`record`]. When the answer holds an id, the header serves that one
-/// and `None` is returned. `None` (and nothing served) when the request asks for one (a client-chosen id, or a path value naming the record),
-/// no header names the record, or no fresh id can be drawn.
+/// and `None` is returned. `None` (and nothing served) when the request asks for one
+/// (a client-chosen id, or a path value naming the record), no header names the
+/// record, or no fresh id can be drawn. An integer header on a record whose identity
+/// is a string mints a string of digits, which the header serves as the integer.
 pub(super) async fn mint(
     rt: &MockRuntime,
     state: &mut StateAccess<'_>,
@@ -55,21 +57,21 @@ pub(super) async fn mint(
         return None;
     }
     let header = identity_header(op, generated.status)?;
-    let item_read = item_read_path(rt, t);
     let Binding::Http { path, .. } = &op.binding else {
         return None;
     };
     let location = header.kind == IdentityHeaderKind::Location;
     // A `Location` names the record only as an item of the create's own collection.
-    if location
-        && !item_read
-            .as_deref()
-            .is_some_and(|item| is_item_of(item, path))
-    {
+    if location && !of_own_collection(rt, t, path) {
         return None;
     }
     let declared = record_id_schema(rt, t, field);
     let header_integer = header.schema.get("type").and_then(Value::as_str) == Some("integer");
+    let string_identity = declared
+        .as_ref()
+        .and_then(|d| d.get("type"))
+        .and_then(Value::as_str)
+        == Some("string");
     let carried = request_values(op, call);
     for _ in 0..ATTEMPTS {
         let Some(id) = draw(rt, declared.as_ref(), &header.schema, header_integer) else {
@@ -86,10 +88,13 @@ pub(super) async fn mint(
         }
         let value = match header.kind {
             IdentityHeaderKind::Id => text.clone(),
-            IdentityHeaderKind::Location => {
-                let base = page_url.map_or_else(|| filled_path(path, call), str::to_string);
-                format!("{}/{text}", base.trim_end_matches('/'))
-            }
+            IdentityHeaderKind::Location => item_url(path, call, page_url, &text),
+        };
+        // A string identity holds the id as a string, though the header serves it as
+        // an integer, so a read by it finds the record.
+        let id = match (&id, string_identity) {
+            (Value::Number(_), true) => Value::String(text.clone()),
+            _ => id,
         };
         tracing::debug!(
             mock = %rt.name,
@@ -129,17 +134,28 @@ fn serve_answered(
             text.to_string()
         }
         IdentityHeaderKind::Location => {
-            let of_collection = item_read_path(rt, t)
-                .as_deref()
-                .is_some_and(|item| is_item_of(item, path));
-            if !of_collection || !url_safe(text) {
+            if !of_own_collection(rt, t, path) || !url_safe(text) {
                 return;
             }
-            let base = page_url.map_or_else(|| filled_path(path, call), str::to_string);
-            format!("{}/{text}", base.trim_end_matches('/'))
+            item_url(path, call, page_url, text)
         }
     };
     generated.headers.push((header.name, value));
+}
+
+/// Whether type `t`'s item read is one parameter segment under the create's `path`,
+/// so a `Location` the create answers names an item of its own collection.
+fn of_own_collection(rt: &MockRuntime, t: &str, path: &str) -> bool {
+    item_read_path(rt, t)
+        .as_deref()
+        .is_some_and(|item| is_item_of(item, path))
+}
+
+/// The URL of the item `id` under the create's collection: the URL the call reached
+/// the mock at when known, else its `path` filled with the call's path values.
+fn item_url(path: &str, call: &OperationCall, page_url: Option<&str>, id: &str) -> String {
+    let base = page_url.map_or_else(|| filled_path(path, call), str::to_string);
+    format!("{}/{id}", base.trim_end_matches('/'))
 }
 
 /// The record a create named in a header stores: the members of `request` the type
