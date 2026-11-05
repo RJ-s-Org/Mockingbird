@@ -1400,7 +1400,7 @@ pub(crate) async fn complete(
                 && plan.scenario.is_none()
                 && deleted::applies(rt, plan)
             {
-                lists::no_content(op, &mut generated);
+                lists::no_content(rt.bundle(), op, &mut generated);
             }
             if matches!(op.kind, OperationKind::Command(Effect::Create)) {
                 // The answer as the model gave it, before a fresh id replaces one a stored

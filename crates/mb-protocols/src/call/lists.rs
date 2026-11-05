@@ -39,7 +39,11 @@
 //! member there must declare a `format` (`email`), one the parameter declares too if it
 //! declares one, and that no member of the items declares: free text one object down
 //! (`brand.name`, `country.code`) is commonly a referenced record's own label, and a
-//! `name` filter on products means the products' own, so it names nothing there.
+//! `name` filter on products means the products' own, so it names nothing there. An
+//! object member is one typed `object` alone, `null` aside (so a nullable one,
+//! `type: [object, "null"]` or `nullable: true`, is one, and an item holding `null`
+//! there stays), or untyped with `properties`; one that may be another type too
+//! (`type: [object, string]`) is none.
 //!
 //! A parameter that names no member changes nothing, whatever its value: a bound
 //! (`before`, `oldest`) or a search naming an item's id leaves it in, as which side of
@@ -74,10 +78,16 @@
 //! declared list member out altogether gave no page at all: it gets the member as `[]`
 //! ([`absent_list`]), and the store fills that page the same way ([`stored_page`]).
 //!
-//! A list read that declares a bodiless `2xx` beside its list answer (a `204` "No order
+//! A list read that declares a bodiless `204` beside its list answer ("No order
 //! matches.") answers that status with no body when its list is left with no items
-//! ([`no_content`]): by the model, the filters or the delete markers. Not under a
-//! scenario or a forced status.
+//! ([`no_content`]): by the model, the filters or the delete markers. Only an answer
+//! that is a list container by its structure does: an array, or an object holding,
+//! beside its list, only paging or count metadata (booleans, integers that are no
+//! identity, links, a fixed kind, a cursor echoing a query parameter, and objects of
+//! those). A record holding a list of its own (a cart with its `id`, `total` and
+//! empty `items`) stays that record. Not under a scenario or a forced status. A page
+//! the store serves ([`runs`], [`pages`]) is no generated answer: one left empty stays
+//! a `200` with its empty list, as the run or cut it comes from was a `200`.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -205,7 +215,9 @@ pub(super) fn filtered_member<'a>(
 /// one of that very name, ignoring case (`email` in `billing_address`; `emails` names
 /// none), the two declaring the one same type, as [`filtered_member`] has it. The
 /// member declares a `format` the parameter does not contradict and no member of the
-/// items declares (see the module's doc).
+/// items declares (see the module's doc). An object member is one [`types_of`] types as
+/// `object` alone, which leaves `null` aside, so a nullable object is one; or one with
+/// `properties` and no type.
 fn nested_filtered_member<'a>(
     bundle: &'a mb_mcm::Bundle,
     query: Option<&'a Value>,
@@ -663,7 +675,7 @@ fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
 
 /// The equality filters `call`'s query asks of `op`'s items `item_parts` describe, each
 /// with its parameter: all but the page size's `page`. A parameter that pages the list
-/// ([`runs::pages_list`]: `offset`, `page`) filters no member one object down that
+/// ([`runs::Paging::pages_list`]: `offset`, `page`) filters no member one object down that
 /// shares its name (`timezone.offset`): only a member of the items themselves would say
 /// so.
 fn filters_of<'a, 'c>(
@@ -675,6 +687,13 @@ fn filters_of<'a, 'c>(
     page: Option<(&str, PageLimit)>,
 ) -> Vec<(&'c str, Filter<'a>)> {
     let mut filters = Vec::new();
+    // Worked out once, for the first parameter that names no member of the items.
+    let paging = std::cell::OnceCell::new();
+    let pages_list = |param: &str| {
+        paging
+            .get_or_init(|| runs::Paging::of(bundle, op, page.map(|(name, _)| name)))
+            .pages_list(param)
+    };
     for (param, raw) in &call.query {
         if page.is_some_and(|(name, _)| name == param) {
             continue;
@@ -710,7 +729,7 @@ fn filters_of<'a, 'c>(
                     test: Test::HoldsAny,
                 },
             ));
-        } else if !runs::pages_list(bundle, op, page.map(|(name, _)| name), param)
+        } else if !pages_list(param)
             && let Some((parent, member)) = nested_filtered_member(bundle, query, item_parts, param)
             && let Some(values) = wanted(&member, raw)
         {
@@ -1040,19 +1059,129 @@ fn no_content_status(op: &Operation) -> Option<u16> {
         .then_some(NO_CONTENT)
 }
 
+/// How deep [`is_paging_metadata`] follows objects beside the list (`meta.page`,
+/// `links.next.href`).
+const MAX_METADATA_DEPTH: usize = 3;
+
+/// Whether `body`, an answer of `op`, is only a list container by the contract's
+/// structure: an array, or an object every member of which, but its list, the answer
+/// schema declares as paging or count metadata ([`is_paging_metadata`]). A record that
+/// holds a list of its own (a cart and its lines, with its `id` and `total`) is none,
+/// so an empty list there is still that record.
+fn is_list_container(bundle: &mb_mcm::Bundle, op: &Operation, body: &Value) -> bool {
+    let Value::Object(members) = body else {
+        return body.is_array();
+    };
+    let Some(list) = list_member(body) else {
+        return false;
+    };
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return false;
+    };
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    let declared: Vec<(&String, &Value)> = parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flatten()
+        .collect();
+    let params = query_names(op);
+    let metadata = |name: &str| {
+        declared
+            .iter()
+            .filter(|(declared, _)| declared.as_str() == name)
+            .any(|(_, member)| is_paging_metadata(bundle, &params, name, member, 0))
+    };
+    declared.iter().any(|(name, _)| name.as_str() == list)
+        && declared
+            .iter()
+            .all(|(name, _)| name.as_str() == list || metadata(name))
+        && members
+            .keys()
+            .all(|name| name.as_str() == list || metadata(name))
+}
+
+/// The query parameters `op` declares.
+fn query_names(op: &Operation) -> Vec<&str> {
+    op.input
+        .query
+        .as_ref()
+        .and_then(|q| q.get("properties"))
+        .and_then(Value::as_object)
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// Whether member `name` beside a list, of schema `member`, is paging or count
+/// metadata by its structure, not a record's own: no identity (`id`, or a name whose
+/// last word is `id`), and a boolean (a more flag), an integer (a count, a page
+/// position), text that is a URL ([`pages::is_url`]: a link), holds one fixed value (a
+/// `const` or a one-value `enum`: a kind, `object: list`) or echoes a query parameter of
+/// `params` by its very name (a cursor), or an object whose members are all such, at
+/// most [`MAX_METADATA_DEPTH`] deep. A real number (an amount), other text, an array
+/// and a value of several types are none.
+fn is_paging_metadata(
+    bundle: &mb_mcm::Bundle,
+    params: &[&str],
+    name: &str,
+    member: &Value,
+    depth: usize,
+) -> bool {
+    let identity = mb_mcm::words(name)
+        .last()
+        .is_some_and(|word| word.eq_ignore_ascii_case("id"));
+    if identity || depth > MAX_METADATA_DEPTH {
+        return false;
+    }
+    let (parts, _) = schema_parts(bundle, Some(member));
+    let types = types_of(&parts);
+    let one_type = |t: &str| types.len() == 1 && types.contains(t);
+    if one_type("boolean") || one_type("integer") {
+        return true;
+    }
+    if one_type("string") {
+        let fixed = parts.iter().any(|p| {
+            p.get("const").is_some()
+                || p.get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| values.len() == 1)
+        });
+        let echoes = params
+            .iter()
+            .any(|param| mb_mcm::joined_name(param) == mb_mcm::joined_name(name));
+        return fixed || echoes || pages::is_url(bundle, member);
+    }
+    if one_type("object") {
+        let inner: Vec<(&String, &Value)> = parts
+            .iter()
+            .filter_map(|p| p.get("properties").and_then(Value::as_object))
+            .flatten()
+            .collect();
+        return !inner.is_empty()
+            && inner.iter().all(|(inner, schema)| {
+                is_paging_metadata(bundle, params, inner, schema, depth + 1)
+            });
+    }
+    false
+}
+
 /// A list answer `generated` of `op` left with no items, as the bodiless status the
-/// operation declares beside its list for that ([`no_content_status`]), with no body.
-/// Any other answer stays as it is. Only a generated answer comes here: a page past the
-/// end that the store serves ([`runs`], [`pages`]) stays a `200` with an empty list.
-pub(super) fn no_content(op: &Operation, generated: &mut GeneratedResponse) {
+/// operation declares beside its list for that ([`no_content_status`]), with no body,
+/// when the answer is only a list container ([`is_list_container`]): a record holding
+/// an empty list stays. Any other answer stays as it is. Only a generated answer comes
+/// here: a page past the end that the store serves ([`runs`], [`pages`]) stays a `200`
+/// with an empty list.
+pub(super) fn no_content(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    generated: &mut GeneratedResponse,
+) {
     if !(200..300).contains(&generated.status) {
         return;
     }
-    let empty = generated
-        .body
-        .as_ref()
-        .and_then(mb_engine::consistency::list_items)
-        .is_some_and(Vec::is_empty);
+    let empty = generated.body.as_ref().is_some_and(|body| {
+        mb_engine::consistency::list_items(body).is_some_and(Vec::is_empty)
+            && is_list_container(bundle, op, body)
+    });
     if let (true, Some(status)) = (empty, no_content_status(op)) {
         generated.status = status;
         generated.body = None;
