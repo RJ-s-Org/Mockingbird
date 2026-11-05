@@ -4197,7 +4197,7 @@ export interface operations {
     contracts_restore_revision_default: {
         parameters: {
             query?: {
-                /** @description `agent`, `llm` or `user` (default: the restored revision's author) */
+                /** @description `agent`, `llm` or `user` (default: the restored revision's author, `user` for a `heuristic` one) */
                 author?: string;
             };
             header?: {
@@ -6981,7 +6981,7 @@ export interface operations {
     contracts_restore_revision: {
         parameters: {
             query?: {
-                /** @description `agent`, `llm` or `user` (default: the restored revision's author) */
+                /** @description `agent`, `llm` or `user` (default: the restored revision's author, `user` for a `heuristic` one) */
                 author?: string;
             };
             header?: {

@@ -1902,3 +1902,118 @@ async fn world_writes_need_credentials() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+#[tokio::test]
+async fn near_limit_hostile_document_is_422_quickly() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    // Thousands of valid filters and a last one that is not of the shape,
+    // just under the size limit: the 422 names it without trying each.
+    let entry = json!({"param": "q", "kind": "eq"});
+    let each = entry.to_string().len() + 1;
+    let mut filters = vec![entry; (mb_mcm::world::MAX_BYTES - 256) / each];
+    filters.push(json!({"param": "q", "kind": "bogus"}));
+    let last = filters.len() - 1;
+    let doc = json!({"operations": {"listWidgets": {"filters": filters}}});
+    assert!(doc.to_string().len() <= mb_mcm::world::MAX_BYTES);
+    assert!(last > 5_000, "{last}");
+    let started = std::time::Instant::now();
+    let (status, ctype, problem) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[],
+        doc.to_string().into_bytes(),
+    )
+    .await;
+    let took = started.elapsed();
+    assert_eq!(status, 422, "{problem}");
+    assert_eq!(ctype, "application/problem+json");
+    assert_eq!(problem["code"], "invalid");
+    assert_eq!(
+        problem["path"],
+        format!("/operations/listWidgets/filters/{last}"),
+        "{problem}"
+    );
+    assert!(took < Duration::from_secs(10), "took {took:?}");
+}
+
+#[tokio::test]
+async fn restore_of_a_heuristic_revision_writes_as_user() {
+    let (st, app, uri, _t) = widgets_v1().await;
+    let mock = widgets_mock(&st).await;
+    let version: i64 = uri
+        .trim_end_matches("/world")
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    revise(
+        &*st.store,
+        mock,
+        version,
+        Author::Heuristic,
+        json!({"version": 1, "operations": {"getWidget": {"not_found": 404}}}),
+    )
+    .await;
+    let (status, _, restored) = call(
+        &app,
+        Method::POST,
+        &format!("{uri}/revisions/1/restore"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, 201, "{restored}");
+    let (_, _, second) = call(
+        &app,
+        Method::GET,
+        &format!("{uri}/revisions/2"),
+        "application/json",
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(second["author"], "user", "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_patches_without_if_match_both_apply() {
+    for _ in 0..8 {
+        let (_st, app, uri, _t) = widgets_v1().await;
+        let patches = [
+            json!({"operations": {"listWidgets": {"order": {"member": "name"}}}}),
+            json!({"operations": {"getWidget": {"not_found": 404}}}),
+        ];
+        let tasks: Vec<_> = patches
+            .into_iter()
+            .map(|p| {
+                let app = app.clone();
+                let uri = uri.clone();
+                tokio::spawn(async move { patch_world(&app, &uri, &[], &p).await })
+            })
+            .collect();
+        let mut revisions = Vec::new();
+        for t in tasks {
+            let (status, _, body) = t.await.unwrap();
+            assert_eq!(status, 201, "{body}");
+            revisions.push(body["revision"].as_i64().unwrap());
+        }
+        revisions.sort_unstable();
+        assert_eq!(revisions, [1, 2]);
+        let (_, _, newest) = call(
+            &app,
+            Method::GET,
+            &format!("{uri}/revisions/2"),
+            "application/json",
+            &[],
+            Vec::new(),
+        )
+        .await;
+        let ops = &newest["document"]["operations"];
+        assert_eq!(ops["listWidgets"]["order"]["member"], "name", "{newest}");
+        assert_eq!(ops["getWidget"]["not_found"], 404, "{newest}");
+    }
+}

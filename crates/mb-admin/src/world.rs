@@ -1046,10 +1046,31 @@ fn shape_error_path(doc: &Value) -> String {
     String::new()
 }
 
+/// The most trial parses [`culprit`] makes: each costs a parse of the
+/// whole entry, so a bounded number keeps a hostile document cheap.
+const CULPRIT_TRIALS: usize = 128;
+
+/// Nodes with more children than this are narrowed by halves first.
+const CULPRIT_SCAN: usize = 16;
+
 /// The path, relative to `entry` (which `ok` refuses), of the deepest member
 /// whose removal alone makes `ok` accept it; empty when none does.
+///
+/// A node with many children is narrowed by halves (the half whose removal
+/// makes `ok` accept it holds the member) before its children are tried
+/// one by one, and at most [`CULPRIT_TRIALS`] removals are tried in all,
+/// after which the deepest path found so far is the answer.
 fn culprit(entry: &Value, ok: Parses) -> String {
     let mut path: Vec<String> = Vec::new();
+    let mut budget = CULPRIT_TRIALS;
+    // Whether removing `children` of the node at `path` makes `ok` accept
+    // `entry`; `None` once the budget is spent.
+    let mut fixes = |path: &[String], children: &[String]| -> Option<bool> {
+        budget = budget.checked_sub(1)?;
+        let mut candidate = entry.clone();
+        remove_at(&mut candidate, path, children);
+        Some(ok(&candidate))
+    };
     'down: loop {
         let mut node = entry;
         for token in &path {
@@ -1063,17 +1084,31 @@ fn culprit(entry: &Value, ok: Parses) -> String {
                 None => break 'down,
             }
         }
-        let children: Vec<String> = match node {
+        let mut children: Vec<String> = match node {
             Value::Object(m) => m.keys().cloned().collect(),
             Value::Array(a) => (0..a.len()).map(|i| i.to_string()).collect(),
             _ => break,
         };
+        while children.len() > CULPRIT_SCAN {
+            let (low, high) = children.split_at(children.len() / 2);
+            let half = match fixes(&path, low) {
+                Some(true) => low,
+                Some(false) => match fixes(&path, high) {
+                    Some(true) => high,
+                    _ => break 'down,
+                },
+                None => break 'down,
+            };
+            children = half.to_vec();
+        }
         for child in children {
-            let mut candidate = entry.clone();
-            remove_at(&mut candidate, &path, &child);
-            if ok(&candidate) {
-                path.push(child);
-                continue 'down;
+            match fixes(&path, std::slice::from_ref(&child)) {
+                Some(true) => {
+                    path.push(child);
+                    continue 'down;
+                }
+                Some(false) => {}
+                None => break 'down,
             }
         }
         break;
@@ -1081,8 +1116,8 @@ fn culprit(entry: &Value, ok: Parses) -> String {
     path.iter().map(|t| format!("/{}", escape(t))).collect()
 }
 
-/// Removes `child` of the node at `path` in `v`.
-fn remove_at(v: &mut Value, path: &[String], child: &str) {
+/// Removes `children` of the node at `path` in `v`.
+fn remove_at(v: &mut Value, path: &[String], children: &[String]) {
     let mut node = v;
     for token in path {
         node = match node {
@@ -1099,12 +1134,17 @@ fn remove_at(v: &mut Value, path: &[String], child: &str) {
     }
     match node {
         Value::Object(m) => {
-            m.remove(child);
+            for child in children {
+                m.remove(child.as_str());
+            }
         }
         Value::Array(a) => {
-            if let Some(i) = child.parse::<usize>().ok().filter(|i| *i < a.len()) {
-                a.remove(i);
-            }
+            let gone: BTreeSet<usize> = children.iter().filter_map(|c| c.parse().ok()).collect();
+            let mut i = 0;
+            a.retain(|_| {
+                i += 1;
+                !gone.contains(&(i - 1))
+            });
         }
         _ => {}
     }
@@ -1184,7 +1224,17 @@ async fn write(
                 v.version
             )));
         }
-        let world = check_document(&build(latest.as_ref())?)?;
+        // Checking a document near the size limit is CPU-bound: keep it
+        // off the runtime.
+        let doc = build(latest.as_ref())?;
+        let world = tokio::task::spawn_blocking(move || check_document(&doc))
+            .await
+            .map_err(|e| {
+                Problem::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("checking the world description did not finish: {e}"),
+                )
+            })??;
         match store_validated(
             st,
             m,
@@ -1407,7 +1457,7 @@ pub async fn get_revision(
         ("mock" = String, Path, description = "Mock name"),
         ("version" = String, Path, description = "Contract version number, or `active`"),
         ("revision" = i64, Path, description = "The revision to restore"),
-        ("author" = Option<String>, Query, description = "`agent`, `llm` or `user` (default: the restored revision's author)"),
+        ("author" = Option<String>, Query, description = "`agent`, `llm` or `user` (default: the restored revision's author, `user` for a `heuristic` one)"),
         ("If-Match" = Option<String>, Header, description = "The newest revision this restore expects; a 412 when it is not"),
     ),
     responses(
@@ -1436,7 +1486,13 @@ pub async fn restore_revision(
     let m = st.mock(&access.ws, &mock).await?;
     let v = resolve_version(&st, &m, &version).await?;
     let old = revision_of(&st, &m, &v, revision).await?;
-    let author = author_of(&q, old.author)?;
+    // Only the importer writes tier 0: a heuristic revision restored
+    // through the API is the person's.
+    let default = match old.author {
+        Author::Heuristic => Author::User,
+        other => other,
+    };
+    let author = author_of(&q, default)?;
     let build = move |_: Option<&WorldRevision>| -> WorldResult<Value> { Ok(old.document.clone()) };
     write(
         &st,
