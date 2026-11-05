@@ -763,19 +763,45 @@ impl SchemaValidator {
     /// `anyOf`/`oneOf` names the errors of its closest branch; quoted values
     /// are capped.
     pub fn validate(&self, instance: &Value) -> Result<(), Vec<String>> {
+        self.validate_located(instance)
+            .map_err(|found| found.into_iter().map(|(_, reason)| reason).collect())
+    }
+
+    /// [`Self::validate`]'s violations, each with the JSON pointer of the member it is
+    /// about: where the value that breaks the schema is, and for a missing required
+    /// member or a lone unexpected one, that member under it (`/name` for a body
+    /// without its required `name`). `""` names the instance itself.
+    pub fn validate_located(&self, instance: &Value) -> Result<(), Vec<(String, String)>> {
         let mut found: Vec<_> = self.inner.iter_errors(instance).take(MAX_SCANNED).collect();
         // Stable: errors at one depth keep the validator's order.
         found.sort_by_key(|e| e.instance_path().as_str().matches('/').count());
-        let errors: Vec<String> = found
+        let errors: Vec<(String, String)> = found
             .iter()
             .take(MAX_ERRORS)
-            .map(|e| describe(e, 0))
+            .map(|e| (violated_pointer(e), describe(e, 0)))
             .collect();
         if errors.is_empty() {
             Ok(())
         } else {
             Err(errors)
         }
+    }
+}
+
+/// The JSON pointer of the member violation `e` is about (see
+/// [`SchemaValidator::validate_located`]).
+fn violated_pointer(e: &jsonschema::ValidationError<'_>) -> String {
+    let at = e.instance_path().as_str().to_string();
+    let member = match e.kind() {
+        ValidationErrorKind::Required { property } => property.as_str().map(str::to_string),
+        ValidationErrorKind::AdditionalProperties { unexpected } if unexpected.len() == 1 => {
+            unexpected.first().cloned()
+        }
+        _ => None,
+    };
+    match member {
+        Some(member) => format!("{at}/{}", member.replace('~', "~0").replace('/', "~1")),
+        None => at,
     }
 }
 

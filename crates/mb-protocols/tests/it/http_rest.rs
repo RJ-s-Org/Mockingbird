@@ -262,8 +262,11 @@ async fn routes_trailing_slash_query_and_unknown() {
     assert!(allow.contains("POST"), "{allow}");
 }
 
+/// An invalid body is refused before any generation; only the error's open `code`
+/// is asked of the LLM, once for the operation and status (here its answer fails,
+/// and the faker's stands).
 #[tokio::test]
-async fn invalid_body_returns_400_without_llm() {
+async fn invalid_body_returns_400_with_at_most_one_llm_call() {
     let h = harness(Some(vec![]), true);
     let bundle = orders();
     let error = SchemaValidator::new(&bundle.with_defs(&json!({"$ref": "#/$defs/Error"}))).unwrap();
@@ -278,7 +281,7 @@ async fn invalid_body_returns_400_without_llm() {
     assert_eq!(header_str(&resp, "x-mockingbird-source"), "rejected");
     assert!(error.validate(&body_json(resp).await).is_ok());
 
-    assert!(h.provider.as_ref().unwrap().requests().is_empty());
+    assert_eq!(h.provider.as_ref().unwrap().requests().len(), 1);
 }
 
 #[tokio::test]

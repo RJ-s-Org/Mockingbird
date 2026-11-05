@@ -1882,22 +1882,21 @@ async fn deleted_item(mut script: Vec<Value>) -> Harness {
     h
 }
 
-/// `unknown_ids: generate` is the default, and a delete still sticks: no LLM call,
-/// and the contract's own 404.
+/// `unknown_ids: generate` is the default, and a delete still sticks: the contract's
+/// own 404, whose open `code` the LLM writes once for the operation (see
+/// [`mb_engine::error_body`]), never a generated record.
 #[tokio::test]
-async fn a_deleted_record_is_not_found_with_no_llm_call() {
-    let h = deleted_item(vec![]).await;
+async fn a_deleted_record_is_not_found_with_one_call_for_its_code() {
+    let h = deleted_item(vec![json!({"code": 1101, "message": "gone"})]).await;
     assert_eq!(h.calls(), 1);
     for _ in 0..2 {
         let (status, source, body) = h.call("GET", "/items/i1", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         assert_eq!(source, "state");
-        assert!(
-            body["code"].is_i64() && body["message"].is_string(),
-            "{body}"
-        );
+        assert_eq!(body["code"], 1101, "{body}");
+        assert!(body["message"].as_str().unwrap().contains("i1"), "{body}");
     }
-    assert_eq!(h.calls(), 1);
+    assert_eq!(h.calls(), 2);
     assert!(
         h.store
             .get(&session(), "items", "i1")
@@ -1908,10 +1907,10 @@ async fn a_deleted_record_is_not_found_with_no_llm_call() {
 }
 
 /// A read naming a seed asks for that seed's answer, and a deleted id has none: it is a
-/// 404 with no LLM call too, as `docs/upgrading.md` says.
+/// 404 too, as `docs/upgrading.md` says, its body's code the one call writes.
 #[tokio::test]
 async fn a_seeded_read_of_a_deleted_record_is_not_found() {
-    let h = deleted_item(vec![item("i1")]).await;
+    let h = deleted_item(vec![json!({"code": 1101, "message": "gone"}), item("i1")]).await;
     let req = Request::builder()
         .method("GET")
         .uri("/items/i1")
@@ -1926,7 +1925,7 @@ async fn a_seeded_read_of_a_deleted_record_is_not_found() {
             .and_then(|v| v.to_str().ok()),
         Some("state")
     );
-    assert_eq!(h.calls(), 1, "no LLM call for the seed's answer");
+    assert_eq!(h.calls(), 2, "no LLM call for the seed's answer");
 }
 
 /// A contract declaring no 404 gets what `unknown_ids: not_found` answers there.
@@ -1944,14 +1943,16 @@ async fn a_deleted_record_with_no_declared_404_is_a_problem() {
     assert_eq!(h.calls(), 1);
 }
 
-/// Deleting what was never held still means it is gone.
+/// Deleting what was never held still means it is gone: the read generates nothing,
+/// and only its 404's code is written.
 #[tokio::test]
 async fn deleting_an_unheld_id_sticks() {
-    let h = deletes(vec![]);
+    let h = deletes(vec![json!({"code": 1101, "message": "gone"})]);
     h.call("DELETE", "/items/never", None).await;
-    let (status, _, _) = h.call("GET", "/items/never", None).await;
+    let (status, _, body) = h.call("GET", "/items/never", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(h.calls(), 0);
+    assert_eq!(body["code"], 1101, "{body}");
+    assert_eq!(h.calls(), 1);
 }
 
 /// A generated list holding the id loses that item, and the count that is clearly
@@ -2194,7 +2195,7 @@ async fn offline_keeps_generating() {
 /// How many are kept is bounded: the oldest is forgotten, the newest still holds.
 #[tokio::test]
 async fn markers_are_bounded() {
-    let h = deletes(vec![item("old")]);
+    let h = deletes(vec![json!({"code": 1101, "message": "gone"}), item("old")]);
     for n in 0..1030 {
         h.call("DELETE", &format!("/items/i{n}"), None).await;
     }
@@ -2206,7 +2207,8 @@ async fn markers_are_bounded() {
         StatusCode::NOT_FOUND
     );
     h.provider.requests();
-    assert_eq!(h.calls(), 0);
+    // The 404's code only.
+    assert_eq!(h.calls(), 1);
     let (status, source, _) = h.call("GET", "/items/i0", None).await;
     assert_eq!((status, source.as_str()), (StatusCode::OK, "llm"));
 }

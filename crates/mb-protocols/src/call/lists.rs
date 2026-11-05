@@ -31,6 +31,20 @@
 //! no `const`, parts the items' `enum` allows, and a parameter's own `enum` only beside
 //! one on the items.
 //!
+//! A parameter that names no member of the items, but one member one object down
+//! (`email` for `billing_address.email`), filters on that one when exactly one object
+//! member of the items declares a member of that very name (ignoring case, with no
+//! plural or stem: `emails` reaches no `email` there), under the same guards: `street`,
+//! which both `billing_address` and `shipping_address` declare, names neither. The
+//! member there must declare a `format` (`email`), one the parameter declares too if it
+//! declares one, and that no member of the items declares: free text one object down
+//! (`brand.name`, `country.code`) is commonly a referenced record's own label, and a
+//! `name` filter on products means the products' own, so it names nothing there. An
+//! object member is one typed `object` alone, `null` aside (so a nullable one,
+//! `type: [object, "null"]` or `nullable: true`, is one, and an item holding `null`
+//! there stays), or untyped with `properties`; one that may be another type too
+//! (`type: [object, string]`) is none.
+//!
 //! A parameter that names no member changes nothing, whatever its value: a bound
 //! (`before`, `oldest`) or a search naming an item's id leaves it in, as which side of
 //! the bound the rest is on, and whether the bound is in it, is not said by the
@@ -63,6 +77,17 @@
 //! rest is, or by a later page number or offset ([`runs`]). An answer that left its
 //! declared list member out altogether gave no page at all: it gets the member as `[]`
 //! ([`absent_list`]), and the store fills that page the same way ([`stored_page`]).
+//!
+//! A list read that declares a bodiless `204` beside its list answer ("No order
+//! matches.") answers that status with no body when its list is left with no items
+//! ([`no_content`]): by the model, the filters or the delete markers. Only an answer
+//! that is a list container by its structure does: an array, or an object holding,
+//! beside its list, only paging or count metadata (booleans, integers that are no
+//! identity, links, a fixed kind, a cursor echoing a query parameter, and objects of
+//! those). A record holding a list of its own (a cart with its `id`, `total` and
+//! empty `items`) stays that record. Not under a scenario or a forced status. A page
+//! the store serves ([`runs`], [`pages`]) is no generated answer: one left empty stays
+//! a `200` with its empty list, as the run or cut it comes from was a `200`.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says: offline answers, and
 //! those with consistency off, are as they were.
@@ -181,6 +206,86 @@ pub(super) fn filtered_member<'a>(
     }
     let declared = query?.get("properties")?.get(param)?;
     let member = named_member(bundle, item_parts, param)?;
+    fits_param(bundle, declared, member)
+}
+
+/// The member one object down of the items `item_parts` describe that query parameter
+/// `param`, declared by `query`, names, with the object member holding it: when no
+/// member of the items is named so, and exactly one of their object members declares
+/// one of that very name, ignoring case (`email` in `billing_address`; `emails` names
+/// none), the two declaring the one same type, as [`filtered_member`] has it. The
+/// member declares a `format` the parameter does not contradict and no member of the
+/// items declares (see the module's doc). An object member is one [`types_of`] types as
+/// `object` alone, which leaves `null` aside, so a nullable object is one; or one with
+/// `properties` and no type.
+fn nested_filtered_member<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    query: Option<&'a Value>,
+    item_parts: &[&'a Value],
+    param: &str,
+) -> Option<(&'a str, Member<'a>)> {
+    if mb_mcm::is_generic_id(param) || named_member(bundle, item_parts, param).is_some() {
+        return None;
+    }
+    let declared = query?.get("properties")?.get(param)?;
+    let mut found = declared_names(item_parts).into_iter().filter_map(|parent| {
+        let schema = item_parts
+            .iter()
+            .find_map(|p| p.get("properties")?.get(parent))?;
+        let (parts, _) = schema_parts(bundle, Some(schema));
+        let object = types_of(&parts).into_iter().eq(["object"])
+            || (types_of(&parts).is_empty() && parts.iter().any(|p| p.get("properties").is_some()));
+        if !object {
+            return None;
+        }
+        // One object down, only the very name (ignoring case) counts: a plural or
+        // stem (`emails` for `email`) widens the guess past what the name says.
+        let member = named_member(bundle, &parts, param)?;
+        member
+            .name
+            .eq_ignore_ascii_case(param)
+            .then_some((parent, member))
+    });
+    let (parent, member) = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    // Only a value of a declared kind (`format: email`) is what the parameter means one
+    // object down: free text there (`brand.name`, `country.code`) is commonly a
+    // referenced record's own label, while the parameter means the items' own. And
+    // the items declaring a member of that kind themselves may be what it means.
+    let format = member.format()?;
+    let (param_parts, _) = schema_parts(bundle, Some(declared));
+    let param_format = param_parts
+        .iter()
+        .find_map(|p| p.get("format").and_then(Value::as_str));
+    if param_format.is_some_and(|f| f != format) {
+        return None;
+    }
+    let own_of_format = item_parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flat_map(|props| props.values())
+        .any(|schema| {
+            let (parts, _) = schema_parts(bundle, Some(schema));
+            parts
+                .iter()
+                .any(|p| p.get("format").and_then(Value::as_str) == Some(format))
+        });
+    if own_of_format {
+        return None;
+    }
+    Some((parent, fits_param(bundle, declared, member)?))
+}
+
+/// `member`, when query parameter schema `declared` fits it as a filter: both declare
+/// the one same type (no real number), the member is no `const`, and a parameter's own
+/// `enum` stands beside one of the member's.
+fn fits_param<'a>(
+    bundle: &'a mb_mcm::Bundle,
+    declared: &'a Value,
+    member: Member<'a>,
+) -> Option<Member<'a>> {
     let (param_parts, _) = schema_parts(bundle, Some(declared));
     let types = member.types();
     // A real number (a coordinate) is matched within a margin, if at all, and a
@@ -368,17 +473,29 @@ enum Test {
 
 /// A filter: the member, the values it asks of it, and how.
 struct Filter<'a> {
+    /// The object member of the item holding the member, when it is one object down.
+    parent: Option<&'a str>,
     member: &'a str,
     values: Vec<Value>,
     test: Test,
+}
+
+impl Filter<'_> {
+    /// What `item` holds under the filter's member, where it holds it.
+    fn held<'v>(&self, item: &'v Value) -> Option<&'v Value> {
+        match self.parent {
+            Some(parent) => item.get(parent)?.get(self.member),
+            None => item.get(self.member),
+        }
+    }
 }
 
 /// Whether `item` holds another value than the filter's under its member: one of the
 /// same shape, so a missing member, another shape, or `null` other than in a reference
 /// says nothing.
 fn contradicts(item: &Value, filter: &Filter<'_>) -> bool {
-    let (member, wanted) = (filter.member, &filter.values);
-    let Some(held) = item.get(member) else {
+    let wanted = &filter.values;
+    let Some(held) = filter.held(item) else {
         return false;
     };
     let (loose, reference) = match filter.test {
@@ -494,7 +611,7 @@ pub(super) fn narrow(
         || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
         call,
     );
-    let filters: Vec<Filter<'_>> = filters_of(bundle, query, &item_parts, call, page)
+    let filters: Vec<Filter<'_>> = filters_of(bundle, op, query, &item_parts, call, page)
         .into_iter()
         .map(|(_, filter)| filter)
         .collect();
@@ -556,16 +673,27 @@ fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
     usize::try_from(limit.items).ok()
 }
 
-/// The equality filters `call`'s query asks of the items `item_parts` describe, each
-/// with its parameter: all but the page size's `page`.
+/// The equality filters `call`'s query asks of `op`'s items `item_parts` describe, each
+/// with its parameter: all but the page size's `page`. A parameter that pages the list
+/// ([`runs::Paging::pages_list`]: `offset`, `page`) filters no member one object down that
+/// shares its name (`timezone.offset`): only a member of the items themselves would say
+/// so.
 fn filters_of<'a, 'c>(
     bundle: &'a mb_mcm::Bundle,
+    op: &Operation,
     query: Option<&'a Value>,
     item_parts: &[&'a Value],
     call: &'c OperationCall,
     page: Option<(&str, PageLimit)>,
 ) -> Vec<(&'c str, Filter<'a>)> {
     let mut filters = Vec::new();
+    // Worked out once, for the first parameter that names no member of the items.
+    let paging = std::cell::OnceCell::new();
+    let pages_list = |param: &str| {
+        paging
+            .get_or_init(|| runs::Paging::of(bundle, op, page.map(|(name, _)| name)))
+            .pages_list(param)
+    };
     for (param, raw) in &call.query {
         if page.is_some_and(|(name, _)| name == param) {
             continue;
@@ -580,6 +708,7 @@ fn filters_of<'a, 'c>(
             filters.push((
                 param.as_str(),
                 Filter {
+                    parent: None,
                     member: member.name,
                     values,
                     test: Test::Equal {
@@ -594,9 +723,28 @@ fn filters_of<'a, 'c>(
             filters.push((
                 param.as_str(),
                 Filter {
+                    parent: None,
                     member: element.name,
                     values,
                     test: Test::HoldsAny,
+                },
+            ));
+        } else if !pages_list(param)
+            && let Some((parent, member)) = nested_filtered_member(bundle, query, item_parts, param)
+            && let Some(values) = wanted(&member, raw)
+        {
+            let loose = member.is_free_text()
+                && !values.iter().any(|v| v.as_str().is_some_and(holds_a_digit));
+            filters.push((
+                param.as_str(),
+                Filter {
+                    parent: Some(parent),
+                    member: member.name,
+                    values,
+                    test: Test::Equal {
+                        loose,
+                        reference: is_reference(member.name),
+                    },
                 },
             ));
         }
@@ -607,7 +755,7 @@ fn filters_of<'a, 'c>(
 /// Whether `item` holds what `filter` asks, as a member of the same shape: a missing
 /// member or `null` holds nothing.
 fn holds_wanted(item: &Value, filter: &Filter<'_>) -> bool {
-    let Some(held) = item.get(filter.member).filter(|held| !held.is_null()) else {
+    let Some(held) = filter.held(item).filter(|held| !held.is_null()) else {
         return false;
     };
     match filter.test {
@@ -842,7 +990,7 @@ pub(super) async fn collection_records(
     let mut held = None;
     let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
     let items_schema = array_parts.iter().find_map(|p| p.get("items"))?;
-    let filters = filters_of(bundle, op.input.query.as_ref(), &item_parts, call, None);
+    let filters = filters_of(bundle, op, op.input.query.as_ref(), &item_parts, call, None);
     if call
         .query
         .keys()
@@ -892,6 +1040,153 @@ pub(super) async fn collection_records(
         out.push(item);
     }
     Some(out)
+}
+
+/// The `204 No Content` that `op`, a list read, declares with no body beside its list
+/// answer (a `204` described as "No order matches."). An empty list answers it (see
+/// [`no_content`]). Only `204` means "nothing to return": a bodiless `202` (accepted,
+/// still processing) or `205` (reset the view) says something else.
+fn no_content_status(op: &Operation) -> Option<u16> {
+    const NO_CONTENT: u16 = 204;
+    let list = op.success_output()?;
+    list.schema.as_ref()?;
+    if list.status == mb_mcm::StatusSelector::Code(NO_CONTENT) {
+        return None;
+    }
+    op.outputs
+        .iter()
+        .any(|o| o.status == mb_mcm::StatusSelector::Code(NO_CONTENT) && o.schema.is_none())
+        .then_some(NO_CONTENT)
+}
+
+/// How deep [`is_paging_metadata`] follows objects beside the list (`meta.page`,
+/// `links.next.href`).
+const MAX_METADATA_DEPTH: usize = 3;
+
+/// Whether `body`, an answer of `op`, is only a list container by the contract's
+/// structure: an array, or an object every member of which, but its list, the answer
+/// schema declares as paging or count metadata ([`is_paging_metadata`]). A record that
+/// holds a list of its own (a cart and its lines, with its `id` and `total`) is none,
+/// so an empty list there is still that record.
+fn is_list_container(bundle: &mb_mcm::Bundle, op: &Operation, body: &Value) -> bool {
+    let Value::Object(members) = body else {
+        return body.is_array();
+    };
+    let Some(list) = list_member(body) else {
+        return false;
+    };
+    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return false;
+    };
+    let (parts, _) = schema_parts(bundle, Some(schema));
+    let declared: Vec<(&String, &Value)> = parts
+        .iter()
+        .filter_map(|p| p.get("properties").and_then(Value::as_object))
+        .flatten()
+        .collect();
+    let params = query_names(op);
+    let metadata = |name: &str| {
+        declared
+            .iter()
+            .filter(|(declared, _)| declared.as_str() == name)
+            .any(|(_, member)| is_paging_metadata(bundle, &params, name, member, 0))
+    };
+    declared.iter().any(|(name, _)| name.as_str() == list)
+        && declared
+            .iter()
+            .all(|(name, _)| name.as_str() == list || metadata(name))
+        && members
+            .keys()
+            .all(|name| name.as_str() == list || metadata(name))
+}
+
+/// The query parameters `op` declares.
+fn query_names(op: &Operation) -> Vec<&str> {
+    op.input
+        .query
+        .as_ref()
+        .and_then(|q| q.get("properties"))
+        .and_then(Value::as_object)
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// Whether member `name` beside a list, of schema `member`, is paging or count
+/// metadata by its structure, not a record's own: no identity (`id`, or a name whose
+/// last word is `id`), and a boolean (a more flag), an integer (a count, a page
+/// position), text that is a URL ([`pages::is_url`]: a link), holds one fixed value (a
+/// `const` or a one-value `enum`: a kind, `object: list`) or echoes a query parameter of
+/// `params` by its very name (a cursor), or an object whose members are all such, at
+/// most [`MAX_METADATA_DEPTH`] deep. A real number (an amount), other text, an array
+/// and a value of several types are none.
+fn is_paging_metadata(
+    bundle: &mb_mcm::Bundle,
+    params: &[&str],
+    name: &str,
+    member: &Value,
+    depth: usize,
+) -> bool {
+    let identity = mb_mcm::words(name)
+        .last()
+        .is_some_and(|word| word.eq_ignore_ascii_case("id"));
+    if identity || depth > MAX_METADATA_DEPTH {
+        return false;
+    }
+    let (parts, _) = schema_parts(bundle, Some(member));
+    let types = types_of(&parts);
+    let one_type = |t: &str| types.len() == 1 && types.contains(t);
+    if one_type("boolean") || one_type("integer") {
+        return true;
+    }
+    if one_type("string") {
+        let fixed = parts.iter().any(|p| {
+            p.get("const").is_some()
+                || p.get("enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| values.len() == 1)
+        });
+        let echoes = params
+            .iter()
+            .any(|param| mb_mcm::joined_name(param) == mb_mcm::joined_name(name));
+        return fixed || echoes || pages::is_url(bundle, member);
+    }
+    if one_type("object") {
+        let inner: Vec<(&String, &Value)> = parts
+            .iter()
+            .filter_map(|p| p.get("properties").and_then(Value::as_object))
+            .flatten()
+            .collect();
+        return !inner.is_empty()
+            && inner.iter().all(|(inner, schema)| {
+                is_paging_metadata(bundle, params, inner, schema, depth + 1)
+            });
+    }
+    false
+}
+
+/// A list answer `generated` of `op` left with no items, as the bodiless status the
+/// operation declares beside its list for that ([`no_content_status`]), with no body,
+/// when the answer is only a list container ([`is_list_container`]): a record holding
+/// an empty list stays. Any other answer stays as it is. Only a generated answer comes
+/// here: a page past the end that the store serves ([`runs`], [`pages`]) stays a `200`
+/// with an empty list.
+pub(super) fn no_content(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    generated: &mut GeneratedResponse,
+) {
+    if !(200..300).contains(&generated.status) {
+        return;
+    }
+    let empty = generated.body.as_ref().is_some_and(|body| {
+        mb_engine::consistency::list_items(body).is_some_and(Vec::is_empty)
+            && is_list_container(bundle, op, body)
+    });
+    if let (true, Some(status)) = (empty, no_content_status(op)) {
+        generated.status = status;
+        generated.body = None;
+        generated.content_type = None;
+    }
 }
 
 /// The declared list member of `op`'s list answer `body`, an object, that the body
@@ -1005,7 +1300,7 @@ async fn stored_records(
             return cut;
         }
     }
-    let filters = filters_of(bundle, query, &item_parts, call, page);
+    let filters = filters_of(bundle, op, query, &item_parts, call, page);
     let declared = declared_names(&item_parts);
     let declared_params = query.and_then(|q| q.get("properties"));
     let mut shown: Vec<Shown<'_>> = Vec::new();

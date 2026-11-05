@@ -39,7 +39,12 @@ const PLAIN: &str = r#"{type: object, required: [code, message], properties: {co
 
 fn not_found_body(bundle: &Bundle) -> Value {
     let op = bundle.operation("putThing").unwrap();
-    let out = offline().not_found(bundle, op, &OperationCall::default(), "no t1");
+    let out = futures::executor::block_on(offline().not_found(
+        bundle,
+        op,
+        &OperationCall::default(),
+        "no t1",
+    ));
     assert_eq!(out.status, 404);
     out.body.unwrap()
 }

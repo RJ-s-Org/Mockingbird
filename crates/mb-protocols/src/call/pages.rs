@@ -367,7 +367,7 @@ fn own_description(schema: &Value) -> Option<&str> {
 
 /// Whether `schema` holds a URL: free text (see [`is_free_text`]) whose `format` is a
 /// URL's, or that its description calls a URL or URI.
-fn is_url(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
+pub(super) fn is_url(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
     if !is_free_text(bundle, schema) {
         return false;
     }

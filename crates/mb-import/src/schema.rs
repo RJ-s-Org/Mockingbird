@@ -24,6 +24,49 @@ pub(crate) fn with_param_description(mut schema: Value, param: &Value) -> Value 
     schema
 }
 
+/// `schema` with the `style` and `explode` an OpenAPI query parameter `param` declares,
+/// as `x-style` and `x-explode`: how a request writes an array (`ids=1,2` for a
+/// `form` array that does not explode, `a|b` for `pipeDelimited`). Neither is added
+/// where the parameter declares neither.
+pub(crate) fn with_param_style(mut schema: Value, param: &Value) -> Value {
+    if let Some(obj) = schema.as_object_mut() {
+        if let Some(style) = param.get("style").and_then(Value::as_str) {
+            obj.insert("x-style".into(), Value::String(style.to_owned()));
+        }
+        if let Some(explode) = param.get("explode").and_then(Value::as_bool) {
+            obj.insert("x-explode".into(), Value::Bool(explode));
+        }
+    }
+    schema
+}
+
+/// `schema` with the OpenAPI 3 `style` and `explode` a Swagger 2 array query
+/// parameter's `collectionFormat` stands for (see [`with_param_style`]): `csv`, the
+/// default, a `form` that does not explode; `ssv` and `pipes` delimited by a space and a
+/// pipe; `multi` an exploded `form`. `tsv`, which OpenAPI 3 has no style for, and
+/// anything but an array, get neither.
+pub(crate) fn with_collection_format(mut schema: Value, param: &Value) -> Value {
+    if param.get("type").and_then(Value::as_str) != Some("array") {
+        return schema;
+    }
+    let format = param
+        .get("collectionFormat")
+        .and_then(Value::as_str)
+        .unwrap_or("csv");
+    let (style, explode) = match format {
+        "csv" => ("form", false),
+        "ssv" => ("spaceDelimited", false),
+        "pipes" => ("pipeDelimited", false),
+        "multi" => ("form", true),
+        _ => return schema,
+    };
+    if let Some(obj) = schema.as_object_mut() {
+        obj.insert("x-style".into(), Value::String(style.to_owned()));
+        obj.insert("x-explode".into(), Value::Bool(explode));
+    }
+    schema
+}
+
 /// Convert an OpenAPI/Swagger schema into JSON Schema 2020-12.
 ///
 /// `ref_prefix` is the source component prefix (e.g. `#/components/schemas/`)

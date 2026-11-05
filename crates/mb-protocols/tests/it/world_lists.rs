@@ -133,6 +133,30 @@ impl Api {
         (status, body)
     }
 
+    /// A `GET` of `uri` sent with `headers`.
+    async fn get_with(&self, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+        let mut req = Request::builder().method("GET").uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let resp = self
+            .router
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
     async fn get(&self, uri: &str) -> Value {
         let (status, body) = self.call("GET", uri, None).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
@@ -2225,14 +2249,175 @@ async fn page_two_is_generated(list: &str, param: &str) {
     assert_eq!(api.provider.requests().len(), 4);
 }
 
-/// A page number with a `minimum` but no `default` is not known to be one.
+/// A `page` with a `minimum` of 1 but no `default` is a page number by its name and
+/// its echo: page 2 is the stored rest.
 #[tokio::test]
-async fn a_page_with_no_default_is_unchanged() {
+async fn a_page_with_no_default_is_a_page_number() {
     let list = BY_PAGE.replace(
         "{type: integer, minimum: 1, default: 1}",
         "{type: integer, minimum: 1}",
     );
-    page_two_is_generated(&list, "page").await;
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, false).to_string()
+    ));
+    let api = api_of(&stored_pages(&list), true, script);
+    two_tasks(&api).await;
+    api.get("/tasks?per_page=1&page=1").await;
+    let second = api.get("/tasks?per_page=1&page=2").await;
+    assert_eq!(ids_in(&second, "data"), ["t2"], "{second}");
+    assert_eq!(second["page_context"]["page"], 2, "{second}");
+    assert_eq!(api.provider.requests().len(), 3);
+}
+
+/// A bare array of three paged by `params` beside page size `size`, cut to one: the
+/// first page `first` (a query) is the first item, and `second` the second, with one
+/// model call.
+async fn second_item_by(params: &str, first: &str, second: &str) {
+    let list = format!(
+        r##"    get:
+      operationId: listTasks
+      parameters:
+{params}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {TASK_ARRAY}"##
+    );
+    let answer = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "open"),
+    ]);
+    let api = api_of(&stored_pages(&list), true, vec![Ok(answer.to_string())]);
+    assert_eq!(
+        api.get(&format!("/tasks?{first}")).await,
+        json!([stored_task("t1", "A", "open")])
+    );
+    assert_eq!(
+        api.get(&format!("/tasks?{second}")).await,
+        json!([stored_task("t2", "B", "open")])
+    );
+    assert_eq!(api.provider.requests().len(), 1);
+}
+
+/// A bracketed `page[number]` from 1 with no `default`, beside `page[size]`, is a page
+/// number.
+#[tokio::test]
+async fn a_bracketed_page_number_with_no_default_pages() {
+    second_item_by(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[number]\", in: query, schema: {type: integer, minimum: 1}}",
+        "page%5Bsize%5D=1&page%5Bnumber%5D=1",
+        "page%5Bsize%5D=1&page%5Bnumber%5D=2",
+    )
+    .await;
+}
+
+/// A required `Offset` from 0 with no `default`, beside `limit`, is an offset.
+#[tokio::test]
+async fn a_required_offset_with_no_default_pages() {
+    second_item_by(
+        "        - {name: limit, in: query, required: true, schema: {type: integer, minimum: 1}}
+        - {name: Offset, in: query, required: true, schema: {type: integer, minimum: 0}}",
+        "limit=1&Offset=0",
+        "limit=1&Offset=1",
+    )
+    .await;
+}
+
+/// An integer from 0 in the page size's bracket family (`page[start]` beside
+/// `page[size]`) is an offset, though its own words name none.
+#[tokio::test]
+async fn a_start_beside_the_page_size_in_its_brackets_pages() {
+    second_item_by(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[start]\", in: query, schema: {type: integer, minimum: 0}}",
+        "page%5Bsize%5D=1&page%5Bstart%5D=0",
+        "page%5Bsize%5D=1&page%5Bstart%5D=1",
+    )
+    .await;
+}
+
+/// [`second_item_by`]'s list, where `second` is no later page: the model answers it.
+async fn second_is_generated(params: &str, first: &str, second: &str) {
+    let list = format!(
+        r##"    get:
+      operationId: listTasks
+      parameters:
+{params}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {TASK_ARRAY}"##
+    );
+    let three = json!([
+        stored_task("t1", "A", "open"),
+        stored_task("t2", "B", "open"),
+        stored_task("t3", "C", "open"),
+    ]);
+    let other = json!([stored_task("t9", "Z", "open")]);
+    let api = api_of(
+        &stored_pages(&list),
+        true,
+        vec![Ok(three.to_string()), Ok(other.to_string())],
+    );
+    assert_eq!(
+        api.get(&format!("/tasks?{first}")).await,
+        json!([stored_task("t1", "A", "open")])
+    );
+    assert_eq!(api.get(&format!("/tasks?{second}")).await, other);
+    assert_eq!(api.provider.requests().len(), 2);
+}
+
+/// A keyset bound in the page size's bracket family (`page[after]` from 1 beside
+/// `page[size]`) is no page number: what comes after an id is not the run's second page.
+#[tokio::test]
+async fn a_bound_in_the_page_size_s_brackets_is_no_page_number() {
+    second_is_generated(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[after]\", in: query, schema: {type: integer, minimum: 1}}",
+        "page%5Bsize%5D=1",
+        "page%5Bsize%5D=1&page%5Bafter%5D=2",
+    )
+    .await;
+}
+
+/// A cursor in the page size's bracket family from 0 (`page[cursor]`) is no offset.
+#[tokio::test]
+async fn a_cursor_in_the_page_size_s_brackets_is_no_offset() {
+    second_is_generated(
+        "        - {name: \"page[size]\", in: query, schema: {type: integer, minimum: 1}}
+        - {name: \"page[cursor]\", in: query, schema: {type: integer, minimum: 0, default: 0}}",
+        "page%5Bsize%5D=1",
+        "page%5Bsize%5D=1&page%5Bcursor%5D=1",
+    )
+    .await;
+}
+
+/// A page number counting from 0 by its schema (`page_no`, default and minimum 0) says
+/// two things, and the list is not paged from its first page.
+#[tokio::test]
+async fn a_page_number_counting_from_zero_is_no_offset() {
+    a_bounded_integer_is_no_page(
+        "        - {name: page_no, in: query, schema: {type: integer, minimum: 0, default: 0}}",
+        "page_no=1",
+    )
+    .await;
+}
+
+/// `depth` from 1 with no `default` is no page number: nothing names it one.
+#[tokio::test]
+async fn a_depth_from_one_with_no_default_is_no_page_number() {
+    a_bounded_integer_is_no_page(
+        "        - {name: depth, in: query, schema: {type: integer, minimum: 1}}",
+        "depth=2",
+    )
+    .await;
 }
 
 /// A `page` whose schema counts from 0 (Trello's) says two things: nothing changes.
@@ -3918,4 +4103,756 @@ async fn a_reused_model_token_finds_no_earlier_walk() {
     assert_eq!(api.get("/tasks?limit=2").await, later);
     let third = api.get("/tasks?limit=1&cursor=abc").await;
     assert_eq!(ids_in(&third, "data"), ["t2"], "{third}");
+}
+
+/// Orders whose buyer's `email` sits one object down, in `billing_address`, and whose
+/// list declares a bodiless `204` for no match beside its `200` array.
+const NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - {name: email, in: query, schema: {type: string}}
+        - {name: street, in: query, schema: {type: string}}
+        - {name: ids, in: query, style: form, explode: false, schema: {type: array, items: {type: integer}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Order"}}
+        "204": {description: No order matches.}
+  /carts:
+    get:
+      operationId: listCarts
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Order"}}
+components:
+  schemas:
+    Address:
+      type: object
+      properties:
+        street: {type: string}
+    Order:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        billing_address:
+          type: object
+          properties:
+            street: {type: string}
+            email: {type: string, format: email}
+        shipping_address: {$ref: "#/components/schemas/Address"}
+"##;
+
+fn order(id: u64, email: &str) -> Value {
+    json!({
+        "id": id,
+        "billing_address": {"street": "Main", "email": email},
+        "shipping_address": {"street": "Elm"},
+    })
+}
+
+fn order_ids(body: &Value) -> Vec<u64> {
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_u64().unwrap())
+        .collect()
+}
+
+/// `email` names no member of the orders but one of `billing_address`, the only object
+/// declaring it: the orders of another buyer go.
+#[tokio::test]
+async fn a_filter_reaches_a_member_one_object_down() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?email=ann@example.com").await;
+    assert_eq!(order_ids(&body), [1], "{body}");
+}
+
+/// `street`, which both addresses declare, names neither: nothing goes.
+#[tokio::test]
+async fn a_member_two_objects_declare_is_no_filter() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?street=Nowhere").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// Products whose `brand`, one object down, declares a `name`, as a referenced
+/// record does, beside the products' own `title`; the list declares a bodiless `204`.
+const BRANDED: &str = r##"
+openapi: 3.0.0
+info: {title: Products, version: "1"}
+paths:
+  /products:
+    get:
+      operationId: listProducts
+      parameters:
+        - {name: name, in: query, description: Filter by product name, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Product"}}
+        "204": {description: No product matches.}
+    post:
+      operationId: createProduct
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Product"}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Product"}
+components:
+  schemas:
+    Product:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        title: {type: string}
+        brand:
+          type: object
+          properties:
+            name: {type: string}
+"##;
+
+/// `name` names no member of the products, and `brand.name` is free text, which a
+/// sub-record's label (`name`, `code`, `type`) commonly is: it is no filter, so the
+/// model's products for `name=Widget` stand under a `200`, never the declared `204`.
+#[tokio::test]
+async fn a_free_text_member_one_object_down_is_no_filter() {
+    let answer = json!([
+        {"id": 1, "title": "Widget", "brand": {"name": "Acme"}},
+        {"id": 2, "title": "Widget Pro", "brand": {"name": "Globex"}},
+    ]);
+    let api = api_of(BRANDED, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/products?name=Widget", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// The products the session created fill a list answer whose `data` the model left
+/// out: `name`, which names only the free-text `brand.name` one object down, drops
+/// none of them, so the list is no `204`.
+#[tokio::test]
+async fn stored_records_are_not_filtered_on_a_free_text_member_one_object_down() {
+    let widget = json!({"id": 1, "title": "Widget", "brand": {"name": "Acme"}});
+    let pro = json!({"id": 2, "title": "Widget Pro", "brand": {"name": "Globex"}});
+    let enveloped = BRANDED.replace(
+        "schema: {type: array, items: {$ref: \"#/components/schemas/Product\"}}",
+        "schema: {type: object, properties: {data: {type: array, items: {$ref: \"#/components/schemas/Product\"}}}}",
+    );
+    assert!(enveloped.contains("properties: {data:"));
+    let api = api_of(
+        &enveloped,
+        true,
+        vec![
+            Ok(widget.to_string()),
+            Ok(pro.to_string()),
+            Ok(json!({}).to_string()),
+        ],
+    );
+    for product in [&widget, &pro] {
+        let (status, _) = api.call("POST", "/products", Some(product.clone())).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, body) = api.call("GET", "/products?name=Widget", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body["data"]), [1, 2], "{body}");
+}
+
+/// A formatted member one object down (`billing_address.email`) is no filter when the
+/// items declare a member of that format themselves (`contact`): the parameter may mean
+/// that one.
+#[tokio::test]
+async fn a_format_the_items_declare_themselves_is_no_filter_one_object_down() {
+    let contract = NESTED.replace(
+        "        id: {type: integer}\n        billing_address:",
+        "        id: {type: integer}\n        contact: {type: string, format: email}\n        billing_address:",
+    );
+    assert!(contract.contains("contact: {type: string, format: email}"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/orders?email=ann@example.com", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// A parameter declaring another format than the member one object down
+/// (`format: uri` against `format: email`) names no member there.
+#[tokio::test]
+async fn a_parameter_of_another_format_is_no_filter_one_object_down() {
+    let contract = NESTED.replace(
+        "- {name: email, in: query, schema: {type: string}}",
+        "- {name: email, in: query, schema: {type: string, format: uri}}",
+    );
+    assert!(contract.contains("schema: {type: string, format: uri}"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?email=ann@example.com").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// A list a filter leaves empty, of an operation declaring a bodiless `204` beside its
+/// list, answers that `204` with no body.
+#[tokio::test]
+async fn an_empty_list_answers_its_declared_no_content() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api
+        .call("GET", "/orders?email=nobody@example.com", None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(body, Value::Null);
+}
+
+/// The `204` an empty list answers carries the headers the `204` declares, never
+/// those only its `200` declares (a required total count), so it stays a valid answer.
+#[tokio::test]
+async fn the_no_content_carries_its_own_headers_only() {
+    let contract = NESTED
+        .replace(
+            "        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema: {type: array, items: {$ref: \"#/components/schemas/Order\"}}\n        \"204\": {description: No order matches.}",
+            "        \"200\":\n          description: ok\n          headers:\n            X-Total-Count: {required: true, schema: {type: integer}}\n          content:\n            application/json:\n              schema: {type: array, items: {$ref: \"#/components/schemas/Order\"}}\n        \"204\":\n          description: No order matches.\n          headers:\n            X-Request-Id: {required: true, schema: {type: string}}",
+        );
+    assert!(contract.contains("X-Total-Count") && contract.contains("X-Request-Id"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/orders?email=nobody@example.com")
+        .body(Body::empty())
+        .unwrap();
+    let resp = api.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("x-total-count").is_none(),
+        "{:?}",
+        resp.headers()
+    );
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "{:?}",
+        resp.headers()
+    );
+    assert!(
+        resp.headers().get("content-type").is_none(),
+        "{:?}",
+        resp.headers()
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(bytes.is_empty());
+}
+
+/// A list declaring no `204` answers an empty list as its `200`; with consistency off,
+/// the declared `204` changes nothing.
+#[tokio::test]
+async fn an_empty_list_with_no_declared_no_content_stays() {
+    let api = api_of(NESTED, true, vec![Ok(json!([]).to_string())]);
+    assert_eq!(api.get("/carts").await, json!([]));
+    let api = api_of(NESTED, false, vec![Ok(json!([]).to_string())]);
+    assert_eq!(api.get("/orders").await, json!([]));
+}
+
+/// A `form` array that does not explode is one comma-separated value: `ids=1,2` is
+/// two integers, not text refused as one.
+#[tokio::test]
+async fn a_comma_separated_array_is_accepted() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?ids=1,2").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// A required `week` from 1 with no `default`, echoed beside `per_page`, is a filter,
+/// not a page number: nothing in its name or brackets says it pages, so week 2 is the
+/// model's answer, not the stored rest.
+#[tokio::test]
+async fn a_required_echoed_integer_from_one_is_no_page_number() {
+    let list = BY_PAGE
+        .replace(
+            "- {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}",
+            "- {name: week, in: query, required: true, schema: {type: integer, minimum: 1}}",
+        )
+        .replace(
+            "required: [page, per_page, has_more_page]",
+            "required: [week, per_page, has_more_page]",
+        )
+        .replace(
+            "                      page: {type: integer}",
+            "                      week: {type: integer}",
+        );
+    assert!(list.contains("name: week") && list.contains("week: {type: integer}"));
+    let week = |tasks: &[Value], n: u64| {
+        json!({
+            "code": 0,
+            "data": tasks,
+            "page_context": {"week": n, "per_page": 1, "has_more_page": false},
+        })
+    };
+    let first = week(&[stored_task("t1", "A", "open")], 1);
+    let second = week(&[stored_task("t1", "A", "open")], 2);
+    let mut script = created("open");
+    script.push(Ok(first.to_string()));
+    script.push(Ok(second.to_string()));
+    let api = api_of(&stored_pages(&list), true, script);
+    two_tasks(&api).await;
+    assert_eq!(api.get("/tasks?per_page=1&week=1").await, first);
+    assert_eq!(api.get("/tasks?per_page=1&week=2").await, second);
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A bodiless `202` beside the list is no "nothing matched": an empty list stays a
+/// `200 []`.
+#[tokio::test]
+async fn an_empty_list_with_a_bodiless_accepted_stays() {
+    let contract = NESTED.replace(
+        "\"204\": {description: No order matches.}",
+        "\"202\": {description: The report is still being prepared.}",
+    );
+    assert!(contract.contains("\"202\""));
+    let api = api_of(&contract, true, vec![Ok(json!([]).to_string())]);
+    let (status, body) = api.call("GET", "/orders", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
+}
+
+/// [`api_of`] over `NESTED` with consistency on and a scenario `quiet` that changes
+/// nothing but is selected.
+fn nested_with_scenario(script: Vec<Result<String, LlmError>>) -> Api {
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let mut rt = MockRuntime::new(
+        "lists",
+        Arc::new(compile(NESTED.as_bytes()).unwrap()),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+    );
+    rt.consistency = true;
+    rt.scenarios.insert(
+        "quiet".into(),
+        mb_protocols::ScenarioRuntime {
+            spec: mb_engine::ScenarioSpec {
+                name: "quiet".into(),
+                ..mb_engine::ScenarioSpec::default()
+            },
+            ..mb_protocols::ScenarioRuntime::default()
+        },
+    );
+    Api {
+        router: http_rest::router(Arc::new(rt)),
+        provider,
+    }
+}
+
+/// A forced status decides the answer: an empty list stays the forced `200`, not the
+/// declared `204`.
+#[tokio::test]
+async fn a_forced_status_keeps_an_empty_list() {
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api
+        .get_with(
+            "/orders?email=nobody@example.com",
+            &[("x-mockingbird-status", "200")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.is_array(), "{body}");
+}
+
+/// Under a scenario the answer is the scenario's: an empty list stays a `200`.
+#[tokio::test]
+async fn a_scenario_keeps_an_empty_list() {
+    let api = nested_with_scenario(vec![Ok(json!([]).to_string())]);
+    let (status, body) = api
+        .get_with("/orders", &[("x-mockingbird-scenario", "quiet")])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!([]));
+}
+
+/// A parameter of another type than the member one object down (`email` an integer)
+/// filters nothing.
+#[tokio::test]
+async fn a_nested_member_of_another_type_is_no_filter() {
+    let contract = NESTED.replace(
+        "- {name: email, in: query, schema: {type: string}}",
+        "- {name: email, in: query, schema: {type: integer}}",
+    );
+    assert!(contract.contains("{name: email, in: query, schema: {type: integer}}"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?email=5").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// One object down a parameter names a member only by its very name: `emails`, the
+/// plural, reaches no `billing_address.email`, and nothing goes.
+#[tokio::test]
+async fn a_nested_member_is_named_by_its_very_name() {
+    let contract = NESTED.replace("{name: email, in: query,", "{name: emails, in: query,");
+    assert!(contract.contains("name: emails,"));
+    let answer = json!([order(1, "ann@example.com"), order(2, "bob@example.com")]);
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?emails=ann@example.com").await;
+    assert_eq!(order_ids(&body), [1, 2], "{body}");
+}
+
+/// The comma-separated `ids=2,3` reaches the model as the two integers, not as the
+/// text `"2,3"`. (An array parameter filters no scalar member, so the answer is the
+/// model's as it gave it.)
+#[tokio::test]
+async fn a_comma_separated_array_reaches_the_model_split() {
+    let answer = json!([order(2, "bob@example.com"), order(3, "cy@example.com")]);
+    let api = api_of(NESTED, true, vec![Ok(answer.to_string())]);
+    let body = api.get("/orders?ids=2,3").await;
+    assert_eq!(order_ids(&body), [2, 3], "{body}");
+    let prompt = api.prompt(0);
+    assert!(prompt.contains(r#""query":{"ids":[2,3]}"#), "{prompt}");
+}
+
+/// Places paged by `limit`, `offset` and `page`, whose members `timezone.offset` and
+/// `source.page` share the paging parameters' names one object down, and whose
+/// `source.email` an `email` filter names; the list declares a bodiless `204`.
+const PAGED_NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Places, version: "1"}
+paths:
+  /places:
+    get:
+      operationId: listPlaces
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 10}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: email, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Place"}}
+        "204": {description: No place matches.}
+components:
+  schemas:
+    Place:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        timezone:
+          type: object
+          properties:
+            name: {type: string}
+            offset: {type: integer}
+        source:
+          type: object
+          properties:
+            page: {type: integer}
+            email: {type: string, format: email}
+"##;
+
+fn place(id: u64, offset: u64, page: u64, email: &str) -> Value {
+    json!({
+        "id": id,
+        "name": format!("Place {id}"),
+        "timezone": {"name": "UTC", "offset": offset},
+        "source": {"page": page, "email": email},
+    })
+}
+
+fn two_places() -> Value {
+    json!([
+        place(1, 0, 3, "north@example.com"),
+        place(2, 1, 4, "south@example.com"),
+    ])
+}
+
+/// A page position (`offset`, `page`) is no filter on a member one object down that
+/// shares its name (`timezone.offset`, `source.page`): the page keeps both places and
+/// stays a `200`, never the declared `204`.
+#[tokio::test]
+async fn a_page_position_is_no_filter_one_object_down() {
+    for uri in [
+        "/places?offset=0",
+        "/places?page=1",
+        "/places?limit=5&offset=0",
+        "/places?limit=5&page=1",
+    ] {
+        let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
+        let (status, body) = api.call("GET", uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert_eq!(order_ids(&body), [1, 2], "{uri}: {body}");
+    }
+}
+
+/// On the same list, a filter one object down (`email`, `source.email`) that matches
+/// nothing answers the declared `204`, with or without a page position beside it; one
+/// that matches keeps its place under a `200`.
+#[tokio::test]
+async fn a_nested_filter_beside_a_page_position_answers_no_content() {
+    for uri in [
+        "/places?email=east@example.com",
+        "/places?page=1&email=east@example.com",
+    ] {
+        let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
+        let (status, body) = api.call("GET", uri, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{uri}: {body}");
+        assert_eq!(body, Value::Null, "{uri}");
+    }
+    let api = api_of(PAGED_NESTED, true, vec![Ok(two_places().to_string())]);
+    let (status, body) = api
+        .call("GET", "/places?offset=0&email=south@example.com", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body), [2], "{body}");
+}
+
+/// A page position only the contract confirms (`from`, from 0, echoed beside the list
+/// that `per_page` sizes) is no filter on a member one object down of its name.
+#[tokio::test]
+async fn a_confirmed_page_position_is_no_filter_one_object_down() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Places, version: "1"}
+paths:
+  /places:
+    get:
+      operationId: listPlaces
+      parameters:
+        - {name: per_page, in: query, schema: {type: integer, default: 10}}
+        - {name: from, in: query, schema: {type: integer, minimum: 0, default: 0}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, from]
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Place"}}
+                  from: {type: integer}
+        "204": {description: No place matches.}
+components:
+  schemas:
+    Place:
+      type: object
+      required: [id]
+      properties:
+        id: {type: integer}
+        window:
+          type: object
+          properties:
+            from: {type: integer}
+"##;
+    let answer = json!({
+        "data": [{"id": 1, "window": {"from": 0}}, {"id": 2, "window": {"from": 5}}],
+        "from": 0,
+    });
+    let api = api_of(contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/places?from=0", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_ids(&body["data"]), [1, 2], "{body}");
+}
+
+/// One cart, read with no id, whose own record holds a list of lines, beside a bodiless
+/// `204` for no cart at all.
+const CART: &str = r##"
+openapi: 3.0.0
+info: {title: Shop, version: "1"}
+paths:
+  /cart:
+    get:
+      operationId: getCart
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Cart"}
+        "204": {description: No active cart.}
+components:
+  schemas:
+    Cart:
+      type: object
+      required: [id, total, items]
+      properties:
+        id: {type: integer}
+        total: {type: number}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              sku: {type: string}
+              qty: {type: integer}
+"##;
+
+/// A record whose list of lines is empty is still that record: an empty cart (its own
+/// `id` and `total` beside the lines) stays a `200` with the cart, never the `204`.
+#[tokio::test]
+async fn an_empty_singleton_cart_stays() {
+    let answer = json!({"id": 1, "total": 0, "items": []});
+    let api = api_of(CART, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/cart", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, answer);
+}
+
+/// A record with no identity of its own is still no list container when it declares a
+/// member that is no paging or count metadata (a real-number `total`).
+#[tokio::test]
+async fn an_empty_record_with_no_identity_stays() {
+    let contract = CART
+        .replace("required: [id, total, items]", "required: [total, items]")
+        .replace("        id: {type: integer}\n", "");
+    assert!(!contract.contains("id: {type: integer}"));
+    let answer = json!({"total": 0, "items": []});
+    let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/cart", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, answer);
+}
+
+/// An envelope holding only its list and paging or count metadata (an integer count, a
+/// `has_more` flag, a cursor echoing the `cursor` parameter, links that are URLs, a
+/// fixed kind) is a list container: left empty, it answers the declared `204`.
+#[tokio::test]
+async fn an_empty_envelope_of_paging_metadata_answers_no_content() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [open, closed]}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: {type: string, enum: [list]}
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id]
+                      properties:
+                        id: {type: integer}
+                        status: {type: string, enum: [open, closed]}
+                  total_count: {type: integer}
+                  has_more: {type: boolean}
+                  cursor: {type: string}
+                  links:
+                    type: object
+                    properties:
+                      next: {type: string, format: uri}
+        "204": {description: No order matches.}
+"##;
+    let answer = json!({
+        "object": "list",
+        "data": [{"id": 1, "status": "open"}],
+        "total_count": 1,
+        "has_more": false,
+        "cursor": "c1",
+        "links": {"next": "https://example.com/orders?cursor=c2"},
+    });
+    let api = api_of(contract, true, vec![Ok(answer.to_string())]);
+    let (status, body) = api.call("GET", "/orders?status=closed", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(body, Value::Null);
+}
+
+/// A page past the end that the store serves stays a `200` with an empty list, even
+/// where the list declares a bodiless `204`: only a generated answer becomes the `204`.
+/// Page 1 of the open tasks leaves `t2` for page 2; `t2` is done by then, so the served
+/// page 2 holds nothing, and no model call is made for it.
+#[tokio::test]
+async fn a_store_served_empty_page_stays_a_200() {
+    let contract = editable_pages().replace(
+        "                      has_more_page: {type: boolean}",
+        "                      has_more_page: {type: boolean}\n        \"204\": {description: No task matches.}",
+    );
+    assert!(contract.contains("No task matches."));
+    let mut script = created("open");
+    script.push(Ok(
+        zoho_page(&[stored_task("t1", "A", "open")], 1, true).to_string()
+    ));
+    script.push(Ok(stored_task("t2", "B", "done").to_string()));
+    let api = api_of(&contract, true, script);
+    two_tasks(&api).await;
+    let (status, first) = api
+        .call("GET", "/tasks?per_page=1&page=1&status=open", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ids_in(&first, "data"), ["t1"], "{first}");
+    let (status, _) = api
+        .call("PATCH", "/tasks/t2", Some(json!({"status": "done"})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, second) = api
+        .call("GET", "/tasks?per_page=1&page=2&status=open", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["data"], json!([]), "{second}");
+    assert_eq!(api.provider.requests().len(), 4);
+}
+
+/// A nullable object parent (`nullable: true` in 3.0, `type: [object, "null"]` in 3.1)
+/// is an object one object down as any: `email` reaches `billing_address.email`, and an
+/// order whose `billing_address` is `null` holds no other email, so it stays.
+#[tokio::test]
+async fn a_nullable_object_parent_is_reached_one_object_down() {
+    let parent = "        billing_address:\n          type: object\n";
+    let nullable_30 = NESTED.replace(
+        parent,
+        "        billing_address:\n          type: object\n          nullable: true\n",
+    );
+    let nullable_31 = NESTED.replace("openapi: 3.0.0", "openapi: 3.1.0").replace(
+        parent,
+        "        billing_address:\n          type: [object, \"null\"]\n",
+    );
+    for contract in [nullable_30, nullable_31] {
+        assert!(contract.contains("nullable: true") || contract.contains("[object, \"null\"]"));
+        let mut unbilled = order(3, "cy@example.com");
+        unbilled["billing_address"] = Value::Null;
+        let answer = json!([
+            order(1, "ann@example.com"),
+            order(2, "bob@example.com"),
+            unbilled
+        ]);
+        let api = api_of(&contract, true, vec![Ok(answer.to_string())]);
+        let body = api.get("/orders?email=ann@example.com").await;
+        assert_eq!(order_ids(&body), [1, 3], "{body}");
+    }
 }
