@@ -484,6 +484,14 @@ def request(url, method="GET", headers=None, json_body=None, form=None, data=Non
     elif form is not None:
         data = urllib.parse.urlencode(form).encode()
         headers["content-type"] = "application/x-www-form-urlencoded"
+    # A value HTTP cannot carry (a model's etag with curly quotes, sent back as
+    # If-Match) fails this call like a refused connection: the check that reads it
+    # fails as the model's, and the journey goes on instead of ending on the exception.
+    for k, v in headers.items():
+        try:
+            str(v).encode("latin-1")
+        except UnicodeEncodeError:
+            return 0.0, 0, {}, None, f"header {k} cannot be sent: {str(v)[:80]!r}".encode()
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     started = time.monotonic()
     try:
