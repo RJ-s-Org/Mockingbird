@@ -25,13 +25,135 @@
 //! refused and stores nothing: as answered when it agrees with the record as stored
 //! ([`answers_the_held`], an API answering a repeat with what it holds), else the stored
 //! record unchanged (it names the holder's identity and value, so it is no new record).
+//!
+//! **A described unique set** (`types.<t>.unique` in the world description) is checked
+//! first, before any LLM call, by [`described_conflict`]: a create, or an update, whose
+//! values of the set's members equal a stored record's (another record, for an update),
+//! within the same value of the set's `scope` member, is refused with the set's
+//! `conflict` status, else the first refusal the operation declares. An operation that
+//! declares no response for that status is not refused. A type the description gives
+//! no unique set keeps the heuristics above.
 
 use mb_engine::{GeneratedResponse, OperationCall};
-use mb_mcm::Operation;
+use mb_mcm::{Effect, Operation, OperationKind};
 use mb_state::{SessionKey, StoredResource};
 use serde_json::Value;
 
-use super::{MockRuntime, StateAccess, in_create_collection};
+use super::{CallPlan, MAX_SCAN, MockRuntime, StateAccess, in_create_collection, plain};
+
+/// The status a create or an update `plan` of `call` is refused with, before any
+/// generation, for repeating a stored record's values of a unique set its type's world
+/// description declares (see the module's documentation). `target` is the update's
+/// target id and the record held there, when there is one; that record is never a
+/// conflict of its own update. At most [`MAX_SCAN`] records of the type are compared.
+/// `None` when nothing conflicts, the type describes no unique set, or the call has a
+/// scenario or a forced status.
+pub(super) async fn described_conflict(
+    state: &mut StateAccess<'_>,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    target: (Option<&str>, Option<&StoredResource>),
+) -> Option<u16> {
+    let rt: &MockRuntime = state.rt;
+    let op = plan.op;
+    let creates = op.kind == OperationKind::Command(Effect::Create);
+    let updates = op.kind == OperationKind::Command(Effect::Update);
+    if !(creates || updates) || !rt.consistency || !plain(plan) {
+        return None;
+    }
+    let t = op.resource_type.as_deref()?;
+    let desc = rt.described().type_desc(t)?;
+    if desc.unique.is_empty() {
+        return None;
+    }
+    let body = call.body.as_ref()?;
+    let request = op
+        .identity
+        .as_ref()
+        .and_then(|i| i.record_in(body))
+        .unwrap_or(body);
+    let (target_id, held) = target;
+    let held = held.filter(|_| updates);
+    // A scope member a create's body leaves out is its parent's, from the path.
+    let parent_param = desc
+        .parent
+        .as_ref()
+        .and_then(|p| Some((p.member.as_deref()?, p.path_param.as_deref()?)));
+    let mut listed: Option<Vec<StoredResource>> = None;
+    for set in &desc.unique {
+        let sent = |m: &str| mb_mcm::member_at(request, m).filter(|v| !v.is_null());
+        // An update that sets none of the set's members, nor its scope, changes none of it.
+        if updates
+            && !set
+                .members
+                .iter()
+                .chain(set.scope.iter())
+                .any(|m| sent(m).is_some())
+        {
+            continue;
+        }
+        let after = |m: &str| {
+            sent(m)
+                .cloned()
+                .or_else(|| held.and_then(|h| mb_mcm::member_at(&h.data, m)).cloned())
+        };
+        let Some(values) = set
+            .members
+            .iter()
+            .map(|m| after(m).map(|v| (m.as_str(), v)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let scope = set.scope.as_deref().map(|scope| {
+            let from_path = || {
+                parent_param
+                    .filter(|(member, _)| *member == scope)
+                    .and_then(|(_, param)| call.path_params.get(param))
+                    .cloned()
+            };
+            (scope, after(scope).or_else(from_path))
+        });
+        let records = match &listed {
+            Some(records) => records,
+            None => listed.insert(state.list(&plan.session, t, MAX_SCAN).await),
+        };
+        let taken = records.iter().find(|r| {
+            Some(r.id.as_str()) != target_id
+                && held.is_none_or(|h| h.id != r.id)
+                && values
+                    .iter()
+                    .all(|(m, v)| same_scalar(mb_mcm::member_at(&r.data, m), v))
+                && scope.as_ref().is_none_or(|(member, asked)| {
+                    match (asked, mb_mcm::member_at(&r.data, member)) {
+                        (Some(asked), Some(kept)) if !kept.is_null() => {
+                            same_scalar(Some(kept), asked)
+                        }
+                        // Where a record is that holds no scope value, only the
+                        // collection a create runs in tells.
+                        _ if creates => in_create_collection(rt, &plan.session, op, call, r),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                })
+        });
+        let Some(taken) = taken else {
+            continue;
+        };
+        let code = set
+            .conflict
+            .or_else(|| mb_engine::guards::refusal_codes(op).first().copied())?;
+        tracing::info!(
+            mock = %rt.name,
+            operation = %op.id,
+            held = %super::log_capped(&taken.id),
+            status = code,
+            "write refused before generation: it repeats a described unique set"
+        );
+        return Some(code);
+    }
+    None
+}
 
 /// What a create's success comes to, by the rule of the module's documentation.
 pub(super) enum Enforced {

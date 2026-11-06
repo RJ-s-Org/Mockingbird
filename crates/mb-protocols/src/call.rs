@@ -417,6 +417,14 @@ pub(crate) async fn prepare<'a>(
         }));
     }
     let resource_type = op.resource_type.as_deref();
+    // A repeat of a described idempotency key: the first call's answer, as it was.
+    if let Some(replay) = replays::replayed(&mut state, plan, call)
+        .instrument(state_span())
+        .await
+    {
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(Box::new(replay));
+    }
     let mut target_id = target_id(op, call);
     // Before any state is read: an answer generated from older state must
     // not be cached after a write that lands meanwhile.
@@ -529,6 +537,25 @@ pub(crate) async fn prepare<'a>(
                 return Prepared::Answered(Box::new(refusal));
             }
         }
+    }
+
+    // A create or update repeating a described unique set is refused before generating.
+    if !foreign_key
+        && let Some(code) = repeats::described_conflict(
+            &mut state,
+            plan,
+            call,
+            (target_id.as_deref(), target.as_ref()),
+        )
+        .instrument(state_span())
+        .await
+        && let Some(refusal) = plan.engine.refuse_from_state(rt.bundle(), op, call, code)
+    {
+        replays::keep(&mut state, plan, call, &refusal)
+            .instrument(state_span())
+            .await;
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(Box::new(refusal));
     }
 
     let target_missing = target.is_none();
@@ -1427,6 +1454,8 @@ pub(crate) async fn complete(
         cursors::after_answer(&mut state, plan, &generated).await;
         world::after_answer(&mut state, plan, call, &generated).await;
         world::after_delete(&mut state, plan, acted_on.as_deref(), &generated).await;
+        // The final answer, for a repeat of a described idempotency key.
+        replays::keep(&mut state, plan, call, &generated).await;
         state.touch(session).await;
     }
     .instrument(state_span())
