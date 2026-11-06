@@ -3177,16 +3177,216 @@ paths:
     let bundle = compile(contract.as_bytes()).unwrap();
     for id in ["createDocument", "getDocument"] {
         let op = bundle.operation(id).unwrap();
-        assert!(
-            op.identity.is_none() || op.resource_type.is_some(),
-            "{id}: identity {:?} without a resource type",
-            op.identity
+        assert_eq!(op.resource_type, None, "{id}");
+        assert_eq!(op.identity, None, "{id}");
+    }
+}
+
+/// A contract shaped like a document store: every path is parameters only, and the
+/// routes on `/{db}` and `/{db}/{docid}` share one `Document` schema.
+fn document_store(get_answer: &str, tags: &str) -> String {
+    format!(
+        r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /{{db}}:
+    parameters:
+      - {{name: db, in: path, required: true, schema: {{type: string}}}}
+    post:
+      operationId: createDocument{tags}
+      requestBody:
+        content:
+          application/json:
+            schema: {{$ref: "#/components/schemas/Document"}}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {{type: string}}
+                  ok: {{type: boolean}}
+  /{{db}}/{{docid}}:
+    parameters:
+      - {{name: db, in: path, required: true, schema: {{type: string}}}}
+      - {{name: docid, in: path, required: true, schema: {{type: string}}}}
+    get:
+      operationId: getDocument{tags}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {get_answer}
+    put:
+      operationId: putDocument{tags}
+      requestBody:
+        content:
+          application/json:
+            schema: {{$ref: "#/components/schemas/Document"}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {{type: string}}
+                  ok: {{type: boolean}}
+    delete:
+      operationId: deleteDocument{tags}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {{type: string}}
+                  ok: {{type: boolean}}
+components:
+  schemas:
+    Document:
+      type: object
+      properties:
+        id: {{type: string}}
+        title: {{type: string}}
+"##
+    )
+}
+
+/// What a path with no static segment does not name, the schema its routes share
+/// does: the routes on `/{db}/{docid}` and the create posted to `/{db}` are of the
+/// type `Document`. The trailing `{docid}` is the item's identity, and the create is
+/// keyed by the record's own `id`, never by `{db}`, which names its collection.
+#[test]
+fn a_parameter_only_path_takes_its_type_from_the_schema_its_routes_share() {
+    let contract = document_store(r##"{$ref: "#/components/schemas/Document"}"##, "");
+    let (bundle, warnings) = mb_import::compile_with_warnings(contract.as_bytes()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for id in ["getDocument", "putDocument", "deleteDocument"] {
+        let op = bundle.operation(id).unwrap();
+        assert_eq!(op.resource_type.as_deref(), Some("Document"), "{id}");
+        let identity = op.identity.as_ref().unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(identity.path_param.as_deref(), Some("docid"), "{id}");
+        assert_eq!(identity.field, "id", "{id}");
+    }
+    let create = bundle.operation("createDocument").unwrap();
+    assert_eq!(create.resource_type.as_deref(), Some("Document"));
+    assert_eq!(create.kind, OperationKind::Command(Effect::Create));
+    let identity = create.identity.as_ref().unwrap();
+    assert_eq!(identity.field, "id");
+    assert_eq!(identity.path_param, None, "{{db}} names the collection");
+}
+
+/// Writes that answer a named acknowledgement (`DocumentResult {id, ok, rev}`, as a
+/// document store's create, replace and delete do) do not outvote the record: the
+/// schema the bodies send and the read answers (`Document`) is the type.
+#[test]
+fn a_parameter_only_path_takes_its_type_from_the_record_over_named_acknowledgements() {
+    let ack = "schema:\n                type: object\n                properties:\n                  id: {type: string}\n                  ok: {type: boolean}";
+    let contract = document_store(r##"{$ref: "#/components/schemas/Document"}"##, "");
+    assert_eq!(contract.matches(ack).count(), 3);
+    let contract = contract
+        .replace(ack, r##"schema: {$ref: "#/components/schemas/DocumentResult"}"##)
+        .replace(
+            "components:\n  schemas:\n",
+            "components:\n  schemas:\n    DocumentResult:\n      type: object\n      properties:\n        id: {type: string}\n        ok: {type: boolean}\n        rev: {type: string}\n",
         );
-        assert_ne!(
+    let (bundle, warnings) = mb_import::compile_with_warnings(contract.as_bytes()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for id in ["getDocument", "putDocument", "deleteDocument"] {
+        let op = bundle.operation(id).unwrap();
+        assert_eq!(op.resource_type.as_deref(), Some("Document"), "{id}");
+        let identity = op.identity.as_ref().unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(identity.path_param.as_deref(), Some("docid"), "{id}");
+    }
+    let create = bundle.operation("createDocument").unwrap();
+    assert_eq!(create.resource_type.as_deref(), Some("Document"));
+    assert_eq!(create.kind, OperationKind::Command(Effect::Create));
+    assert_eq!(
+        create
+            .identity
+            .as_ref()
+            .map(|i| (i.path_param.as_deref(), i.field.as_str())),
+        Some((None, "id"))
+    );
+}
+
+/// With no schema name to go by, one tag every route of the family carries names
+/// the type.
+#[test]
+fn a_parameter_only_path_takes_its_type_from_a_tag_its_routes_share() {
+    let inline = "{type: object, properties: {id: {type: string}, title: {type: string}}}";
+    let contract = document_store(inline, "\n      tags: [documents]")
+        .replace(r##"{$ref: "#/components/schemas/Document"}"##, inline);
+    let bundle = compile(contract.as_bytes()).unwrap();
+    for id in ["getDocument", "putDocument", "deleteDocument"] {
+        let op = bundle.operation(id).unwrap();
+        assert_eq!(op.resource_type.as_deref(), Some("documents"), "{id}");
+        assert_eq!(
             op.identity.as_ref().and_then(|i| i.path_param.as_deref()),
-            Some("db"),
-            "{id}: the collection parameter is not the record's key"
+            Some("docid"),
+            "{id}"
         );
+    }
+    let create = bundle.operation("createDocument").unwrap();
+    assert_eq!(create.resource_type.as_deref(), Some("documents"));
+    assert_eq!(
+        create
+            .identity
+            .as_ref()
+            .map(|i| (i.path_param.as_deref(), i.field.as_str())),
+        Some((None, "id"))
+    );
+}
+
+/// With neither a schema name nor a tag, a path with no static segment has no type,
+/// so nothing on it has an identity.
+#[test]
+fn a_parameter_only_path_with_no_schema_name_or_tag_keeps_no_identity() {
+    let inline = "{type: object, properties: {id: {type: string}, title: {type: string}}}";
+    let contract =
+        document_store(inline, "").replace(r##"{$ref: "#/components/schemas/Document"}"##, inline);
+    let bundle = compile(contract.as_bytes()).unwrap();
+    for id in [
+        "createDocument",
+        "getDocument",
+        "putDocument",
+        "deleteDocument",
+    ] {
+        let op = bundle.operation(id).unwrap();
+        assert_eq!((&op.resource_type, &op.identity), (&None, &None), "{id}");
+    }
+}
+
+/// Two schema names the family's routes use as often as each other (the read
+/// answers `Other`, the replace sends `Document`), and no tag, name no type.
+#[test]
+fn a_parameter_only_path_whose_schemas_disagree_keeps_no_identity() {
+    let contract = document_store(r##"{$ref: "#/components/schemas/Other"}"##, "").replace(
+        "components:\n  schemas:\n",
+        "components:\n  schemas:\n    Other: {type: object, properties: {id: {type: string}}}\n",
+    );
+    let contract = contract.replacen(
+        r##"schema: {$ref: "#/components/schemas/Document"}"##,
+        "schema: {type: object}",
+        1,
+    );
+    let bundle = compile(contract.as_bytes()).unwrap();
+    for id in [
+        "createDocument",
+        "getDocument",
+        "putDocument",
+        "deleteDocument",
+    ] {
+        let op = bundle.operation(id).unwrap();
+        assert_eq!((&op.resource_type, &op.identity), (&None, &None), "{id}");
     }
 }
 
@@ -3236,4 +3436,38 @@ paths:
     assert_eq!(op.resource_type.as_deref(), Some("documents"));
     assert_eq!(op.identity.as_ref().map(|i| i.field.as_str()), Some("id"));
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A declared identity the operation does not declare is ignored for that reason
+/// alone: it was never applied, so no second warning says it needs a type.
+#[test]
+fn an_unapplied_declared_identity_warns_once() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /{db}:
+    parameters:
+      - {name: db, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: createDocument
+      x-mockingbird-resource: {identity: nope}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+"##;
+    let (bundle, warnings) = mb_import::compile_with_warnings(contract.as_bytes()).unwrap();
+    let op = bundle.operation("createDocument").unwrap();
+    assert_eq!((&op.resource_type, &op.identity), (&None, &None));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].message.contains("does not declare"),
+        "{warnings:?}"
+    );
 }
