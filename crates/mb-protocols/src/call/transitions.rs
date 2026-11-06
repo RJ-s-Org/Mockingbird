@@ -36,8 +36,9 @@ pub(super) fn sets_members(rt: &MockRuntime, op: &Operation) -> bool {
 /// sets: its `transition` members (a state is written as the member's type declares
 /// it), then its `changes` (the `request` body at a `from_request` pointer, or a fixed
 /// `value`). A value that does not fit its member's schema is dropped, and so is the
-/// whole set when the record it leaves does not fit the type. Answers the members it
-/// set, in that order.
+/// whole set when it breaks a record that fit the type (a record already not fitting,
+/// stored in an earlier, incomplete shape, takes it). Answers the members it set, in
+/// that order.
 pub(super) fn apply(
     rt: &MockRuntime,
     op: &Operation,
@@ -91,7 +92,9 @@ pub(super) fn apply(
             ),
         }
     }
-    if !set.is_empty() && !entity_fits(rt, t, record) {
+    // A record that did not fit before (stored in an earlier, incomplete shape) takes
+    // a change that leaves it no worse; a fitting one refuses a change that breaks it.
+    if !set.is_empty() && !entity_fits(rt, t, record) && entity_fits(rt, t, &before) {
         tracing::info!(
             mock = %rt.name,
             operation = %op.id,
@@ -156,4 +159,86 @@ fn fits_member(rt: &MockRuntime, t: &str, member: &str, value: &Value) -> bool {
     };
     mb_engine::SchemaValidator::new(&bundle.with_reachable_defs(&schema))
         .is_ok_and(|v| v.is_valid(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mb_engine::{Engine, EngineConfig};
+    use mb_state::{MemoryStore, StateStore};
+    use serde_json::json;
+
+    use super::*;
+
+    /// Items read as `{id, name, created}` (all required, at most four members), starred
+    /// by an action.
+    const CONTRACT: &str = r##"
+openapi: 3.0.0
+info: {title: Items, version: "1"}
+paths:
+  /items/{id}:
+    get:
+      operationId: getItem
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /items/{id}/star:
+    post:
+      operationId: starItem
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, name, created]
+      maxProperties: 4
+      properties:
+        id: {type: string}
+        name: {type: string}
+        created: {type: string}
+        starred: {type: boolean}
+        rank: {type: integer}
+"##;
+
+    /// The runtime of [`CONTRACT`] whose world says `starItem` sets `changes`.
+    fn runtime(changes: serde_json::Value) -> MockRuntime {
+        let bundle = mb_import::compile(CONTRACT.as_bytes()).unwrap();
+        let doc: mb_mcm::world::World = serde_json::from_value(json!({
+            "operations": {"starItem": {"kind": "action", "target": {"path_param": "id"}, "changes": changes}}
+        }))
+        .unwrap();
+        let base = mb_mcm::world::tier0(&bundle);
+        let (world, refused) = mb_mcm::world::effective(&bundle, &base, &doc);
+        assert!(refused.is_empty(), "{refused:?}");
+        let state: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        let engine = Arc::new(Engine::new(None, EngineConfig::default()));
+        MockRuntime::new("items", Arc::new(bundle), engine, state).with_world(&base, &world, 1)
+    }
+
+    fn star(rt: &MockRuntime) -> Operation {
+        rt.bundle().operation("starItem").unwrap().clone()
+    }
+
+    #[test]
+    fn a_change_on_a_record_that_already_breaks_its_schema_is_set() {
+        let rt = runtime(json!({"starred": {"value": true}}));
+        let op = star(&rt);
+        // Stored in an earlier shape: no `created`, which the read requires.
+        let mut record = json!({"id": "i1", "name": "a"});
+        assert_eq!(apply(&rt, &op, None, &mut record), vec!["starred"]);
+        assert_eq!(record, json!({"id": "i1", "name": "a", "starred": true}));
+    }
+
+    #[test]
+    fn a_change_that_breaks_a_fitting_record_is_refused() {
+        // Each value fits its member, but together they pass the read's `maxProperties`.
+        let rt = runtime(json!({"starred": {"value": true}, "rank": {"value": 1}}));
+        let op = star(&rt);
+        let fitting = json!({"id": "i1", "name": "a", "created": "2026-01-01"});
+        let mut record = fitting.clone();
+        assert!(apply(&rt, &op, None, &mut record).is_empty());
+        assert_eq!(record, fitting);
+    }
 }

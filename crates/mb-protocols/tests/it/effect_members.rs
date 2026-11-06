@@ -205,6 +205,45 @@ async fn an_effect_that_leaves_a_request_member_out_is_not_overruled() {
     assert_eq!(note["active"], false, "{note}");
 }
 
+/// A note held in an earlier, incomplete shape (no `body`, which its read requires)
+/// still takes an effect that leaves it no worse; one that fit is still refused one
+/// that breaks it.
+#[tokio::test]
+async fn an_effect_on_a_record_that_already_breaks_its_schema_is_applied() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(
+        &state,
+        "notes",
+        "n1",
+        json!({"id": "n1", "title": "Old", "active": true}),
+    )
+    .await;
+    let answer = json!({"response": {"id": "n1", "title": "New", "active": true}, "effects": [
+        {"type": "notes", "id": "n1", "set": {"active": false}},
+    ]});
+    let edit = json!({"title": "New"});
+    let (_, effects) = call(NOTES, &state, answer, ("PUT", "/notes/n1", Some(edit))).await;
+    assert_eq!(effects[0]["outcome"], "applied", "{effects}");
+    let note = stored(&state, "notes", "n1").await;
+    assert_eq!(note["active"], false, "{note}");
+}
+
+/// An effect that breaks a note that fit (a member its schema does not take) is still
+/// refused.
+#[tokio::test]
+async fn an_effect_that_breaks_a_fitting_record_is_refused() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "notes", "n1", note()).await;
+    let answer = json!({"response": {"id": "n1", "title": "New", "active": true}, "effects": [
+        {"type": "notes", "id": "n1", "set": {"active": "yes"}},
+    ]});
+    let edit = json!({"title": "New"});
+    let (_, effects) = call(NOTES, &state, answer, ("PUT", "/notes/n1", Some(edit))).await;
+    assert_eq!(effects[0]["outcome"], "rejected", "{effects}");
+    let note = stored(&state, "notes", "n1").await;
+    assert_eq!(note["active"], true, "{note}");
+}
+
 /// An answer with the note's own schema settles every member the request names: an
 /// effect giving one another value is still refused.
 #[tokio::test]

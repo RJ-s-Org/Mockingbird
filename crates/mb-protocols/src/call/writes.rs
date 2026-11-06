@@ -259,7 +259,8 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             (id, Some(data))
         }
         // An action the description says sets members of its target: set on the held
-        // record. Any other action stores nothing here.
+        // record, with the action's own answer merged onto it first when that answer is
+        // the target's record. Any other action stores nothing here.
         OperationKind::Command(Effect::Other)
             if !generated.new_record && transitions::sets_members(rt, op) =>
         {
@@ -269,7 +270,22 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             let Some(held) = state.get(session, resource_type, &id).await else {
                 return WriteOutcome::default();
             };
-            let mut data = held.data;
+            // An answer that is a record of the type holding the target's id is merged
+            // onto the held record, as an update's is; any other answer adds nothing.
+            let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
+            let mut data = match &generated.body {
+                Some(answer)
+                    if entity_fits(rt, resource_type, answer)
+                        && mb_mcm::member_at(answer, field)
+                            .and_then(id_string)
+                            .is_some_and(|answered| answered == id) =>
+                {
+                    let on = (resource_type, Some(&held.data));
+                    let answered = (answer.clone(), generated.status);
+                    write_memory::onto_record(rt, op, on, answered, call_body)
+                }
+                _ => held.data,
+            };
             if transitions::apply(rt, op, call_body, &mut data).is_empty() {
                 return WriteOutcome::default();
             }
