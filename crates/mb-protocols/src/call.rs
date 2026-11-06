@@ -24,6 +24,7 @@ use tracing::Instrument;
 use crate::chaos::{self, CHAOS_HEADER, ChaosDecision};
 pub(crate) use crate::dp_auth::Unauthorized;
 use crate::dp_auth::authenticate;
+use crate::world_gaps::GapCode;
 use crate::{
     MockRuntime, RequestKind, RequestRecord, STREAM_ITEMS_HEADER, ScenarioRuntime, UnknownIds,
 };
@@ -452,7 +453,9 @@ pub(crate) async fn prepare<'a>(
         && target.is_none()
         && guarded(rt, op, call).is_some()
         && match (resource_type, target_id.as_deref()) {
-            (Some(t), Some(id)) => state.get(session, t, id).await.is_some(),
+            (Some(t), Some(id)) => records::held_by_key(&mut state, session, t, id)
+                .await
+                .is_some(),
             _ => false,
         };
 
@@ -889,6 +892,8 @@ pub(crate) async fn complete(
     // nothing else comes of it.
     let mut unstored = false;
     let mut header_id: Option<Value> = None;
+    // A bulk create's request records, with the ids minted for them.
+    let mut request_records: Vec<Value> = Vec::new();
     // What state keeps of an answer holding its record in an envelope or a one-item
     // array is the record, and of a request the record it holds the same way.
     let held_in = op.identity.as_ref().filter(|i| i.record.is_some());
@@ -999,6 +1004,12 @@ pub(crate) async fn complete(
                     true => None,
                     false => generated.body.clone(),
                 };
+                // What the description says of the answer: a long-running create is done.
+                records::settle_create(rt, op, &mut generated);
+                // Each record a bulk or long-running create makes holds an id.
+                request_records =
+                    records::mint_created(&mut state, (session, op, t, state_call), &mut generated)
+                        .await;
                 // A record answered with no identity (a model writing only what the
                 // schema requires) would not be stored: it is given one.
                 mint_create_id(
@@ -1175,7 +1186,7 @@ pub(crate) async fn complete(
                 } else {
                     WriteOrigin::Call
                 };
-                write_state(
+                let outcome = write_state(
                     &mut state,
                     WriteRequest {
                         session,
@@ -1191,9 +1202,29 @@ pub(crate) async fn complete(
                         origin,
                         held: target.is_some() && !generated.new_record,
                         header_id: header_id.clone(),
+                        request_records: std::mem::take(&mut request_records),
                     },
                 )
                 .await;
+                // A create or update that found no record of its type to store: the
+                // description leaves where its record is open. A type with no identity
+                // is marked `no_identity` already, which says why; with no world
+                // attached nothing is marked, as no static gap is.
+                let writes_record = matches!(
+                    op.kind,
+                    OperationKind::Command(Effect::Create | Effect::Update)
+                );
+                let mark = GapCode::NoRecord.as_str();
+                let marked =
+                    |code: GapCode| generated.world_gaps.iter().any(|g| g == code.as_str());
+                if writes_record
+                    && outcome.no_record
+                    && rt.world().is_some()
+                    && !marked(GapCode::NoRecord)
+                    && !marked(GapCode::NoIdentity)
+                {
+                    generated.world_gaps.push(mark.to_string());
+                }
                 if op.kind == OperationKind::Command(Effect::Delete)
                     && state.tracks_deleted
                     && !foreign_key

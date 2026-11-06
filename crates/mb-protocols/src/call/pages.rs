@@ -1523,6 +1523,7 @@ pub(super) async fn mint(
                 origin: WriteOrigin::Seeded,
                 held: false,
                 header_id: None,
+                request_records: Vec::new(),
             },
         )
         .await;

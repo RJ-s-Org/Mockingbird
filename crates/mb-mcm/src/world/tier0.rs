@@ -10,9 +10,10 @@
 use std::collections::BTreeMap;
 
 use super::{
-    AnswerDesc, Extra, IdentityDesc, OpDesc, OpKind, Pointer, TargetDesc, TypeDesc, World, validate,
+    AnswerDesc, Extra, IdentityDesc, IdentityHeader, OpDesc, OpKind, Pointer, TargetDesc, TypeDesc,
+    World, validate,
 };
-use crate::{Bundle, RecordAt};
+use crate::{Bundle, Operation, RecordAt, StatusSelector};
 
 /// The tier-0 world description of `bundle`: only what the bundle already
 /// holds.
@@ -25,7 +26,15 @@ use crate::{Bundle, RecordAt};
 ///   record's id field: of the fields the type's operations name, its
 ///   reads' first, the first that is a member of its record), and
 ///   `answer.record` where the answer holds the record
-///   ([`record_pointer`]).
+///   ([`record_pointer`]);
+/// - a create's `answer.identity_header`: the header the contract's 2xx answer
+///   names the new record's id in, as
+///   [`identity_header`](crate::identity_headers::identity_header) detects it
+///   (on the first 2xx status that declares one).
+///
+/// Tier 0 emits no `identity.alternates`: the runtime's alternate members are
+/// read from a path parameter's name or description, per operation, which no
+/// type-level list restates.
 ///
 /// An operation the bundle says nothing about gets no entry.
 #[must_use]
@@ -52,6 +61,13 @@ pub fn tier0(bundle: &Bundle) -> World {
                 });
             }
         }
+        if desc.kind == Some(OpKind::Create)
+            && let Some(header) = detected_identity_header(op)
+        {
+            desc.answer
+                .get_or_insert_with(AnswerDesc::default)
+                .identity_header = Some(IdentityHeader::Named(header));
+        }
         if desc != OpDesc::default() {
             world.operations.insert(op.id.clone(), desc);
         }
@@ -69,6 +85,17 @@ pub fn tier0(bundle: &Bundle) -> World {
         );
     }
     world
+}
+
+/// The header the first 2xx answer of `op` declaring one names a created
+/// record's id in.
+fn detected_identity_header(op: &Operation) -> Option<String> {
+    op.outputs.iter().find_map(|o| match o.status {
+        StatusSelector::Code(code) if (200..300).contains(&code) => {
+            crate::identity_headers::identity_header(op, code).map(|h| h.name)
+        }
+        _ => None,
+    })
 }
 
 /// The identity member of each type: of the id fields its operations'

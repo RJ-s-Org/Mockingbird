@@ -378,6 +378,21 @@ pub(super) async fn mint_create_id(
         else {
             return;
         };
+        // A type whose identity has a pattern holds the id in that form; one its
+        // schema refuses (a pattern past the member's `maxLength`) is not given.
+        let (draw, drawn) = match records::in_pattern(rt, resource_type, &drawn) {
+            Some(formed) => {
+                let mut record = draw;
+                if let Some(record) = record.as_mut() {
+                    mb_mcm::set_member_at(record, field, Value::String(formed.clone()));
+                }
+                if !identity_holds(rt, op, resource_type, field, &formed) {
+                    return;
+                }
+                (record, formed)
+            }
+            None => (draw, drawn),
+        };
         if !carried.contains(&drawn) && state.get(session, resource_type, &drawn).await.is_none() {
             tracing::debug!(
                 mock = %rt.name,
@@ -389,6 +404,32 @@ pub(super) async fn mint_create_id(
             return;
         }
     }
+}
+
+/// Whether type `t`'s records hold `id` as their identity `field` as `op`'s answer and
+/// the type's read declare it (any id when neither declares the member).
+fn identity_holds(rt: &MockRuntime, op: &Operation, t: &str, field: &str, id: &str) -> bool {
+    let bundle = rt.bundle();
+    let index = rt.index();
+    let read = index
+        .detail_reads
+        .get(t)
+        .and_then(|i| bundle.operations.get(*i)?.success_output()?.schema.as_ref());
+    let own = op.success_output().and_then(|o| o.schema.as_ref());
+    let held = op.identity.as_ref().filter(|i| i.record.is_some());
+    let own = match (own, held) {
+        (Some(schema), Some(identity)) => record_schema_of(bundle, identity, schema),
+        (schema, _) => schema.cloned(),
+    };
+    let value = Value::String(id.to_string());
+    [index.record_schemas.get(t).cloned(), read.cloned(), own]
+        .into_iter()
+        .flatten()
+        .filter_map(|schema| mb_engine::consistency::property_schema(bundle, &schema, field))
+        .all(|declared| {
+            mb_engine::SchemaValidator::for_output(&bundle.with_defs(&declared))
+                .is_ok_and(|v| v.is_valid_output(&value))
+        })
 }
 
 /// Keeps an action's new record off a stored one: an answer whose id is taken
