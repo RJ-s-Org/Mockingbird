@@ -867,3 +867,85 @@ async fn a_refusal_with_a_written_body_is_replayed_for_its_key() {
     assert_eq!(refused, again);
     assert_eq!(calls(&h), 3);
 }
+
+/// Aliases unique by `alias`, refused with `422`: the `422` and the read's `404` share
+/// a JSON:API error body with no code-like member, its `status` shown as a 3-digit code.
+fn json_api_aliases() -> String {
+    r##"
+openapi: 3.1.0
+info: {title: Aliases, version: "1"}
+paths:
+  /aliases:
+    post:
+      operationId: createAlias
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/AliasInput"}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Alias"}}}}
+        "422": {description: refused, content: {application/json: {schema: {$ref: "#/components/schemas/Errors"}}}}
+  /aliases/{aliasId}:
+    parameters: [{name: aliasId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getAlias
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Alias"}}}}
+        "404": {description: missing, content: {application/json: {schema: {$ref: "#/components/schemas/Errors"}}}}
+components:
+  schemas:
+    Alias:
+      type: object
+      required: [id]
+      properties: {id: {type: string}, alias: {type: string}}
+    AliasInput:
+      type: object
+      properties: {alias: {type: string}}
+    Errors:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              status: {type: string, examples: ["422"]}
+              title: {type: string}
+              detail: {type: string}
+              source: {type: object, properties: {pointer: {type: string}}}
+"##
+    .to_string()
+}
+
+/// A described unique conflict refused with a JSON:API body: its `title`, which only the
+/// faker would fill, is the model's (written once), and its `status` says `422`.
+#[tokio::test]
+async fn a_json_api_refusal_from_state_is_written_once_and_says_its_status() {
+    let written = json!({"errors": [{
+        "status": "409",
+        "title": "Alias already taken",
+        "detail": "x",
+        "source": {"pointer": "/x"}
+    }]});
+    let h = support::described(
+        &json_api_aliases(),
+        json!({"types": {"aliases": {"unique": [{"members": ["alias"], "conflict": 422}]}}}),
+        vec![json!({"id": "a1", "alias": "welcome-1"}), written],
+    );
+    let (status, _, _) = h
+        .send("POST", "/aliases", Some(json!({"alias": "welcome-1"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    for _ in 0..2 {
+        let (status, _, body) = h
+            .send("POST", "/aliases", Some(json!({"alias": "welcome-1"})), &[])
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let error = &body["errors"][0];
+        assert_eq!(error["status"], "422", "{body}");
+        assert_eq!(error["title"], "Alias already taken", "{body}");
+        assert_eq!(error["source"]["pointer"], "/alias", "{body}");
+        let detail = error["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("welcome-1"), "{body}");
+    }
+    assert_eq!(calls(&h), 2);
+}

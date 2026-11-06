@@ -262,3 +262,146 @@ async fn an_array_of_error_objects_says_the_message() {
         );
     }
 }
+
+/// `POST /aliases` whose `422` and `404` share a JSON:API error body, its `status` a
+/// string member declared by `status`: a shared schema, so no example of it is taken
+/// for this status alone.
+fn json_api(status: &str) -> Bundle {
+    let src = format!(
+        r##"
+openapi: 3.1.0
+info: {{title: Aliases, version: "1"}}
+paths:
+  /aliases:
+    post:
+      operationId: createAlias
+      requestBody: {{content: {{application/json: {{schema: {{type: object, properties: {{alias: {{type: string}}}}}}}}}}}}
+      responses:
+        "201": {{description: created, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string}}}}}}}}}}}}
+        "404": {{description: missing, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Errors"}}}}}}}}
+        "422": {{description: refused, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Errors"}}}}}}}}
+components:
+  schemas:
+    Errors:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              status: {status}
+              title: {{type: string}}
+              detail: {{type: string}}
+              source: {{type: object, properties: {{pointer: {{type: string}}}}}}
+"##
+    );
+    compile(src.as_bytes()).unwrap()
+}
+
+/// A status member whose examples are 3-digit codes holds the refusal's own status,
+/// offline, every time.
+#[tokio::test]
+async fn a_status_text_member_says_the_refusals_status_offline() {
+    let bundle = json_api(r#"{type: string, examples: ["422"]}"#);
+    let op = bundle.operation("createAlias").unwrap();
+    let engine = Engine::new(None, EngineConfig::default());
+    for _ in 0..2 {
+        let out = engine
+            .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+            .await
+            .unwrap();
+        assert_eq!((out.status, out.source), (422, Source::State));
+        let body = out.body.unwrap();
+        assert_eq!(body["errors"][0]["status"], "422", "{body}");
+        assert_eq!(
+            body["errors"][0]["detail"],
+            "alias 'welcome-1' is already in use",
+            "{body}"
+        );
+        assert_eq!(body["errors"][0]["source"]["pointer"], "/alias", "{body}");
+    }
+}
+
+/// A free text member nothing else fills (`title`) has the model write the body, once
+/// per status and cause, though the schema has no code; its status member still says
+/// the refusal's status.
+#[tokio::test]
+async fn a_free_text_member_has_the_model_write_the_body_once() {
+    let bundle = json_api(r#"{type: string, examples: ["422"]}"#);
+    let op = bundle.operation("createAlias").unwrap();
+    let written = json!({"errors": [{
+        "status": "409",
+        "title": "Alias already taken",
+        "detail": "x",
+        "source": {"pointer": "/x"}
+    }]});
+    let (provider, engine) = scripted(vec![Ok(written.to_string())]);
+    for _ in 0..2 {
+        let out = engine
+            .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+            .await
+            .unwrap();
+        assert_eq!((out.status, out.source), (422, Source::State));
+        let body = out.body.unwrap();
+        let error = &body["errors"][0];
+        assert_eq!(error["title"], "Alias already taken", "{body}");
+        assert_eq!(error["status"], "422", "{body}");
+        assert_eq!(error["detail"], "alias 'welcome-1' is already in use");
+        assert_eq!(error["source"]["pointer"], "/alias", "{body}");
+    }
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// A status member whose examples are words is the API's own: left as it is.
+#[tokio::test]
+async fn a_status_member_with_word_examples_is_left_alone() {
+    let bundle = json_api(r#"{type: string, examples: ["fail", "error"]}"#);
+    let op = bundle.operation("createAlias").unwrap();
+    let engine = Engine::new(None, EngineConfig::default());
+    let out = engine
+        .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+        .await
+        .unwrap();
+    let body = out.body.unwrap();
+    assert_ne!(body["errors"][0]["status"], "422", "{body}");
+}
+
+/// A status member whose pattern takes 3 digits holds the status too; one with an
+/// enum of codes that names it does as well.
+#[tokio::test]
+async fn a_status_member_patterned_or_enumerated_as_codes_says_the_status() {
+    for status in [
+        r#"{type: string, pattern: "^[1-5][0-9]{2}$"}"#,
+        r#"{type: string, enum: ["404", "422"]}"#,
+    ] {
+        let bundle = json_api(status);
+        let op = bundle.operation("createAlias").unwrap();
+        let engine = Engine::new(None, EngineConfig::default());
+        let out = engine
+            .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+            .await
+            .unwrap();
+        let body = out.body.unwrap();
+        assert_eq!(body["errors"][0]["status"], "422", "{status}: {body}");
+    }
+}
+
+/// A body whose members are all filled by the facts or fixed (a message and a
+/// pointer, a status text) asks no model.
+#[tokio::test]
+async fn a_body_the_facts_fill_asks_no_model() {
+    let bundle = refusing_with(
+        "{type: object, properties: {errors: {type: array, minItems: 1, items: {type: object, properties: {status: {type: string, examples: [\"422\"]}, detail: {type: string}, kind: {type: string, enum: [conflict, other]}, source: {type: object, properties: {pointer: {type: string}}}}}}}}",
+    );
+    let op = bundle.operation("createAlias").unwrap();
+    let (provider, engine) = scripted(vec![]);
+    let out = engine
+        .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+        .await
+        .unwrap();
+    assert_eq!(out.body.unwrap()["errors"][0]["status"], "422");
+    assert!(provider.requests().is_empty());
+}
