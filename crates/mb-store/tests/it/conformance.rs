@@ -110,6 +110,8 @@ macro_rules! conformance_checks {
             world_revisions_number_from_one_per_version,
             world_revision_expect_mismatch_conflicts,
             world_revisions_go_with_the_mock,
+            a_world_revision_on_the_active_version_publishes_a_mock_change,
+            a_world_revision_on_an_inactive_version_publishes_nothing,
         }
     };
 }
@@ -4463,5 +4465,62 @@ pub(crate) async fn world_revisions_go_with_the_mock(store: &Arc<dyn ControlStor
             .await
             .expect("latest v1")
             .is_none()
+    );
+}
+
+pub(crate) async fn a_world_revision_on_the_active_version_publishes_a_mock_change(
+    store: &Arc<dyn ControlStore>,
+) {
+    let mock = create(store, "world-publishes").await;
+    store
+        .add_contract_version(mock.id, new_version(ContractStatus::Active, "wp"))
+        .await
+        .expect("add version");
+    let mut rx = store.subscribe();
+    store
+        .add_world_revision(
+            mock.id,
+            1,
+            world_revision(Author::Agent, json!({"version": 1}), None),
+        )
+        .await
+        .expect("revision");
+    assert_eq!(
+        next_change(&mut rx, "world revision change").await,
+        ControlChange::Mock {
+            workspace: DEFAULT_WORKSPACE.into(),
+            name: "world-publishes".into(),
+        }
+    );
+}
+
+pub(crate) async fn a_world_revision_on_an_inactive_version_publishes_nothing(
+    store: &Arc<dyn ControlStore>,
+) {
+    let mock = create(store, "world-quiet").await;
+    for (status, src) in [
+        (ContractStatus::Active, "wq1"),
+        (ContractStatus::Approved, "wq2"),
+    ] {
+        store
+            .add_contract_version(mock.id, new_version(status, src))
+            .await
+            .expect("add version");
+    }
+    let mut rx = store.subscribe();
+    store
+        .add_world_revision(
+            mock.id,
+            2,
+            world_revision(Author::Agent, json!({"version": 1}), None),
+        )
+        .await
+        .expect("revision");
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a revision of an inactive version publishes nothing"
     );
 }

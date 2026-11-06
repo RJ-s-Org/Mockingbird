@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, header};
-use mb_admin::world::{carry_forward, effective_world};
+use mb_admin::world::{carry_forward, effective_world, runtime_world};
 use mb_admin::{AdminState, UPLOAD_HEADER, router, run_next_import};
 use mb_auth::{AuthError, Authenticate, Principal, PrincipalKind, Role};
 use mb_import::world::tier0;
@@ -261,6 +261,64 @@ async fn overlay_entries_are_marked_with_their_author() {
         "{:?}",
         eff.gaps
     );
+}
+
+#[tokio::test]
+async fn runtime_world_equals_effective_world_without_authors() {
+    let (store, mock) = store_with_mock().await;
+    let (version, bundle) = add_version(store.as_ref(), mock, V1).await;
+    let base = tier0(&bundle);
+    let widget = widget_type(&bundle);
+    let check = |label: &'static str| {
+        let store = Arc::clone(&store);
+        let bundle = bundle.clone();
+        let base = base.clone();
+        async move {
+            let eff = effective_world(store.as_ref(), mock, version, &bundle)
+                .await
+                .unwrap();
+            let (world, revision) = runtime_world(store.as_ref(), mock, version, &bundle, &base)
+                .await
+                .unwrap();
+            assert_eq!((&world, revision), (&eff.world, eff.revision), "{label}");
+        }
+    };
+    check("no revision").await;
+    revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::Agent,
+        json!({"version": 1, "types": {widget.clone(): {"identity": {"member": "name"}}}}),
+    )
+    .await;
+    check("one revision").await;
+    revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::User,
+        json!({
+            "version": 1,
+            "types": {widget.clone(): {"identity": {"member": "color"}}},
+            "operations": {"getWidget": {"target": {"path_param": "missing"}}},
+        }),
+    )
+    .await;
+    check("a revision with a refused entry").await;
+    revise(
+        store.as_ref(),
+        mock,
+        version,
+        Author::Agent,
+        json!({"types": 5}),
+    )
+    .await;
+    check("a revision that is not a world").await;
+    let (world, revision) = runtime_world(store.as_ref(), mock, version, &bundle, &base)
+        .await
+        .unwrap();
+    assert_eq!((world, revision), (base.clone(), 3));
 }
 
 #[tokio::test]

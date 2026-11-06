@@ -1084,20 +1084,24 @@ impl ControlStore for PgStore {
     ) -> Result<WorldRevision, StoreError> {
         let document = serde_json::to_string(&r.document)?;
         let mut tx = self.pool.begin().await?;
-        // Serializes this version's revision writers; a mock or version
-        // deleted meanwhile is waited for and then not found.
-        let exists: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM contract_versions WHERE mock_id = $1 AND version = $2 FOR NO KEY UPDATE",
+        // The mock row first, then the version row: the order the version
+        // writers lock in.
+        let (ws, name) = require_locked_mock_key(&mut tx, mock_id, LOCK_KEEP).await?;
+        // Serializes this version's revision writers; a version deleted
+        // meanwhile is waited for and then not found.
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM contract_versions WHERE mock_id = $1 AND version = $2 FOR NO KEY UPDATE",
         )
         .bind(mock_id)
         .bind(version)
         .fetch_optional(&mut *tx)
         .await?;
-        if exists.is_none() {
+        let Some(status) = status else {
             return Err(StoreError::NotFound(format!(
                 "contract version {version} of mock {mock_id}"
             )));
-        }
+        };
+        let active = ContractStatus::parse(&status)? == ContractStatus::Active;
         let current: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(revision), 0) FROM world_revisions WHERE mock_id = $1 AND version = $2",
         )
@@ -1135,6 +1139,10 @@ impl ControlStore for PgStore {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        // The runtime serving the active version is rebuilt with it.
+        if active {
+            self.publish_mock(&ws, &name);
+        }
         Ok(revision)
     }
 

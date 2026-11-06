@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwapOption;
+use mb_admin::world::runtime_world;
 use mb_engine::pii::Scrubber;
 use mb_engine::{
     Engine, EngineConfig, EngineGuards, GenerationLimiter, ScenarioSpec, StreamConfig, TokenBudget,
@@ -14,6 +15,7 @@ use mb_engine::{
 use mb_ext::{Extensions, Tenancy};
 use mb_import::smart::ExtractLlm;
 use mb_llm::{FallbackProvider, HopSettings, OpenAiCompatible, OpenAiConfig, Provider};
+use mb_mcm::world::{World, tier0};
 use mb_protocols::events::EventDeps;
 use mb_protocols::webhooks::deliver::{
     DispatchSettings, ResolvedTarget, SecretBytes, WebhookDispatcher,
@@ -487,18 +489,48 @@ pub async fn build_runtime_with_budget(
     deps: &RuntimeDeps,
     mock: &Mock,
 ) -> anyhow::Result<Option<(MockRuntime, Option<Arc<StoreTokenBudget>>)>> {
-    Ok(build_runtime_tracked(deps, mock)
+    Ok(build_runtime_tracked(deps, mock, None)
         .await?
-        .map(|(rt, budget, _)| (rt, budget)))
+        .map(|(rt, budget, _, _)| (rt, budget)))
 }
+
+/// The world description a runtime was built with.
+#[derive(Clone, Debug)]
+pub(crate) struct LoadedWorld {
+    /// The contract version the runtime serves.
+    pub(crate) version: i64,
+    /// The effective world description it serves.
+    pub(crate) world: Arc<World>,
+    /// Its revision; `0` with none.
+    pub(crate) revision: i64,
+    /// The description could not be loaded: the runtime serves a fallback
+    /// (the previous runtime's world, or tier 0), and a retry is due.
+    pub(crate) pending: bool,
+}
+
+/// What [`build_runtime_tracked`] builds: the runtime, its token budget, the
+/// profiles it generates with and the world description it serves.
+pub(crate) type TrackedRuntime = (
+    MockRuntime,
+    Option<Arc<StoreTokenBudget>>,
+    ProfileUse,
+    LoadedWorld,
+);
 
 /// [`build_runtime_with_budget`], also returning the profiles the runtime
 /// generates with, which grows as its calls build the engines the provider
-/// policy picks.
+/// policy picks, and the world description it serves.
+///
+/// The runtime serves its contract version's effective world description
+/// ([`runtime_world`]). When the store cannot read it, the runtime serves
+/// `previous`'s world (the world the runtime it replaces served) when that
+/// served the same contract version, else tier 0, and the [`LoadedWorld`] is
+/// `pending`: the caller retries the build.
 pub(crate) async fn build_runtime_tracked(
     deps: &RuntimeDeps,
     mock: &Mock,
-) -> anyhow::Result<Option<(MockRuntime, Option<Arc<StoreTokenBudget>>, ProfileUse)>> {
+    previous: Option<&LoadedWorld>,
+) -> anyhow::Result<Option<TrackedRuntime>> {
     let Some(contract) = deps
         .store
         .active_contract(mock.id)
@@ -520,12 +552,46 @@ pub(crate) async fn build_runtime_tracked(
         .map(|s| (s.name.clone(), scenario_runtime(s)))
         .collect::<HashMap<_, _>>();
 
+    let base = tier0(&contract.bundle);
+    let loaded = match runtime_world(
+        deps.store.as_ref(),
+        mock.id,
+        contract.version,
+        &contract.bundle,
+        &base,
+    )
+    .await
+    {
+        Ok((world, revision)) => LoadedWorld {
+            version: contract.version,
+            world: Arc::new(world),
+            revision,
+            pending: false,
+        },
+        Err(error) => {
+            tracing::warn!(mock = %mock.name, %error, "world description not loaded; retrying");
+            match previous.filter(|p| p.version == contract.version) {
+                Some(p) => LoadedWorld {
+                    pending: true,
+                    ..p.clone()
+                },
+                None => LoadedWorld {
+                    version: contract.version,
+                    world: Arc::new(base.clone()),
+                    revision: 0,
+                    pending: true,
+                },
+            }
+        }
+    };
+
     let mut rt = MockRuntime::new(
         mock.name.clone(),
         Arc::new(contract.bundle),
         Arc::new(engine),
         deps.state.clone(),
-    );
+    )
+    .with_world(&base, &loaded.world, loaded.revision);
     rt.workspace = mock.workspace.clone();
     rt.configured_profile = configured_profile(deps, mock);
     if !deps.offline {
@@ -561,7 +627,7 @@ pub(crate) async fn build_runtime_tracked(
     rt.default_scenario = mock.behavior.default_scenario.clone();
     rt.base_paths = mb_import::base_paths(&contract.source);
     rt.webhooks = webhook_dispatcher(deps, mock).await?;
-    Ok(Some((rt, budget, used)))
+    Ok(Some((rt, budget, used, loaded)))
 }
 
 /// The runtime form of a mock's stored data-plane auth settings.

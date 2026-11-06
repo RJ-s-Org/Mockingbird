@@ -5,8 +5,10 @@
 //! and SOAP mocks are dispatched by route prefix on the data plane; gRPC
 //! mocks hold no prefix and are published to the shared [`GrpcServer`].
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::Router;
@@ -25,7 +27,7 @@ use tower::ServiceExt;
 
 use crate::budget::StoreTokenBudget;
 use crate::ha::HubEvent;
-use crate::runtime::{ProfileUse, RuntimeDeps, ServeMode, build_runtime_tracked};
+use crate::runtime::{LoadedWorld, ProfileUse, RuntimeDeps, ServeMode, build_runtime_tracked};
 
 /// How a mock is named in logs and `/readyz`: `name` in the default
 /// workspace, `workspace/name` elsewhere.
@@ -42,6 +44,39 @@ type MockKey = (String, String);
 
 /// Mocks [`MockRegistry::reload_all`] builds at once.
 const RELOAD_CONCURRENCY: usize = 8;
+
+/// The first delay before a mock whose world description could not be
+/// loaded is rebuilt; it doubles on each retry, up to [`WORLD_RETRY_MAX`].
+const WORLD_RETRY_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest delay between two rebuilds of a mock whose world description
+/// could not be loaded.
+const WORLD_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// The delay after a retry that waited `delay`.
+fn next_retry_delay(delay: Duration) -> Duration {
+    delay.saturating_mul(2).min(WORLD_RETRY_MAX)
+}
+
+/// A scheduled rebuild of a mock whose world description could not be
+/// loaded.
+struct WorldRetry {
+    /// The build generation of the mounted runtime it rebuilds: it does
+    /// nothing once another build replaced that runtime.
+    generation: u64,
+    /// How long it waits.
+    delay: Duration,
+    task: tokio::task::AbortHandle,
+}
+
+/// How a mock's build ended, for [`MockRegistry::settle_retry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildEnd {
+    /// It built (or found the mock gone, or with no active contract).
+    Built,
+    /// It failed; whatever was mounted stays.
+    Failed,
+}
 
 /// One mounted mock.
 #[derive(Clone)]
@@ -62,6 +97,10 @@ struct Mounted {
     profiles: ProfileUse,
     /// The mock names no LLM profile: it uses the default one.
     uses_default: bool,
+    /// The world description its runtime serves.
+    world: LoadedWorld,
+    /// The build that made it, from [`MockRegistry::generations`].
+    generation: u64,
 }
 
 /// How a mounted mock is reached.
@@ -189,6 +228,15 @@ pub struct MockRegistry {
     claimed: ArcSwap<HashSet<String>>,
     /// Serialises reloads so concurrent updates cannot drop each other's work.
     reload: Mutex<()>,
+    /// Numbers every build of a mock, so a retry scheduled for one
+    /// runtime does nothing once a later build replaced it.
+    generations: AtomicU64,
+    /// `(workspace, name)` → the scheduled rebuild of a mounted mock whose
+    /// world description could not be loaded; at most one per mock.
+    world_retries: std::sync::Mutex<HashMap<MockKey, WorldRetry>>,
+    /// This registry, for the retry tasks it spawns (which must not keep it
+    /// alive).
+    me: Weak<MockRegistry>,
 }
 
 impl std::fmt::Debug for MockRegistry {
@@ -202,7 +250,7 @@ impl std::fmt::Debug for MockRegistry {
 impl MockRegistry {
     /// An empty registry with its own gRPC server.
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             mounted: ArcSwap::from_pointee(Vec::new()),
             failed: std::sync::Mutex::new(BTreeMap::new()),
             grpc_skipped: std::sync::Mutex::new(BTreeMap::new()),
@@ -211,7 +259,152 @@ impl MockRegistry {
             configured_hosts: std::sync::Mutex::new(BTreeMap::new()),
             claimed: ArcSwap::from_pointee(HashSet::new()),
             reload: Mutex::new(()),
+            generations: AtomicU64::new(0),
+            world_retries: std::sync::Mutex::new(HashMap::new()),
+            me: me.clone(),
         })
+    }
+
+    /// `(revision, pending)` of the world description mounted mock `name`
+    /// in `workspace` serves: its revision (`0` with none), and whether it
+    /// could not be loaded and a rebuild is due. `None` when the mock is not
+    /// mounted.
+    #[doc(hidden)]
+    pub fn world_status(&self, workspace: &str, name: &str) -> Option<(i64, bool)> {
+        self.mounted
+            .load()
+            .iter()
+            .find(|m| m.is(workspace, name))
+            .map(|m| (m.world.revision, m.world.pending))
+    }
+
+    /// The world description mounted mock `name` serves, for its rebuild.
+    fn mounted_world(&self, workspace: &str, name: &str) -> Option<LoadedWorld> {
+        self.mounted
+            .load()
+            .iter()
+            .find(|m| m.is(workspace, name))
+            .map(|m| m.world.clone())
+    }
+
+    /// The next build generation.
+    fn next_generation(&self) -> u64 {
+        self.generations.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Schedules, cancels or keeps mock `key`'s world retry after a build
+    /// of it ended as `end`, for a caller holding `self.reload`.
+    /// `retried` is the delay the build waited when it was itself a retry.
+    ///
+    /// A mounted runtime whose world is `pending` gets one retry, keyed to
+    /// its build generation; any other outcome of a build that did not
+    /// fail cancels the retry. A failed build leaves a scheduled retry as it
+    /// is, and reschedules a retry whose own build failed.
+    fn settle_retry(
+        &self,
+        deps: &RuntimeDeps,
+        key: &MockKey,
+        end: BuildEnd,
+        retried: Option<Duration>,
+    ) {
+        let mounted = self
+            .mounted
+            .load()
+            .iter()
+            .find(|m| m.is(&key.0, &key.1))
+            .map(|m| (m.generation, m.world.pending));
+        let Ok(mut retries) = self.world_retries.lock() else {
+            return;
+        };
+        let pending = match mounted {
+            Some((generation, true)) => Some(generation),
+            _ => None,
+        };
+        let delay = match end {
+            BuildEnd::Built => {
+                let old = retries.remove(key);
+                if let Some(old) = &old {
+                    old.task.abort();
+                }
+                retried
+                    .map(next_retry_delay)
+                    .or(old.map(|o| o.delay))
+                    .unwrap_or(WORLD_RETRY_FIRST)
+            }
+            BuildEnd::Failed => match retried {
+                Some(delay) if !retries.contains_key(key) => next_retry_delay(delay),
+                _ => return,
+            },
+        };
+        let Some(generation) = pending else {
+            return;
+        };
+        let me = self.me.clone();
+        let deps = deps.clone();
+        let task_key = key.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let Some(registry) = me.upgrade() {
+                registry
+                    .retry_world(&deps, task_key, generation, delay)
+                    .await;
+            }
+        })
+        .abort_handle();
+        retries.insert(
+            key.clone(),
+            WorldRetry {
+                generation,
+                delay,
+                task,
+            },
+        );
+    }
+
+    /// Mock `key`'s scheduled world retry, after `delay`: rebuilds the mock
+    /// when the retry is still its own and the runtime of build
+    /// `generation` is still mounted with a `pending` world.
+    async fn retry_world(
+        &self,
+        deps: &RuntimeDeps,
+        key: MockKey,
+        generation: u64,
+        delay: Duration,
+    ) {
+        let _guard = self.reload.lock().await;
+        if let Ok(mut retries) = self.world_retries.lock() {
+            match retries.get(&key) {
+                Some(retry) if retry.generation == generation => {
+                    retries.remove(&key);
+                }
+                _ => return,
+            }
+        }
+        let current = self
+            .mounted
+            .load()
+            .iter()
+            .any(|m| m.is(&key.0, &key.1) && m.generation == generation && m.world.pending);
+        if !current {
+            return;
+        }
+        let (workspace, name) = &key;
+        match self.fetch_and_build(deps, workspace, name).await {
+            Some(built) => {
+                self.apply_built(deps, workspace, name, built, Some(delay))
+                    .await;
+            }
+            None => self.settle_retry(deps, &key, BuildEnd::Failed, Some(delay)),
+        }
+    }
+
+    /// Drops every scheduled world retry: the registry stops watching.
+    fn drop_world_retries(&self) {
+        if let Ok(mut retries) = self.world_retries.lock() {
+            for (_, retry) in retries.drain() {
+                retry.task.abort();
+            }
+        }
     }
 
     /// The shared gRPC server the gRPC mocks are published to.
@@ -246,13 +439,21 @@ impl MockRegistry {
         let current = self.mounted.load_full();
         let mut failed = BTreeMap::new();
         let mut next: Vec<Mounted> = Vec::new();
+        let mut ends: Vec<(MockKey, BuildEnd)> = Vec::new();
         // Built concurrently but taken in (workspace, name) order, so which
         // mock keeps a contested prefix does not depend on build times.
         let mut builds = futures::stream::iter(mocks)
             .map(|mock| {
                 let key: MockKey = (mock.workspace.clone(), mock.name.clone());
                 let deps = deps.clone();
-                let task = tokio::spawn(async move { build_mounted(&deps, &mock).await });
+                let previous = current
+                    .iter()
+                    .find(|m| m.is(&key.0, &key.1))
+                    .map(|m| m.world.clone());
+                let generation = self.next_generation();
+                let task = tokio::spawn(async move {
+                    build_mounted(&deps, &mock, previous.as_ref(), generation).await
+                });
                 async move { (key, task.await) }
             })
             .buffered(RELOAD_CONCURRENCY);
@@ -262,6 +463,14 @@ impl MockRegistry {
                 tracing::error!(mock = %mock_label(&key.0, &key.1), %error, "cannot build mock; keeping any previous version mounted");
                 Err(error)
             });
+            ends.push((
+                key.clone(),
+                if built.is_err() {
+                    BuildEnd::Failed
+                } else {
+                    BuildEnd::Built
+                },
+            ));
             let mounted = match built {
                 Ok(Some(mounted)) => mounted,
                 Ok(None) => continue,
@@ -291,6 +500,20 @@ impl MockRegistry {
         if let Ok(mut slot) = self.failed.lock() {
             *slot = failed;
         }
+        // A mock no longer stored has nothing to retry.
+        let mounted = self.mounted.load_full();
+        if let Ok(mut retries) = self.world_retries.lock() {
+            retries.retain(|key, retry| {
+                let keep = mounted.iter().any(|m| m.is(&key.0, &key.1));
+                if !keep {
+                    retry.task.abort();
+                }
+                keep
+            });
+        }
+        for (key, end) in ends {
+            self.settle_retry(deps, &key, end, None);
+        }
         Ok(())
     }
 
@@ -304,7 +527,7 @@ impl MockRegistry {
     pub async fn reload_mock(&self, deps: &RuntimeDeps, workspace: &str, name: &str) {
         let _guard = self.reload.lock().await;
         if let Some(built) = self.fetch_and_build(deps, workspace, name).await {
-            self.apply_built(deps, workspace, name, built).await;
+            self.apply_built(deps, workspace, name, built, None).await;
         }
     }
 
@@ -375,7 +598,7 @@ impl MockRegistry {
             .await;
         for (workspace, name, built) in builds {
             if let Some(built) = built
-                && self.apply_built(deps, &workspace, &name, built).await
+                && self.apply_built(deps, &workspace, &name, built, None).await
             {
                 return;
             }
@@ -393,7 +616,9 @@ impl MockRegistry {
         match deps.store.get_mock(workspace, name).await {
             Ok(Some(mock)) => {
                 self.set_configured_hosts(workspace, name, &mock.hosts);
-                Some(build_mounted(deps, &mock).await)
+                let previous = self.mounted_world(workspace, name);
+                let generation = self.next_generation();
+                Some(build_mounted(deps, &mock, previous.as_ref(), generation).await)
             }
             Ok(None) => {
                 self.set_configured_hosts(workspace, name, &[]);
@@ -408,9 +633,33 @@ impl MockRegistry {
     }
 
     /// Mounts what [`Self::fetch_and_build`] built for mock `name`, for a
-    /// caller holding `self.reload`. Returns whether every mock was
-    /// reloaded instead (the mock released a prefix).
+    /// caller holding `self.reload`, and settles its world retry (see
+    /// [`Self::settle_retry`]; `retried` as there). Returns whether every
+    /// mock was reloaded instead (the mock released a prefix).
     async fn apply_built(
+        &self,
+        deps: &RuntimeDeps,
+        workspace: &str,
+        name: &str,
+        built: Result<Option<Mounted>, String>,
+        retried: Option<Duration>,
+    ) -> bool {
+        let key: MockKey = (workspace.to_owned(), name.to_owned());
+        let failed = built.is_err();
+        let reloaded_all = self.mount_built(deps, workspace, name, built).await;
+        if !reloaded_all {
+            let end = if failed {
+                BuildEnd::Failed
+            } else {
+                BuildEnd::Built
+            };
+            self.settle_retry(deps, &key, end, retried);
+        }
+        reloaded_all
+    }
+
+    /// [`Self::apply_built`] without the world retry.
+    async fn mount_built(
         &self,
         deps: &RuntimeDeps,
         workspace: &str,
@@ -521,7 +770,10 @@ impl MockRegistry {
                 match changes.recv().await {
                     Ok(event) => batch.add(event),
                     Err(broadcast::error::RecvError::Lagged(_)) => batch.all = true,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        registry.drop_world_retries();
+                        break;
+                    }
                 }
                 batch.drain(&mut changes);
                 if batch.all {
@@ -534,6 +786,7 @@ impl MockRegistry {
                         .await;
                 }
                 if batch.closed {
+                    registry.drop_world_retries();
                     break;
                 }
             }
@@ -1000,11 +1253,20 @@ fn rewrite_path(uri: &Uri, path: &str) -> Result<Uri, axum::http::Error> {
     Uri::builder().path_and_query(path_and_query).build()
 }
 
-/// The mounted router for `mock`; `Ok(None)` when it has no active
-/// contract; `Err` (logged) when it cannot be built.
-async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted>, String> {
+/// The mounted router for `mock`, as build `generation`; `Ok(None)` when it
+/// has no active contract; `Err` (logged) when it cannot be built.
+/// `previous` is the world description of the runtime it replaces, which it
+/// keeps serving when the store cannot read the description (see
+/// [`build_runtime_tracked`]).
+async fn build_mounted(
+    deps: &RuntimeDeps,
+    mock: &Mock,
+    previous: Option<&LoadedWorld>,
+    generation: u64,
+) -> Result<Option<Mounted>, String> {
     let label = mock_label(&mock.workspace, &mock.name);
-    let (runtime, budget, profiles) = match build_runtime_tracked(deps, mock).await {
+    let (runtime, budget, profiles, world) = match build_runtime_tracked(deps, mock, previous).await
+    {
         Ok(Some(built)) => built,
         Ok(None) => return Ok(None),
         Err(error) => {
@@ -1075,6 +1337,8 @@ async fn build_mounted(deps: &RuntimeDeps, mock: &Mock) -> Result<Option<Mounted
             budget,
             profiles,
             uses_default: mock.llm_profile.is_none(),
+            world,
+            generation,
         })),
         Err(error) => {
             tracing::error!(mock = %label, %error, "cannot route mock; keeping any previous version mounted");
