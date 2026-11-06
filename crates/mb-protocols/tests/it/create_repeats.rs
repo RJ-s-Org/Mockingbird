@@ -937,3 +937,78 @@ async fn a_value_naming_a_sibling_is_still_a_copy() {
     let held = h.held("payments", "tr_000001").await;
     assert!(held.get("parent_id").is_none(), "{held}");
 }
+
+/// Templates of a server, whose create gives an alias and name and may name a layout
+/// template by its alias; the API mints the integer id.
+const TEMPLATES: &str = r##"
+openapi: 3.0.0
+info: {title: Mail, version: "1"}
+paths:
+  /servers/{server}/templates:
+    post:
+      operationId: createTemplate
+      parameters: [{name: server, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, properties: {Alias: {type: string}, Name: {type: string}, TemplateType: {type: string, enum: [Standard, Layout]}, LayoutTemplate: {type: string, nullable: true}}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}
+  /templates/{TemplateId}:
+    get:
+      operationId: getTemplate
+      parameters: [{name: TemplateId, in: path, required: true, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}
+components:
+  schemas:
+    Template:
+      type: object
+      required: [TemplateId, Alias, Name]
+      properties:
+        TemplateId: {type: integer}
+        Alias: {type: string}
+        Name: {type: string}
+        TemplateType: {type: string, enum: [Standard, Layout]}
+        LayoutTemplate: {type: string, nullable: true}
+        Active: {type: boolean}
+"##;
+
+/// A create whose answer reuses a stored template's id and describes the new template
+/// in an effect on the stored one (its alias and name, a `null` layout) leaves the
+/// stored template as it was: the whole effect is the new record, its defaults too.
+#[tokio::test]
+async fn a_create_s_effect_describing_the_new_record_changes_no_sibling() {
+    let template = |id: u64, alias: &str, kind: &str, layout: Value| json!({"TemplateId": id, "Alias": alias, "Name": alias, "TemplateType": kind, "LayoutTemplate": layout, "Active": true});
+    let h = harness(
+        TEMPLATES,
+        vec![
+            template(1001, "base-layout", "Layout", Value::Null),
+            template(1002, "welcome", "Standard", json!("base-layout")),
+            json!({
+                "effects": [{"type": "templates", "id": "1002", "set": {
+                    "Alias": "receipt", "Name": "receipt", "LayoutTemplate": null,
+                    "TemplateType": "Standard", "Active": true,
+                }}],
+                "response": template(1002, "receipt", "Standard", Value::Null),
+            }),
+        ],
+    );
+    let uri = "/servers/srv_1/templates";
+    h.post(
+        uri,
+        json!({"Alias": "base-layout", "Name": "base-layout", "TemplateType": "Layout"}),
+    )
+    .await;
+    h.post(
+        uri,
+        json!({"Alias": "welcome", "Name": "welcome", "LayoutTemplate": "base-layout"}),
+    )
+    .await;
+    let (status, body) = h
+        .post(uri, json!({"Alias": "receipt", "Name": "receipt"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body} {}", h.prompt(2));
+    let welcome = h.held("templates", "1002").await;
+    assert_eq!(welcome["Alias"], "welcome", "{welcome} {}", h.prompt(2));
+    assert_eq!(welcome["LayoutTemplate"], "base-layout", "{welcome}");
+}
