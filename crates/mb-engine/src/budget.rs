@@ -90,7 +90,7 @@ impl Shaped {
 /// never leaves out.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Listing<'a> {
-    /// The operation lists records: its page's item arrays (see [`page_arrays`]) hold them.
+    /// The operation lists records: its page's item arrays hold them.
     pub list: bool,
     /// The tokens of the pointer a world description gives the answer's records at
     /// (`answer.records`), over what the shape says.
@@ -206,7 +206,19 @@ fn plan(
         stats = Stats::of(&doc, held)?;
     }
     if !selected {
-        let optional = |m: &Member| !m.required && !m.keeps && !requested.contains(&m.property);
+        // A member holding some of the kept arrays may go once the request names
+        // another that holds some; while it names none, none of them goes, so the
+        // list is never left with no page.
+        let named = stats
+            .members
+            .values()
+            .any(|m| !m.holds.is_empty() && !m.keeps && requested.contains(&m.property));
+        let optional = |m: &Member| {
+            !m.required
+                && !m.keeps
+                && (named || m.holds.is_empty())
+                && !requested.contains(&m.property)
+        };
         drop_until(&mut doc, &mut stats, optional, budget, held, None)?;
     }
     for (top, nested) in CAPS {
@@ -1789,6 +1801,32 @@ mod tests {
             "{}",
             shaped.schema
         );
+    }
+
+    #[test]
+    fn a_list_with_several_pages_keeps_them_while_the_request_names_none() {
+        // An index answering a page of open issues and one of closed ones.
+        let state = json!({"type": "object", "properties": {
+            "count": {"type": "integer"},
+            "entries": {"type": "array", "items": {"type": "object", "properties": {
+                "summary": {"type": "string"}, "reporter": user(), "assignee": user()
+            }}}
+        }});
+        let doc = json!({"type": "object", "properties": {
+            "open": state.clone(), "closed": state
+        }});
+        for budget in [30, 60, 120] {
+            let shaped = shape(&doc, &HashSet::new(), false, budget, None, list()).unwrap();
+            let pages = ["open", "closed"]
+                .iter()
+                .filter(|state| {
+                    shaped.schema["properties"][**state]["properties"]
+                        .get("entries")
+                        .is_some()
+                })
+                .count();
+            assert!(pages >= 1, "{budget}: {}", shaped.schema);
+        }
     }
 
     #[test]
