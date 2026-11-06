@@ -1,0 +1,298 @@
+openapi: 3.0.3
+info:
+  title: Zotero Web API v3 (library items)
+  version: "3"
+  description: |
+    A subset of the Zotero Web API v3, written from its public documentation
+    (zotero.org/support/dev/web_api/v3: Basics and Write Requests). Requests send an
+    API key as `Zotero-API-Key: <key>` (or `Authorization: Bearer <key>`) and
+    `Zotero-API-Version: 3`. Every path starts with a library prefix, `/users/{userID}`.
+
+    Every library has a version number that goes up on each change; every object
+    (item) has a `version`, the library version at which it last changed. A
+    multi-object read answers the library's version in `Last-Modified-Version`, a
+    single-object read the object's. An item answers as `{key, version, library, links,
+    meta, data}`; `key` is an 8-character string of capitals and digits and `data` holds
+    the editable JSON (`key`, `version`, `itemType`, `title`, `creators`, `date`,
+    `abstractNote`, `tags` as `[{"tag": ...}]`, `collections`, `relations`, ...).
+
+    Reads (`GET .../items`, `.../items/top`) take `q` (a phrase quick search of titles
+    and creators by default), `itemType` (`||` for OR, a leading `-` for NOT), `tag`
+    (`||` for OR, a leading `-` for NOT, the parameter repeated for AND), `itemKey` (a
+    comma-separated list of up to 50 keys) and `since` (objects changed after a library
+    version). `sort` (`dateAdded`, `dateModified`, `title`, `creator`, `itemType`,
+    `date`, ...; default `dateModified`) and `direction` (`asc` or `desc`) order the
+    results; `limit` (1 to 100, default 25) and `start` (default 0) page them. A
+    multi-object answer carries `Total-Results` (every match) and a `Link` header with
+    `first`, `prev`, `next` and `last` relations. `format` is `json` (the default),
+    `keys` (the matching keys as plain text, one per line, unpaged) or `versions` (an
+    object of key to version).
+
+    Writes: `POST .../items` takes a JSON array of up to 50 items (413 for more). Each
+    needs `itemType`; other fields are optional. An unversioned write sends a
+    `Zotero-Write-Token` (a random 32-character string): a token is kept for 12 hours
+    after a successful request, and a request that sends one again answers 412 and
+    writes nothing. The answer is 200 with the outcome of each object keyed by its index
+    in the array: `successful` (the saved objects), `success` (their keys), `unchanged`
+    (keys) and `failed` (`{key, code, message}`), and `Last-Modified-Version`.
+
+    `PUT .../items/{itemKey}` replaces the item: fields it omits are removed. `PATCH`
+    changes only the fields it sends. Both send the item's current version in
+    `If-Unmodified-Since-Version` (or a `version` property) and answer 204 No Content
+    with the item's new version in `Last-Modified-Version`; when the item changed after
+    that version they answer 412 Precondition Failed and change nothing.
+    `DELETE .../items/{itemKey}` with `If-Unmodified-Since-Version` answers 204; without
+    the header it answers 428 Precondition Required. A deleted item is not found (404).
+
+    Status codes: 200, 204, 304 (a conditional read with nothing changed), 400 (an
+    invalid type or field, or JSON that does not parse), 403, 404, 409 (the library is
+    locked), 412, 413, 428 and 429.
+servers:
+  - url: https://api.zotero.org
+security:
+  - apiKey: []
+tags:
+  - name: Items
+paths:
+  /users/{userID}/items:
+    parameters:
+      - $ref: "#/components/parameters/userID"
+    get:
+      tags: [Items]
+      operationId: items_list
+      summary: The library's items
+      parameters:
+        - {name: q, in: query, description: A phrase quick search of titles and creators., schema: {type: string}}
+        - {name: qmode, in: query, schema: {type: string, enum: [titleCreatorYear, everything], default: titleCreatorYear}}
+        - {name: itemType, in: query, description: "An item type; `||` joins types (OR) and a leading `-` negates.", schema: {type: string}}
+        - name: tag
+          in: query
+          description: "A tag; `||` joins tags (OR), a leading `-` negates, and repeating the parameter requires every one (AND)."
+          style: form
+          explode: true
+          schema: {type: array, items: {type: string}}
+        - {name: itemKey, in: query, description: Up to 50 comma-separated keys., schema: {type: string}}
+        - {name: since, in: query, description: Only objects changed after this library version., schema: {type: integer, default: 0}}
+        - {name: sort, in: query, schema: {type: string, enum: [dateAdded, dateModified, title, creator, itemType, date, publisher, publicationTitle, journalAbbreviation, language, accessDate, libraryCatalog, callNumber, rights, addedBy, numItems], default: dateModified}}
+        - {name: direction, in: query, schema: {type: string, enum: [asc, desc]}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
+        - {name: start, in: query, schema: {type: integer, minimum: 0, default: 0}}
+        - {name: format, in: query, description: "`keys` answers plain text, one key per line, unpaged.", schema: {type: string, enum: [json, keys, versions], default: json}}
+        - {name: If-Modified-Since-Version, in: header, schema: {type: integer}}
+      responses:
+        "200":
+          description: The matching items, or their keys or versions.
+          headers:
+            Total-Results: {description: Every match., schema: {type: integer}}
+            Link: {description: "`first`, `prev`, `next` and `last` relations.", schema: {type: string}}
+            Last-Modified-Version: {description: The library's version., schema: {type: integer}}
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {type: array, items: {$ref: "#/components/schemas/Item"}}
+                  - {type: object, description: "format=versions: key to version.", additionalProperties: {type: integer}}
+            text/plain:
+              schema: {type: string, description: "format=keys: one key per line."}
+        "304": {description: Nothing changed since If-Modified-Since-Version.}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Items]
+      operationId: items_create
+      summary: Create or update up to 50 items
+      parameters:
+        - {name: Zotero-Write-Token, in: header, description: "A random 32-character string; a token sent again within 12 hours of a successful request answers 412.", schema: {type: string, minLength: 32, maxLength: 32}}
+        - {name: If-Unmodified-Since-Version, in: header, schema: {type: integer}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 50
+              items: {$ref: "#/components/schemas/ItemData"}
+      responses:
+        "200":
+          description: The outcome of each object, keyed by its index in the array.
+          headers:
+            Last-Modified-Version: {schema: {type: integer}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WriteResult"}
+        "400": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+        "413": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Items]
+      operationId: items_delete
+      summary: Delete up to 50 items
+      parameters:
+        - {name: itemKey, in: query, required: true, schema: {type: string}}
+        - {name: If-Unmodified-Since-Version, in: header, schema: {type: integer}}
+      responses:
+        "204": {description: Deleted.}
+        "409": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+        "428": {$ref: "#/components/responses/Error"}
+  /users/{userID}/items/{itemKey}:
+    parameters:
+      - $ref: "#/components/parameters/userID"
+      - {name: itemKey, in: path, required: true, schema: {type: string, pattern: "^[A-Z0-9]{8}$"}}
+    get:
+      tags: [Items]
+      operationId: item_get
+      summary: One item
+      responses:
+        "200":
+          description: The item.
+          headers:
+            Last-Modified-Version: {description: The item's version., schema: {type: integer}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Item"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Items]
+      operationId: item_replace
+      summary: Replace an item; fields it omits are removed
+      parameters:
+        - {name: If-Unmodified-Since-Version, in: header, schema: {type: integer}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ItemData"}
+      responses:
+        "204":
+          description: Updated.
+          headers:
+            Last-Modified-Version: {schema: {type: integer}}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Items]
+      operationId: item_update
+      summary: Change only the fields sent
+      parameters:
+        - {name: If-Unmodified-Since-Version, in: header, schema: {type: integer}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ItemFields"}
+      responses:
+        "204":
+          description: Updated.
+          headers:
+            Last-Modified-Version: {schema: {type: integer}}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Items]
+      operationId: item_delete
+      summary: Delete an item
+      parameters:
+        - {name: If-Unmodified-Since-Version, in: header, description: Required; without it the delete answers 428., schema: {type: integer}}
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "412": {$ref: "#/components/responses/Error"}
+        "428": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    apiKey: {type: apiKey, in: header, name: Zotero-API-Key}
+  parameters:
+    userID: {name: userID, in: path, required: true, schema: {type: integer}}
+  responses:
+    Error:
+      description: A plain-text message.
+      content:
+        text/plain:
+          schema: {type: string}
+  schemas:
+    Creator:
+      type: object
+      properties:
+        creatorType: {type: string, example: author}
+        firstName: {type: string}
+        lastName: {type: string}
+        name: {type: string, description: A single-field name instead of firstName and lastName.}
+    ItemData:
+      description: An item's editable JSON; `itemType` is required.
+      allOf:
+        - {$ref: "#/components/schemas/ItemFields"}
+        - {type: object, required: [itemType]}
+    ItemFields:
+      type: object
+      description: Item fields; a PATCH sends only those it changes.
+      properties:
+        key: {type: string}
+        version: {type: integer}
+        itemType: {type: string, example: book}
+        title: {type: string}
+        creators: {type: array, items: {$ref: "#/components/schemas/Creator"}}
+        abstractNote: {type: string}
+        date: {type: string}
+        publisher: {type: string}
+        publicationTitle: {type: string}
+        url: {type: string}
+        tags:
+          type: array
+          items:
+            type: object
+            properties:
+              tag: {type: string}
+              type: {type: integer, description: 1 for an automatic tag.}
+        collections: {type: array, items: {type: string}}
+        relations: {type: object, additionalProperties: true}
+        dateAdded: {type: string, format: date-time}
+        dateModified: {type: string, format: date-time}
+    Item:
+      type: object
+      required: [key, version, data]
+      properties:
+        key: {type: string, pattern: "^[A-Z0-9]{8}$"}
+        version: {type: integer}
+        library:
+          type: object
+          properties:
+            type: {type: string, enum: [user, group]}
+            id: {type: integer}
+            name: {type: string}
+        links: {type: object}
+        meta:
+          type: object
+          properties:
+            creatorSummary: {type: string}
+            parsedDate: {type: string}
+            numChildren: {type: integer}
+        data: {$ref: "#/components/schemas/ItemData"}
+    WriteResult:
+      type: object
+      properties:
+        successful:
+          type: object
+          description: The saved objects, by index.
+          additionalProperties: {$ref: "#/components/schemas/Item"}
+        success:
+          type: object
+          description: The saved objects' keys, by index.
+          additionalProperties: {type: string}
+        unchanged:
+          type: object
+          additionalProperties: {type: string}
+        failed:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              key: {type: string}
+              code: {type: integer}
+              message: {type: string}

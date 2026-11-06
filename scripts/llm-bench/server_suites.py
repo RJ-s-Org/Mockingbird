@@ -109,6 +109,15 @@ Suites (contracts are in-repo, so the bench is reproducible):
   voided, nested recipients and custom fields, start_position paging) and Mastodon
   statuses (Idempotency-Key, favourites and bookmarks, Link cursors, edit history,
   scheduled statuses). Not in the default suites. Same rule; no check gates the rest.
+- journeys_blind14: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind14/`: Zotero library items (batch writes answered
+  by index, write tokens, library versions, tag filters, format=keys), FHIR R4 patients
+  (versioned resources, If-Match, vread and history, conditional create, searchset
+  Bundles, 410 Gone), OpenStreetMap changesets and nodes (XML bodies, plain-text
+  answers, version conflicts, multi fetch), Home Assistant states (201 or 200 upserts,
+  last_changed, events, templates, history) and Transmission RPC torrents (JSON-RPC 2.0
+  behind a 409 session id, notifications). Not in the default suites. Same rule; no
+  check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -175,7 +184,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
           "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
           "journeys_blind8", "journeys_blind9", "journeys_blind10", "journeys_blind11",
-          "journeys_blind12", "journeys_blind13")
+          "journeys_blind12", "journeys_blind13", "journeys_blind14")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -9505,6 +9514,914 @@ def run_journeys_blind13(srv, sink, args):
     run_journey_table(BLIND13_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- fourteenth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind14/). They were picked for
+# API styles and domains no earlier set has: batch writes that answer the outcome of each
+# object by its index, write tokens that refuse a repeat with 412, library versions sent
+# in `If-Unmodified-Since-Version` (412 when stale, 428 when missing), PUT that drops the
+# fields it omits beside PATCH, `tag` filters with repeats for AND and `-` for NOT,
+# `Total-Results` with `Link` pages and `format=keys` plain text (Zotero), resources
+# versioned by the server with `Location` naming the version, `If-Match` updates that
+# answer 412 when stale, vread and history Bundles, conditional creates by
+# `If-None-Exist`, searchset Bundles with prefix string matching, `_count` and `next`
+# links, and deletes that read 410 Gone (FHIR R4), XML request bodies with plain-text
+# answers, edits inside changesets that close, versions that must match (409), a node a
+# way uses that cannot be deleted (412), history oldest first and multi fetches that
+# answer deleted nodes as not visible (OpenStreetMap), state writes that answer 201 when
+# new and 200 after, `last_changed` that moves only with the state, events, templates
+# rendered as plain text and history as one list per entity (Home Assistant), and one
+# JSON-RPC 2.0 endpoint behind a session id that a 409 hands out, results under the
+# request's id, `torrent_duplicate` for a repeated add, standard error codes, notifications
+# that answer 204, and torrents named by hash (Transmission).
+#
+# No check gates the rest, and one miss stays one miss: a check that uses an earlier
+# call's result goes by state the journey reads again or a fallback of its own (an object
+# a create did not make is made again), so only the check that judges that call fails. A
+# check asserts only what the public documentation promises a client: no status code,
+# order or field it does not give. Do not edit a check to suit results.
+BLIND14_CHECKS = {
+    "zotero": [
+        "a batch create answers 200 with each new item under its index",
+        "the item reads by key with its data and version",
+        "a write token sent again is refused with 412 and writes nothing",
+        "a PATCH with the current version answers 204 and changes only what it sends",
+        "a PATCH with a stale version is refused with 412 and changes nothing",
+        "a PUT answers 204 and drops the fields it omits",
+        "repeated tag filters keep only the items with every tag",
+        "a negated tag keeps only the items without it", "a quick search finds the item by its title",
+        "limit 1 answers one item, Total-Results and a next link", "the next link reaches another item",
+        "format=keys answers the run's keys as plain text", "a delete without a version is refused with 428",
+        "a delete with the version answers 204 and the item is not found",
+    ],
+    "fhir": [
+        "a created patient answers 201 with a Location naming its id and version",
+        "the patient reads by id with its name, identifier and version",
+        "an update with the current If-Match answers 200 and moves the version on",
+        "an update with a stale If-Match is refused with 412 and changes nothing",
+        "vread answers the first version", "the history Bundle holds both versions",
+        "an identifier search answers a searchset of the run's patients",
+        "a family search matches the names that start with it",
+        "_count 1 answers one patient and a next link", "the next link reaches another patient",
+        "a conditional create that matches one patient answers 200 and creates nothing",
+        "a gender outside its value set is refused with 400 or 422",
+        "an observation for the patient is found by subject",
+        "a deleted patient answers success and reads 410",
+    ],
+    "openstreetmap": [
+        "a changeset create answers its id as plain text", "the changeset reads open with its comment",
+        "a node create answers its id as plain text", "the node reads with its position, tags and version 1",
+        "an update with the current version answers the next version",
+        "an update with a stale version is refused with 409 and changes nothing",
+        "version 1 still reads with its first tags", "the history lists every version oldest first",
+        "a multi fetch answers each node named", "a node a way uses is refused deletion with 412 and stays",
+        "a deleted node answers its new version and reads 410",
+        "a multi fetch answers the deleted node as not visible",
+        "closing the changeset answers 200 and it reads closed", "a node in a closed changeset is refused with 409",
+    ],
+    "homeassistant": [
+        "a new state answers 201 with its state, attributes and a Location",
+        "the state reads by entity id with its attributes and times",
+        "an attribute-only change answers 200 and keeps last_changed",
+        "a state change answers 200 and moves last_changed", "the state list holds the run's entities",
+        "an entity with no state reads 404", "a state write without state is refused with 400 and creates nothing",
+        "the history of one entity holds its states and only its own",
+        "the history of two entities answers a list for each", "a fired event answers that it fired",
+        "a template renders an entity's state as text", "a template renders an entity's attribute",
+        "a deleted state answers success and reads 404", "deleting a state that is gone answers 404",
+    ],
+    "transmission": [
+        "a request without a session id answers 409 with one",
+        "the request sent again answers its result under the request's id",
+        "torrent_add answers torrent_added with the magnet's hash",
+        "adding it again answers torrent_duplicate with the same torrent",
+        "torrent_get by hash answers the paused torrent stopped with its labels",
+        "torrent_set replaces the labels", "torrent_start moves the torrent out of stopped",
+        "torrent_stop answers it stopped", "torrent_get of every torrent holds the run's two by label",
+        "torrent_get by two hashes answers both",
+        "an unknown method answers error -32601 under the request's id",
+        "positional params are refused with an error", "a notification answers 204 with no body",
+        "torrent_remove removes the torrent",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND14_CHECKS)
+BLIND14_DIR = "scripts/llm-bench/contracts/blind14"
+# Contracts alone: no persona.
+BLIND14_MOCKS = {name: (f"{BLIND14_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND14_CHECKS}
+ZOTERO_KEY = "[A-Z0-9]{8}"
+DIGITS = "0123456789"
+
+
+def sending(j, extra, method, path, **kw):
+    """`j.call` with `extra` headers on this call only."""
+    j.headers.update(extra)
+    try:
+        return j.call(method, path, **kw)
+    finally:
+        for k in extra:
+            j.headers.pop(k, None)
+
+
+def header_int(j, name):
+    """The latest answer's header `name` as an integer, or None."""
+    value = str(j.answer_headers.get(name) or "").strip()
+    return int(value) if re.fullmatch(r"\d+", value) else None
+
+
+def raw_text(j):
+    return j.raw.decode("utf-8", errors="replace").strip() if isinstance(j.raw, bytes) else ""
+
+
+def zotero_steps(j):
+    # Every run writes into a library of its own (a user id made for the run) and tags
+    # each item with a word made for it, and every list a check judges filters on that
+    # tag, so the lists hold only this run's items. The documentation gives 200 for a
+    # batch write, 204 for a PUT, a PATCH and a delete, 412 and 428 for versions.
+    j.headers.update({"zotero-api-key": "bench-placeholder", "zotero-api-version": "3", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    run = f"bench{tag}"
+    lib = f"/users/{j.rng.randrange(10**6, 10**7)}"
+    titles = {"a": f"Atlas of Rivers {tag}", "b": f"Tides and Currents {tag}", "c": f"Delta Survey {tag}"}
+    ana = [{"creatorType": "author", "firstName": "Ana", "lastName": "Silva"}]
+    items = {
+        "a": {"itemType": "book", "title": titles["a"], "creators": ana, "date": "2019", "publisher": "Bench Press",
+              "tags": [{"tag": run}, {"tag": "maps"}], "collections": [], "relations": {}},
+        "b": {"itemType": "journalArticle", "title": titles["b"], "creators": ana, "publicationTitle": "Coastal Notes",
+              "tags": [{"tag": run}, {"tag": "sea"}], "collections": [], "relations": {}},
+        "c": {"itemType": "report", "title": titles["c"], "creators": ana,
+              "tags": [{"tag": run}, {"tag": "maps"}, {"tag": "sea"}], "collections": [], "relations": {}},
+    }
+
+    def token():
+        return {"zotero-write-token": made_up(j, "", 32, HEX)}
+
+    def version_header(version):
+        return {"if-unmodified-since-version": str(version)}
+
+    def write(objects, headers):
+        return obj(sending(j, headers, "POST", f"{lib}/items", body=objects))
+
+    def saved_key(result, index):
+        """The key a write answered for the object at `index` (`successful` holds the
+        saved object, `success` its key), or None."""
+        found = obj(obj(result.get("successful")).get(str(index))).get("key")
+        if not matches(ZOTERO_KEY, found):
+            found = obj(result.get("success")).get(str(index))
+        return found if matches(ZOTERO_KEY, found) else None
+
+    def data(item):
+        return obj(item.get("data"))
+
+    def tags_of(item):
+        return [t.get("tag") for t in dicts(data(item).get("tags"))]
+
+    def listed(*params):
+        answer = j.call("GET", f"{lib}/items", query=[("tag", run)] + list(params))
+        return dicts(answer if isinstance(answer, list) else [])
+
+    def keys(rows):
+        return [r.get("key") for r in rows]
+
+    def read(key):
+        return obj(j.call("GET", f"{lib}/items/{key}"))
+
+    def titled(name):
+        return [r.get("key") for r in listed(("q", titles[name])) if eq(data(r).get("title"), titles[name])]
+
+    def key_of(name, key):
+        """The key a write answered; else the one item of the run with its title; else
+        that of one written again. So a write that answered no key is its own check's
+        miss only."""
+        if key:
+            return key
+        found = titled(name)
+        if len(found) == 1 and matches(ZOTERO_KEY, found[0]):
+            return found[0]
+        return saved_key(write([items[name]], token()), 0) or made_up(j, "", 8, UPPER + DIGITS)
+
+    def version_of(key):
+        """The item's version as it reads; else as the versions format lists it."""
+        item = read(key)
+        if is_int(item.get("version")):
+            return item["version"]
+        answer = obj(j.call("GET", f"{lib}/items", query={"itemKey": key, "format": "versions"}))
+        return answer.get(key) if is_int(answer.get(key)) else None
+
+    first = write([items["a"], items["b"]], token())
+    status = j.last["status"]
+    ka, kb = saved_key(first, 0), saved_key(first, 1)
+    j.check("a batch create answers 200 with each new item under its index",
+            status == 200 and ka is not None and kb is not None and ka != kb and not obj(first.get("failed")),
+            status_code=status, keys=[ka, kb], failed=first.get("failed"))
+    ka, kb = key_of("a", ka), key_of("b", kb)
+    item = read(ka)
+    j.check("the item reads by key with its data and version",
+            eq(item.get("key"), ka) and is_int(item.get("version")) and eq(data(item).get("title"), titles["a"])
+            and eq(data(item).get("itemType"), "book") and run in tags_of(item),
+            item={"key": item.get("key"), "version": item.get("version"),
+                  "data": {k: data(item).get(k) for k in ("title", "itemType", "tags")}})
+    # The token that is sent again is that of a write that succeeded: a token is kept
+    # only after a successful request. No check judges that write by itself.
+    sent = token()
+    kc = saved_key(write([items["c"]], sent), 0)
+    if kc is None:
+        sent = token()
+        kc = saved_key(write([items["c"]], sent), 0)
+    kc = key_of("c", kc)
+    write([items["c"]], sent)
+    refused = j.last["status"]
+    found = titled("c")
+    j.check("a write token sent again is refused with 412 and writes nothing", refused == 412 and found == [kc],
+            status_code=refused, titled=found, expected=[kc])
+    for extra in [k for k in found if k != kc]:
+        # The repeated write made an item (the check before's miss): it is deleted, so the
+        # tag lists the checks after it judge hold only the run's three items.
+        version = version_of(extra)
+        sending(j, version_header(version if is_int(version) else 0), "DELETE", f"{lib}/items/{extra}")
+    before = version_of(ka)
+    held = {k: data(read(ka)).get(k) for k in ("title", "itemType", "publisher")}
+    sending(j, version_header(before if is_int(before) else 0), "PATCH", f"{lib}/items/{ka}", body={"date": "2021"})
+    patched = j.last["status"]
+    after = read(ka)
+    j.check("a PATCH with the current version answers 204 and changes only what it sends",
+            patched == 204 and eq(data(after).get("date"), "2021")
+            and all(isinstance(v, str) and eq(data(after).get(k), v) for k, v in held.items())
+            and is_int(before) and is_int(after.get("version")) and after["version"] > before,
+            status_code=patched, before=before, version=after.get("version"), held=held,
+            read={k: data(after).get(k) for k in ("date", "title", "itemType", "publisher")})
+    # Any version before the item's current one is stale: the item changed after it.
+    current = version_of(ka)
+    stale = current - 1 if is_int(current) and current > 0 else 0
+    held = data(read(ka)).get("date")
+    sending(j, version_header(stale), "PATCH", f"{lib}/items/{ka}", body={"date": "1999"})
+    refused = j.last["status"]
+    now = data(read(ka)).get("date")
+    j.check("a PATCH with a stale version is refused with 412 and changes nothing",
+            refused == 412 and isinstance(held, str) and eq(now, held),
+            status_code=refused, held=held, read=now)
+    current = version_of(ka)
+    full = {k: v for k, v in items["a"].items() if k != "date"}
+    full["abstractNote"] = f"Revised {tag}"
+    sending(j, version_header(current if is_int(current) else 0), "PUT", f"{lib}/items/{ka}", body=full)
+    put = j.last["status"]
+    after = data(read(ka))
+    j.check("a PUT answers 204 and drops the fields it omits",
+            put == 204 and eq(after.get("abstractNote"), f"Revised {tag}") and eq(after.get("title"), titles["a"])
+            and not after.get("date"),
+            status_code=put, read={k: after.get(k) for k in ("abstractNote", "title", "date")})
+    # The tags as the items read now, so a write that stored others is its own miss.
+    held = {k: tags_of(read(k)) for k in (ka, kb, kc)}
+    present = [k for k in (ka, kb, kc) if run in held[k]]
+    want = [k for k in present if "maps" in held[k]]
+    rows = keys(listed(("tag", "maps")))
+    j.check("repeated tag filters keep only the items with every tag", bool(want) and same_items(rows, want),
+            listed=rows, expected=want, tags=held)
+    want = [k for k in present if "maps" not in held[k]]
+    rows = keys(listed(("tag", "-maps")))
+    j.check("a negated tag keeps only the items without it", bool(want) and same_items(rows, want),
+            listed=rows, expected=want)
+    want = [k for k in present if eq(data(read(k)).get("title"), titles["b"])]
+    rows = keys(listed(("q", titles["b"])))
+    j.check("a quick search finds the item by its title", want == [kb] and rows == want, listed=rows, expected=want)
+    # The run's items as the filter lists them whole; the pages are judged against it.
+    every = keys(listed(("limit", 100)))
+    rows = keys(listed(("sort", "title"), ("direction", "asc"), ("limit", 1)))
+    total, link = header_int(j, "Total-Results"), j.answer_headers.get("Link")
+    nxt = link_rel(link, "next")
+    j.check("limit 1 answers one item, Total-Results and a next link",
+            len(rows) == 1 and rows[0] in every and len(every) > 1 and total == len(every) and nxt is not None,
+            listed=rows, every=every, total=total, link=link)
+    # The next page is reached by the query its URL holds, as given.
+    cursor = urllib.parse.parse_qsl(urllib.parse.urlsplit(nxt or "").query)
+    if nxt and cursor:
+        later = keys(dicts(j.call("GET", f"{lib}/items", query=cursor)))
+        j.check("the next link reaches another item",
+                len(later) == 1 and later[0] in every and later[0] not in rows,
+                first=rows, listed=later, every=every)
+    else:
+        j.check("the next link reaches another item", False, reason="the first page gave no next link", link=link)
+    present = [k for k in (ka, kb, kc) if eq(read(k).get("key"), k) and run in tags_of(read(k))]
+    j.call("GET", f"{lib}/items", query=[("tag", run), ("format", "keys")])
+    lines = [line.strip() for line in raw_text(j).splitlines() if line.strip()]
+    j.check("format=keys answers the run's keys as plain text",
+            j.last["status"] == 200 and bool(present) and same_items(lines, present), keys=lines, expected=present)
+    j.call("DELETE", f"{lib}/items/{kb}")
+    refused = j.last["status"]
+    still = read(kb).get("key")
+    j.check("a delete without a version is refused with 428", refused == 428 and eq(still, kb),
+            status_code=refused, read=still)
+    current = version_of(kb)
+    sending(j, version_header(current if is_int(current) else 0), "DELETE", f"{lib}/items/{kb}")
+    deleted = j.last["status"]
+    read(kb)
+    j.check("a delete with the version answers 204 and the item is not found",
+            deleted == 204 and j.last["status"] == 404, delete_status=deleted, read_status=j.last["status"])
+
+
+def fhir_steps(j):
+    # Every patient carries an identifier in a system made for this run, and every
+    # search a check judges filters on that system (or names the run's patient), so the
+    # searches hold only this run's resources.
+    j.headers.update({"accept": "application/fhir+json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    system = f"https://bench.example/patients/{tag}"
+
+    def patient(n, family, given_name, gender="female", pid=None, within=system):
+        body = {"resourceType": "Patient", "identifier": [{"system": within, "value": f"p{n}"}], "active": True,
+                "name": [{"use": "official", "family": family, "given": [given_name]}], "gender": gender,
+                "birthDate": "1985-04-12"}
+        if pid:
+            body["id"] = pid
+        return body
+
+    def send(method, path, resource, **headers):
+        extra = dict({"content-type": "application/fhir+json", "prefer": "return=representation"}, **headers)
+        return obj(sending(j, extra, method, path, data=json.dumps(resource).encode()))
+
+    def located(kind="Patient"):
+        """The (id, version) the Location header names, `[base]/{type}/{id}/_history/{vid}`."""
+        found = re.search(rf"/{kind}/([A-Za-z0-9\-.]{{1,64}})/_history/([^/?#]+)",
+                          str(j.answer_headers.get("Location") or ""))
+        return (found.group(1), found.group(2)) if found else None
+
+    def matched(bundle, kind="Patient"):
+        return [obj(e.get("resource")).get("id") for e in dicts(bundle.get("entry"))
+                if eq(obj(e.get("resource")).get("resourceType"), kind)
+                and obj(e.get("search")).get("mode", "match") == "match"]
+
+    def search(**query):
+        bundle = obj(j.call("GET", "/Patient", query=dict({"identifier": f"{system}|"}, **query)))
+        return matched(bundle), bundle
+
+    def read(pid):
+        return obj(j.call("GET", f"/Patient/{pid}"))
+
+    def family(resource):
+        return head(resource.get("name")).get("family")
+
+    def version(resource):
+        return obj(resource.get("meta")).get("versionId")
+
+    def made_id(answer, n, resource):
+        """The id the Location names; else the body's; else the one patient the run's
+        identifier finds; else that of one made again."""
+        where = located()
+        if where:
+            return where[0]
+        if given(answer.get("id"), None):
+            return answer["id"]
+        ids, _ = search(identifier=f"{system}|p{n}")
+        if len(ids) == 1 and given(ids[0], None):
+            return ids[0]
+        again = send("POST", "/Patient", resource)
+        return (located() or (given(again.get("id"), f"bench-{tag}-{n}"),))[0]
+
+    first = patient(1, "Rivera", "Ana")
+    made = send("POST", "/Patient", first)
+    status, where = j.last["status"], located()
+    j.check("a created patient answers 201 with a Location naming its id and version",
+            status == 201 and where is not None and (made.get("id") is None or eq(made.get("id"), where[0])),
+            status_code=status, location=j.answer_headers.get("Location"), id=made.get("id"))
+    p1 = made_id(made, 1, first)
+    # The first version as the create named it, else as the patient reads now.
+    v1 = where[1] if where else given(version(made), None)
+    found = read(p1)
+    v1 = v1 or given(version(found), "1")
+    j.check("the patient reads by id with its name, identifier and version",
+            eq(found.get("resourceType"), "Patient") and eq(found.get("id"), p1) and eq(family(found), "Rivera")
+            and any(eq(i.get("system"), system) and eq(i.get("value"), "p1") for i in dicts(found.get("identifier")))
+            and given(version(found), None) is not None,
+            patient={k: found.get(k) for k in ("resourceType", "id", "name", "identifier", "meta")})
+    current = given(version(read(p1)), v1)
+    send("PUT", f"/Patient/{p1}", patient(1, "Rivera-Lopez", "Ana", pid=p1), **{"if-match": f'W/"{current}"'})
+    status = j.last["status"]
+    after = read(p1)
+    j.check("an update with the current If-Match answers 200 and moves the version on",
+            status == 200 and eq(family(after), "Rivera-Lopez") and given(version(after), None) is not None
+            and version(after) != current,
+            status_code=status, before=current, version=version(after), family=family(after))
+    if not eq(family(after), "Rivera-Lopez"):
+        # The update did not hold (the check before's miss): it is made once more without
+        # a condition, so the checks after it judge their own calls.
+        send("PUT", f"/Patient/{p1}", patient(1, "Rivera-Lopez", "Ana", pid=p1))
+    # The first version is stale once the patient has moved on; else one it never had.
+    current = version(read(p1))
+    stale = v1 if v1 != current else f"stale{tag}"
+    held = family(read(p1))
+    send("PUT", f"/Patient/{p1}", patient(1, "Stale", "Ana", pid=p1), **{"if-match": f'W/"{stale}"'})
+    refused = j.last["status"]
+    now = family(read(p1))
+    j.check("an update with a stale If-Match is refused with 412 and changes nothing",
+            refused == 412 and isinstance(held, str) and eq(now, held), status_code=refused, held=held, read=now)
+    if isinstance(held, str) and not eq(now, held):
+        # The stale update held (the check before's miss): the family is put back without a
+        # condition, so the searches after it judge their own calls.
+        send("PUT", f"/Patient/{p1}", patient(1, held, "Ana", pid=p1))
+    old = obj(j.call("GET", f"/Patient/{p1}/_history/{v1}"))
+    j.check("vread answers the first version", eq(old.get("id"), p1) and eq(family(old), "Rivera"),
+            version=v1, read={k: old.get(k) for k in ("id", "name", "meta")})
+    now = family(read(p1))
+    history = obj(j.call("GET", f"/Patient/{p1}/_history"))
+    families = [family(obj(e.get("resource"))) for e in dicts(history.get("entry"))]
+    j.check("the history Bundle holds both versions",
+            eq(history.get("resourceType"), "Bundle") and eq(history.get("type"), "history") and len(families) >= 2
+            and "Rivera" in families and isinstance(now, str) and now != "Rivera" and now in families,
+            type=history.get("type"), families=families, current=now)
+    # No check judges these creates by themselves.
+    second, third = patient(2, "Okafor", "Ben", gender="male"), patient(3, "Rivera", "Cleo")
+    p2 = made_id(send("POST", "/Patient", second), 2, second)
+    p3 = made_id(send("POST", "/Patient", third), 3, third)
+    names = {p: family(read(p)) for p in (p1, p2, p3)}
+    present = [p for p in (p1, p2, p3) if isinstance(names[p], str)]
+    ids, bundle = search()
+    j.check("an identifier search answers a searchset of the run's patients",
+            eq(bundle.get("resourceType"), "Bundle") and eq(bundle.get("type"), "searchset") and bool(present)
+            and same_items(ids, present),
+            type=bundle.get("type"), listed=ids, expected=present)
+    # A string search matches a name that equals the value or starts with it, ignoring case.
+    want = [p for p in present if names[p].lower().startswith("rivera")]
+    ids, _ = search(family="Rivera")
+    j.check("a family search matches the names that start with it", len(want) > 1 and same_items(ids, want),
+            listed=ids, expected=want, families=names)
+    # The run's patients as the search lists them whole; the pages are judged against it.
+    every, _ = search()
+    ids, bundle = search(_count=1)
+    nxt = next((link.get("url") for link in dicts(bundle.get("link")) if eq(link.get("relation"), "next")), None)
+    j.check("_count 1 answers one patient and a next link",
+            len(ids) == 1 and ids[0] in every and len(every) > 1 and given(nxt, None) is not None,
+            listed=ids, every=every, link=bundle.get("link"))
+    # The next page is the server's link, followed as given (its search path and query).
+    path = urllib.parse.urlsplit(nxt).path if isinstance(nxt, str) else ""
+    at = path.find("/Patient")
+    if at >= 0:
+        query = urllib.parse.parse_qsl(urllib.parse.urlsplit(nxt).query)
+        later = matched(obj(j.call("GET", path[at:], query=query or None)))
+        j.check("the next link reaches another patient", len(later) == 1 and later[0] in every and later[0] not in ids,
+                first=ids, listed=later, every=every)
+    else:
+        j.check("the next link reaches another patient", False, reason="the first page gave no Patient next link",
+                link=nxt)
+    send("POST", "/Patient", patient(1, "Rivera-Lopez", "Ana"), **{"if-none-exist": f"identifier={system}|p1"})
+    status = j.last["status"]
+    ids, _ = search(identifier=f"{system}|p1")
+    j.check("a conditional create that matches one patient answers 200 and creates nothing",
+            status == 200 and ids == [p1], status_code=status, listed=ids, expected=[p1])
+    # In a system of its own, so a create that should not have happened is this check's
+    # miss only.
+    elsewhere = f"{system}/invalid"
+    send("POST", "/Patient", patient(9, "Invalid", "Code", gender="robot", within=elsewhere))
+    refused = j.last["status"]
+    stored = matched(obj(j.call("GET", "/Patient", query={"identifier": f"{elsewhere}|"})))
+    j.check("a gender outside its value set is refused with 400 or 422", refused in (400, 422) and stored == [],
+            status_code=refused, stored=stored)
+    observation = {"resourceType": "Observation", "status": "final",
+                   "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+                   "subject": {"reference": f"Patient/{p1}"}, "effectiveDateTime": "2026-01-15T09:30:00Z",
+                   "valueQuantity": {"value": 72, "unit": "beats/minute", "system": "http://unitsofmeasure.org",
+                                     "code": "/min"}}
+    made = send("POST", "/Observation", observation)
+    created = j.last["status"]
+    oid = (located("Observation") or (given(made.get("id"), None),))[0]
+    found = matched(obj(j.call("GET", "/Observation", query={"subject": f"Patient/{p1}"})), "Observation")
+    j.check("an observation for the patient is found by subject",
+            created == 201 and oid is not None and found == [oid], status_code=created, id=oid, listed=found)
+    j.call("DELETE", f"/Patient/{p3}")
+    deleted = j.last["status"]
+    read(p3)
+    j.check("a deleted patient answers success and reads 410", success(deleted) and j.last["status"] == 410,
+            delete_status=deleted, read_status=j.last["status"])
+
+
+def osm_xml(kind, attrs, tags=None, refs=None):
+    """An `<osm>` body holding one element; attribute values are escaped."""
+    root = ElementTree.Element("osm")
+    element = ElementTree.SubElement(root, kind, {k: str(v) for k, v in attrs.items()})
+    for ref in refs or []:
+        ElementTree.SubElement(element, "nd", {"ref": str(ref)})
+    for k, v in (tags or {}).items():
+        ElementTree.SubElement(element, "tag", {"k": k, "v": v})
+    return ElementTree.tostring(root, encoding="unicode")
+
+
+def openstreetmap_steps(j):
+    # Element ids are global, so every check reads its own elements by id and every
+    # multi fetch names only this run's nodes; their tags hold a number made for the run.
+    # Writes send XML and answer plain text; reads ask for JSON.
+    j.headers.update({"authorization": "Bearer bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    comment = f"Add benches in the park, run {tag}"
+    spot = (round(51.5 + j.rng.random() / 100, 7), round(-0.12 + j.rng.random() / 100, 7))
+    names = {"first": f"Bench {tag}", "second": f"Oak bench {tag}"}
+
+    def write(method, path, body):
+        j.headers["content-type"] = "text/xml"
+        try:
+            j.call(method, path, data=body.encode())
+        finally:
+            j.headers.pop("content-type", None)
+        text = raw_text(j)
+        return int(text) if j.last["status"] == 200 and re.fullmatch(r"\d+", text) else None
+
+    def open_changeset():
+        return write("PUT", "/api/0.6/changeset/create",
+                     osm_xml("changeset", {}, {"comment": comment, "created_by": "bench"}))
+
+    def changeset(cid):
+        answer = obj(j.call("GET", f"/api/0.6/changeset/{cid}"))
+        # The JSON format since August 2024 answers `changeset`; older servers answered it
+        # as the one entry of `elements`.
+        return obj(answer.get("changeset")) or head(answer.get("elements"))
+
+    def node(nid, path=""):
+        return head(obj(j.call("GET", f"/api/0.6/node/{nid}{path}")).get("elements"))
+
+    def create(cid, tags, at=spot):
+        return write("POST", "/api/0.6/nodes", osm_xml("node", {"changeset": cid, "lat": at[0], "lon": at[1]}, tags))
+
+    def made(nid, again):
+        """An id a create answered, else that of one made again, else a made-up one."""
+        return nid or again() or int(made_up(j, "9", 9, DIGITS))
+
+    def version_of(nid):
+        v = node(nid).get("version")
+        return v if is_int(v) else 1
+
+    def fetched(*ids):
+        rows = dicts(obj(j.call("GET", "/api/0.6/nodes", query={"nodes": ",".join(map(str, ids))})).get("elements"))
+        return {r.get("id"): r for r in rows if eq(r.get("type"), "node")}
+
+    cid = open_changeset()
+    j.check("a changeset create answers its id as plain text", cid is not None, status_code=j.last["status"],
+            answer=raw_text(j)[:80])
+    cid = made(cid, open_changeset)
+    found = changeset(cid)
+    j.check("the changeset reads open with its comment",
+            eq(found.get("id"), cid) and found.get("open") is True
+            and eq(obj(found.get("tags")).get("comment"), comment),
+            changeset={k: found.get(k) for k in ("id", "open", "tags")})
+    first_tags = {"amenity": "bench", "name": names["first"]}
+    n1 = create(cid, first_tags)
+    j.check("a node create answers its id as plain text", n1 is not None, status_code=j.last["status"],
+            answer=raw_text(j)[:80])
+    n1 = made(n1, lambda: create(cid, first_tags))
+    found = node(n1)
+    j.check("the node reads with its position, tags and version 1",
+            eq(found.get("id"), n1) and is_number(found.get("lat")) and near(found["lat"], spot[0], 1e-6)
+            and is_number(found.get("lon")) and near(found["lon"], spot[1], 1e-6)
+            and obj(found.get("tags")) == first_tags and eq(found.get("version"), 1)
+            and eq(found.get("changeset"), cid),
+            node={k: found.get(k) for k in ("id", "lat", "lon", "tags", "version", "changeset")})
+    second_tags = {"amenity": "bench", "name": names["second"], "backrest": "yes"}
+
+    def update(nid, version, tags):
+        return write("PUT", f"/api/0.6/node/{nid}", osm_xml("node", {"id": nid, "changeset": cid, "version": version,
+                                                                      "lat": spot[0], "lon": spot[1]}, tags))
+
+    before = version_of(n1)
+    answered = update(n1, before, second_tags)
+    found = node(n1)
+    j.check("an update with the current version answers the next version",
+            answered == before + 1 and eq(found.get("version"), before + 1) and obj(found.get("tags")) == second_tags,
+            before=before, answer=answered, read={k: found.get(k) for k in ("version", "tags")})
+    if obj(found.get("tags")) != second_tags:
+        # The update did not hold (the check before's miss): it is made once more, so the
+        # checks after it judge their own calls.
+        update(n1, version_of(n1), second_tags)
+    current = version_of(n1)
+    stale = current - 1 if current > 1 else current + 1
+    held = obj(node(n1).get("tags"))
+    write("PUT", f"/api/0.6/node/{n1}", osm_xml("node", {"id": n1, "changeset": cid, "version": stale,
+                                                         "lat": spot[0], "lon": spot[1]}, {"amenity": "bench"}))
+    refused = j.last["status"]
+    now = obj(node(n1).get("tags"))
+    j.check("an update with a stale version is refused with 409 and changes nothing",
+            refused == 409 and bool(held) and now == held, status_code=refused, held=held, read=now)
+    if held and now != held:
+        # The stale update held (the check before's miss): the tags are put back, so the
+        # history check after it judges its own call.
+        update(n1, version_of(n1), held)
+    old = node(n1, "/1")
+    j.check("version 1 still reads with its first tags",
+            eq(old.get("version"), 1) and obj(old.get("tags")) == first_tags,
+            read={k: old.get(k) for k in ("id", "version", "tags")})
+    current = version_of(n1)
+    versions = dicts(obj(j.call("GET", f"/api/0.6/node/{n1}/history")).get("elements"))
+    numbers = [v.get("version") for v in versions]
+    j.check("the history lists every version oldest first",
+            current > 1 and numbers == list(range(1, current + 1))
+            and eq(obj(versions[0].get("tags")).get("name"), names["first"])
+            and eq(obj(versions[-1].get("tags")).get("name"), names["second"]),
+            versions=numbers, current=current)
+    # No check judges these creates by themselves.
+    n2 = made(create(cid, {"amenity": "bench", "name": f"Elm bench {tag}"}),
+              lambda: create(cid, {"amenity": "bench", "name": f"Elm bench {tag}"}))
+    rows = fetched(n1, n2)
+    j.check("a multi fetch answers each node named", same_items(list(rows), [n1, n2]),
+            listed=sorted(rows, key=str), expected=[n1, n2])
+    path = osm_xml("way", {"changeset": cid}, {"highway": "footway", "name": f"Park path {tag}"}, refs=[n1, n2])
+    way = write("POST", "/api/0.6/ways", path) or write("POST", "/api/0.6/ways", path)
+    current = version_of(n1)
+    write("DELETE", f"/api/0.6/node/{n1}", osm_xml("node", {"id": n1, "changeset": cid, "version": current,
+                                                            "lat": spot[0], "lon": spot[1]}))
+    refused = j.last["status"]
+    found = node(n1)
+    j.check("a node a way uses is refused deletion with 412 and stays",
+            refused == 412 and eq(found.get("id"), n1) and found.get("visible") is not False,
+            status_code=refused, way=way, read_status=j.last["status"])
+    lone = {"amenity": "waste_basket", "name": f"Bin {tag}"}
+    n3 = made(create(cid, lone), lambda: create(cid, lone))
+
+    def delete(nid):
+        version = version_of(nid)
+        return version, write("DELETE", f"/api/0.6/node/{nid}", osm_xml("node", {
+            "id": nid, "changeset": cid, "version": version, "lat": spot[0], "lon": spot[1]}))
+
+    before, answered = delete(n3)
+    node(n3)
+    j.check("a deleted node answers its new version and reads 410",
+            answered == before + 1 and j.last["status"] == 410, before=before, answer=answered,
+            read_status=j.last["status"])
+    if j.last["status"] != 410:
+        # The delete did not hold (the check before's miss): it is made once more.
+        delete(n3)
+    rows = fetched(n2, n3)
+    j.check("a multi fetch answers the deleted node as not visible",
+            obj(rows.get(n3)).get("visible") is False and n2 in rows and rows[n2].get("visible") is not False,
+            nodes={str(k): v.get("visible") for k, v in rows.items()})
+    j.call("PUT", f"/api/0.6/changeset/{cid}/close")
+    closed = j.last["status"]
+    found = changeset(cid)
+    j.check("closing the changeset answers 200 and it reads closed", closed == 200 and found.get("open") is False,
+            status_code=closed, open=found.get("open"))
+    if found.get("open") is not False:
+        # The close did not hold (the check before's miss): it is closed once more.
+        j.call("PUT", f"/api/0.6/changeset/{cid}/close")
+    create(cid, {"amenity": "bench", "name": f"Late bench {tag}"})
+    j.check("a node in a closed changeset is refused with 409", j.last["status"] == 409,
+            status_code=j.last["status"], answer=raw_text(j)[:120])
+
+
+def homeassistant_steps(j):
+    # Every entity id holds a number made for this run, and every list a check judges
+    # keeps only those entities, so runs stay apart. The documentation gives 201 for a new
+    # state and 200 for a changed one, and 404 for an entity with no state.
+    j.headers.update({"authorization": "Bearer bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    prefix = f"sensor.bench_{tag}_"
+    temp, humidity = f"{prefix}temperature", f"{prefix}humidity"
+    looks = {"unit_of_measurement": "°C", "friendly_name": f"Bench {tag} temperature"}
+    start = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def put(eid, state, attributes):
+        return obj(j.call("POST", f"/api/states/{eid}", body={"state": state, "attributes": attributes}))
+
+    def read(eid):
+        return obj(j.call("GET", f"/api/states/{eid}"))
+
+    def history(*eids):
+        end = (datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        answer = j.call("GET", f"/api/history/period/{start}",
+                        query={"filter_entity_id": ",".join(eids), "end_time": end})
+        return [dicts(rows) for rows in answer] if isinstance(answer, list) else []
+
+    def render(template):
+        j.call("POST", "/api/template", body={"template": template})
+        return raw_text(j)
+
+    made = put(temp, "21.5", looks)
+    status = j.last["status"]
+    j.check("a new state answers 201 with its state, attributes and a Location",
+            status == 201 and eq(made.get("entity_id"), temp) and eq(made.get("state"), "21.5")
+            and obj(made.get("attributes")) == looks and bool(j.answer_headers.get("Location")),
+            status_code=status, state={k: made.get(k) for k in ("entity_id", "state", "attributes")},
+            location=j.answer_headers.get("Location"))
+    found = read(temp)
+    j.check("the state reads by entity id with its attributes and times",
+            eq(found.get("entity_id"), temp) and eq(found.get("state"), "21.5")
+            and obj(found.get("attributes")) == looks
+            and instant(found.get("last_changed")) is not None and instant(found.get("last_updated")) is not None,
+            state={k: found.get(k) for k in ("entity_id", "state", "attributes")},
+            times_given=[instant(found.get(k)) is not None for k in ("last_changed", "last_updated")])
+    if j.last["status"] == 404:
+        # The create did not hold (the check before's miss): it is made once more.
+        put(temp, "21.5", looks)
+    before = read(temp)
+    more = dict(obj(before.get("attributes")) or looks, battery=90)
+    answer = put(temp, given(before.get("state"), "21.5"), more)
+    status = j.last["status"]
+    after = read(temp)
+    j.check("an attribute-only change answers 200 and keeps last_changed",
+            status == 200 and eq(obj(answer.get("attributes")).get("battery"), 90)
+            and eq(obj(after.get("attributes")).get("battery"), 90)
+            and given(before.get("last_changed"), None) is not None
+            and instant(after.get("last_changed")) == instant(before.get("last_changed")),
+            status_code=status, battery=obj(after.get("attributes")).get("battery"),
+            kept=instant(after.get("last_changed")) == instant(before.get("last_changed")))
+    before = read(temp)
+    put(temp, "23.0", obj(before.get("attributes")) or looks)
+    status = j.last["status"]
+    after = read(temp)
+    was, now = instant(before.get("last_changed")), instant(after.get("last_changed"))
+    j.check("a state change answers 200 and moves last_changed",
+            status == 200 and eq(after.get("state"), "23.0") and was is not None and now is not None
+            and now >= was and after.get("last_changed") != before.get("last_changed"),
+            status_code=status, state=after.get("state"), moved=bool(was and now and now > was))
+    # No check judges this create by itself.
+    put(humidity, "48", {"unit_of_measurement": "%"})
+    if not eq(read(humidity).get("state"), "48"):
+        put(humidity, "48", {"unit_of_measurement": "%"})
+    present = [e for e in (temp, humidity) if eq(read(e).get("entity_id"), e)]
+    answer = j.call("GET", "/api/states")
+    rows = [s.get("entity_id") for s in dicts(answer if isinstance(answer, list) else [])
+            if str(s.get("entity_id")).startswith(prefix)]
+    j.check("the state list holds the run's entities", bool(present) and same_items(rows, present),
+            listed=rows, expected=present)
+    read(f"{prefix}missing")
+    j.check("an entity with no state reads 404", j.last["status"] == 404, status_code=j.last["status"])
+    broken = f"{prefix}broken"
+    j.call("POST", f"/api/states/{broken}", body={"attributes": {"unit_of_measurement": "%"}})
+    refused = j.last["status"]
+    read(broken)
+    j.check("a state write without state is refused with 400 and creates nothing",
+            refused == 400 and j.last["status"] == 404, status_code=refused, read_status=j.last["status"])
+    # The states the entity went through, as it read after each write.
+    now = given(read(temp).get("state"), "23.0")
+    lists = history(temp)
+    states = [s.get("state") for rows in lists for s in rows]
+    owners = {s.get("entity_id") for rows in lists for s in rows}
+    j.check("the history of one entity holds its states and only its own",
+            len(lists) == 1 and owners == {temp} and {"21.5", now} <= set(states),
+            lists=len(lists), owners=sorted(map(str, owners)), states=states)
+    lists = history(temp, humidity)
+    owners = [sorted({str(s.get("entity_id")) for s in rows}) for rows in lists]
+    j.check("the history of two entities answers a list for each",
+            len(lists) == 2 and sorted(owners) == sorted([[temp], [humidity]]), owners=owners)
+    event = f"bench_{tag}_doorbell"
+    answer = obj(j.call("POST", f"/api/events/{event}", body={"source": f"bench {tag}"}))
+    j.check("a fired event answers that it fired",
+            j.last["status"] == 200 and eq(answer.get("message"), f"Event {event} fired."), answer=answer)
+    now = read(temp).get("state")
+    text = render(f"{{{{ states('{temp}') }}}}")
+    j.check("a template renders an entity's state as text",
+            j.last["status"] == 200 and isinstance(now, str) and text == now, rendered=text[:80], state=now)
+    unit = obj(read(temp).get("attributes")).get("unit_of_measurement")
+    text = render(f"{{{{ state_attr('{temp}', 'unit_of_measurement') }}}}")
+    j.check("a template renders an entity's attribute",
+            j.last["status"] == 200 and isinstance(unit, str) and text == unit, rendered=text[:80], unit=unit)
+    j.call("DELETE", f"/api/states/{humidity}")
+    deleted = j.last["status"]
+    read(humidity)
+    gone = j.last["status"]
+    j.check("a deleted state answers success and reads 404", success(deleted) and gone == 404,
+            delete_status=deleted, read_status=gone)
+    if gone != 404:
+        # The delete did not hold (the check before's miss): it is made once more.
+        j.call("DELETE", f"/api/states/{humidity}")
+    j.call("DELETE", f"/api/states/{humidity}")
+    j.check("deleting a state that is gone answers 404", j.last["status"] == 404, status_code=j.last["status"])
+
+
+def transmission_steps(j):
+    # Every torrent carries a label made for this run, and every list a check judges
+    # keeps only the torrents with it (or names them by hash), so runs stay apart.
+    j.headers.update({"accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    run = f"bench-{tag}"
+    hashes = {k: made_up(j, "", 40, HEX) for k in ("a", "b")}
+    magnet = {k: f"magnet:?xt=urn:btih:{h}&dn=bench-{tag}-{k}" for k, h in hashes.items()}
+    sequence = [j.rng.randrange(10**3, 10**4)]
+    fields = ["id", "name", "hash_string", "status", "labels"]
+
+    def next_id():
+        sequence[0] += 1
+        return sequence[0]
+
+    def post(body):
+        answer = obj(j.call("POST", "/transmission/rpc", body=body))
+        fresh = str(j.answer_headers.get("X-Transmission-Session-Id") or "")
+        if j.last["status"] == 409 and fresh:
+            # The session id moved on: it is kept and the request sent again, as a client does.
+            j.headers["x-transmission-session-id"] = fresh
+            answer = obj(j.call("POST", "/transmission/rpc", body=body))
+        return answer
+
+    def rpc(method, params=None, rid=None):
+        body = {"jsonrpc": "2.0", "method": method, "id": rid if rid is not None else next_id()}
+        if params is not None:
+            body["params"] = params
+        return post(body)
+
+    def result(answer):
+        return obj(answer.get("result"))
+
+    def ok(answer):
+        return j.last["status"] == 200 and "error" not in answer and "result" in answer
+
+    def torrents(ids=None):
+        params = {"fields": fields}
+        if ids is not None:
+            params["ids"] = ids
+        return dicts(result(rpc("torrent_get", params)).get("torrents"))
+
+    def hash_of(t):
+        return str(t.get("hash_string") or "").lower()
+
+    def one(key):
+        return next((t for t in torrents([hashes[key]]) if hash_of(t) == hashes[key]), {})
+
+    def add(key, labels):
+        return rpc("torrent_add", {"filename": magnet[key], "paused": True, "labels": labels})
+
+    rid = next_id()
+    answer = obj(j.call("POST", "/transmission/rpc", body={"jsonrpc": "2.0", "method": "session_get", "id": rid}))
+    session = str(j.answer_headers.get("X-Transmission-Session-Id") or "")
+    j.check("a request without a session id answers 409 with one", j.last["status"] == 409 and bool(session),
+            status_code=j.last["status"], session_given=bool(session))
+    j.headers["x-transmission-session-id"] = session or made_up(j, "", 48, ALNUM)
+    rid = next_id()
+    answer = rpc("session_get", {"fields": ["version", "rpc_version_semver"]}, rid)
+    j.check("the request sent again answers its result under the request's id",
+            ok(answer) and eq(answer.get("jsonrpc"), "2.0") and eq(answer.get("id"), rid)
+            and given(result(answer).get("version"), None) is not None
+            and given(result(answer).get("rpc_version_semver"), None) is not None,
+            id=answer.get("id"), sent=rid, result=result(answer), error=answer.get("error"))
+    answer = add("a", [run, "linux"])
+    first = obj(result(answer).get("torrent_added"))
+    j.check("torrent_add answers torrent_added with the magnet's hash",
+            ok(answer) and hash_of(first) == hashes["a"] and is_int(first.get("id")),
+            torrent_added=first, keys=sorted(result(answer)), error=answer.get("error"))
+    if not one("a"):
+        # The add did not hold (the check before's miss): it is made once more.
+        add("a", [run, "linux"])
+    known = one("a").get("id")
+    again = result(add("a", [run, "linux"]))
+    duplicate = obj(again.get("torrent_duplicate"))
+    j.check("adding it again answers torrent_duplicate with the same torrent",
+            "torrent_added" not in again and hash_of(duplicate) == hashes["a"]
+            and (not is_int(known) or eq(duplicate.get("id"), known)),
+            torrent_duplicate=duplicate, keys=sorted(again), id=known)
+    found = one("a")
+    j.check("torrent_get by hash answers the paused torrent stopped with its labels",
+            hash_of(found) == hashes["a"] and eq(found.get("status"), 0)
+            and same_items(found.get("labels"), [run, "linux"]),
+            torrent={k: found.get(k) for k in ("hash_string", "status", "labels")})
+    answer = rpc("torrent_set", {"ids": [hashes["a"]], "labels": [run, "iso"]})
+    found = one("a")
+    j.check("torrent_set replaces the labels", ok(answer) and same_items(found.get("labels"), [run, "iso"]),
+            error=answer.get("error"), labels=found.get("labels"))
+    answer = rpc("torrent_start", {"ids": [hashes["a"]]})
+    status = one("a").get("status")
+    j.check("torrent_start moves the torrent out of stopped",
+            ok(answer) and is_int(status) and 1 <= status <= 6, error=answer.get("error"), status=status)
+    if status == 0:
+        # The start did not hold (the check before's miss): it is made once more, so the
+        # stop is judged on a started torrent.
+        rpc("torrent_start", {"ids": [hashes["a"]]})
+    before = one("a").get("status")
+    answer = rpc("torrent_stop", {"ids": [hashes["a"]]})
+    status = one("a").get("status")
+    j.check("torrent_stop answers it stopped", ok(answer) and eq(status, 0), error=answer.get("error"),
+            before=before, status=status)
+    # No check judges this add by itself.
+    add("b", [run])
+    if not one("b"):
+        add("b", [run])
+    present = sorted(h for k, h in hashes.items() if one(k))
+    rows = sorted(hash_of(t) for t in torrents() if run in (t.get("labels") or []))
+    j.check("torrent_get of every torrent holds the run's two by label", len(present) == 2 and rows == present,
+            listed=rows, expected=present)
+    rows = sorted(hash_of(t) for t in torrents([hashes["a"], hashes["b"]]))
+    j.check("torrent_get by two hashes answers both", len(present) == 2 and rows == present,
+            listed=rows, expected=present)
+    rid = next_id()
+    answer = rpc(f"bench_unknown_{tag}", {}, rid)
+    j.check("an unknown method answers error -32601 under the request's id",
+            eq(obj(answer.get("error")).get("code"), -32601) and eq(answer.get("id"), rid) and "result" not in answer,
+            answer=answer)
+    rid = next_id()
+    answer = post({"jsonrpc": "2.0", "method": "torrent_get", "params": [fields, [hashes["a"]]], "id": rid})
+    j.check("positional params are refused with an error",
+            is_int(obj(answer.get("error")).get("code")) and "result" not in answer, answer=answer)
+    post({"jsonrpc": "2.0", "method": "session_get", "params": {"fields": ["version"]}})
+    j.check("a notification answers 204 with no body", j.last["status"] == 204 and not j.raw,
+            status_code=j.last["status"], body=raw_text(j)[:80])
+    answer = rpc("torrent_remove", {"ids": [hashes["b"]], "delete_local_data": False})
+    left = [hash_of(t) for t in torrents([hashes["b"]])]
+    every = [hash_of(t) for t in torrents()]
+    j.check("torrent_remove removes the torrent",
+            ok(answer) and hashes["b"] not in left and hashes["b"] not in every,
+            error=answer.get("error"), by_hash=left, listed=hashes["b"] in every)
+
+
+BLIND14_JOURNEYS = {"zotero": zotero_steps, "fhir": fhir_steps, "openstreetmap": openstreetmap_steps,
+                    "homeassistant": homeassistant_steps, "transmission": transmission_steps}
+
+
+def run_journeys_blind14(srv, sink, args):
+    run_journey_table(BLIND14_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -9526,6 +10443,7 @@ RUNNERS = {
     "journeys_blind11": (BLIND11_MOCKS, run_journeys_blind11),
     "journeys_blind12": (BLIND12_MOCKS, run_journeys_blind12),
     "journeys_blind13": (BLIND13_MOCKS, run_journeys_blind13),
+    "journeys_blind14": (BLIND14_MOCKS, run_journeys_blind14),
 }
 
 

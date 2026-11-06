@@ -1,0 +1,270 @@
+openapi: 3.0.3
+info:
+  title: OpenStreetMap API v0.6 (changesets, nodes and ways)
+  version: "0.6"
+  description: |
+    A subset of the OpenStreetMap editing API v0.6, written from its public
+    documentation (wiki.openstreetmap.org/wiki/API_v0.6). Edits need an OAuth 2.0 token
+    with the `write_api` scope, sent as `Authorization: Bearer <token>`.
+
+    Request bodies are XML (UTF-8) wrapped in `<osm>`. Answers are XML unless the
+    client sends `Accept: application/json` (or adds `.json` to the URL), when reads
+    answer JSON. Creates, updates and deletes answer plain text (`text/plain`); errors
+    answer a plain-text message.
+
+    Every edit belongs to a changeset. `PUT /api/0.6/changeset/create` with
+    `<osm><changeset><tag k="comment" v="..."/></changeset></osm>` answers the new
+    changeset's id as plain text. `GET /api/0.6/changeset/{id}` reads it; in JSON it
+    answers `{"version": "0.6", ..., "changeset": {"id", "created_at", "open",
+    "comments_count", "changes_count", "tags", ...}}` (the JSON format changed on 25
+    August 2024), with `closed_at` once closed. `PUT /api/0.6/changeset/{id}/close`
+    closes it and answers 200 with an empty body; closing a closed changeset answers 409
+    `The changeset {id} was closed at {closed_at}.` 404 when there is no changeset.
+
+    Elements (nodes, ways) are created with `POST /api/0.6/nodes` (or `/ways`) holding one
+    element whose `changeset` attribute names an open changeset, and the answer is the
+    new element's id as plain text (only the first element of the body is created). A
+    node has `lat`, `lon` and `<tag k v>` children; a way has `<nd ref>` children naming
+    its nodes, which must exist and be visible (else 412). Creating in a closed
+    changeset answers 409.
+
+    `GET /api/0.6/node/{id}` reads the current version: in JSON
+    `{"version": "0.6", ..., "elements": [{"type": "node", "id", "lat", "lon",
+    "timestamp", "version", "changeset", "user", "uid", "tags"}]}`. 404 when there is no
+    such element, 410 Gone when it has been deleted.
+
+    `PUT /api/0.6/node/{id}` sends the whole element with the `version` it has now; it
+    answers the new version number as plain text. A version that does not match the
+    current one answers 409 Conflict and changes nothing; a missing version answers 400.
+    Tags the body omits are removed. `DELETE /api/0.6/node/{id}` sends the element (id,
+    version, changeset, lat and lon) and answers the new version as plain text; a node
+    still used by a way answers 412 `Node {id} is still used by way {way_id}.` and stays;
+    a deleted element answers 410.
+
+    `GET /api/0.6/node/{id}/history` answers every version, oldest first.
+    `GET /api/0.6/node/{id}/{version}` answers that version. `GET /api/0.6/nodes?nodes=
+    {id},{id}` answers each node named (404 if any is missing); a deleted node is
+    answered with `visible` false.
+servers:
+  - url: https://api.openstreetmap.org
+security:
+  - oauth2: [write_api]
+tags:
+  - name: Changesets
+  - name: Elements
+paths:
+  /api/0.6/changeset/create:
+    put:
+      tags: [Changesets]
+      operationId: changeset_create
+      summary: Open a changeset
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema: {type: string, example: '<osm><changeset><tag k="comment" v="Add a bench"/></changeset></osm>'}
+      responses:
+        "200": {$ref: "#/components/responses/Text"}
+        "400": {$ref: "#/components/responses/Text"}
+  /api/0.6/changeset/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Changesets]
+      operationId: changeset_read
+      summary: Read a changeset
+      responses:
+        "200":
+          description: The changeset.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: {type: string}
+                  changeset: {$ref: "#/components/schemas/Changeset"}
+            text/xml:
+              schema: {type: string}
+        "404": {$ref: "#/components/responses/Text"}
+  /api/0.6/changeset/{id}/close:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    put:
+      tags: [Changesets]
+      operationId: changeset_close
+      summary: Close a changeset
+      responses:
+        "200": {description: Closed; the body is empty.}
+        "404": {$ref: "#/components/responses/Text"}
+        "409": {$ref: "#/components/responses/Text"}
+  /api/0.6/nodes:
+    get:
+      tags: [Elements]
+      operationId: nodes_fetch
+      summary: Read several nodes
+      parameters:
+        - {name: nodes, in: query, required: true, description: Comma-separated node ids., schema: {type: string}}
+      responses:
+        "200": {$ref: "#/components/responses/Elements"}
+        "404": {$ref: "#/components/responses/Text"}
+    post:
+      tags: [Elements]
+      operationId: node_create
+      summary: Create a node
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema: {type: string, example: '<osm><node changeset="12" lat="51.5" lon="-0.1"><tag k="amenity" v="bench"/></node></osm>'}
+      responses:
+        "200": {$ref: "#/components/responses/Text"}
+        "400": {$ref: "#/components/responses/Text"}
+        "409": {$ref: "#/components/responses/Text"}
+  /api/0.6/node/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Elements]
+      operationId: node_read
+      summary: Read a node
+      responses:
+        "200": {$ref: "#/components/responses/Elements"}
+        "404": {$ref: "#/components/responses/Text"}
+        "410": {$ref: "#/components/responses/Text"}
+    put:
+      tags: [Elements]
+      operationId: node_update
+      summary: Replace a node
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema: {type: string, example: '<osm><node id="7" version="1" changeset="12" lat="51.5" lon="-0.1"><tag k="amenity" v="bench"/></node></osm>'}
+      responses:
+        "200": {$ref: "#/components/responses/Text"}
+        "400": {$ref: "#/components/responses/Text"}
+        "404": {$ref: "#/components/responses/Text"}
+        "409": {$ref: "#/components/responses/Text"}
+    delete:
+      tags: [Elements]
+      operationId: node_delete
+      summary: Delete a node
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema: {type: string, example: '<osm><node id="7" version="2" changeset="12" lat="51.5" lon="-0.1"/></osm>'}
+      responses:
+        "200": {$ref: "#/components/responses/Text"}
+        "400": {$ref: "#/components/responses/Text"}
+        "404": {$ref: "#/components/responses/Text"}
+        "409": {$ref: "#/components/responses/Text"}
+        "410": {$ref: "#/components/responses/Text"}
+        "412": {$ref: "#/components/responses/Text"}
+  /api/0.6/node/{id}/history:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Elements]
+      operationId: node_history
+      summary: Every version of a node, oldest first
+      responses:
+        "200": {$ref: "#/components/responses/Elements"}
+        "404": {$ref: "#/components/responses/Text"}
+  /api/0.6/node/{id}/{version}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - {name: version, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Elements]
+      operationId: node_version
+      summary: One version of a node
+      responses:
+        "200": {$ref: "#/components/responses/Elements"}
+        "403": {$ref: "#/components/responses/Text"}
+        "404": {$ref: "#/components/responses/Text"}
+  /api/0.6/ways:
+    post:
+      tags: [Elements]
+      operationId: way_create
+      summary: Create a way
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema: {type: string, example: '<osm><way changeset="12"><nd ref="7"/><nd ref="8"/><tag k="highway" v="footway"/></way></osm>'}
+      responses:
+        "200": {$ref: "#/components/responses/Text"}
+        "400": {$ref: "#/components/responses/Text"}
+        "409": {$ref: "#/components/responses/Text"}
+        "412": {$ref: "#/components/responses/Text"}
+  /api/0.6/way/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Elements]
+      operationId: way_read
+      summary: Read a way
+      responses:
+        "200": {$ref: "#/components/responses/Elements"}
+        "404": {$ref: "#/components/responses/Text"}
+        "410": {$ref: "#/components/responses/Text"}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://www.openstreetmap.org/oauth2/authorize
+          tokenUrl: https://www.openstreetmap.org/oauth2/token
+          scopes:
+            read_prefs: Read user preferences
+            write_api: Modify the map
+  parameters:
+    id: {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+  responses:
+    Text:
+      description: Plain text (an id or version on success, a message on error).
+      content:
+        text/plain:
+          schema: {type: string}
+    Elements:
+      description: The elements (JSON with Accept application/json).
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              version: {type: string}
+              generator: {type: string}
+              elements: {type: array, items: {$ref: "#/components/schemas/Element"}}
+        text/xml:
+          schema: {type: string}
+  schemas:
+    Changeset:
+      type: object
+      properties:
+        id: {type: integer}
+        created_at: {type: string, format: date-time}
+        closed_at: {type: string, format: date-time}
+        open: {type: boolean}
+        comments_count: {type: integer}
+        changes_count: {type: integer}
+        user: {type: string}
+        uid: {type: integer}
+        tags: {type: object, additionalProperties: {type: string}}
+    Element:
+      type: object
+      properties:
+        type: {type: string, enum: [node, way, relation]}
+        id: {type: integer}
+        lat: {type: number}
+        lon: {type: number}
+        nodes: {type: array, items: {type: integer}, description: A way's node ids in order.}
+        timestamp: {type: string, format: date-time}
+        version: {type: integer}
+        changeset: {type: integer}
+        user: {type: string}
+        uid: {type: integer}
+        visible: {type: boolean, description: False for a deleted element in a multi fetch or history.}
+        tags: {type: object, additionalProperties: {type: string}}

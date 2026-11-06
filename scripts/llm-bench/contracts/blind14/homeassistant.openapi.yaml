@@ -1,0 +1,224 @@
+openapi: 3.0.3
+info:
+  title: Home Assistant REST API (states, events, templates and history)
+  version: "2025.1"
+  description: |
+    A subset of the Home Assistant REST API, written from its public documentation
+    (the REST API page of the developer documentation and the State objects page of the
+    user documentation). Every request sends a long-lived access token as
+    `Authorization: Bearer <token>`; bodies are JSON.
+
+    A state object holds `entity_id` (`<domain>.<object_id>`), `state` (the current
+    state, as text), `attributes` (a dictionary), `last_changed` (when the state last
+    changed, in UTC; not updated when only the attributes change), `last_updated` (when
+    the state or the attributes last changed; not updated when neither changed),
+    `last_reported` (when the entity last reported its state; updated even when nothing
+    changed) and `context` (`id`, `parent_id`, `user_id`).
+
+    `POST /api/states/{entity_id}` (admin) sets the state of an entity from `state`
+    (required) and `attributes` (optional), with `force_update` to fire a change even
+    when nothing changed. It answers the new state object with 201 when the entity did
+    not have a state and 200 when it did, and a `Location` header naming the state's
+    URL. It changes only what Home Assistant shows; it does not talk to a device.
+    `GET /api/states` answers every state the user may read; `GET /api/states/{entity_id}`
+    answers one, or 404 when there is none. `DELETE /api/states/{entity_id}` removes it;
+    404 when there was none.
+
+    `POST /api/events/{event_type}` (admin) fires an event whose data is the optional
+    body and answers `{"message": "Event {event_type} fired."}`.
+
+    `POST /api/template` (admin) renders the Jinja template in `template` (with the
+    template functions `states('<entity_id>')` and `state_attr('<entity_id>', '<name>')`)
+    and answers the result as plain text.
+
+    `GET /api/history/period/{timestamp}` answers the history of the entities named in
+    `filter_entity_id` (required, comma-separated) from `timestamp` (default one day
+    before) to `end_time` (URL-encoded): a list holding
+    one list of state objects per entity. `minimal_response` keeps only `state` and
+    `last_changed` between the first and last state, `no_attributes` drops the
+    attributes, `significant_changes_only=0` keeps every change and `skip_initial_state`
+    drops the state at the start of the period.
+
+    Status codes: 200, 201 (something was created), 400 (bad request, such as a state
+    write without `state`), 401, 404, 405.
+servers:
+  - url: http://homeassistant.local:8123
+security:
+  - bearerAuth: []
+tags:
+  - name: States
+  - name: Events
+  - name: Templates
+  - name: History
+paths:
+  /api/:
+    get:
+      tags: [States]
+      operationId: api_status
+      summary: Whether the API is running
+      responses:
+        "200":
+          description: Running.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: {type: string, example: API running.}
+  /api/states:
+    get:
+      tags: [States]
+      operationId: states_list
+      summary: Every state the user may read
+      responses:
+        "200":
+          description: The states.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/State"}}
+        "401": {$ref: "#/components/responses/Message"}
+  /api/states/{entity_id}:
+    parameters:
+      - {name: entity_id, in: path, required: true, schema: {type: string, pattern: "^[a-z_]+\\.[a-z0-9_]+$", example: sensor.kitchen_temperature}}
+    get:
+      tags: [States]
+      operationId: state_get
+      summary: One entity's state
+      responses:
+        "200":
+          description: The state.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/State"}
+        "404": {$ref: "#/components/responses/Message"}
+    post:
+      tags: [States]
+      operationId: state_set
+      summary: Create or update an entity's state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                state: {type: string}
+                attributes: {type: object, additionalProperties: true}
+                force_update: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The entity had a state; the new one.
+          headers:
+            Location: {schema: {type: string, example: /api/states/sensor.kitchen_temperature}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/State"}
+        "201":
+          description: The entity had no state; the new one.
+          headers:
+            Location: {schema: {type: string, example: /api/states/sensor.kitchen_temperature}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/State"}
+        "400": {$ref: "#/components/responses/Message"}
+    delete:
+      tags: [States]
+      operationId: state_delete
+      summary: Remove an entity's state
+      responses:
+        "200": {description: Removed.}
+        "404": {$ref: "#/components/responses/Message"}
+  /api/events/{event_type}:
+    parameters:
+      - {name: event_type, in: path, required: true, schema: {type: string}}
+    post:
+      tags: [Events]
+      operationId: event_fire
+      summary: Fire an event
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true, description: The event data.}
+      responses:
+        "200":
+          description: Fired.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: {type: string, example: Event front_door_pressed fired.}
+  /api/template:
+    post:
+      tags: [Templates]
+      operationId: template_render
+      summary: Render a template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template]
+              properties:
+                template: {type: string, example: "It is {{ states('sensor.kitchen_temperature') }}!"}
+      responses:
+        "200":
+          description: The rendered text.
+          content:
+            text/plain:
+              schema: {type: string}
+        "400": {$ref: "#/components/responses/Message"}
+  /api/history/period/{timestamp}:
+    parameters:
+      - {name: timestamp, in: path, required: true, description: "The start, `YYYY-MM-DDThh:mm:ssTZD`.", schema: {type: string, format: date-time}}
+    get:
+      tags: [History]
+      operationId: history_period
+      summary: State history over a period
+      parameters:
+        - {name: filter_entity_id, in: query, required: true, description: Comma-separated entity ids., schema: {type: string}}
+        - {name: end_time, in: query, schema: {type: string, format: date-time}}
+        - {name: minimal_response, in: query, allowEmptyValue: true, schema: {type: string}}
+        - {name: no_attributes, in: query, allowEmptyValue: true, schema: {type: string}}
+        - {name: significant_changes_only, in: query, schema: {type: string, enum: ["0", "1"]}}
+        - {name: skip_initial_state, in: query, allowEmptyValue: true, schema: {type: string}}
+      responses:
+        "200":
+          description: One list of states per entity.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {type: array, items: {$ref: "#/components/schemas/State"}}
+        "400": {$ref: "#/components/responses/Message"}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  responses:
+    Message:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message: {type: string}
+  schemas:
+    State:
+      type: object
+      required: [entity_id, state]
+      properties:
+        entity_id: {type: string}
+        state: {type: string}
+        attributes: {type: object, additionalProperties: true}
+        last_changed: {type: string, format: date-time}
+        last_updated: {type: string, format: date-time}
+        last_reported: {type: string, format: date-time}
+        context:
+          type: object
+          properties:
+            id: {type: string}
+            parent_id: {type: string, nullable: true}
+            user_id: {type: string, nullable: true}

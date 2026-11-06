@@ -1,0 +1,167 @@
+openapi: 3.0.3
+info:
+  title: Transmission RPC (JSON-RPC 2.0)
+  version: "6.0.0"
+  description: |
+    A subset of the Transmission BitTorrent client's RPC protocol, written from its
+    public specification (docs/rpc-spec.md in the transmission/transmission repository,
+    `rpc_version_semver` 6.0.0, Transmission 4.1). Every call is an HTTP POST of one
+    JSON-RPC 2.0 request to `/transmission/rpc`.
+
+    CSRF protection: every request sends `X-Transmission-Session-Id`. When it is missing
+    or out of date (the first request always is) the server answers 409 Conflict with
+    the right id in the `X-Transmission-Session-Id` response header (and, from 6.0.0,
+    `X-Transmission-Rpc-Version`); the client keeps that id and sends the request again.
+
+    A request is `{"jsonrpc": "2.0", "method": ..., "params": {...}, "id": ...}`. Params
+    are by name only: `params` must be an object; positional (array) params are not
+    supported. The server follows JSON-RPC 2.0 otherwise: a response is
+    `{"jsonrpc": "2.0", "result": ..., "id": <the request's id>}`, and a failure answers
+    `{"jsonrpc": "2.0", "error": {"code", "message", "data"}, "id": ...}` instead, whose
+    `data` may hold an `error_string` and a method's `result`. The codes JSON-RPC 2.0
+    reserves apply: -32700 parse error, -32600 invalid request, -32601 method not found,
+    -32602 invalid params, -32603 internal error. A request without an `id` is a
+    notification: it gets no response body and the server answers HTTP 204. The HTTP
+    status is otherwise 200.
+
+    Torrents are named in `ids` by an integer id, a list of integer ids and/or SHA1 hash
+    strings, or `recently_active`; omitting `ids` means every torrent. Integer ids are
+    not stable across daemon restarts; hash strings are.
+
+    Methods:
+    - `torrent_add`: `filename` (a file name or URL, a magnet link too) or `metainfo`
+      (base64 .torrent content), one of them required; `paused` (do not start it),
+      `labels` (strings), `download_dir`, `peer_limit`, `bandwidth_priority`. The result
+      holds `torrent_added` `{id, name, hash_string}`, or, when the torrent is already
+      there, `torrent_duplicate` with the existing torrent's `{id, name, hash_string}`.
+    - `torrent_get`: `fields` (required: the keys to answer), `ids`, `format` (`objects`,
+      the default, or `table`). The result holds `torrents`, one object per torrent; with
+      `ids` `recently_active` it also holds `removed` (the ids of torrents removed
+      recently).
+    - `torrent_set`: `ids` and the fields to change (`labels`, `bandwidth_priority`,
+      `download_limit`, `download_limited`, `queue_position`, ...). No result fields.
+    - `torrent_start`, `torrent_start_now`, `torrent_stop`, `torrent_verify`,
+      `torrent_reannounce`: `ids`. No result fields.
+    - `torrent_remove`: `ids` and `delete_local_data` (default false). No result fields.
+    - `session_get`: `fields` (optional); the result holds the session's settings,
+      `version` and `rpc_version_semver` among them.
+
+    A torrent's `status` is 0 stopped, 1 queued to verify, 2 verifying, 3 queued to
+    download, 4 downloading, 5 queued to seed, 6 seeding.
+servers:
+  - url: http://localhost:9091
+tags:
+  - name: RPC
+paths:
+  /transmission/rpc:
+    post:
+      tags: [RPC]
+      operationId: rpc
+      summary: One JSON-RPC 2.0 request
+      parameters:
+        - {name: X-Transmission-Session-Id, in: header, description: The id the last 409 answered., schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Request"}
+      responses:
+        "200":
+          description: The JSON-RPC response (a result or an error).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Response"}
+        "204": {description: A notification (a request without an id) has no response.}
+        "409":
+          description: The session id is missing or out of date; send the request again with the one in the header.
+          headers:
+            X-Transmission-Session-Id: {schema: {type: string}}
+            X-Transmission-Rpc-Version: {schema: {type: string}}
+components:
+  schemas:
+    Ids:
+      description: An integer id, a list of integer ids and/or hash strings, or recently_active.
+      oneOf:
+        - {type: integer}
+        - {type: array, items: {oneOf: [{type: integer}, {type: string}]}}
+        - {type: string, enum: [recently_active]}
+    Request:
+      type: object
+      required: [jsonrpc, method]
+      properties:
+        jsonrpc: {type: string, enum: ["2.0"]}
+        method:
+          type: string
+          description: "The method's name: `torrent_add`, `torrent_get`, `torrent_set`, `torrent_start`, `torrent_start_now`, `torrent_stop`, `torrent_verify`, `torrent_reannounce`, `torrent_remove`, `session_get`, `session_set`, `session_stats`, `free_space`, ...; any other name answers the error -32601."
+          example: torrent_get
+        params:
+          description: By name, as an object; positional (array) params are not supported and answer an error.
+          anyOf:
+            - {$ref: "#/components/schemas/Params"}
+            - {type: array, items: {}, description: Positional params; not supported.}
+        id:
+          description: Echoed in the response; a request without one is a notification.
+          oneOf: [{type: integer}, {type: string}]
+    Params:
+      type: object
+      properties:
+        ids: {$ref: "#/components/schemas/Ids"}
+        fields: {type: array, items: {type: string}}
+        format: {type: string, enum: [objects, table]}
+        filename: {type: string}
+        metainfo: {type: string}
+        paused: {type: boolean}
+        labels: {type: array, items: {type: string}}
+        download_dir: {type: string}
+        bandwidth_priority: {type: integer}
+        delete_local_data: {type: boolean, default: false}
+    TorrentRef:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        hash_string: {type: string}
+    Torrent:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        hash_string: {type: string}
+        status: {type: integer, minimum: 0, maximum: 6}
+        labels: {type: array, items: {type: string}}
+        added_date: {type: integer}
+        download_dir: {type: string}
+        total_size: {type: integer}
+        percent_done: {type: number}
+        bandwidth_priority: {type: integer}
+        error: {type: integer}
+        error_string: {type: string}
+    Response:
+      type: object
+      required: [jsonrpc]
+      properties:
+        jsonrpc: {type: string, enum: ["2.0"]}
+        id: {oneOf: [{type: integer}, {type: string}], nullable: true}
+        result:
+          type: object
+          description: The method's result fields (none for methods that answer nothing).
+          properties:
+            torrent_added: {$ref: "#/components/schemas/TorrentRef"}
+            torrent_duplicate: {$ref: "#/components/schemas/TorrentRef"}
+            torrents:
+              type: array
+              items: {$ref: "#/components/schemas/Torrent"}
+            removed: {type: array, items: {type: integer}}
+            version: {type: string}
+            rpc_version_semver: {type: string}
+          additionalProperties: true
+        error:
+          type: object
+          properties:
+            code: {type: integer, example: -32601}
+            message: {type: string}
+            data:
+              type: object
+              properties:
+                error_string: {type: string}
+                result: {type: object}
