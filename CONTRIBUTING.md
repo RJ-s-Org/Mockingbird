@@ -21,6 +21,10 @@ and report security issues privately as described in [SECURITY.md](SECURITY.md).
 These are the commands CI runs. Run them before opening a pull request; a pull request
 is merged only when all of them pass.
 
+For day-to-day work, `scripts/gate.sh` runs the subset your branch needs (fmt, plus clippy
+and nextest for the changed crates and their direct dependents, and the console or bench
+tests when those changed); CI runs the full list below on every pull request.
+
 ```sh
 # Rust
 cargo fmt --all --check
