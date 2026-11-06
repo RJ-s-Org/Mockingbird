@@ -64,7 +64,11 @@ impl Engine {
         // One generator for the stream: its items differ from each other,
         // and a seeded stream repeats item for item.
         let draws = self.call_draws(&bundle, &op.id, status, &call);
-        let repair_seed = self.repair_seed(&bundle, &op.id, [&call]);
+        // Repairs happen to LLM items only: none to seed offline.
+        let repair_seed = self
+            .provider
+            .as_ref()
+            .and_then(|_| self.repair_seed(&bundle, &op.id, [&call]));
 
         let (upstream, repair_system) = match &self.provider {
             None => (Upstream::Closed, None),

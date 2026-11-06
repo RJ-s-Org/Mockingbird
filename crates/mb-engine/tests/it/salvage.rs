@@ -416,3 +416,36 @@ fn errors_are_capped_shallowest_first() {
     assert_eq!(errors.len(), 10);
     assert!(errors.iter().all(|e| !e.contains("/deep")), "{errors:?}");
 }
+
+/// The `customerId` a fresh engine with `seed` refills for an answer cut
+/// inside it.
+async fn refilled_customer(seed: Option<u64>) -> String {
+    let partial =
+        format!(r#"{{"id": "{ID}", "status": "pending", "total": 42.5, "customerId": "c1-cut"#);
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![Err(cut(&partial))]));
+    let engine = Engine::new(Some(provider), EngineConfig::default());
+    let engine = match seed {
+        Some(seed) => engine.with_faker_seed(seed),
+        None => engine,
+    };
+    let out = generate(&engine, "getOrder").await;
+    assert_eq!(out.source, Source::Patched);
+    let body = out.body.unwrap();
+    order_validator().validate(&body).unwrap();
+    let customer = body["customerId"].as_str().unwrap().to_owned();
+    assert_ne!(customer, "c1-cut");
+    customer
+}
+
+/// A required member the cut dropped is refilled from the seed and the call:
+/// the same seed and call refill it alike, another seed otherwise.
+#[tokio::test]
+async fn a_seeded_fill_of_a_cut_member_repeats() {
+    let first = refilled_customer(Some(7)).await;
+    assert_eq!(
+        first,
+        refilled_customer(Some(7)).await,
+        "same seed and call"
+    );
+    assert_ne!(first, refilled_customer(Some(8)).await, "another seed");
+}
