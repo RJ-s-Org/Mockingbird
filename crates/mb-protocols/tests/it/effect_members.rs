@@ -995,3 +995,117 @@ async fn an_effect_breaking_a_fitting_lamp_is_refused() {
     assert_eq!(outcome, "rejected", "{lamp}");
     assert_eq!(lamp["tone"], "warm", "{lamp}");
 }
+
+/// Fixtures whose read answers a union: a lamp (`label` required) or a bulb (`watts`
+/// required), both with a boolean `lit` and a value object `base`. An edit answers an
+/// acknowledgement.
+const FIXTURES: &str = r##"
+openapi: 3.0.0
+info: {title: Fixtures, version: "1"}
+paths:
+  /fixtures/{id}:
+    get:
+      operationId: getFixture
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Fixture"}}}}
+    put:
+      operationId: editFixture
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {name: {type: string}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/FixtureAck"}}}}
+components:
+  schemas:
+    Fixture:
+      oneOf:
+        - $ref: "#/components/schemas/Lamp"
+        - $ref: "#/components/schemas/Bulb"
+    Base:
+      type: object
+      properties:
+        height: {type: integer}
+        color: {type: string}
+    Lamp:
+      type: object
+      required: [id, name, label]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        label: {type: string}
+        lit: {type: boolean}
+        base: {$ref: "#/components/schemas/Base"}
+    Bulb:
+      type: object
+      required: [id, name, watts]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        watts: {type: integer}
+        lit: {type: boolean}
+        base: {$ref: "#/components/schemas/Base"}
+    FixtureAck:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+"##;
+
+/// Edits fixture `f1`, held as `held` (fitting neither variant), with an answer whose
+/// one effect sets `set`; answers the effect's outcome and the fixture as stored.
+async fn edit_fixture(set: Value) -> (Value, Value) {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let held = json!({"id": "f1", "name": "Old", "lit": false, "base": {"height": 3}});
+    store(&state, "fixtures", "f1", held).await;
+    let answer = json!({"response": {"id": "f1", "name": "New"}, "effects": [
+        {"type": "fixtures", "id": "f1", "set": set},
+    ]});
+    let edit = json!({"name": "New"});
+    let (_, effects) = call(
+        FIXTURES,
+        &state,
+        answer,
+        ("PUT", "/fixtures/f1", Some(edit)),
+    )
+    .await;
+    (
+        effects[0]["outcome"].clone(),
+        stored(&state, "fixtures", "f1").await,
+    )
+}
+
+/// Under a union read, a record that fits no variant shows one violation of the union
+/// whatever its members hold: a wrong-typed member is still refused, by its own schema.
+#[tokio::test]
+async fn an_effect_adding_a_wrong_type_under_a_union_read_is_refused() {
+    let (outcome, fixture) = edit_fixture(json!({"lit": "yes"})).await;
+    assert_eq!(outcome, "rejected", "{fixture}");
+    assert_eq!(fixture["lit"], false, "{fixture}");
+}
+
+/// The leaf a dotted path sets is checked against its own schema too.
+#[tokio::test]
+async fn an_effect_adding_a_wrong_type_by_a_path_under_a_union_read_is_refused() {
+    let (outcome, fixture) = edit_fixture(json!({"base.height": "tall"})).await;
+    assert_eq!(outcome, "rejected", "{fixture}");
+    assert_eq!(fixture["base"], json!({"height": 3}), "{fixture}");
+}
+
+/// A value each member's schema takes still applies to a record that fits no variant.
+#[tokio::test]
+async fn an_effect_adding_no_violation_under_a_union_read_is_applied() {
+    let (outcome, fixture) = edit_fixture(json!({"lit": true, "base.color": "red"})).await;
+    assert_eq!(outcome, "applied", "{fixture}");
+    assert_eq!(fixture["lit"], true, "{fixture}");
+    assert_eq!(
+        fixture["base"],
+        json!({"height": 3, "color": "red"}),
+        "{fixture}"
+    );
+}

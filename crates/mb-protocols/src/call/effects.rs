@@ -1012,6 +1012,18 @@ pub(super) async fn apply_effect(
     merge_members(rt, t, data, requested);
     // Objects the effect names only by their identity are the records stored under it.
     fill_stubs(state, session, rt, t, &mut stored.data, &keys).await;
+    // Each member it sets fits its own schema, in the variant the record is: under a
+    // union read, a record that already fits no variant shows only the union's own
+    // violation, the same with a wrong-typed member as without.
+    if let Some(member) = wrong_member(rt, t, &held.data, &stored.data, &keys, &set) {
+        tracing::info!(
+            mock = %rt.name,
+            resource_type = %t,
+            member = %member,
+            "an effect sets a member to a value its schema does not take"
+        );
+        return Err("the merged resource breaks its schema");
+    }
     // Refused when it adds a violation: it breaks a record that fit, or gives one held
     // in an earlier, incomplete shape a violation it did not have.
     if let Some((path, keyword)) = added_violation(rt, t, &held.data, &stored.data) {
@@ -1040,6 +1052,93 @@ pub(super) async fn apply_effect(
     }
     rt.collections().carry(session, &held, &carried);
     Ok((merged, applied))
+}
+
+/// The first member of `keys` (the top-level members an effect merged into `after`,
+/// the record of type `t` that was `before`) given a violation of its own schema it
+/// did not have, as the record's variant declares it (see [`Place::of_held`]): of a
+/// dotted key of `set` that is a path (see [`dotted_path`]), the leaf it ends at, else
+/// the whole member (see [`adds_to_member`]). Where several parts of the variant
+/// declare the member, one it adds nothing to is enough; a member with no schema to go
+/// by takes anything.
+fn wrong_member(
+    rt: &MockRuntime,
+    t: &str,
+    before: &Value,
+    after: &Value,
+    keys: &[String],
+    set: &Map<String, Value>,
+) -> Option<String> {
+    let record = Place::of_held(rt, write_memory::read_schema(rt, t), Some(before));
+    let at = |value: &'_ Value, path: &[String]| -> Option<Value> {
+        path.iter()
+            .try_fold(value, |v, k| v.get(k.as_str()))
+            .cloned()
+    };
+    for key in keys {
+        // A member set by name is checked whole, and so is one set through no path.
+        let mut by_path = false;
+        for dotted in set.keys().filter(|k| k.contains('.')) {
+            let Some((path, schema)) = dotted_path(rt, &record, dotted) else {
+                continue;
+            };
+            if path.first() != Some(key) {
+                continue;
+            }
+            by_path = true;
+            let (Some(schema), Some(leaf)) = (schema, at(after, &path)) else {
+                continue;
+            };
+            if adds_to_member(rt, schema, at(before, &path).as_ref(), &leaf) {
+                return Some(dotted.clone());
+            }
+        }
+        if by_path && !set.contains_key(key) {
+            continue;
+        }
+        let Some(value) = after.get(key.as_str()) else {
+            continue;
+        };
+        let mut declared = record
+            .parts
+            .iter()
+            .filter_map(|p| p.get("properties")?.get(key.as_str()))
+            .peekable();
+        if declared.peek().is_some()
+            && declared.all(|schema| adds_to_member(rt, schema, before.get(key.as_str()), value))
+        {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+/// Whether `after`, a member's value of `schema` that was `before`, has a violation of
+/// it `before` has not: it breaks a value that fit, or one that did not (held in an
+/// earlier, incomplete shape) gets something new wrong. A value left as it was, or a
+/// schema that does not compile, adds none.
+fn adds_to_member(rt: &MockRuntime, schema: &Value, before: Option<&Value>, after: &Value) -> bool {
+    if before == Some(after) {
+        return false;
+    }
+    let Ok(validator) = mb_engine::SchemaValidator::new(&rt.bundle().with_reachable_defs(schema))
+    else {
+        return false;
+    };
+    if validator.is_valid(after) {
+        return false;
+    }
+    match before {
+        Some(before) if !validator.is_valid(before) => {
+            let held: HashSet<(String, String)> =
+                validator.violations(before).into_iter().collect();
+            validator
+                .violations(after)
+                .iter()
+                .any(|v| !held.contains(v))
+        }
+        _ => true,
+    }
 }
 
 /// `set`, an effect's members for a record of type `t`, with each name written with
