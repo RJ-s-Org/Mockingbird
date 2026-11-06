@@ -417,6 +417,9 @@ pub struct MockRuntime {
     /// Which collection a stored resource was listed or written under (see
     /// [`call::Collections`]).
     collections: call::Collections,
+    /// The effective world description, indexed (see [`MockRuntime::with_world`]);
+    /// describes nothing until a world is attached.
+    described: call::Described,
     /// GraphQL root fields' narrowed schemas, by selection.
     #[cfg(feature = "graphql")]
     narrowed: graphql::NarrowCache,
@@ -540,9 +543,67 @@ impl MockRuntime {
             written_types: call::WrittenTypes::default(),
             own_reads: call::OwnReads::default(),
             collections: call::Collections::default(),
+            described: call::Described::default(),
             #[cfg(feature = "graphql")]
             narrowed: graphql::NarrowCache::default(),
         }
+    }
+
+    /// This runtime serving `world`, the effective world description of its contract
+    /// (tier 0 overlaid with the valid entries of revision `revision`), over `base`,
+    /// the contract's tier 0, computed once by the caller.
+    ///
+    /// What the bundle models (kinds, types, targets, record pointers, identity
+    /// members) is written into the runtime's bundle where `world` differs from
+    /// `base` ([`mb_mcm::world::apply`]); the lookups computed from the bundle are
+    /// recomputed with it. The rest is indexed for the modules that read it. With
+    /// `world` equal to `base` every answer is as without a world; only the request
+    /// log marks what the description leaves open (`world_gap`).
+    #[must_use]
+    pub fn with_world(
+        mut self,
+        base: &mb_mcm::world::World,
+        world: &mb_mcm::world::World,
+        revision: i64,
+    ) -> Self {
+        let bundle = Arc::new(mb_mcm::world::apply(&self.bundle, base, world));
+        self.described = call::Described::new(&bundle, base, world, revision);
+        self.index = call::BundleIndex::new(&bundle);
+        self.credential_names = CredentialNames::new(&self.data_plane_auth, &bundle);
+        #[cfg(feature = "graphql")]
+        {
+            self.narrowed = graphql::NarrowCache::default();
+        }
+        self.bundle = bundle;
+        self
+    }
+
+    /// The revision of the world description this runtime serves; `0` with none.
+    pub fn world_revision(&self) -> i64 {
+        self.described.revision()
+    }
+
+    /// The effective world description [`MockRuntime::with_world`] was given; `None`
+    /// without one.
+    pub fn world(&self) -> Option<&Arc<mb_mcm::world::World>> {
+        self.described.world()
+    }
+
+    /// This runtime with the static world gaps of each operation in `gaps` replaced
+    /// (operations it does not name keep theirs), and nothing else changed. For tests
+    /// of the request log's `world_gap` marks only.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_gaps(mut self, gaps: HashMap<String, Vec<world_gaps::GapCode>>) -> Self {
+        for (op, codes) in gaps {
+            self.described.set_gaps(op, codes);
+        }
+        self
+    }
+
+    /// The effective world description, indexed for the request path.
+    pub(crate) fn described(&self) -> &call::Described {
+        &self.described
     }
 
     /// The compiled contract this runtime serves.

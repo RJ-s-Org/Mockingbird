@@ -416,9 +416,10 @@ async fn generate_in(
                     let route = match batch.take() {
                         Some(b) => match call::prepare(rt, &plan, &call, narrowed.as_deref()).await
                         {
-                            call::Prepared::Answered(answer) => {
+                            call::Prepared::Answered(mut answer) => {
                                 // Not generating: give up the batch place.
                                 *batch = Some(b);
+                                call::seed_world_gaps(rt, op, &mut answer);
                                 Route::Answered(answer)
                             }
                             call::Prepared::Pending(pending) => Route::Join(b, pending),
@@ -705,6 +706,7 @@ pub(crate) fn merged_record(
     reports.sort_by(|a, b| a.0.cmp(&b.0));
     let mut args = Map::new();
     let mut effects: Vec<Value> = Vec::new();
+    let mut world_gap: Vec<Value> = Vec::new();
     let mut operations: Vec<String> = Vec::new();
     let (_, first) = reports.first()?;
     let mut merged = first.clone();
@@ -724,6 +726,17 @@ pub(crate) fn merged_record(
         if let Some(Value::Array(list)) = r.request.get("effects") {
             effects.extend(list.iter().cloned());
         }
+        for gap in r
+            .request
+            .get("world_gap")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if !world_gap.contains(gap) {
+                world_gap.push(gap.clone());
+            }
+        }
         merged.status = merged.status.max(r.status);
         merged.source = match (merged.source, r.source) {
             (Some(a), Some(b)) => Some(a.worst(b)),
@@ -740,6 +753,11 @@ pub(crate) fn merged_record(
         request.insert("args".into(), Value::Object(args));
         if !effects.is_empty() {
             request.insert("effects".into(), Value::Array(effects));
+        }
+        // Each field's own, once each; the first field's alone came with the clone.
+        request.remove("world_gap");
+        if !world_gap.is_empty() {
+            request.insert("world_gap".into(), Value::Array(world_gap));
         }
     }
     if merged.response.is_some() {

@@ -356,6 +356,11 @@ pub struct GeneratedResponse {
     /// declared headers would otherwise get (the header naming a created record's id).
     /// Empty from the engine.
     pub headers: Vec<(String, String)>,
+    /// What the mock's world description leaves open about this answer's operation
+    /// (`no_identity`, `no_target`, `no_record`), for the request log: filled by the
+    /// caller, like [`GeneratedResponse::effect_outcomes`]. Empty from the engine. A
+    /// gap never changes the answer.
+    pub world_gaps: Vec<String>,
 }
 
 /// The top-level members of an answer a local patch touched, against the model's own
@@ -818,6 +823,7 @@ impl Engine {
                 new_record: false,
                 patched: None,
                 headers: Vec::new(),
+                world_gaps: Vec::new(),
             });
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -969,6 +975,7 @@ impl Engine {
                         new_record: false,
                         patched: answer.patched,
                         headers: Vec::new(),
+                        world_gaps: Vec::new(),
                     },
                     Err(reason) => {
                         tracing::warn!(operation = %op.id, %reason, "LLM generation fell back to faker");
@@ -1114,6 +1121,7 @@ impl Engine {
                 new_record: false,
                 patched: None,
                 headers: Vec::new(),
+                world_gaps: Vec::new(),
             };
             let schema = part
                 .ctx
@@ -1159,6 +1167,7 @@ impl Engine {
                 new_record: false,
                 patched: None,
                 headers: Vec::new(),
+                world_gaps: Vec::new(),
             };
         };
         if let Some(answer) = media::answer(op, variant, schema) {
@@ -1245,6 +1254,7 @@ impl Engine {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         })
     }
 
@@ -1362,6 +1372,7 @@ impl Engine {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         });
         response.source = Source::State;
         response.fallback_reason = None;
@@ -1494,6 +1505,7 @@ impl Engine {
                 new_record: false,
                 patched: None,
                 headers: Vec::new(),
+                world_gaps: Vec::new(),
             },
         };
         tracing::info!(operation = %op.id, status = code, "the call was refused with a declared error");
@@ -1541,6 +1553,7 @@ impl Engine {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         })
     }
 
@@ -1858,6 +1871,7 @@ impl Engine {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         }
     }
 
@@ -1908,6 +1922,7 @@ impl Engine {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         }
     }
 
