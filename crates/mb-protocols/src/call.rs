@@ -596,15 +596,28 @@ pub(crate) async fn prepare<'a>(
     // Whether a stored answer stands depends on what is remembered; otherwise
     // what is remembered waits until the cache has had its say.
     let mut recalled = None;
+    // The held record with the members the description derives from its children; the
+    // record as stored when that answer does not suit the schema.
+    let derived = match &target {
+        Some(stored) if matches!(op.kind, OperationKind::Query) && plain(plan) => {
+            derived::filled(&mut state, session, stored)
+                .instrument(state_span())
+                .await
+        }
+        _ => None,
+    };
+    let held = |stored: &StoredResource, kept: Option<&Map<String, Value>>| {
+        derived
+            .as_ref()
+            .and_then(|filled| serve_held(rt, op, filled, kept, response_schema))
+            .or_else(|| serve_held(rt, op, stored, kept, response_schema))
+    };
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
         // What the schema alone tells of the envelope costs no read; what the session's
         // answers said of it ([`envelopes`]) is read only for an answer that stands.
-        && let (bare, enveloped) = (
-            serve_held(rt, op, stored, None, response_schema),
-            envelopes::applies(rt, op),
-        )
+        && let (bare, enveloped) = (held(stored, None), envelopes::applies(rt, op))
         && (bare.is_some() || enveloped)
     {
         let mut earlier = write_memory::recall(
@@ -627,9 +640,7 @@ pub(crate) async fn prepare<'a>(
                 }
                 false => None,
             };
-            let served = kept
-                .and_then(|kept| serve_held(rt, op, stored, Some(&kept), response_schema))
-                .or(bare);
+            let served = kept.and_then(|kept| held(stored, Some(&kept))).or(bare);
             if let Some(mut served) = served {
                 write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
                 state.touch(session).instrument(state_span()).await;
@@ -1558,6 +1569,22 @@ pub(crate) async fn complete(
             if let Some(id) = target_id.clone().or_else(created) {
                 tokens::after_answer(&mut state, plan, t, &id).await;
             }
+        }
+        // A held record's derived members, from its children as state now has them.
+        if (200..300).contains(&generated.status)
+            && !unstored
+            && !foreign_key
+            && let Some(t) = resource_type
+            && derived::describes(rt, t)
+            && match op.kind {
+                OperationKind::Command(Effect::Create) => true,
+                OperationKind::Command(Effect::Delete) => false,
+                _ => target.is_some(),
+            }
+            && let Some(body) = generated.body.as_mut()
+            && entity_fits(rt, t, body)
+        {
+            derived::fill(&mut state, session, t, body).await;
         }
         // Served as it was answered, holding the record as state now has it.
         if let (Some(identity), Some(mut answer)) = (held_in, answered.take()) {

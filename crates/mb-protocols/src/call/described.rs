@@ -102,6 +102,7 @@ impl Described {
                 (alternates_of(base, t).as_ref() != Some(&a)).then(|| (t.clone(), a))
             })
             .collect();
+        super::derived::log_skipped_child_types(world);
         Self {
             world: Some(Arc::new(world.clone())),
             revision,
