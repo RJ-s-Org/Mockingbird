@@ -993,6 +993,11 @@ async fn build_app_inner(
         audit,
         web_auth,
         ext: deps.ext.clone(),
+        // A control-only node mounts no mocks, so it has none to wait on.
+        world_mounts: match role {
+            Role::Control => None,
+            Role::All | Role::Data => Some(registry.clone() as Arc<dyn mb_admin::WorldMounts>),
+        },
         llm: Arc::new(RuntimeLlm {
             deps: deps.clone(),
             import_profile: cfg.import.llm_profile.clone(),

@@ -90,6 +90,7 @@ pub use problem::Problem;
 pub use scenarios::{invalid_scenario_set, undeclared_scenario_status};
 pub use webhook::{WebhookSink, signature};
 pub use workspaces::{CreateWorkspace, DeleteParams, PatchWorkspace, WorkspaceView};
+pub use world::{WORLD_MOUNT_WAIT, WorldMount, WorldMounts};
 
 /// Admin API base path.
 pub const API_BASE: &str = "/api/v1";
@@ -142,6 +143,12 @@ pub struct AdminState {
     /// `quota` and their LLM calls reported to `usage`, like data-plane
     /// calls ([`Extensions::default`] by default).
     pub ext: Extensions,
+    /// This node's running mocks, which a world write waits on until they
+    /// serve the new revision; `None` (a control-only node) waits for
+    /// nothing and answers `runtime: unknown`.
+    pub world_mounts: Option<Arc<dyn WorldMounts>>,
+    /// How long a world write waits for that ([`WORLD_MOUNT_WAIT`]).
+    pub world_mount_wait: std::time::Duration,
 }
 
 impl std::fmt::Debug for AdminState {
@@ -154,6 +161,8 @@ impl std::fmt::Debug for AdminState {
             .field("live_recheck", &self.live_recheck)
             .field("web_auth", &self.web_auth)
             .field("imports", &self.imports)
+            .field("world_mounts", &self.world_mounts.is_some())
+            .field("world_mount_wait", &self.world_mount_wait)
             .finish_non_exhaustive()
     }
 }
@@ -188,6 +197,8 @@ impl AdminState {
             llm: Arc::new(OfflineLlm),
             imports: Imports::default(),
             ext: Extensions::default(),
+            world_mounts: None,
+            world_mount_wait: WORLD_MOUNT_WAIT,
         }
     }
 }

@@ -914,3 +914,57 @@ async fn a_rebuild_reads_only_the_newest_revision() {
     assert_eq!(env.store.latest_calls.load(Ordering::SeqCst), 1);
     assert_eq!(env.store.revision_calls.load(Ordering::SeqCst), 0);
 }
+
+/// A world write can wait until the running mock serves its revision.
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_for_a_revision_returns_once_it_is_mounted() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await.start().await;
+    let revision = revise(env.store(), &env.mock, 1, widget_identity()).await;
+    let mount = env
+        .registry
+        .wait_world(DEFAULT_WORKSPACE, "m", 1, revision, SOON)
+        .await;
+    assert_eq!(mount, mb_admin::WorldMount::Mounted);
+    // Served at once: the next call already uses the new world.
+    assert_eq!(env.status(), Some((revision, false)));
+    assert_eq!(env.create_widget_gap().await, None);
+}
+
+/// A revision that does not land in time is pending; a mock that is not
+/// mounted is not served.
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_for_a_revision_that_does_not_land_times_out() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await.start().await;
+    let short = Duration::from_millis(200);
+    let mount = env
+        .registry
+        .wait_world(DEFAULT_WORKSPACE, "m", 1, 7, short)
+        .await;
+    assert_eq!(mount, mb_admin::WorldMount::Pending);
+    let mount = env
+        .registry
+        .wait_world(DEFAULT_WORKSPACE, "other", 1, 1, short)
+        .await;
+    assert_eq!(mount, mb_admin::WorldMount::NotServed);
+    // Another contract version is not this one.
+    let mount = env
+        .registry
+        .wait_world(DEFAULT_WORKSPACE, "m", 2, 0, short)
+        .await;
+    assert_eq!(mount, mb_admin::WorldMount::Pending);
+}
+
+/// A world that failed to load is a fallback, not the revision: the wait
+/// lasts until the retry loads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_for_a_revision_skips_a_fallback_build() {
+    let env = Env::stored(NO_ID_CONTRACT, &[]).await.start().await;
+    env.store.fail_latest.store(1, Ordering::SeqCst);
+    let revision = revise(env.store(), &env.mock, 1, widget_identity()).await;
+    let mount = env
+        .registry
+        .wait_world(DEFAULT_WORKSPACE, "m", 1, revision, Duration::from_secs(8))
+        .await;
+    assert_eq!(mount, mb_admin::WorldMount::Mounted);
+    assert_eq!(env.status(), Some((revision, false)));
+}

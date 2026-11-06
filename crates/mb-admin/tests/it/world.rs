@@ -2115,3 +2115,129 @@ async fn concurrent_patches_without_if_match_both_apply() {
         assert_eq!(ops["getWidget"]["not_found"], 404, "{newest}");
     }
 }
+
+/// The running mocks of a test node: records what a world write waits on
+/// and answers `answer`.
+struct FakeMounts {
+    answer: mb_admin::WorldMount,
+    waits: std::sync::Mutex<Vec<(String, String, i64, i64)>>,
+}
+
+#[async_trait]
+impl mb_admin::WorldMounts for FakeMounts {
+    async fn wait(
+        &self,
+        workspace: &str,
+        mock: &str,
+        version: i64,
+        revision: i64,
+        _within: Duration,
+    ) -> mb_admin::WorldMount {
+        if let Ok(mut w) = self.waits.lock() {
+            w.push((workspace.into(), mock.into(), version, revision));
+        }
+        self.answer
+    }
+}
+
+/// [`widgets_v1`] on a node whose running mocks answer `answer`.
+async fn widgets_on_a_node(
+    answer: mb_admin::WorldMount,
+) -> (Arc<FakeMounts>, Router, String, String) {
+    let (st, _app, uri, _t) = widgets_v1().await;
+    let mounts = Arc::new(FakeMounts {
+        answer,
+        waits: Default::default(),
+    });
+    let app = router(AdminState {
+        world_mounts: Some(mounts.clone()),
+        ..st
+    });
+    let version = uri.trim_end_matches("/world").rsplit('/').next().unwrap();
+    let activate = format!("{BASE}/widgets/contracts/{version}/activate");
+    (mounts, app, uri, activate)
+}
+
+/// A world write on the active version returns once the running mock
+/// serves the new revision, and says so.
+#[tokio::test]
+async fn a_world_write_waits_for_the_running_mock() {
+    let (mounts, app, uri, activate) = widgets_on_a_node(mb_admin::WorldMount::Mounted).await;
+    send(
+        &app,
+        Method::POST,
+        &activate,
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    let doc = json!({"operations": {"createWidget": {"answer": {"record": ""}}}});
+    let first = put_world(&app, &uri, &doc).await;
+    assert_eq!(first["runtime"], "mounted", "{first}");
+    let (status, _, second) = patch_world(&app, &uri, &[], &json!({"version": 1})).await;
+    assert_eq!(status, 201, "{second}");
+    assert_eq!(second["runtime"], "mounted", "{second}");
+    let version = first["version"].as_i64().unwrap();
+    let waits = mounts.waits.lock().unwrap().clone();
+    assert_eq!(
+        waits,
+        vec![
+            ("default".into(), "widgets".into(), version, 1),
+            ("default".into(), "widgets".into(), version, 2),
+        ]
+    );
+}
+
+/// A rebuild that has not landed in time is reported, not hidden.
+#[tokio::test]
+async fn a_world_write_reports_a_pending_rebuild() {
+    let (_mounts, app, uri, activate) = widgets_on_a_node(mb_admin::WorldMount::Pending).await;
+    send(
+        &app,
+        Method::POST,
+        &activate,
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    let result = put_world(&app, &uri, &json!({"version": 1})).await;
+    assert_eq!(result["runtime"], "pending", "{result}");
+}
+
+/// A version no mock serves is not waited on.
+#[tokio::test]
+async fn a_world_write_on_an_inactive_version_waits_for_nothing() {
+    let (mounts, app, uri, _activate) = widgets_on_a_node(mb_admin::WorldMount::Mounted).await;
+    // A second upload is approved, not active.
+    let second = send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts"),
+        "application/yaml",
+        v2().into_bytes(),
+    )
+    .await;
+    assert_ne!(second["status"], "active", "{second}");
+    let version = second["version"].as_i64().unwrap();
+    let uri = uri.replace("/contracts/1/", &format!("/contracts/{version}/"));
+    let result = put_world(&app, &uri, &json!({"version": 1})).await;
+    assert_eq!(result["runtime"], "not_served", "{result}");
+    assert!(mounts.waits.lock().unwrap().is_empty());
+}
+
+/// A node that runs no mocks cannot tell.
+#[tokio::test]
+async fn a_world_write_without_running_mocks_is_unknown() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let version = uri.trim_end_matches("/world").rsplit('/').next().unwrap();
+    send(
+        &app,
+        Method::POST,
+        &format!("{BASE}/widgets/contracts/{version}/activate"),
+        "application/json",
+        Vec::new(),
+    )
+    .await;
+    let result = put_world(&app, &uri, &json!({"version": 1})).await;
+    assert_eq!(result["runtime"], "unknown", "{result}");
+}

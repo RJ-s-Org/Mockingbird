@@ -730,6 +730,68 @@ pub struct WorldWriteResult {
     /// The entries that did not validate; they are not stored.
     #[schema(value_type = Vec<RefusalSchema>)]
     pub refused: Vec<Refusal>,
+    /// Whether the running mock serves the new revision when the write
+    /// returns: the write waits for the rebuild, at most
+    /// [`WORLD_MOUNT_WAIT`].
+    pub runtime: WorldMount,
+}
+
+/// How long a world write waits for the running mock to serve it.
+pub const WORLD_MOUNT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Where a world write stands on this node's running mock when the write
+/// returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldMount {
+    /// The running mock serves the new revision: the next call uses it.
+    Mounted,
+    /// The mock is rebuilding (or retrying a failed load) and still serves
+    /// the previous description; it applies once the rebuild lands.
+    Pending,
+    /// No running mock serves this version here: it is not the active
+    /// version, or the mock is not mounted on this node.
+    NotServed,
+    /// This server does not run the mocks (a control-only node), so it
+    /// cannot tell.
+    Unknown,
+}
+
+/// Waits for a node's running mocks to serve a world revision
+/// ([`AdminState::world_mounts`]).
+#[async_trait::async_trait]
+pub trait WorldMounts: Send + Sync {
+    /// Waits, at most `within`, until mock `mock` of `workspace` serves
+    /// contract `version` with world revision `revision` or newer.
+    async fn wait(
+        &self,
+        workspace: &str,
+        mock: &str,
+        version: i64,
+        revision: i64,
+        within: std::time::Duration,
+    ) -> WorldMount;
+}
+
+/// Where the write of `revision` on `v` stands on this node's running mock.
+async fn mounted(
+    st: &AdminState,
+    ws: &str,
+    m: &Mock,
+    v: &ContractVersion,
+    revision: i64,
+) -> WorldMount {
+    if v.status != ContractStatus::Active {
+        return WorldMount::NotServed;
+    }
+    match &st.world_mounts {
+        Some(mounts) => {
+            mounts
+                .wait(ws, &m.name, v.version, revision, st.world_mount_wait)
+                .await
+        }
+        None => WorldMount::Unknown,
+    }
 }
 
 /// One revision of a world description, without its document.
@@ -1359,6 +1421,7 @@ async fn write(
             })),
         )
         .await;
+    let runtime = mounted(st, &access.ws, m, v, revision.revision).await;
     Ok((
         StatusCode::CREATED,
         Json(WorldWriteResult {
@@ -1366,6 +1429,7 @@ async fn write(
             revision: revision.revision,
             applied,
             refused,
+            runtime,
         }),
     ))
 }
