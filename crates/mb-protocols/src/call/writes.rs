@@ -17,6 +17,9 @@ pub(super) struct WriteRequest<'a> {
     pub(super) target_id: Option<String>,
     pub(super) generated: &'a GeneratedResponse,
     pub(super) request_body: Option<&'a Value>,
+    /// The call's whole request body, which a described change's `from_request`
+    /// pointer reads (`request_body` may be the record it holds).
+    pub(super) call_body: Option<&'a Value>,
     /// The call's query, which a create's record is noted as made under (see
     /// [`Collections::note_scope`]).
     pub(super) query: Option<&'a Map<String, Value>>,
@@ -66,6 +69,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
         target_id,
         generated,
         request_body,
+        call_body,
         query,
         collection,
         origin,
@@ -215,11 +219,16 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 return WriteOutcome::default();
             };
             // An answer of another schema adds nothing of its own to the held record.
-            let data = match &generated.body {
-                Some(_) if was_held && !generated.new_record => {
+            let mut data = match &generated.body {
+                // A replace answering nothing replaces the held record all the same.
+                body if was_held
+                    && !generated.new_record
+                    && (body.is_some() || transitions::replaces(rt, op)) =>
+                {
                     let held = state.get(session, resource_type, &id).await;
                     let on = (resource_type, held.as_ref().map(|h| &h.data));
-                    write_memory::onto_record(rt, op, on, data, generated.status)
+                    let answered = (data, generated.status);
+                    write_memory::onto_record(rt, op, on, answered, request_body)
                 }
                 // With nothing held, an answer that does not suit the type (a task
                 // acknowledging the update) is no record of it: nothing is stored,
@@ -235,6 +244,27 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 }
                 _ => data,
             };
+            // What the description says the update sets, whatever was answered.
+            if !generated.new_record {
+                transitions::apply(rt, op, call_body, &mut data);
+            }
+            (id, Some(data))
+        }
+        // An action the description says sets members of its target: set on the held
+        // record. Any other action stores nothing here.
+        OperationKind::Command(Effect::Other)
+            if !generated.new_record && transitions::sets_members(rt, op) =>
+        {
+            let Some(id) = target_id else {
+                return WriteOutcome::default();
+            };
+            let Some(held) = state.get(session, resource_type, &id).await else {
+                return WriteOutcome::default();
+            };
+            let mut data = held.data;
+            if transitions::apply(rt, op, call_body, &mut data).is_empty() {
+                return WriteOutcome::default();
+            }
             (id, Some(data))
         }
         OperationKind::Command(Effect::Delete) => {

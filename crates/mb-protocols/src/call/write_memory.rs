@@ -466,7 +466,8 @@ pub(super) async fn silent_write_target(
 /// Whether a write leaves the stored copy to [`after_write`]: an update answering
 /// nothing, which merges what it can. Storing the request in the copy's place would
 /// lose what it did not repeat, identity included. Offline, and with consistency
-/// off, the request still replaces it.
+/// off, the request still replaces it. An update the description calls a replace
+/// does not: [`onto_record`] replaces the copy, keeping its identity.
 pub(super) fn keeps_stored(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -476,16 +477,75 @@ pub(super) fn keeps_stored(
     held && generated.body.is_none()
         && applies(rt, plan)
         && plan.op.kind == OperationKind::Command(Effect::Update)
+        && !transitions::replaces(rt, plan.op)
 }
 
-/// What of an update's answer `data` goes onto the record `t` it is stored as. An answer
-/// with the read's schema is the record. One of another schema (an `Ack {ok}`) was laid
-/// over the stored copy `held` (see [`mb_engine`]'s reflection), and a member stays when
-/// the record's read declares it at the top level or `held` already had it: what only
-/// the answer brought adds nothing to the record. Where the read declares no members,
-/// allows more by `additionalProperties`, or has a `oneOf` or `anyOf` that may hold
-/// others, it is as it was.
+/// What of an update's answer `data` (of `status`) goes onto the record `t` it is
+/// stored as. An answer with the read's schema is the record. One of another schema
+/// (an `Ack {ok}`) was laid over the stored copy `held` (see [`mb_engine`]'s
+/// reflection), and a member stays when the record's read declares it at the top
+/// level or `held` already had it: what only the answer brought adds nothing to the
+/// record. Where the read declares no members, allows more by `additionalProperties`,
+/// or has a `oneOf` or `anyOf` that may hold others, it is as it was.
+///
+/// What the description says of the update's `request` comes after that:
+/// - an update it calls a `replace` stores the record its request sends (see
+///   [`records::request_record`]) with only the held identity and read-only members
+///   kept, so a member it does not send is gone;
+/// - a `request.record` pointer that resolves lays the members of the record it
+///   points at onto the record, as far as the read declares them.
+///
+/// A result that breaks the type's schema keeps the merge as it was.
 pub(super) fn onto_record(
+    rt: &MockRuntime,
+    op: &Operation,
+    (t, held): (&str, Option<&Value>),
+    (data, status): (Value, u16),
+    request: Option<&Value>,
+) -> Value {
+    let merged = answered_onto_record(rt, op, (t, held), data, status);
+    let Some(request) = request else {
+        return merged;
+    };
+    let inner = records::request_record(rt, op, request);
+    let replace = transitions::replaces(rt, op);
+    if !replace && std::ptr::eq(inner, request) {
+        return merged;
+    }
+    let bundle = rt.bundle();
+    let schema = read_schema(rt, t);
+    let pinned = pinned_members(rt, t);
+    let result = if replace {
+        let level = Level::of(bundle, schema);
+        let stays = |key: &str| {
+            pinned.contains(&key) || level.named(key).is_some_and(|s| read_only(bundle, Some(s)))
+        };
+        let mut kept = Map::new();
+        for source in [Some(&merged), held].into_iter().flatten() {
+            for (key, value) in source.as_object().into_iter().flatten() {
+                if stays(key) {
+                    kept.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        merge_declared(bundle, schema, &Value::Object(kept), inner, &pinned).0
+    } else {
+        merge_declared(bundle, schema, &merged, inner, &pinned).0
+    };
+    if entity_fits(rt, t, &result) {
+        result
+    } else {
+        tracing::info!(
+            mock = %rt.name,
+            operation = %op.id,
+            "the record a described request leaves breaks its schema: merged as answered"
+        );
+        merged
+    }
+}
+
+/// [`onto_record`]'s merge of the answer alone.
+fn answered_onto_record(
     rt: &MockRuntime,
     op: &Operation,
     (t, held): (&str, Option<&Value>),
@@ -1636,7 +1696,15 @@ pub(super) async fn after_write(
         if tell.publish
             && let Some(held) = w.held
         {
-            state.upsert(session, held.clone()).await;
+            // A described transition or change stored the record anew: that copy is
+            // the one published, not the one held before.
+            let current = match transitions::sets_members(rt, op) {
+                true => state.get(session, t, &held.id).await,
+                false => None,
+            };
+            state
+                .upsert(session, current.unwrap_or_else(|| held.clone()))
+                .await;
         }
     }
     // Told as a child is to what it is made under: last write wins. A delete names the

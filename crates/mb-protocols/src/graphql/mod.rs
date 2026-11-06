@@ -47,6 +47,7 @@ mod select;
 mod state;
 mod subscription;
 
+pub(crate) use resolve::contradicts;
 pub(crate) use schema::build_schema;
 pub(crate) use select::NarrowCache;
 
