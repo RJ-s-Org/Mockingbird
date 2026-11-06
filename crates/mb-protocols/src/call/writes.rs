@@ -154,6 +154,14 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                     continue;
                 };
                 outcome.stored += 1;
+                state_lists::mark_created(
+                    state,
+                    session,
+                    (op, resource_type),
+                    collection.as_ref(),
+                    &id,
+                )
+                .await;
                 let place = (collection.clone(), query, was_held);
                 store_one(state, session, (op, resource_type), (id, data), place).await;
             }
@@ -291,6 +299,15 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             // A created record starts in its type's described initial state.
             if is_create {
                 lifecycle::initial(rt, resource_type, &mut data, request_body);
+                // A create into a listed collection is one of its members.
+                state_lists::mark_created(
+                    state,
+                    session,
+                    (op, resource_type),
+                    collection.as_ref(),
+                    &id,
+                )
+                .await;
             }
             let place = (collection, query, was_held);
             store_one(state, session, (op, resource_type), (id, data), place).await;
