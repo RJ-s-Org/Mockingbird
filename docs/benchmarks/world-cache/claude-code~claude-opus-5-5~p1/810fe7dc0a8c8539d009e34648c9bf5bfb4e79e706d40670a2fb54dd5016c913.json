@@ -1,0 +1,486 @@
+{
+  "author": {
+    "id": "claude-code~claude-opus-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-opus-5-5",
+    "model_requested": "claude-opus-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-06T19:48:53Z",
+  "authors": {
+    "/operations/archiveMessageStream/not_found": "agent",
+    "/operations/createMessageStream/answer": "agent",
+    "/operations/createMessageStream/request": "agent",
+    "/operations/createTemplate/answer": "agent",
+    "/operations/createTemplate/kind": "agent",
+    "/operations/createTemplate/type": "agent",
+    "/operations/deleteTemplate/kind": "agent",
+    "/operations/deleteTemplate/not_found": "agent",
+    "/operations/deleteTemplate/target": "agent",
+    "/operations/deleteTemplate/type": "agent",
+    "/operations/editMessageStream/not_found": "agent",
+    "/operations/editTemplate/not_found": "agent",
+    "/operations/getMessageStream/not_found": "agent",
+    "/operations/getTemplate/not_found": "agent",
+    "/operations/listMessageStreams/answer": "agent",
+    "/operations/listMessageStreams/filters": "agent",
+    "/operations/listTemplates/answer": "agent",
+    "/operations/listTemplates/filters": "agent",
+    "/operations/listTemplates/paging": "agent",
+    "/operations/unarchiveMessageStream/changes": "agent",
+    "/operations/unarchiveMessageStream/kind": "agent",
+    "/operations/unarchiveMessageStream/not_found": "agent",
+    "/operations/unarchiveMessageStream/target": "agent",
+    "/operations/unarchiveMessageStream/type": "agent",
+    "/types/message-streams/identity": "agent",
+    "/types/message-streams/unique": "agent",
+    "/types/templates/identity": "agent",
+    "/types/templates/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind11/postmark.openapi.yaml",
+  "contract_sha256": "810fe7dc0a8c8539d009e34648c9bf5bfb4e79e706d40670a2fb54dd5016c913",
+  "cost_usd": 0.39226819999999996,
+  "document": {
+    "operations": {
+      "archiveMessageStream": {
+        "not_found": 422
+      },
+      "createMessageStream": {
+        "answer": {
+          "record": ""
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "createTemplate": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "templates"
+      },
+      "deleteTemplate": {
+        "kind": "delete",
+        "not_found": 422,
+        "target": {
+          "path_param": "templateIdOrAlias"
+        },
+        "type": "templates"
+      },
+      "editMessageStream": {
+        "not_found": 422
+      },
+      "editTemplate": {
+        "not_found": 422
+      },
+      "getMessageStream": {
+        "not_found": 422
+      },
+      "getTemplate": {
+        "not_found": 422
+      },
+      "listMessageStreams": {
+        "answer": {
+          "records": "/MessageStreams"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "MessageStreamType",
+            "param": "MessageStreamType"
+          }
+        ]
+      },
+      "listTemplates": {
+        "answer": {
+          "records": "/Templates"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "LayoutTemplate",
+            "param": "LayoutTemplate"
+          },
+          {
+            "kind": "eq",
+            "member": "TemplateType",
+            "param": "TemplateType"
+          }
+        ],
+        "paging": {
+          "request": "Offset",
+          "size": "Count",
+          "style": "offset"
+        }
+      },
+      "unarchiveMessageStream": {
+        "changes": {
+          "ArchivedAt": {
+            "value": null
+          }
+        },
+        "kind": "action",
+        "not_found": 422,
+        "target": {
+          "path_param": "stream_ID"
+        },
+        "type": "message-streams"
+      }
+    },
+    "types": {
+      "message-streams": {
+        "identity": {
+          "member": "ID"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "ID"
+            ]
+          }
+        ]
+      },
+      "templates": {
+        "identity": {
+          "alternates": [
+            "Alias"
+          ],
+          "member": "TemplateId"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "Alias"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 55335,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteTemplate` (Delete) acts on one `templates` record but no target says where the request names it",
+      "operation": "deleteTemplate",
+      "type": "templates"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "5de2c7bfbebee3ca2e6a23d8df4433ee32c800c16a7080079a759cfa44a5bd8f",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "postmark",
+  "model_usage": {
+    "claude-opus-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 28125,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 28125,
+      "cacheReadInputTokens": 262601,
+      "canonicalModel": "claude-opus-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.39226819999999996,
+      "inputTokens": 22,
+      "maxOutputTokens": 128000,
+      "outputTokens": 5733,
+      "provider": "firstParty",
+      "thinkingTokens": 1259,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 20,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-06T19:48:21.083854Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 28125,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 28125,
+    "cache_read_input_tokens": 262601,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 22,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1607,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1607,
+        "cache_read_input_tokens": 34180,
+        "input_tokens": 2,
+        "output_tokens": 1181,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 5733,
+    "output_tokens_details": {
+      "thinking_tokens": 1259
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 55891,
+  "world": {
+    "operations": {
+      "archiveMessageStream": {
+        "kind": "action",
+        "not_found": 422,
+        "target": {
+          "path_param": "stream_ID"
+        },
+        "type": "message-streams"
+      },
+      "createMessageStream": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "message-streams"
+      },
+      "createTemplate": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "templates"
+      },
+      "deleteTemplate": {
+        "kind": "delete",
+        "not_found": 422,
+        "target": {
+          "path_param": "templateIdOrAlias"
+        },
+        "type": "templates"
+      },
+      "editMessageStream": {
+        "kind": "update",
+        "not_found": 422,
+        "target": {
+          "path_param": "stream_ID"
+        },
+        "type": "message-streams"
+      },
+      "editTemplate": {
+        "kind": "update",
+        "not_found": 422,
+        "target": {
+          "path_param": "templateIdOrAlias"
+        },
+        "type": "templates"
+      },
+      "getMessageStream": {
+        "kind": "read",
+        "not_found": 422,
+        "target": {
+          "path_param": "stream_ID"
+        },
+        "type": "message-streams"
+      },
+      "getTemplate": {
+        "kind": "read",
+        "not_found": 422,
+        "target": {
+          "path_param": "templateIdOrAlias"
+        },
+        "type": "templates"
+      },
+      "listMessageStreams": {
+        "answer": {
+          "records": "/MessageStreams"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "MessageStreamType",
+            "param": "MessageStreamType"
+          }
+        ],
+        "kind": "list",
+        "type": "message-streams"
+      },
+      "listTemplates": {
+        "answer": {
+          "records": "/Templates"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "LayoutTemplate",
+            "param": "LayoutTemplate"
+          },
+          {
+            "kind": "eq",
+            "member": "TemplateType",
+            "param": "TemplateType"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "Offset",
+          "size": "Count",
+          "style": "offset"
+        },
+        "type": "templates"
+      },
+      "unarchiveMessageStream": {
+        "changes": {
+          "ArchivedAt": {
+            "value": null
+          }
+        },
+        "kind": "action",
+        "not_found": 422,
+        "target": {
+          "path_param": "stream_ID"
+        },
+        "type": "message-streams"
+      }
+    },
+    "types": {
+      "message-streams": {
+        "identity": {
+          "member": "ID"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "ID"
+            ]
+          }
+        ]
+      },
+      "templates": {
+        "identity": {
+          "alternates": [
+            "Alias"
+          ],
+          "member": "TemplateId"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "Alias"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": false,
+      "problem": "Admin API answered 422 Unprocessable Entity: {\"code\":\"invalid\",\"detail\":\"not a world description entry: invalid value: map, expected map with a single key\",\"path\":\"/operations/unarchiveMessageStream/changes/ArchivedAt\",\"status\":422,\"title\":\"Invalid world description\",\"type\":\"about:blank\"}",
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "put_world"
+    }
+  ]
+}

@@ -131,7 +131,13 @@ each suite's mocks run with. `derived` writes Mockingbird's heuristic descriptio
 as a revision; `agent` has a coding agent write one per contract, blind, before the
 suites run (cached per contract hash; `--author stub` is free). Rows of a run with a
 world carry `world`, its proxy label and server log end in `@<world>`, and each write
-is recorded in `<out>/world-applied.jsonl`. See world_author.py and the README.
+is recorded in `<out>/world-applied.jsonl`. `--world-cache-only` reads every description
+from the cache and never authors (replay.py's agent tier). See world_author.py and the
+README.
+
+Journeys are tagged by default (`--no-tag-journeys` turns it off): each mock's LLM calls
+carry `x-bench-journey`, each journey rep is marked at the proxy, so the proxy's `--dump`
+of any run can be packed into a replay recording (`replay.py pack-dump`).
 
 Standard library only. Makes no LLM calls itself.
 """
@@ -1470,16 +1476,27 @@ def run_reps(unit, srv, sink, args):
         unit(srv, sink, args, rep)
 
 
+MARK_WARNED = threading.Event()
+
+
 def mark_rep(srv, args, journey, rep):
     """Tells the bench proxy that `journey`'s calls from now on are rep `rep`
-    (--tag-journeys only; replay.py keys recorded answers by it)."""
+    (--tag-journeys, the default; replay.py keys recorded answers by it). An endpoint
+    that does not take marks (fake_llm.py as the proxy in a dry run) gets a warning,
+    once, and the journey runs: its calls are then all tagged rep 0."""
     if not getattr(args, "tag_journeys", False):
         return
     body = json.dumps({"label": run_label(args.model, srv.suite, args), "journey": journey, "rep": rep}).encode()
     req = urllib.request.Request(f"{args.proxy_base.rstrip('/')}/bench/mark", data=body, method="POST",
                                  headers={"content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+    except OSError as e:
+        if not MARK_WARNED.is_set():
+            MARK_WARNED.set()
+            print(f"WARNING: {args.proxy_base} took no journey mark ({e}); calls stay tagged by journey but "
+                  "not by rep (--no-tag-journeys turns tagging off)", file=sys.stderr, flush=True)
 
 
 def run_journey_table(table, srv, sink, args):
@@ -9529,7 +9546,7 @@ RUNNERS = {
 }
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True, help="model id, e.g. deepseek/deepseek-v4.1-flash")
     p.add_argument("--proxy-base", required=True, help="bench proxy, e.g. http://127.0.0.1:18080")
@@ -9557,15 +9574,22 @@ def main():
                         "derived (Mockingbird's heuristic description written back as a revision) or agent "
                         "(a coding agent's, authored blind from the contract and cached per contract hash; "
                         "see world_author.py)")
-    p.add_argument("--tag-journeys", action="store_true",
-                   help="for replay.py: each mock's LLM calls carry x-bench-journey, each journey rep is "
-                        "marked at the proxy, a journey's reps run one after another, and fallbacks are seeded")
+    p.add_argument("--tag-journeys", action=argparse.BooleanOptionalAction, default=True,
+                   help="each mock's LLM calls carry x-bench-journey, each journey rep is marked at the proxy, "
+                        "a journey's reps run one after another, and fallbacks are seeded, so the proxy's "
+                        "--record and --dump can be packed into a replay.py recording (default on; "
+                        "--no-tag-journeys turns it off)")
     p.add_argument("--provider-pins", default=bench_proxy.DEFAULT_PROVIDER_PINS,
                    help="providers.json whose pins the proxy sends: checked before the run (default: the bench's; "
                         "'' for none)")
     p.add_argument("--openrouter-api", default=provider_health.OPENROUTER_API, help=argparse.SUPPRESS)
     provider_health.add_args(p)
     world_author.add_author_args(p)
+    return p
+
+
+def main():
+    p = build_parser()
     args = p.parse_args()
     if args.jobs < 1:
         p.error("--jobs must be at least 1")
@@ -9592,7 +9616,10 @@ def main():
         # Authored (or read from the cache) before any suite runs, so a suite never
         # waits on authoring and every suite of the run uses the same descriptions.
         contracts = [os.path.join(REPO, c) for s in suites for c, _, _ in suite_mocks(s, args).values()]
-        args.authored = world_author.ensure_authored(contracts, args, args.out)
+        try:
+            args.authored = world_author.ensure_authored(contracts, args, args.out)
+        except world_author.CacheMiss as e:
+            sys.exit(f"server_suites: {e}")
     if args.suites_parallel:
         # A suite's server log is named by model and suite, so each runs once.
         suites = list(dict.fromkeys(suites))

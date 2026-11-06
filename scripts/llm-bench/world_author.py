@@ -74,6 +74,13 @@ DEFAULT_AUTHOR_MODEL = "claude-opus-5-5"
 SECRET_MARK = re.compile(r"sk-(?:or|ant)-[A-Za-z0-9_-]{8,}")
 # Kept out of the stored transcript: machine paths and session ids, no use for attribution.
 TRANSCRIPT_DROP = ("session_id", "cwd", "uuid", "apiKeySource", "memory_paths")
+# Text the agent (or its process) wrote, kept out of a cached entry that succeeded: the
+# summary is the transcript's result event, and stderr matters only for a failure. A
+# committed `<sha>.json` thus holds the description and its metadata, never prose.
+TRANSCRIPT_TEXT = ("summary", "stderr_tail")
+# What the committed cache may hold (`committed_cache_problems`): the ignore file and one
+# `<author id>/<contract sha256>.json` per authored contract.
+CACHE_ENTRY = re.compile(r"^[A-Za-z0-9._~-]+/[0-9a-f]{64}\.json$")
 
 # The Mockingbird MCP tools the author may call: reading the mock and its world,
 # writing the world, and calling the mock to check a description. Everything else
@@ -155,6 +162,84 @@ def rel(path):
 def scan_secrets(text):
     """True when text holds what looks like an OpenRouter key."""
     return bool(SECRET_MARK.search(text or ""))
+
+
+# `scan_files`: what must never be committed with the cache. A token after `Bearer`
+# (or an Authorization scheme) is a credential unless it is an obvious placeholder.
+SCAN_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+SCAN_TOKEN = re.compile(r"(?i)\b(?:bearer|authorization[\"']?\s*[:=]\s*[\"']?\s*(?:basic|token))\s+([A-Za-z0-9._~+/=-]+)")
+SCAN_PLACEHOLDERS = {"test", "bench-placeholder", "placeholder", "token", "xxx", "<token>", "redacted", "..."}
+SCAN_VENDOR_KEYS = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|"
+                              r"AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,})\b|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+SCAN_ASSIGNED = re.compile(r"(?i)[\"']?(?:api[_-]?key|secret|access[_-]?token|password)[\"']?\s*[:=]\s*[\"']([^\"'\s]{16,})[\"']")
+SCAN_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
+# RFC 2606 / 6761 names and the bench's own: an address there belongs to no one.
+SCAN_EMAIL_OK = re.compile(r"(?i)(?:^|\.)(?:example(?:\.[a-z]+)?|test|invalid|localhost|bench(?:\.[a-z]+)?)$")
+
+
+def scan_text(text):
+    """What in `text` looks like a credential or a private address: a list of short
+    descriptions (the match itself is never repeated in full), empty when clean."""
+    found = []
+    for m in SCAN_KEY.finditer(text):
+        found.append(f"an sk- key ({m.group(0)[:6]}...)")
+    for m in SCAN_TOKEN.finditer(text):
+        if m.group(1).lower() not in SCAN_PLACEHOLDERS:
+            found.append(f"an Authorization token ({m.group(1)[:3]}...)")
+    for m in SCAN_VENDOR_KEYS.finditer(text):
+        found.append(f"a vendor key or private key ({m.group(0)[:4]}...)")
+    for m in SCAN_ASSIGNED.finditer(text):
+        value = m.group(1)
+        if any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
+            found.append(f"a secret-named value ({value[:3]}...)")
+    for m in SCAN_EMAIL.finditer(text):
+        if not SCAN_EMAIL_OK.search(m.group(1)):
+            found.append(f"an email address at {m.group(1)}")
+    return found
+
+
+def scan_files(paths):
+    """`scan_text` over files (a directory: every file under it). Returns problems."""
+    problems = []
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            files += sorted(os.path.join(r, n) for r, _, names in os.walk(p) for n in names)
+        else:
+            files.append(p)
+    for path in files:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        problems += [f"{path}: {what}" for what in scan_text(text)]
+    return problems
+
+
+def committed_cache_problems(cache, files):
+    """Why `files` (paths relative to the cache directory, as `git ls-files` lists them)
+    must not be the committed cache: anything but the ignore file and `<author id>/<sha
+    256>.json` entries (never a transcript, a lock or a failure), an entry that is not a
+    successful one for its own contract hash, or one that keeps the agent's text."""
+    problems = []
+    for name in files:
+        if name == ".gitignore":
+            continue
+        if not CACHE_ENTRY.match(name):
+            problems.append(f"{name}: only <author id>/<contract sha256>.json entries are committed")
+            continue
+        try:
+            with open(os.path.join(cache, name)) as f:
+                entry = json.load(f)
+        except (OSError, ValueError) as e:
+            problems.append(f"{name}: not readable JSON ({e})")
+            continue
+        sha = os.path.basename(name)[:-len(".json")]
+        if not isinstance(entry, dict) or entry.get("contract_sha256") != sha or entry.get("is_error"):
+            problems.append(f"{name}: not a successful entry for contract {sha[:12]}")
+            continue
+        kept = [k for k in TRANSCRIPT_TEXT if k in entry]
+        if kept:
+            problems.append(f"{name}: keeps the agent's text ({', '.join(kept)})")
+    return problems
 
 
 def write_text_atomic(path, text):
@@ -660,6 +745,8 @@ def ensure_authored(contracts, args, out=None):
     <out>/world-authoring.jsonl."""
     aid = author_id(args.author, args.author_model)
     cache = args.world_cache
+    if getattr(args, "world_cache_only", False):
+        return read_cache_only(contracts, cache, aid, out)
     args.author_inputs = author_inputs(args.binary)
     if args.author != "stub" and not getattr(args, "mcp_tools", None):
         args.mcp_tools = mcp_tool_names(args.binary)
@@ -680,6 +767,9 @@ def ensure_authored(contracts, args, out=None):
                 entry = author_contract(contract, args, sha)
                 transcript = entry.pop("_transcript", "")
                 stem = path[:-len(".json")] + (".failed" if entry.get("is_error") else "")
+                if not entry.get("is_error"):
+                    for k in TRANSCRIPT_TEXT:
+                        entry.pop(k, None)
                 write_json_atomic(stem + ".json", entry)
                 write_text_atomic(stem + ".transcript.jsonl", transcript)
         row = summary_row(entry, cached, rel(path))
@@ -695,6 +785,34 @@ def ensure_authored(contracts, args, out=None):
     with ThreadPoolExecutor(max_workers=max(1, args.author_jobs)) as pool:
         by_entry = dict(pool.map(one, list(by_sha)))
     return {c: by_entry[shas[c]] for c in paths}
+
+
+class CacheMiss(RuntimeError):
+    """`--world-cache-only`: a contract has no cached description."""
+
+
+def read_cache_only(contracts, cache, aid, out=None):
+    """{contract path: entry} from the cache alone, for a run that must be deterministic
+    (replay.py's agent tier): nothing is authored and nothing is locked or written in the
+    cache. The entry is taken whatever its recorded `inputs`: the description is what the
+    run applies, and a skill edit since does not change it. A contract with no successful
+    entry raises CacheMiss, naming every one."""
+    paths = list(dict.fromkeys(os.path.abspath(c) for c in contracts))
+    got, missing = {}, []
+    for c in paths:
+        sha = sha256_file(c)
+        entry = load_cached(cache, aid, sha)
+        if entry is None:
+            missing.append(f"{rel(c)} ({rel(cache_path(cache, aid, sha))})")
+            continue
+        got[c] = entry
+        row = summary_row(entry, True, rel(cache_path(cache, aid, sha)))
+        print(f"world: {row['mock']} revision {row['revision']} (cached, cache only)", file=sys.stderr)
+        if out:
+            append_jsonl(os.path.join(out, "world-authoring.jsonl"), row)
+    if missing:
+        raise CacheMiss("no cached description (--world-cache-only never authors): " + "; ".join(missing))
+    return got
 
 
 # ---------------------------------------------------------------- applying
@@ -764,6 +882,9 @@ def add_author_args(p):
     p.add_argument("--world-cache", default=DEFAULT_CACHE,
                    help="authored descriptions, per author id and contract sha256 (default %(default)s)")
     p.add_argument("--refresh", action="store_true", help="author again even when cached")
+    p.add_argument("--world-cache-only", action="store_true",
+                   help="never author: read every description from --world-cache, and fail on a contract "
+                        "with none (replay.py's agent tier, which must be deterministic)")
     p.add_argument("--claude", default="claude", help="the claude executable")
 
 
@@ -782,8 +903,17 @@ def main():
     p.add_argument("--binary", default="target/release/mockingbird")
     p.add_argument("--out", help="also append summary rows to <out>/world-authoring.jsonl")
     p.add_argument("--keep", action="store_true", help="keep each authoring temp directory")
+    p.add_argument("--scan", nargs="+", metavar="PATH",
+                   help="only scan these files (or directories) for keys, Authorization tokens and private "
+                        "email addresses, and exit 1 on a finding (run it over the cache files you commit)")
     add_author_args(p)
     args = p.parse_args()
+    if args.scan:
+        problems = scan_files(args.scan)
+        for line in problems:
+            print(line, file=sys.stderr)
+        print(f"scan: {len(problems)} finding(s)")
+        sys.exit(1 if problems else 0)
     resolve_paths(args)
     if not os.path.exists(args.binary):
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")

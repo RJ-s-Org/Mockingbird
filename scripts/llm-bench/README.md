@@ -125,6 +125,7 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 
 - `GET /stats` returns spend, call count, the trip flag and per-label totals. `GET /healthz` returns 200.
 - `--record <raw.jsonl>` appends each call's journey tag (from `x-bench-journey` and the `POST /bench/mark` marks) and answer, never a header; `--replay <recordings>` answers every call from recordings with no upstream, no key and no ledger needed, and `--replay-log` records each call's match. Both are for `replay.py` (see [Replay gate](#replay-gate)).
+- `--dump <exchanges.jsonl>` appends each forwarded call's messages and answer, never a header, with its status and the same journey tag `--record` writes (`journey`, `rep`, `op`, `n`, `hash`, `now`). `server_suites.py` tags journeys by default, so the dump of any run (`run.py` keeps one next to the ledger) can be packed into a recording: `replay.py pack-dump` (see [Seeding from a run's dump](#seeding-from-a-runs-dump)).
 - When the client did not ask for streaming, the proxy upgrades the call to streaming (turn this off with `--no-stream-upgrade`). This lets it measure TTFT, the time to the first non-empty `delta.content`. TTFR is the time to the first reasoning delta. Both are measured from when the attempt that succeeded had its upstream connection up (TCP and TLS are excluded: a real client reuses pooled connections). `total_ms` is measured from when the client's request arrived.
 - OpenRouter's keep-alive comments (`: OPENROUTER PROCESSING`) are skipped. The proxy reads usage, including `usage.cost`, from the final chunk. A mid-stream `error` object, or `finish_reason: "error"`, becomes a 502 carrying the error body. If the client asked for a stream, the 200 header has already gone out, so the error passes through inside the stream.
 - If the upstream rejects `reasoning: {"enabled": false}` (400/404/422 with "reasoning" in the body), the proxy retries once without it and remembers that for the model. It does the same for `response_format` (400/422 that mentions response_format or JSON mode).
@@ -261,7 +262,7 @@ Two limits remain:
 - `--restricted` still loads the user's own `~/.claude/CLAUDE.md`. `--author-isolation bare` adds `--bare`, which skips CLAUDE.md, auto-memory and hooks, but needs `ANTHROPIC_API_KEY` authentication.
 - `call_mock` takes an optional `base_url`, so the agent could call another URL on the machine. Its prompt and the skill never point it anywhere but the mock. `--author stub` runs `stub_author.py` instead. It writes through the CLI (`mockingbird world show|patch --author agent`), restates the heuristic identities and sends one unknown operation to exercise a refusal. It costs nothing, carries no knowledge of the API, and is for dry runs only.
 
-**What is recorded.** Each contract's result is cached as `--world-cache` (default `docs/benchmarks/world-cache`)`/<author id>/<contract sha256>.json`, next to the agent's stream-json transcript (`.transcript.jsonl`; both are scanned for `sk-or-` before they are written). The author id is `claude-code~<model>~p<prompt version>`. `--author-model` defaults to a full id (`claude-opus-5-5`), not an alias, so a new model release is never mistaken for a cache hit. Each entry also records the sha256 of the skills Mockingbird installs and of the world schema (`inputs`). A different contract, model, prompt, skill text or schema is therefore authored again, while a rerun reads the cache and pays nothing. Concurrent runs that need the same contract (`run.py --parallel` models, two terminals) take a lock per contract: the first authors it, and the others wait and read the cache. A failed authoring is kept as `<sha>.failed.json` and is never read back, so the next run tries again. Failure means a non-zero exit, an error result, a timeout, or an isolation problem. In the run that hit the failure, applying it fails the suite (`suite_error`) rather than silently running the heuristics. The entry holds:
+**What is recorded.** Each contract's result is cached as `--world-cache` (default `docs/benchmarks/world-cache`)`/<author id>/<contract sha256>.json`, next to the agent's stream-json transcript (`.transcript.jsonl`; both are scanned for `sk-or-` before they are written). A successful entry keeps none of the agent's text: its closing summary is the transcript's result event, and its stderr is kept only in a failed entry. The author id is `claude-code~<model>~p<prompt version>`. `--author-model` defaults to a full id (`claude-opus-5-5`), not an alias, so a new model release is never mistaken for a cache hit. Each entry also records the sha256 of the skills Mockingbird installs and of the world schema (`inputs`). A different contract, model, prompt, skill text or schema is therefore authored again, while a rerun reads the cache and pays nothing. Concurrent runs that need the same contract (`run.py --parallel` models, two terminals) take a lock per contract: the first authors it, and the others wait and read the cache. A failed authoring is kept as `<sha>.failed.json` and is never read back, so the next run tries again. Failure means a non-zero exit, an error result, a timeout, or an isolation problem. In the run that hit the failure, applying it fails the suite (`suite_error`) rather than silently running the heuristics. The entry holds:
 
 - the cost (`total_cost_usd` from Claude Code), duration, turns and token usage;
 - every world write's answer from the transcript: `revision` and `refused` entries (`path`, `code`, `message`), or the problem of a whole-document refusal, which stores nothing (an answer that is not JSON is `ok: null`, unknown rather than failed);
@@ -269,7 +270,15 @@ Two limits remain:
 - the accepted description: `document`, the newest revision's overlay;
 - the gaps before and after authoring, the refused entries left at the end, each entry's author, and the effective description.
 
-`--refresh` authors again. Commit the cache with a run's results, so the numbers can be traced to the exact descriptions. The stored transcript drops session ids and machine paths.
+`--refresh` authors again. The stored transcript drops session ids and machine paths.
+
+**The committed cache.** `docs/benchmarks/world-cache` is committed with the authored descriptions of blind11, blind12 and blind13 (the replay gate's agent tier runs on them). Only the `<author id>/<contract sha256>.json` entries are committed: the directory's `.gitignore` keeps out the transcripts, the failed attempts and the locks, and `test_replay.py` fails when the tracked files hold anything else, an entry that keeps the agent's text, or a finding of the scan. Commit new entries with the run that authored them, after scanning exactly the files you add:
+
+```sh
+python3 scripts/llm-bench/world_author.py --scan $(git diff --cached --name-only -- docs/benchmarks/world-cache)
+```
+
+The scan flags `sk-` keys, an Authorization or Bearer token other than an obvious placeholder (`Bearer test`, `bench-placeholder`), well-known vendor key shapes and private keys, a long value of a field named like a key or password, and any email address outside the reserved domains (`example.*`, `.test`, `.invalid`, `.localhost`) and the bench's own. `--world-cache-only` (on `server_suites.py`, and what `replay.py --world agent` passes) never authors: each description is read from the cache whatever its recorded `inputs`, nothing is locked or written there, and a contract with no entry stops the run.
 
 During a run, `<out>/world-authoring.jsonl` gets one summary row per contract (`cached` true on a hit, with the first authoring's cost and time). `<out>/world-applied.jsonl` gets one row per (model, suite, mock) with the revision the write made on the suite's mock and the entries the server refused then (the runtime's validator may differ from the one at authoring time). A write counts only once the server says the running mock serves it (`runtime: mounted` in the answer of the world write): a `pending` write is sent again, up to `WORLD_WRITE_ATTEMPTS` (3) times, and a mock that never serves it fails the suite, so no call is measured on the previous description. The row keeps `runtime`. A description the server refuses as a whole fails the suite (`suite_error`). Rows of a run with a world carry `"world": "<tier>"` in `server.jsonl` (rows with no `world` are `none`). The proxy label and the server log are `<slug>~<suite>@<tier>`, so the ledger keeps the tiers' LLM spend apart.
 
@@ -290,16 +299,18 @@ python3 scripts/llm-bench/aggregate.py --out $OUT
 
 ## Replay gate
 
-A regression that is deterministic given the model's answers (a check answered from stored state going from pass to fail after an engine change) does not need a paid run to be found. `replay.py gate` runs the journeys suites against recorded LLM answers, offline and with no key, and compares each check with the recording's result. The `Replay gate` workflow runs it on every pull request that touches `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import`, `crates/mb-state`, `crates/mb-store`, `crates/mb-llm` or `scripts/llm-bench`, and `scripts/gate.sh` runs it locally for the same paths (on the release binary it builds first, which the bench's Python tests also get as `MB_BENCH_BINARY`).
+A regression that is deterministic given the model's answers (a check answered from stored state going from pass to fail after an engine change) does not need a paid run to be found. `replay.py gate` runs the journeys suites against recorded LLM answers, offline and with no key, and compares each check with the recording's result. The `Replay gate` workflow runs it on every pull request that touches `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import`, `crates/mb-state`, `crates/mb-store`, `crates/mb-llm`, `scripts/llm-bench` or `docs/benchmarks/world-cache`, on both world tiers (`--world none --world agent`), and `scripts/gate.sh` runs it locally for the same paths (on the release binary it builds first, which the bench's Python tests also get as `MB_BENCH_BINARY`).
 
 ```sh
 cargo build --release -p mockingbird-cli
-python3 scripts/llm-bench/replay.py gate [--suite journeys_blind6] [--keep] [--report verdict.json]
+python3 scripts/llm-bench/replay.py gate [--world none] [--world agent] [--suite journeys_blind6] [--keep] [--report verdict.json]
 ```
+
+**World tiers.** A recording is made on one world tier (`record --world none|agent`, default `none`). The `agent` tier runs every mock with its committed description from `docs/benchmarks/world-cache` (`server_suites.py --world agent --world-cache-only`): the description comes from the cache, is never authored during `record` or `gate`, and a contract with no cached description fails its suite. Its recordings are a set of their own, `recordings/<model slug>~<suite>@agent.json.gz` (the proxy label carries `@agent`), with `"world": "agent"`, and their results are the `server.jsonl` rows of that world. `gate` replays the tiers named by `--world` (default `none`, so the `none` recordings and their verdicts are unchanged); the workflow and `scripts/gate.sh` name both. A suite that reports no result at all (a server that did not start, a world cache miss) fails the gate rather than masking its checks as dirt.
 
 **Recordings.** `recordings/<model slug>~<suite>.json.gz` holds, for rep 0 of one (model, suite) run: every LLM call's journey, operation, order and prompt hash with the answer the model gave (`content`, `finish_reason`, or the error status), and the run's per-check results (`case` -> `ok`). It holds no prompt, no header and no key: `test_replay.py` scans every committed recording for an Authorization header and for any `sk-or-` string, and `replay.py scan` does the same on demand. The recorder drops anything shaped like an OpenRouter key from what it writes.
 
-**How a call is answered.** The gate starts `proxy.py --replay recordings/`, which never opens an upstream connection and never reads the key, and runs `server_suites.py --tag-journeys --repeat 1` against it. `--tag-journeys` gives each mock its own copy of the LLM profile that sends `x-bench-journey: <mock>`, posts a mark (`POST /bench/mark`) before each journey rep so the proxy knows the rep, runs a journey's reps one after another, and seeds the faker (`faker_seed: 1`) so a fallback answers the same each run. An engine change can change the prompt, so a call is matched in this order:
+**How a call is answered.** The gate starts `proxy.py --replay recordings/`, which never opens an upstream connection and never reads the key, and runs `server_suites.py --repeat 1` against it, which tags journeys (`--tag-journeys`, the default since it makes every run seedable; `--no-tag-journeys` turns it off). Tagging gives each mock its own copy of the LLM profile that sends `x-bench-journey: <mock>`, posts a mark (`POST /bench/mark`) before each journey rep so the proxy knows the rep, runs a journey's reps one after another, and seeds the faker (`faker_seed: 1`) so a fallback answers the same each run. An engine change can change the prompt, so a call is matched in this order:
 
 | match | rule |
 |---|---|
@@ -331,6 +342,8 @@ A server that does not start, or a suite that breaks, fails the gate too. The ta
 # The free seed: fake_llm.py answers every call, recorded as model bench/fake-llm.
 # --calibrate 30 is what the committed seed was calibrated with (see above): 30 free replays, so it runs far longer than one gate.
 python3 scripts/llm-bench/replay.py record --fake --calibrate 30
+# The agent tier's free seed: every journeys suite with cached descriptions (blind11-13)
+python3 scripts/llm-bench/replay.py record --fake --world agent --calibrate 30
 
 # A paid recording: one rep of every journeys suite through the budget-guarded proxy
 source ~/.zshenv >/dev/null 2>&1   # OPENROUTER_API_KEY, never printed
@@ -354,6 +367,18 @@ Such a recording would hold faker fallbacks as the model's answers, and the gate
 
 The recordings committed now are the free seed (`source: "fake_llm.py"`, model `bench/fake-llm`). Its answers are schema-shaped values, so its passing checks are mostly the ones the engine answers from state: reads of what a write stored, lists that hold a created item, deletes that leave a 404. That is what the gate protects first. The 2026-10-30 dumps under `docs/benchmarks` (`exchanges.jsonl.gz`) predate the journey tags and many engine changes, so they cannot seed it. A paid recording adds the checks that pass only with a real model's answers.
 
+### Seeding from a run's dump
+
+Every paid run can seed the gate without a second, recording run. `server_suites.py` tags journeys by default and the proxy's `--dump` keeps each call's tag, so the dump and the run's `server.jsonl` pack into recordings:
+
+```sh
+# run.py full: the dump and the ledger sit in $OUT, each model's server.jsonl under $OUT/server/<model slug>
+python3 scripts/llm-bench/replay.py pack-dump $OUT/exchanges.jsonl $OUT/server/<model slug>/server.jsonl \
+  --rep 0 [--source "paid run 2026-11-06 via OpenRouter"]
+```
+
+It writes one recording per journeys suite (and world tier) of that model with results in `server.jsonl`, for the rep given. It refuses as `pack` does (the ledger defaults to `calls.jsonl` next to the dump, where `run.py` puts it), and also when a dumped call has no tag (a dump from before tagging, or a run with `--no-tag-journeys`). Calibrate before committing: the recording has none of `record`'s calibration, so replay it with `gate` a few times on the run's binary, then `expect` or drop what flips.
+
 ## Testing without spend
 
 Both scripts accept a hidden `--upstream URL` flag that points the proxy at a fake chat endpoint. With it, `run.py` skips the key calls. `fake_llm.py` can stand in for OpenRouter:
@@ -364,6 +389,6 @@ env -u OPENROUTER_API_KEY python3 scripts/llm-bench/run.py pilot --out /tmp/benc
   --models a/x,b/y --upstream http://127.0.0.1:18999/api/v1/chat/completions
 ```
 
-`test_replay.py` tests the matching (`reused` included), the shift of timestamps, the comparison and what makes a journey dirty, the baseline report of calibration, `expect`, packing and its refusals, the security scan and the proxy's replay mode (with every upstream connection patched to fail). Its end-to-end test records the `journeys` suite against `fake_llm.py`, replays it green, then claims a failing check passed and expects the gate to fail; it runs when the release binary is built (`target/release/mockingbird`, `$CARGO_TARGET_DIR/release/mockingbird` or `MB_BENCH_BINARY`).
+`test_replay.py` tests the matching (`reused` included), the shift of timestamps, the comparison and what makes a journey dirty, the baseline report of calibration, `expect`, packing and its refusals, the world tiers, `pack-dump` from a tagged proxy dump, default tagging, the security scan, the committed world cache (entries only, scanned clean, a cache hit for blind11-13) and the proxy's replay mode (with every upstream connection patched to fail). Its end-to-end tests record the `journeys` suite against `fake_llm.py`, replay it green, then claim a failing check passed and expect the gate to fail, and record `journeys_blind11` on the agent tier, replay it green with `--world agent` and expect a gate on an empty world cache to fail; it runs when the release binary is built (`target/release/mockingbird`, `$CARGO_TARGET_DIR/release/mockingbird` or `MB_BENCH_BINARY`).
 
 `python3 -m unittest scripts/llm-bench/test_world.py` tests the `--world` mode with fakes only: transcript parsing, the agent's blind tool set and environment, the cache, applying each tier, the row and label changes, and the aggregate split. One end-to-end test runs `stub_author.py` against a real `mockingbird serve` when `target/release/mockingbird` is built.

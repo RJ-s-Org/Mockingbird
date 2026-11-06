@@ -578,11 +578,18 @@ def sse_events(resp: Any, on_line: Any = None, deadline: Optional[float] = None)
 
 
 class Proxy:
-    def dump(self, rec: Dict[str, Any], body: Dict[str, Any], out: "Outcome") -> None:
-        """Appends the call's prompt and answer to `--dump` (no headers, so no key)."""
+    def dump(self, rec: Dict[str, Any], body: Dict[str, Any], out: "Outcome",
+             tag: Optional[Dict[str, Any]] = None) -> None:
+        """Appends the call's prompt and answer to `--dump` (no headers, so no key),
+        with its journey tag (journey, rep, op, n, hash, now) and status, so `replay.py
+        pack-dump` can make a recording of the run."""
         if not self.dump_path:
             return
         line = json.dumps({
+            **{k: (tag or {}).get(k) for k in replay.TAG_FIELDS},
+            "status": rec.get("status"),
+            "error_kind": rec.get("error_kind"),
+            "error": rec.get("error_excerpt") if rec.get("error_kind") else None,
             "ts": rec.get("ts"),
             "label": rec.get("label"),
             "model_requested": rec.get("model_requested"),
@@ -610,6 +617,10 @@ class Proxy:
         self.replayer = replay.Replayer(replays, getattr(args, "replay_log", None)) if replays else None
         record = getattr(args, "record", None)
         self.recorder = replay.Recorder(record) if record and not self.replayer else None
+        # Every forwarded call is tagged when it is recorded or dumped: a dump is then
+        # as good as a raw recording (`replay.py pack-dump`).
+        self.tagger: Optional[replay.Tags] = self.recorder or (
+            replay.Tags() if self.dump_path and not self.replayer else None)
         ledger = args.ledger
         if self.replayer and not ledger:
             import tempfile
@@ -797,7 +808,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def mark(self, raw: bytes) -> None:
         """`{label, journey, rep}`: the journey's calls from now on belong to that rep."""
-        tags = self.proxy.replayer or self.proxy.recorder
+        tags = self.proxy.replayer or self.proxy.tagger
         try:
             doc = json.loads(raw or b"{}")
             if tags:
@@ -881,7 +892,8 @@ class Handler(BaseHTTPRequestHandler):
             "provider_pin": None,
             "provider_pin_by": None,
         }
-        tag = px.recorder.tag(label, self.headers, body) if px.recorder else None
+        tag = px.tagger.tag(label, self.headers, body) if px.tagger else None
+        self.call_tag = tag
         self.last_outcome = None
         estimate = px.estimate(model, body)
         if not px.ledger.reserve(estimate):
@@ -901,7 +913,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(502, {"error": {"message": rec["error_excerpt"]}})
         finally:
             px.ledger.settle(estimate, rec, reserved=True)
-            if tag is not None:
+            if tag is not None and px.recorder:
                 out = self.last_outcome
                 px.recorder.write(tag, rec, redact("".join(out.content)) if out else "",
                                   out.finish_reason if out else None)
@@ -1067,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
             self.client_closed(px, model, rec, out, received, prompt_est)
         else:
             self.complete(px, model, rec, out, client_stream, received, prompt_est)
-        px.dump(rec, body, out)
+        px.dump(rec, body, out, getattr(self, "call_tag", None))
 
     @staticmethod
     def check_first_chunk(out: Outcome, pinned: Optional[Dict[str, Any]]) -> None:
