@@ -34,7 +34,10 @@
 //! ([`write_memory::matched_for_context`]) and joins the related resources as context,
 //! within the bounds [`world::named_by_value`] keeps. It is not one of the records a
 //! create marks as referenced ([`world::referenced_by_value`]), and an answer's body is
-//! never stored on it.
+//! never stored on it. The one exception is an alternate key: a member the world
+//! description names in a type's `identity.alternates` is indexed whenever its value
+//! has an id's shape, and a create's value only one live record holds under such a
+//! member marks that record referenced, under its stored id ([`by_alternate`]).
 //!
 //! A create whose operation declares a refusal status is also shown the records of the
 //! type it creates that already hold what it asks for ([`same_values`]): a top-level
@@ -470,8 +473,20 @@ fn member_kind(rt: &MockRuntime, parts: &[&Value], name: &str, text: &str) -> Op
     }
 }
 
+/// Whether member `name` of a type whose described alternates are `alternates` holds
+/// `text` as an alternate key: of an id's shape ([`id_like`]), and neither a
+/// credential's member nor a credential's look.
+fn alternate_key(rt: &MockRuntime, alternates: &[String], name: &str, text: &str) -> bool {
+    alternates.iter().any(|a| a == name)
+        && id_like(text)
+        && !write_memory::is_credential_name(rt, name)
+        && !mb_mcm::credentials::hides_in_context(name)
+        && !mb_mcm::credentials::is_credential_value(text)
+}
+
 /// What `record` is indexed under: its identity and up to [`MAX_MEMBERS`] of its
-/// string members that identify it ([`Kind::Identifying`]), other than its identity.
+/// string members that identify it ([`Kind::Identifying`]) or are a described alternate
+/// key of its type ([`alternate_key`]), other than its identity.
 fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue> {
     let mut out = Vec::new();
     let id = record.id.as_str();
@@ -491,6 +506,7 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
         return out;
     };
     let parts = schema_parts(rt.bundle(), Some(schema)).0;
+    let alternates = records::alternates(rt, &record.resource_type);
     let mut kept = 0;
     for (name, value) in members {
         if kept >= MAX_MEMBERS {
@@ -499,7 +515,10 @@ fn indexed_values(rt: &MockRuntime, record: &StoredResource) -> Vec<IndexedValue
         let Value::String(text) = value else {
             continue;
         };
-        if text != id && member_kind(rt, &parts, name, text) == Some(Kind::Identifying) {
+        if text != id
+            && (alternate_key(rt, &alternates, name, text)
+                || member_kind(rt, &parts, name, text) == Some(Kind::Identifying))
+        {
             out.push(IndexedValue {
                 member: Some(name.clone()),
                 value: text.clone(),
@@ -787,6 +806,64 @@ pub(super) async fn matched(
         }
     }
     out
+}
+
+/// The one stored record `value` is an alternate key of: held under a member its type's
+/// description names in `identity.alternates` ([`records::alternates`]), by one live
+/// record only. Its holders are read back as [`matched`] reads them, and on a store
+/// others write to the store must show it unique ([`held_once`]); `reads` counts the
+/// store reads, at most [`MAX_READS`]. A value no record holds so, or two do, or that
+/// a failed read leaves undecided, names none.
+pub(super) async fn by_alternate(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    value: &str,
+    reads: &mut usize,
+) -> Option<StoredResource> {
+    let rt = state.rt;
+    let holders: Vec<Holder> = rt
+        .value_index()
+        .holders(session, value)
+        .into_iter()
+        .filter(|h| {
+            h.member
+                .as_ref()
+                .is_some_and(|m| records::alternates(rt, &h.resource_type).contains(m))
+        })
+        .collect();
+    if holders.is_empty() || holders.len() > MAX_HOLDERS {
+        return None;
+    }
+    let mut live: Vec<(StoredResource, String)> = Vec::new();
+    for holder in &holders {
+        let Some(member) = holder.member.as_deref() else {
+            continue;
+        };
+        if live.iter().any(|(r, _)| holder.is(&r.resource_type, &r.id)) {
+            continue;
+        }
+        if *reads >= MAX_READS {
+            return None;
+        }
+        *reads += 1;
+        let hit = state.get(session, &holder.resource_type, &holder.id).await;
+        match hit {
+            Some(hit) if hit.data.get(member).and_then(Value::as_str) == Some(value) => {
+                live.push((hit, member.to_string()));
+            }
+            _ if !state.available() => return None,
+            _ => rt
+                .value_index()
+                .forget(session, &holder.resource_type, &holder.id),
+        }
+    }
+    let [(hit, member)] = <[_; 1]>::try_from(live).ok()?;
+    if !rt.state.local_only()
+        && held_once(state, session, (&hit, &member), value, reads).await != Some(true)
+    {
+        return None;
+    }
+    Some(hit)
 }
 
 /// Whether `value`, which `hit` holds under `member`, is held by `hit` alone among the

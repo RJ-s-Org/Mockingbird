@@ -262,7 +262,9 @@ const MAX_REFERENCE_LOOKUPS: usize = 8;
 /// The held records a create's request refers to by value, as stored: what a value of its
 /// body, or of its path, is the identity of, by the matching [`named_by_value`] shows a
 /// generation (a value holding a digit or a separator, or a large whole number, that is a
-/// stored id or a path field known to hold it), other than what `skip(type, id)` names
+/// stored id or a path field known to hold it), or what one such value is a described
+/// alternate key of ([`value_index::by_alternate`], within as many more reads), other
+/// than what `skip(type, id)` names
 /// (what is told already, as the parent its path names). Only the request: what the
 /// generated answer says is the model's, and a count equal to an id names nothing. A
 /// reply naming the message it answers, a refund its payment. At most
@@ -288,7 +290,26 @@ pub(super) async fn referenced_by_value(
         return Vec::new();
     }
     let limits = (MAX_REFERENCED, MAX_REFERENCE_LOOKUPS);
-    held_under(state, &plan.session, &values, limits, skip, Some).await
+    let mut found = held_under(state, &plan.session, &values, limits, &skip, Some).await;
+    // A value no id lookup resolved may be an alternate key of one record, stored
+    // under another id (a layout named by its alias): it refers to that record.
+    let mut reads = 0;
+    for value in &values {
+        if found.len() >= MAX_REFERENCED || reads >= MAX_REFERENCE_LOOKUPS {
+            break;
+        }
+        if found.iter().any(|r| r.id == *value) {
+            continue;
+        }
+        let Some(hit) = value_index::by_alternate(state, &plan.session, value, &mut reads).await
+        else {
+            continue;
+        };
+        if !skip(&hit.resource_type, &hit.id) && !holds(&found, &hit) {
+            found.push(hit);
+        }
+    }
+    found
 }
 
 /// What routes with no parameters answered earlier in this session, oldest first, and

@@ -1174,3 +1174,143 @@ async fn a_write_acknowledgement_names_the_record_in_the_id_it_declares() {
     assert_eq!(body["id"], json!("order-001"), "{body}");
     assert!(body.get("_id").is_none(), "{body}");
 }
+
+/// Layouts, keyed by `TemplateId` and also named by their `Alias`, and emails a create
+/// makes naming their layout by either.
+const LAYOUTS: &str = r##"
+openapi: 3.0.0
+info: {title: Layouts, version: "1"}
+paths:
+  /templates:
+    post:
+      operationId: createTemplate
+      requestBody: {content: {application/json: {schema: {type: object, properties: {Alias: {type: string}, Name: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+  /templates/{templateId}:
+    parameters: [{name: templateId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getTemplate
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}, "404": {description: missing}}
+    delete:
+      operationId: deleteTemplate
+      responses: {"200": {description: gone, content: {application/json: {schema: {type: object, properties: {Message: {type: string}}}}}}, "422": {description: The template is in use.}}
+  /email:
+    post:
+      operationId: sendEmail
+      requestBody: {content: {application/json: {schema: {type: object, properties: {LayoutTemplate: {type: string}, Subject: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Email"}}}}}
+  /email/{messageId}:
+    get:
+      operationId: getEmail
+      parameters: [{name: messageId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Email"}}}}}
+components:
+  schemas:
+    Template:
+      type: object
+      properties: {TemplateId: {type: string}, Alias: {type: string}, Name: {type: string}}
+    Email:
+      type: object
+      properties: {MessageId: {type: string}, LayoutTemplate: {type: string}, Subject: {type: string}}
+"##;
+
+fn layout(id: &str, alias: &str) -> Value {
+    json!({"TemplateId": id, "Alias": alias, "Name": "layout"})
+}
+
+/// A layouts world whose templates are also named by `Alias`, after creating each of
+/// `layouts` and reading `tpl-100001` from state, then sending an email whose
+/// `LayoutTemplate` is `named`; `then` is scripted after.
+async fn email_naming(layouts: &[Value], named: &str, then: Vec<Value>) -> DescribedHarness {
+    let world = json!({"types": {"templates": {"identity": {"alternates": ["Alias"]}}}});
+    let mut script: Vec<Value> = layouts.to_vec();
+    script.push(json!({"MessageId": "msg-200001", "LayoutTemplate": named, "Subject": "hi"}));
+    script.extend(then);
+    let h = support::described(LAYOUTS, world, script);
+    for l in layouts {
+        h.send(
+            "POST",
+            "/templates",
+            Some(json!({"Alias": l["Alias"]})),
+            &[],
+        )
+        .await;
+    }
+    let (_, headers, body) = h.send("GET", "/templates/tpl-100001", None, &[]).await;
+    assert_eq!(source(&headers), "state", "{body}");
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/email",
+            Some(json!({"LayoutTemplate": named, "Subject": "hi"})),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    h
+}
+
+/// A create naming a stored layout by its alternate key marks that layout, under its
+/// stored id, as referred to: its delete is told of the email and shown it as new.
+#[tokio::test]
+async fn a_reference_by_an_alternate_key_marks_the_record_referenced() {
+    let h = email_naming(
+        &[layout("tpl-100001", "layout-589360")],
+        "layout-589360",
+        vec![json!({"Message": "deleted"})],
+    )
+    .await;
+    let calls = h.provider.requests().len();
+    h.send("DELETE", "/templates/tpl-100001", None, &[]).await;
+    assert_eq!(h.provider.requests().len(), calls + 1);
+    let prompt = prompt(&h, calls);
+    let earlier = block(&prompt, "earlier_requests").unwrap_or_default();
+    assert!(earlier.contains("sendEmail"), "{prompt}");
+    let new = block(&prompt, "new_resources").unwrap_or_default();
+    assert!(new.contains("msg-200001"), "{prompt}");
+}
+
+/// A reference by the stored id still marks the record.
+#[tokio::test]
+async fn a_reference_by_the_stored_id_marks_the_record_referenced() {
+    let h = email_naming(
+        &[layout("tpl-100001", "layout-589360")],
+        "tpl-100001",
+        vec![layout("tpl-100001", "layout-589360")],
+    )
+    .await;
+    let (_, headers, _) = h.send("GET", "/templates/tpl-100001", None, &[]).await;
+    assert_eq!(source(&headers), "llm", "the layout is behind the email");
+    let calls = h.provider.requests().len();
+    let prompt = prompt(&h, calls - 1);
+    assert!(
+        block(&prompt, "earlier_requests").is_some_and(|e| e.contains("sendEmail")),
+        "{prompt}"
+    );
+}
+
+/// An alternate value two stored records hold names neither: nothing is marked.
+#[tokio::test]
+async fn an_ambiguous_alternate_value_marks_nothing() {
+    let h = email_naming(
+        &[
+            layout("tpl-100001", "layout-589360"),
+            layout("tpl-100002", "layout-589360"),
+        ],
+        "layout-589360",
+        Vec::new(),
+    )
+    .await;
+    for id in ["tpl-100001", "tpl-100002"] {
+        let (_, headers, body) = h.send("GET", &format!("/templates/{id}"), None, &[]).await;
+        assert_eq!(source(&headers), "state", "{id}: {body}");
+    }
+}
+
+/// The text between a block's tags, or `None` without one.
+fn block<'a>(prompt: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = prompt.find(&open)? + open.len();
+    let end = prompt.find(&format!("</{tag}>"))?;
+    Some(&prompt[start..end])
+}
