@@ -718,12 +718,15 @@ def import_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 def drop_invalid_runs(rows: List[Dict[str, Any]], invalid: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
     """Server rows minus those of runs server_suites.py marked invalid in
     invalid.jsonl (the bench proxy's own budget ran out mid-run, so some answers were
-    the faker's and say nothing about the model). A record names its run by `run_id`;
-    one without (none are written so) names (model, suite, world)."""
-    ids = {str(r["run_id"]) for r in invalid if r.get("run_id")}
+    the faker's and say nothing about the model). A record names its suite run by
+    (`run_id`, suite, world): one process runs several suites under one `run_id`, and
+    a suite that finished before the budget ran out keeps its rows. A record without a
+    `run_id` (none are written so) names (model, suite, world)."""
+    runs = {(str(r["run_id"]), r.get("suite"), str(r.get("world") or "none")) for r in invalid if r.get("run_id")}
     keys = {(r.get("model"), r.get("suite"), str(r.get("world") or "none")) for r in invalid if not r.get("run_id")}
     kept = [r for r in rows
-            if str(r.get("run_id")) not in ids and (row_model(r), r.get("suite"), world_of(r)) not in keys]
+            if (str(r.get("run_id")), r.get("suite"), world_of(r)) not in runs
+            and (row_model(r), r.get("suite"), world_of(r)) not in keys]
     return kept, len(rows) - len(kept)
 
 

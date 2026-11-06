@@ -15,8 +15,10 @@ placeholder `OPENROUTER_API_KEY`: the real key never reaches it.
 
 Every check appends one JSON line to `<out>/server.jsonl`:
 `{model, suite, case, rep, ok, latency_ms, ttfe_ms?, source, detail, run_id}`.
-A faker answer forced by the bench proxy's own budget stops the run and marks it
-invalid in `<out>/invalid.jsonl` (exit 3); see the README's Budget section.
+A faker answer forced by the bench proxy's own budget (seen in an answer's fallback
+reason, or in the proxy's /stats for the suite's label when a suite ends) stops the
+run and marks each stopped suite invalid in `<out>/invalid.jsonl` (exit 3); see the
+README's Budget section.
 Before any suite, the model's pinned OpenRouter endpoints are checked (provider_health.py):
 a degraded one refuses the run (exit 4) unless `--allow-degraded-provider`; the status is
 recorded in `<out>/providers-status.json`. See the README's Provider pins section.
@@ -364,13 +366,29 @@ def check_budget(reason, where):
     for the answer, and every other unit stops at its next call."""
     if not bench_proxy.budget_exhausted(reason):
         return
+    trip_budget(reason, where)
+    raise Stopped(f"bench budget exhausted: {where}")
+
+
+def trip_budget(reason, where):
+    """Records that the bench's budget ran out (the first `reason` is kept) and stops
+    every unit at its next call."""
     with _BUDGET_LOCK:
         if not BUDGET_TRIPPED.is_set():
             BUDGET_FIRST_REASON.append(str(reason)[:300])
             BUDGET_TRIPPED.set()
             print(f"  bench budget exhausted (at {where}): stopping the run; it is invalid", file=sys.stderr)
     STOP.set()
-    raise Stopped(f"bench budget exhausted: {where}")
+
+
+def budget_refusals(stats, label):
+    """How many of `label`'s calls the proxy refused on its budget, from a /stats
+    answer; None when unknown (no answer, or a proxy that does not count them)."""
+    entry = ((stats or {}).get("per_label") or {}).get(label) if isinstance(stats, dict) else None
+    if not isinstance(entry, dict):
+        return 0 if isinstance(stats, dict) and isinstance(stats.get("per_label"), dict) else None
+    n = entry.get("budget_refused")
+    return n if isinstance(n, int) else None
 
 
 def run_units(units, args, jobs=None):
@@ -903,6 +921,8 @@ def logged_source(srv, mock, session, waits=10):
         _, status, _, body, _ = request(f"{srv.api}/mocks/{mock}/requests?{q}", timeout=10)
         if status == 200 and isinstance(body, list) and body:
             e = body[0]
+            # Mockingbird's SSE handler sets no fallback reason today; this catches one when it does.
+            check_budget(e.get("fallback_reason"), f"{mock} request log")
             return e.get("source") or "?", {"prompt_tokens": e.get("prompt_tokens"),
                                             "completion_tokens": e.get("completion_tokens"),
                                             "fallback_reason": e.get("fallback_reason")}
@@ -8683,17 +8703,22 @@ def main():
     if args.suites_parallel:
         # A suite's server log is named by model and suite, so each runs once.
         suites = list(dict.fromkeys(suites))
-    warn_headroom(args, suites)
-    if args.suites_parallel:
-        failed = any(run_units([functools.partial(run_suite, suite, args) for suite in suites], args,
-                               jobs=len(suites)))
-    else:
-        failed = False
-        for suite in suites:
-            failed = run_suite(suite, args) or failed
-            if BUDGET_TRIPPED.is_set():
-                break  # the rest would only meet the same refusal
-    sys.exit(exit_code(failed))
+    if warn_headroom(args, suites):
+        sys.exit(EXIT_BUDGET)  # every call would be refused: nothing to run
+    sys.exit(exit_code(run_suites(suites, args)))
+
+
+def run_suites(suites, args):
+    """Runs the suites, at once with --suites-parallel; True when one broke."""
+    if getattr(args, "suites_parallel", False):
+        return any(run_units([functools.partial(run_suite, suite, args) for suite in suites], args,
+                             jobs=len(suites)))
+    failed = False
+    for suite in suites:
+        failed = run_suite(suite, args) or failed
+        if BUDGET_TRIPPED.is_set():
+            break  # the rest would only meet the same refusal
+    return failed
 
 
 def run_suite(suite, args):
@@ -8702,6 +8727,8 @@ def run_suite(suite, args):
     world = getattr(args, "world", "none") or "none"
     sink = Sink(args.out, args.model, suite, world)
     print(f"{args.model} / {suite}" + ("" if world == "none" else f" / world {world}"), file=sys.stderr)
+    label = run_label(args.model, suite, args)
+    refused_before = budget_refusals(proxy_stats(args), label)
     failed = False
     try:
         with Server(args, suite, mocks) as srv:
@@ -8713,7 +8740,17 @@ def run_suite(suite, args):
     except Exception as e:  # one broken suite must not stop the others
         failed = True
         sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
-    if BUDGET_TRIPPED.is_set():
+    # Taken at once: a suite that ended before another suite's refusal stays valid.
+    stopped = BUDGET_TRIPPED.is_set()
+    if not stopped and refused_before is not None:
+        # The backstop for answers that carry no fallback reason (an SSE stream sends
+        # its headers before it generates): the proxy counts its refusals per label.
+        refused = budget_refusals(proxy_stats(args), label)
+        if refused is not None and refused > refused_before:
+            trip_budget(f"proxy /stats: {refused - refused_before} call(s) of {label} refused with 402 "
+                        f"{bench_proxy.BUDGET_EXHAUSTED_MESSAGE}", f"{suite} end")
+            stopped = True
+    if stopped:
         mark_invalid(args, suite, world, sink)
         return True
     n_ok = sum(1 for r in sink.rows if r["ok"])
@@ -8796,18 +8833,26 @@ def headroom_warning(budget, spent, reserved, per_call, in_flight, basis):
 
 def warn_headroom(args, suites):
     """Prints headroom_warning for this run, from the proxy's `/reserve`; silent when
-    the proxy does not answer it (an older proxy, or --replay)."""
+    the proxy does not answer it (an older proxy, or --replay). True (after an error
+    on stderr) when the proxy has already tripped, so every call would be refused."""
     q = urllib.parse.urlencode({"model": args.model, "max_tokens": SERVER_MAX_TOKENS})
     got = proxy_get(args, f"/reserve?{q}")
     if not got:
-        return
+        return False
+    if got.get("tripped") is True:
+        print(f"ERROR: the bench proxy's budget is already tripped (spent ${float(got.get('spent_usd') or 0):.4f} "
+              f"of ${float(got.get('budget_usd') or 0):.2f} cap): every LLM call would be answered by the faker. "
+              f"Not starting; exit {EXIT_BUDGET}. Raise --budget-usd and delete BUDGET_TRIPPED next to the ledger "
+              "on purpose to go on.", file=sys.stderr, flush=True)
+        return True
     try:
         msg = headroom_warning(float(got["budget_usd"]), float(got["spent_usd"]), float(got.get("reserved_usd") or 0),
                                float(got["reserve_usd"]), calls_in_flight(args, suites), str(got.get("basis") or "?"))
     except (KeyError, TypeError, ValueError):
-        return
+        return False
     if msg:
         print(msg, file=sys.stderr, flush=True)
+    return False
 
 
 def suite_mocks(suite, args):

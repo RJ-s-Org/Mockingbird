@@ -491,7 +491,22 @@ def run_server_suites(
         c = cmd + (["--suite", suite] if suite else [])
         rcs.append(kids.run(c, child_env({"OPENROUTER_API_KEY": DUMMY_KEY}),
                             os.path.join(outdir, "server_suites.log")))
-    return next((rc for rc in rcs if rc != 0), 0)
+    # A budget stop anywhere makes the model's server results invalid, whatever else failed.
+    return SERVER_EXIT_BUDGET if SERVER_EXIT_BUDGET in rcs else next((rc for rc in rcs if rc != 0), 0)
+
+
+# server_suites.py's exit when the bench's own budget stopped it (its EXIT_BUDGET):
+# the run is invalid, not failed; see the README's Budget section.
+SERVER_EXIT_BUDGET = 3
+
+
+def model_status(engine_rc: int, srv_rc: Optional[int], why: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+    """A model's status in run.json, and the fields that go with it."""
+    if srv_rc == SERVER_EXIT_BUDGET:
+        return "invalid", {"invalid_reason": bench_proxy.BUDGET_EXHAUSTED_MESSAGE}
+    if engine_ok(engine_rc) and srv_rc in (None, 0) and not why:
+        return "done", {}
+    return ("partial" if why else "failed"), {}
 
 
 def provider_check_off(args: argparse.Namespace) -> bool:
@@ -820,14 +835,17 @@ def full(args: argparse.Namespace) -> int:
         else:
             log(f"{m}: server suites")
             srv_rc = run_server_suites(args, kids, proxy, m, args.repeat, os.path.join(out, "server", slug(m)))
-            if srv_rc != 0:
+            if srv_rc == SERVER_EXIT_BUDGET:
+                log(f"{m}: server suites INVALID: the bench budget ran out mid-run; aggregate.py leaves the "
+                    f"stopped suites out (see {rel(os.path.join(out, 'server', slug(m)))}/invalid.jsonl)")
+            elif srv_rc != 0:
                 log(f"{m}: server_suites.py exited {srv_rc}")
         st = proxy.stats()
         spent = model_spent(st, m)
         why = stopped()
-        status = "done" if engine_ok(rc) and srv_rc in (None, 0) and not why else ("partial" if why else "failed")
+        status, extra = model_status(rc, srv_rc, why)
         providers = model_providers(st, m)
-        setm(m, status=status, server_exit=srv_rc, spent_usd=round(spent, 6), wall_s=round(time.time() - t0, 1),
+        setm(m, status=status, **extra, server_exit=srv_rc, spent_usd=round(spent, 6), wall_s=round(time.time() - t0, 1),
              finished=utc_now(), stop_reason=why, providers=providers)
         log(f"{m}: {status}, spent ${spent:.4f} (total ${st.get('spent_usd', 0):.4f}); "
             f"providers: {provider_mix(providers)}")

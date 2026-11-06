@@ -337,10 +337,14 @@ class Ledger:
                 self.model_costs.setdefault(base_model(str(model)), []).append(cost)
         label = rec.get("label") or "?"
         s = self.per_label.setdefault(
-            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "client_closed": 0, "prompt_tokens": 0,
-                    "completion_tokens": 0, "providers": {}}
+            label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "client_closed": 0, "budget_refused": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0, "providers": {}}
         )
         s["calls"] += 1
+        if rec.get("error_kind") == "budget":
+            # server_suites.py compares this before and after a suite: a refusal it could
+            # not see in an answer (an SSE stream carries no fallback reason) still counts.
+            s["budget_refused"] += 1
         prov = rec.get("provider")
         if prov and live:
             s["providers"][prov] = s["providers"].get(prov, 0) + 1
@@ -888,8 +892,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.forward(px, model, body, client_stream, rec, received)
         except Exception as e:  # never lose a call's cost to a proxy bug
-            # The upstream may have generated: charge the full reservation.
-            rec.update(status=502, error_kind="stream_error", cost_usd=estimate, cost_source="estimate",
+            # The upstream may have generated all of `max_tokens`: charge the worst case,
+            # not the reservation, which once measured is a percentile and can undercount.
+            rec.update(status=502, error_kind="stream_error", cost_usd=px.worst_case(model, body)[1],
+                       cost_source="estimate",
                        error_excerpt=excerpt(f"proxy error: {type(e).__name__}: {e}"))
             rec["total_ms"] = round((time.monotonic() - received) * 1000.0, 1)
             self.send_json(502, {"error": {"message": rec["error_excerpt"]}})
