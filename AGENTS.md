@@ -9,7 +9,7 @@ Read [`plugins/mockingbird/skills/mockingbird/SKILL.md`](plugins/mockingbird/ski
 ## Working on this repository
 
 - Rust workspace (`crates/*`), toolchain pinned in `rust-toolchain.toml`; the console is `crates/mb-console/web` (Node 22).
-- Before opening a pull request, run `scripts/gate.sh`: fmt, plus clippy and nextest for the crates you changed and their direct dependents, the console checks if you touched it, and the bench tests if you touched `scripts/llm-bench`. Don't run the full workspace locally; CI runs all of it on every pull request in about 4 minutes and is the full gate ([CONTRIBUTING.md](CONTRIBUTING.md#local-gates) lists everything CI runs).
+- Before opening a pull request, run `scripts/gate.sh`: fmt, plus clippy, nextest and doctests for the crates you changed and their direct dependents, the console checks if you touched it, and the bench tests if you touched `scripts/llm-bench`. Don't run the full workspace locally; CI runs all of it on every pull request in a few minutes and is the full gate ([CONTRIBUTING.md](CONTRIBUTING.md#local-gates) lists everything CI runs).
 - No `unwrap()`/`expect()` outside tests; Admin API errors are `application/problem+json`; secrets are references only.
 - After changing the Admin API, regenerate the console client: `npm run gen:api` in `crates/mb-console/web`.
 - New config keys go in `docs/configuration.md` and `docs/examples/mockingbird.full.yaml` (a test checks both).
@@ -17,7 +17,7 @@ Read [`plugins/mockingbird/skills/mockingbird/SKILL.md`](plugins/mockingbird/ski
 
 ## Shipping a change (agents)
 
-A single fix should go from opened pull request to merged in under 30 minutes. CI takes about 4; the rest is review, so keep review bounded:
+A single fix should go from opened pull request to merged in under 30 minutes. CI takes a few; the rest is review, so keep review bounded:
 
 1. **One change per pull request.** Don't bundle fixes: every review round re-reads everything in the PR.
 2. **Gate, then open.** Run `scripts/gate.sh`, self-review the diff against the project rules in CONTRIBUTING.md, then open the PR.
