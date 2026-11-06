@@ -13,7 +13,7 @@ same as when the check passed.
         --budget-usd 1.5 --prices docs/benchmarks/<run>/roster.json [--suite journeys_blind6 ...]
 
     # Free (re-)recording against the fake LLM (what seeds the committed recordings)
-    python3 scripts/llm-bench/replay.py record --fake
+    python3 scripts/llm-bench/replay.py record --fake --calibrate 30
 
     # The gate: free, offline, a few minutes
     python3 scripts/llm-bench/replay.py gate --binary target/release/mockingbird
