@@ -38,6 +38,7 @@ A new contract version starts from the previous version's newest overlay. Entrie
 
 Types (`types.<resource type>`):
 - `identity: {member, pattern?}`: the member holding the record's id; `pattern` when the id is embedded in a name (`folders/{id}`).
+- `identity.alternates: [member]`: other members a path value may name the record by (an alias next to the id); `[]` removes a wrongly guessed one. Setting only `alternates` keeps the heuristic member.
 - `parent: {type, member?, path_param?, pattern?}`: the record's parent and where it is named.
 - `lifecycle: {member, states?, initial?, soft_delete?: {state, listed_with?: {param, value}}}`: the status member, and the state a delete only moves the record to, with the list parameter that still shows such records.
 - `unique: [{members, scope?, conflict?}]`: member sets the docs say are unique, within a member's scope, with the declared conflict status.
@@ -48,6 +49,7 @@ Operations (`operations.<operation id>`):
 - `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type.
 - `target: {path_param | member}`: what names the record the operation acts on.
 - `request` and `answer`: `{record}` or `{records}` as JSON pointers into the body (nested envelopes, one-item arrays, bulk arrays); `answer.long_running: {done, result}` for long-running operations.
+- `answer.identity_header`: the declared 2xx response header a create names its new id in (`Location`, `Resource-ID`), or `false` when it names it in none. HTTP only.
 - `transition: {<member>: <value>}`: members an action sets (the type needs a `lifecycle`).
 - `changes: {<member>: {from_request: <pointer>} | {value}}`: members of the target an action changes.
 - Lists: `scope: {param, member}`, `filters: [{param, member?, kind}]` (`eq`, `contains`, `gte`, `lte`, `flag`, `text`), `order: {member, descending?}`, `paging: {style, request?, response?, response_header?, size?}` (`cursor`, `page`, `offset`, `next_url`, `header_cursor`).

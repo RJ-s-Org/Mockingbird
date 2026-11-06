@@ -177,7 +177,7 @@ components:
         v.applied.types[&t]
             .identity
             .as_ref()
-            .map(|i| i.member.as_str()),
+            .and_then(|i| i.member.as_deref()),
         Some("odata.id")
     );
     let all = gaps(&b, &v.applied, &v.refused);

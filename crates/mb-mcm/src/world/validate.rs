@@ -16,9 +16,9 @@ use serde_json::Value;
 
 use super::{
     AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FilterDesc, HeaderRef,
-    IdentityDesc, LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc,
-    PagingDesc, ParamValue, ParentDesc, Pointer, RecordsAt, ScopeDesc, SoftDelete, TargetDesc,
-    TypeDesc, UniqueDesc, VERSION, World,
+    IdentityDesc, IdentityHeader, LifecycleDesc, LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind,
+    OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer, RecordsAt, ScopeDesc, SoftDelete,
+    TargetDesc, TypeDesc, UniqueDesc, VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -556,6 +556,38 @@ impl<'a> Ctx<'a> {
         false
     }
 
+    /// An identity header applies to HTTP operations only. A header name
+    /// must be declared, ignoring case, on one of the operation's 2xx
+    /// responses; `false` (none) needs no declaration.
+    fn check_identity_header(&mut self, op: &Operation, h: &IdentityHeader, path: &Path) -> bool {
+        if !is_http(op) {
+            self.refuse(
+                path,
+                RefusalCode::NotApplicable,
+                format!(
+                    "operation `{}` is not an HTTP operation and has no headers",
+                    op.id
+                ),
+            );
+            return false;
+        }
+        let Some(name) = h.name() else {
+            return true;
+        };
+        if declares_success_header(op, name) {
+            return true;
+        }
+        self.refuse(
+            path,
+            RefusalCode::Unresolved,
+            format!(
+                "operation `{}` declares no 2xx response header `{name}`",
+                op.id
+            ),
+        );
+        false
+    }
+
     fn check_status(&mut self, op: &Operation, code: u16, path: &Path) -> bool {
         if !is_http(op) {
             self.refuse(
@@ -718,14 +750,43 @@ impl<'a> Ctx<'a> {
         if let Some(id) = &t.identity {
             let p = path.join("identity");
             self.unknown(&p, &id.extra);
-            if self.check_member(record, ty, &id.member, &p.join("member")) {
+            // An absent member keeps the lower tier's (the effective world
+            // refuses an identity left with none). A refused member drops
+            // the identity's pattern with it: the pattern says how that
+            // member's value embeds the id.
+            let member_ok = id
+                .member
+                .as_ref()
+                .is_none_or(|m| self.check_member(record, ty, m, &p.join("member")));
+            let alternates = id.alternates.as_ref().and_then(|alts| {
+                let ap = p.join("alternates");
+                let kept: Vec<String> = alts
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, m)| self.check_member(record, ty, m, &ap.join(i)))
+                    .map(|(_, m)| m.clone())
+                    .collect();
+                // Every alternate refused: dropped, never read as `[]`
+                // (which says the type has none).
+                (!kept.is_empty() || alts.is_empty()).then_some(kept)
+            });
+            if member_ok {
+                out.identity = unless_emptied(
+                    id,
+                    IdentityDesc {
+                        member: id.member.clone(),
+                        pattern: id
+                            .pattern
+                            .clone()
+                            .filter(|pat| self.check_pattern(pat, &p.join("pattern"))),
+                        alternates,
+                        extra: Extra::new(),
+                    },
+                );
+            } else if alternates.is_some() {
                 out.identity = Some(IdentityDesc {
-                    member: id.member.clone(),
-                    pattern: id
-                        .pattern
-                        .clone()
-                        .filter(|pat| self.check_pattern(pat, &p.join("pattern"))),
-                    extra: Extra::new(),
+                    alternates,
+                    ..IdentityDesc::default()
                 });
             }
         }
@@ -1083,6 +1144,10 @@ impl<'a> Ctx<'a> {
                         self.check_pointer(answer, ptr, (true, false), "answer", &p.join("records"))
                     }),
                     long_running,
+                    identity_header: a
+                        .identity_header
+                        .clone()
+                        .filter(|h| self.check_identity_header(op, h, &p.join("identity_header"))),
                     extra: Extra::new(),
                 },
             );
@@ -1471,6 +1536,14 @@ fn declares_header(b: &Bundle, op: &Operation, name: &str) -> bool {
     }) || op
         .outputs
         .iter()
+        .any(|o| o.headers.keys().any(|k| k.eq_ignore_ascii_case(name)))
+}
+
+/// A header of a declared 2xx response, ignoring case.
+fn declares_success_header(op: &Operation, name: &str) -> bool {
+    op.outputs
+        .iter()
+        .filter(|o| matches!(o.status, StatusSelector::Code(c) if (200..300).contains(&c)))
         .any(|o| o.headers.keys().any(|k| k.eq_ignore_ascii_case(name)))
 }
 
@@ -2010,7 +2083,10 @@ mod tests {
         assert!(v.applied.extra.is_empty());
         let folder = &v.applied.types["folder"];
         assert!(folder.extra.is_empty());
-        assert_eq!(folder.identity.as_ref().unwrap().member, "name");
+        assert_eq!(
+            folder.identity.as_ref().unwrap().member.as_deref(),
+            Some("name")
+        );
         assert!(folder.identity.as_ref().unwrap().extra.is_empty());
         let get = &v.applied.operations["GetFolder"];
         // `target` held only a typo: refused, it is dropped, not kept empty.
@@ -2320,5 +2396,234 @@ mod tests {
             "path {}",
             err.path
         );
+    }
+
+    /// Templates: a read by `{id}`, a create answering 201 with a declared
+    /// `Resource-ID` header, and widgets, which no operation identifies (so
+    /// tier 0 gives the type no identity).
+    fn templates() -> Bundle {
+        let template = json!({"type": "object", "properties": {
+            "TemplateId": {"type": "string"},
+            "Alias": {"type": "string"},
+            "Name": {"type": "string"}
+        }});
+        let widget = json!({"type": "object", "properties": {
+            "uid": {"type": "string"},
+            "label": {"type": "string"}
+        }});
+        let mut b = bundle(&[
+            ("getTemplate", "GET", "/templates/{id}", template.clone()),
+            ("createTemplate", "POST", "/templates", template),
+            ("listWidgets", "GET", "/widgets", widget.clone()),
+            ("createWidget", "POST", "/widgets", widget),
+        ]);
+        typed(&mut b, "getTemplate", "template", Some("id"), "TemplateId");
+        typed(&mut b, "createTemplate", "template", None, "TemplateId");
+        typed(&mut b, "listWidgets", "widget", None, "uid");
+        typed(&mut b, "createWidget", "widget", None, "uid");
+        let create = op(&mut b, "createTemplate");
+        create.outputs[0].status = StatusSelector::Code(201);
+        create.outputs[0]
+            .headers
+            .insert("Resource-ID".into(), json!({"schema": {"type": "string"}}));
+        create.outputs.push(OutputVariant {
+            status: StatusSelector::Code(400),
+            content_type: None,
+            schema: None,
+            headers: [("X-Other".to_owned(), json!({}))].into_iter().collect(),
+            description: None,
+        });
+        b
+    }
+
+    fn graphql_create() -> Bundle {
+        let mut b = bundle(&[(
+            "createIssue",
+            "POST",
+            "/graphql",
+            json!({"type": "object", "properties": {"id": {"type": "string"}}}),
+        )]);
+        let o = op(&mut b, "createIssue");
+        o.protocol = Protocol::Graphql;
+        o.binding = Binding::Graphql {
+            operation_type: GraphqlOperationType::Mutation,
+            field: "createIssue".into(),
+        };
+        o.resource_type = Some("issue".into());
+        b
+    }
+
+    #[test]
+    fn alternates_must_be_members_of_the_record() {
+        let v = validate(
+            &world(json!({"types": {"template": {"identity": {
+                "member": "TemplateId", "alternates": ["Alias", "Nope"]
+            }}}})),
+            &templates(),
+        );
+        let id = v.applied.types["template"].identity.as_ref().unwrap();
+        assert_eq!(id.member.as_deref(), Some("TemplateId"));
+        assert_eq!(id.alternates, Some(vec!["Alias".to_owned()]));
+        assert_eq!(
+            paths(&v),
+            vec![(
+                "/types/template/identity/alternates/1",
+                RefusalCode::Unresolved
+            )]
+        );
+        // Every alternate refused: the list is dropped, not kept as `[]`
+        // (which would say the type has none).
+        let v = validate(
+            &world(json!({"types": {"template": {"identity": {"alternates": ["Nope"]}}}})),
+            &templates(),
+        );
+        assert!(
+            v.applied
+                .types
+                .get("template")
+                .is_none_or(|t| t.identity.is_none())
+        );
+    }
+
+    #[test]
+    fn identity_header_must_be_a_declared_2xx_response_header() {
+        let b = templates();
+        let v = validate(
+            &world(
+                json!({"operations": {"createTemplate": {"answer": {"identity_header": "resource-id"}}}}),
+            ),
+            &b,
+        );
+        assert!(v.refused.is_empty(), "{:?}", v.refused);
+        assert_eq!(
+            v.applied.operations["createTemplate"]
+                .answer
+                .as_ref()
+                .and_then(|a| a.identity_header.as_ref())
+                .and_then(IdentityHeader::name),
+            Some("resource-id")
+        );
+        // Declared, but only on a 400: not where a create names its id.
+        let v = validate(
+            &world(
+                json!({"operations": {"createTemplate": {"answer": {"identity_header": "X-Other"}}}}),
+            ),
+            &b,
+        );
+        assert_eq!(
+            paths(&v),
+            vec![(
+                "/operations/createTemplate/answer/identity_header",
+                RefusalCode::Unresolved
+            )]
+        );
+        assert!(
+            v.applied
+                .operations
+                .get("createTemplate")
+                .is_none_or(|o| o.answer.is_none())
+        );
+    }
+
+    #[test]
+    fn identity_header_is_not_applicable_off_http() {
+        for header in [json!("Resource-ID"), json!(false)] {
+            let v = validate(
+                &world(
+                    json!({"operations": {"createIssue": {"answer": {"identity_header": header}}}}),
+                ),
+                &graphql_create(),
+            );
+            assert_eq!(
+                paths(&v),
+                vec![(
+                    "/operations/createIssue/answer/identity_header",
+                    RefusalCode::NotApplicable
+                )],
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_header_false_is_applied_without_a_header_check() {
+        // `listWidgets`' answer declares no header at all.
+        for id in ["createTemplate", "createWidget"] {
+            let v = validate(
+                &world(json!({"operations": {id: {"answer": {"identity_header": false}}}})),
+                &templates(),
+            );
+            assert!(v.refused.is_empty(), "{:?}", v.refused);
+            assert_eq!(
+                v.applied.operations[id]
+                    .answer
+                    .as_ref()
+                    .unwrap()
+                    .identity_header,
+                Some(IdentityHeader::Off)
+            );
+        }
+        // `true` is not an identity header: the document does not deserialize
+        // (the Admin API refuses it `invalid` at the entry).
+        let doc = json!({"operations": {"createTemplate": {"answer": {"identity_header": true}}}});
+        assert!(serde_json::from_value::<World>(doc).is_err());
+        assert!(serde_json::from_value::<IdentityHeader>(json!(true)).is_err());
+        assert_eq!(
+            serde_json::to_value(IdentityHeader::Off).unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            serde_json::to_value(IdentityHeader::Named("Location".into())).unwrap(),
+            json!("Location")
+        );
+    }
+
+    #[test]
+    fn an_identity_with_no_member_on_a_type_tier0_gave_none_is_refused() {
+        let b = templates();
+        let base = crate::world::tier0(&b);
+        assert!(
+            base.types
+                .get("widget")
+                .is_none_or(|t| t.identity.is_none())
+        );
+        let doc = world(json!({
+            "types": {"widget": {"identity": {"alternates": ["label"]}}},
+            "operations": {"createWidget": {"kind": "create"}}
+        }));
+        let (eff, refused) = crate::world::effective(&b, &base, &doc);
+        assert_eq!(
+            refused
+                .iter()
+                .map(|r| (r.path.as_str(), r.code))
+                .collect::<Vec<_>>(),
+            vec![("/types/widget/identity/member", RefusalCode::Invalid)]
+        );
+        assert!(refused[0].message.contains("set identity.member"));
+        assert!(eff.types.get("widget").is_none_or(|t| t.identity.is_none()));
+        // The rest of the revision applies.
+        assert_eq!(eff.operations["createWidget"].kind, Some(OpKind::Create));
+        // The same identity on a type tier 0 names a member for keeps it.
+        let doc = world(json!({"types": {"template": {"identity": {"alternates": ["Alias"]}}}}));
+        let (eff, refused) = crate::world::effective(&b, &base, &doc);
+        assert!(refused.is_empty(), "{refused:?}");
+        let id = eff.types["template"].identity.as_ref().unwrap();
+        assert_eq!(id.member.as_deref(), Some("TemplateId"));
+        assert_eq!(id.alternates, Some(vec!["Alias".to_owned()]));
+    }
+
+    #[test]
+    fn empty_alternates_are_kept_as_set() {
+        let b = templates();
+        let base = crate::world::overlay(
+            &crate::world::tier0(&b),
+            &world(json!({"types": {"template": {"identity": {"alternates": ["Alias"]}}}})),
+        );
+        let doc = world(json!({"types": {"template": {"identity": {"alternates": []}}}}));
+        let (eff, refused) = crate::world::effective(&b, &base, &doc);
+        assert!(refused.is_empty(), "{refused:?}");
+        let id = eff.types["template"].identity.as_ref().unwrap();
+        assert_eq!(id.alternates, Some(vec![]));
+        assert_eq!(id.member.as_deref(), Some("TemplateId"));
     }
 }
