@@ -31,7 +31,11 @@ info:
     `properties`, `routing_key`, `payload` and `payload_encoding` (`string` or
     `base64`), all required. It answers 200 `{"routed": true}` when the message reached
     at least one queue and `{"routed": false}` when no binding matched. The endpoint is
-    for development and troubleshooting.
+    for development and troubleshooting. Every virtual host has the default exchange,
+    which the HTTP API names `amq.default` in the path (its AMQP name is the empty
+    string): it routes a message to the queue named by its routing key, with no binding
+    declared, so `POST /api/exchanges/{vhost}/amq.default/publish` with `routing_key` set
+    to a queue's name puts the message on that queue.
 
     `POST /api/queues/{vhost}/{name}/get` takes up to `count` messages from the head of
     the queue (oldest first) and answers them as an array; an empty queue answers `[]`.
@@ -50,11 +54,12 @@ info:
     (`PRECONDITION_FAILED - queue ... not empty`). `DELETE .../contents` purges a queue
     (204): its ready messages are removed. A deleted object then answers 404.
 
-    `GET /api/queues/{vhost}` lists the virtual host's queues sorted by name, as a bare
-    array. With `page` (from 1) it answers one page instead:
+    `GET /api/queues/{vhost}` lists the virtual host's queues as a bare array; the order
+    is not promised unless `sort` names a field to sort by (`sort=name`, with
+    `sort_reverse=true` for descending). With `page` (from 1) it answers one page instead:
     `{items, page, page_size, page_count, item_count, filtered_count, total_count}`.
     `page_size` is 1 to 500 (default 100); `name` keeps only the queues whose name holds
-    it, ignoring case (with `use_regex=true` it is a regular expression); `total_count`
+    it (with `use_regex=true` it is a regular expression); `total_count`
     counts every queue, `filtered_count` the queues the filter kept, `item_count` this
     page's, and `page_count` the pages of the filtered queues.
 
@@ -139,13 +144,13 @@ paths:
       tags: [Queues]
       operationId: listQueues
       summary: List a virtual host's queues
-      description: "Sorted by name. A bare array, or with `page` one page of the queues."
+      description: "A bare array, or with `page` one page of the queues. Ordered by `sort` when it is given."
       parameters:
         - {name: page, in: query, description: "From 1; asks for a page instead of every queue.", schema: {type: integer, minimum: 1}}
         - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
-        - {name: name, in: query, description: "Only queues whose name holds this, ignoring case.", schema: {type: string}}
+        - {name: name, in: query, description: "Only queues whose name holds this.", schema: {type: string}}
         - {name: use_regex, in: query, description: Read name as a regular expression., schema: {type: boolean, default: false}}
-        - {name: sort, in: query, description: The field to sort by; default name., schema: {type: string}}
+        - {name: sort, in: query, description: "The field to sort by, e.g. name.", schema: {type: string}}
         - {name: sort_reverse, in: query, schema: {type: boolean, default: false}}
       responses:
         "200":

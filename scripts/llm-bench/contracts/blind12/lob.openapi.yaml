@@ -27,7 +27,9 @@ info:
 
     A letter is created with `to` and `from` (an address id, or an address object made
     inline), `file` (HTML, a URL or a PDF), `color` and `use_type` (`marketing` or
-    `operational`), all required. It answers `to` and `from` as whole address objects,
+    `operational`), all required; `use_type` may be left out (null) only when the account
+    has a default use_type selected in its settings, and this account has none. Any other
+    `use_type` value is refused with 422. It answers `to` and `from` as whole address objects,
     `send_date`, `expected_delivery_date`, `carrier` (`USPS`), `url` (a signed link to
     the rendered letter) and `tracking_events`. This account has no cancellation window:
     a letter created without `send_date` goes to production at once, and its

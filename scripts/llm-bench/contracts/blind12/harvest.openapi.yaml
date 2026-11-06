@@ -19,7 +19,9 @@ info:
     Work is organised as clients, their projects, and tasks assigned to projects. A
     project bills by `bill_by`: with `Tasks` the billable rate of time on the project is
     the `hourly_rate` of the task's assignment to it (`POST
-    /v2/projects/{project_id}/task_assignments`). A time entry records time a user spent
+    /v2/projects/{project_id}/task_assignments`). A task with `is_default` true is
+    automatically assigned to every project created after it, so a new project may already
+    hold assignments for the account's default tasks. A time entry records time a user spent
     on a project's task on a day (`spent_date`), and answers its `client`, `project`,
     `task`, `task_assignment`, `billable` and `billable_rate` (null when not billable).
 
@@ -245,7 +247,7 @@ paths:
                 name: {type: string}
                 billable_by_default: {type: boolean, default: true}
                 default_hourly_rate: {type: number, default: 0}
-                is_default: {type: boolean, default: false}
+                is_default: {type: boolean, default: false, description: "Whether this task is automatically added to future projects."}
                 is_active: {type: boolean, default: true}
       responses:
         "201":

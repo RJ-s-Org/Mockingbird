@@ -1,16 +1,17 @@
 openapi: 3.0.3
 info:
   title: NetBox REST API (sites, tags, VRFs, prefixes, available IPs and IP addresses)
-  version: "4.4"
+  version: "4.5"
   description: |
     A subset of the NetBox REST API, written from its public documentation
     (netboxlabs.com/docs/netbox: integrations/rest-api, reference/filtering and the
     IPAM models). Requests authenticate with `Authorization: Bearer nbt_<key>.<token>`
-    (or a legacy `Token <token>`). Bodies are JSON. Every URL ends with a slash.
+    (v2 tokens, NetBox 4.5 and later; or a legacy `Token <token>`). Bodies are JSON. Every URL ends with a slash.
 
     Objects have integer ids. `POST` to a list endpoint creates an object and answers
     201 with it; `GET`, `PATCH` (only the fields sent change) and `DELETE` (204, no
-    body) work on `/{id}/`. A missing object answers 404 `{"detail": "Not found."}`.
+    body) work on `/{id}/`. A missing object answers 404 with a `detail` message
+    (e.g. `{"detail": "No IPAddress matches the given query."}`).
     A choice field such as `status` is written as its value (`"active"`) and answered as
     `{"value": "active", "label": "Active"}`. A related object is written by its id (or
     by attributes that name exactly one object) and answered nested and brief, as
@@ -463,7 +464,7 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Detail"}
-          example: {detail: Not found.}
+          example: {detail: "No IPAddress matches the given query."}
     ValidationError:
       description: "Errors keyed by field: `{field: [messages]}`."
       content:
