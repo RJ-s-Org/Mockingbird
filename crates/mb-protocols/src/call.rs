@@ -415,6 +415,7 @@ pub(crate) struct Pending<'a> {
 
 impl Pending<'_> {
     /// Whether the executor answered the call, so it is completed without generating.
+    #[cfg(feature = "graphql")]
     pub(crate) fn is_executed(&self) -> bool {
         self.executed.is_some()
     }

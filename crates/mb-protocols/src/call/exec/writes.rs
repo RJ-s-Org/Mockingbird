@@ -1,4 +1,5 @@
-//! Updates, replaces and deletes (step 3 of the plan). Not executed yet: every such call generates.
+//! Updates, replaces and deletes (step 3 of the plan). Not executed yet: every such call
+//! generates.
 
 use mb_mcm::world::OpKind;
 use serde_json::Value;

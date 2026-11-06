@@ -1,4 +1,5 @@
-//! Lists (step 4 of the plan): scope, filters, sort and pages over the session's records. Not executed yet: every such call generates.
+//! Lists (step 4 of the plan): scope, filters, sort and pages over the session's records.
+//! Not executed yet: every such call generates.
 
 use serde_json::Value;
 

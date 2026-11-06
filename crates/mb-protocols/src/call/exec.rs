@@ -70,7 +70,7 @@ pub(super) enum Ran {
     Answered(Box<GeneratedResponse>),
     /// The executor's answer to a write, which [`super::complete`] stores, publishes and
     /// serves as it does a generated one, with no LLM call.
-    #[expect(
+    #[allow(
         dead_code,
         reason = "the write executors (steps 2, 3 and 5 of the plan) answer through it"
     )]
@@ -147,7 +147,10 @@ pub(super) async fn run(
 ) -> Ran {
     match classify(state.rt, plan, call) {
         Some(Ok(kind)) => match kind {
-            OpKind::Read => read(state, plan, call, held, response_schema, kind).await,
+            OpKind::Read if matches!(plan.op.kind, OperationKind::Query) => {
+                read(state, plan, call, held, response_schema, kind).await
+            }
+            OpKind::Read => unclassified(state, plan, call, held, response_schema).await,
             OpKind::Create => create::run(state, plan, call, held, response_schema).await,
             OpKind::Update | OpKind::Replace | OpKind::Delete => {
                 writes::run(state, plan, call, held, response_schema, kind).await
@@ -291,7 +294,8 @@ fn answered(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind) {
     );
 }
 
-/// Logs why a classified call goes on to generation: a [`Fallback`]'s name, or a reason
+/// Logs why the executor did not answer a classified call (today's path then answers it,
+/// from state where it can): a [`Fallback`]'s name, or a reason
 /// of one kind's executor (`undescribed_param`).
 fn fell_back(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, reason: &str) {
     tracing::info!(
@@ -299,7 +303,7 @@ fn fell_back(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, reason:
         operation = %plan.op.id,
         exec = kind_name(kind),
         exec_fallback = reason,
-        "the executor fell back to generation"
+        "not answered by the executor"
     );
 }
 

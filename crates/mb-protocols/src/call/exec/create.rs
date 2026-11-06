@@ -1,4 +1,5 @@
-//! Creates (step 2 of the plan): the request's record, its minted id, its initial state and the members fill writes. Not executed yet: every such call generates.
+//! Creates (step 2 of the plan): the request's record, its minted id, its initial state and
+//! the members fill writes. Not executed yet: every such call generates.
 
 use serde_json::Value;
 

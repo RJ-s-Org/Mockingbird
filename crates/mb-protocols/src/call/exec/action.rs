@@ -1,4 +1,5 @@
-//! Actions (step 5 of the plan): described transitions and changes on the held target. Not executed yet: every such call generates.
+//! Actions (step 5 of the plan): described transitions and changes on the held target. Not
+//! executed yet: every such call generates.
 
 use serde_json::Value;
 

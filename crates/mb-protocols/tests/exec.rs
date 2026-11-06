@@ -162,7 +162,7 @@ async fn an_unheld_id_generates_under_unknown_ids_generate() {
 
 #[tokio::test]
 async fn an_unheld_id_is_not_found_under_unknown_ids_404() {
-    let (_capture, _guard) = Capture::install();
+    let (capture, _guard) = Capture::install();
     let h = support::harness(
         CONTRACT,
         vec![json!({"message": "widget w9 not found"})],
@@ -174,6 +174,8 @@ async fn an_unheld_id_is_not_found_under_unknown_ids_404() {
     );
     let (status, _, body) = h.send("GET", "/widgets/w9", None, &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    // Refused before the executor is reached.
+    assert!(capture.of("getWidget").is_empty());
 }
 
 #[tokio::test]
