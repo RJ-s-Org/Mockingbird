@@ -544,6 +544,30 @@ fn target_id_from_input_field() {
     assert_eq!(target_id(&op, &missing), None);
 }
 
+/// A read a world description gave an identity by its kind alone (no path
+/// parameter, no request member) names no target id, whatever the request
+/// carries: it is generated as a read of an unheld id is.
+#[test]
+fn a_read_with_no_target_names_no_id() {
+    let rt = stream_runtime();
+    let mut op = rt.bundle.operations[0].clone();
+    op.kind = OperationKind::Query;
+    op.identity = Some(Identity {
+        path_param: None,
+        field: "id".into(),
+        input_field: None,
+        path_field: None,
+        record: None,
+    });
+    let call = OperationCall {
+        operation_id: op.id.clone(),
+        path_params: [("id".to_owned(), json!("7"))].into_iter().collect(),
+        body: Some(json!({"id": 7})),
+        ..OperationCall::default()
+    };
+    assert_eq!(target_id(&op, &call), None);
+}
+
 #[tokio::test]
 async fn change_feed_emits_upserts_for_resource_type() {
     let rt = stream_runtime();

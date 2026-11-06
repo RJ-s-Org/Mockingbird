@@ -1726,6 +1726,19 @@ fn record_held(
             let props = schema_properties(Some(served), defs)?;
             array_items(props.get(member)?, defs).cloned()
         }
+        // The heuristics never write a deep pointer; a bundle a world
+        // description was applied to may hold one.
+        Some(mb_mcm::RecordAt::Pointer(tokens)) => {
+            tokens.iter().try_fold(served.clone(), |at, token| {
+                if token == "0"
+                    && let Some(items) = array_items(&at, defs)
+                {
+                    return Some(items.clone());
+                }
+                let props = schema_properties(Some(&at), defs)?;
+                resolve(props.get(token)?, defs).cloned()
+            })
+        }
     }
 }
 

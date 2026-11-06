@@ -50,6 +50,11 @@
       "pattern": "^(/([^~]|~[01])*)+$",
       "description": "An RFC 6901 JSON pointer, e.g. `/result/0`."
     },
+    "recordPointer": {
+      "type": "string",
+      "pattern": "^$|^(/([^~]|~[01])*)+$",
+      "description": "An RFC 6901 JSON pointer to the one record, e.g. `/data`; the root pointer `\"\"` says the whole answer (or request body) is the record."
+    },
     "pattern": {
       "type": "string",
       "pattern": "\\{id\\}",
@@ -298,7 +303,7 @@
           "additionalProperties": false,
           "properties": {
             "record": {
-              "$ref": "#/$defs/pointer"
+              "$ref": "#/$defs/recordPointer"
             },
             "records": {
               "$ref": "#/$defs/pointer"
@@ -310,7 +315,7 @@
           "additionalProperties": false,
           "properties": {
             "record": {
-              "$ref": "#/$defs/pointer"
+              "$ref": "#/$defs/recordPointer"
             },
             "records": {
               "$ref": "#/$defs/pointer"

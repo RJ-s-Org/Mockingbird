@@ -33,11 +33,10 @@ use axum::response::{IntoResponse, Response};
 use futures::{StreamExt, TryStreamExt, stream};
 use mb_auth::Permission;
 
-use mb_import::world::tier0;
 use mb_mcm::Bundle;
 use mb_mcm::world::{
     Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
-    check_size, overlay, validate,
+    check_size, effective_validated, tier0, validate,
 };
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
 use mb_store::{
@@ -114,29 +113,29 @@ pub async fn effective_world(
             gaps,
         });
     };
-    let (applied, refused) = match serde_json::from_value::<World>(latest.document.clone()) {
-        Ok(doc) => {
-            let v = validate(&doc, bundle);
-            (v.applied, v.refused)
-        }
-        Err(e) => (
-            World::default(),
-            vec![Refusal {
-                path: String::new(),
-                code: RefusalCode::Invalid,
-                message: format!(
-                    "revision {} is not a world description: {e}",
-                    latest.revision
-                ),
-            }],
-        ),
-    };
+    let (world, Validation { applied, refused }) =
+        match serde_json::from_value::<World>(latest.document.clone()) {
+            Ok(doc) => effective_validated(bundle, &base, &doc),
+            Err(e) => (
+                base,
+                Validation {
+                    applied: World::default(),
+                    refused: vec![Refusal {
+                        path: String::new(),
+                        code: RefusalCode::Invalid,
+                        message: format!(
+                            "revision {} is not a world description: {e}",
+                            latest.revision
+                        ),
+                    }],
+                },
+            ),
+        };
     let authors = attribute(store, &latest, &serde_json::to_value(&applied)?)
         .await?
         .into_iter()
         .map(|(pointer, origin)| (pointer, origin.author))
         .collect();
-    let world = overlay(&base, &applied);
     let gaps = gaps(bundle, &world, &refused);
     Ok(EffectiveWorld {
         world,
@@ -1014,38 +1013,49 @@ fn trimmed(mut v: Validation) -> Validation {
 fn bad_pointer(world: &World) -> Option<Refusal> {
     for (id, op) in &world.operations {
         let base = format!("/operations/{}", escape(id));
-        let mut pointers: Vec<(String, &Pointer)> = Vec::new();
+        // Each pointer, where it is, and whether it is a record pointer (which
+        // may be the root `""`: the whole answer or request body is the record).
+        let mut pointers: Vec<(String, &Pointer, bool)> = Vec::new();
         if let Some(r) = &op.request {
             pointers.extend(
                 r.record
                     .iter()
-                    .map(|p| (format!("{base}/request/record"), p)),
+                    .map(|p| (format!("{base}/request/record"), p, true)),
             );
             pointers.extend(
                 r.records
                     .iter()
-                    .map(|p| (format!("{base}/request/records"), p)),
+                    .map(|p| (format!("{base}/request/records"), p, false)),
             );
         }
         if let Some(a) = &op.answer {
             pointers.extend(
                 a.record
                     .iter()
-                    .map(|p| (format!("{base}/answer/record"), p)),
+                    .map(|p| (format!("{base}/answer/record"), p, true)),
             );
             pointers.extend(
                 a.records
                     .iter()
-                    .map(|p| (format!("{base}/answer/records"), p)),
+                    .map(|p| (format!("{base}/answer/records"), p, false)),
             );
         }
         for (member, change) in &op.changes {
             if let ChangeDesc::FromRequest(p) = change {
-                pointers.push((format!("{base}/changes/{}/from_request", escape(member)), p));
+                pointers.push((
+                    format!("{base}/changes/{}/from_request", escape(member)),
+                    p,
+                    false,
+                ));
             }
         }
-        for (path, pointer) in pointers {
-            if let Err(e) = Pointer::check(pointer.as_str()) {
+        for (path, pointer, record) in pointers {
+            let syntax = if record {
+                Pointer::check_record
+            } else {
+                Pointer::check
+            };
+            if let Err(e) = syntax(pointer.as_str()) {
                 return Some(Refusal {
                     path,
                     code: RefusalCode::Invalid,

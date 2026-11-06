@@ -89,3 +89,25 @@ fn schema_accepts_every_serialized_field() {
     assert_eq!(back, full, "the types keep every field");
     assert_eq!(errors(&validator(), &back), Vec::<String>::new());
 }
+
+/// The root pointer `""` is a record pointer only: `answer.record` and
+/// `request.record` take it, the `records` pointers and `from_request` do not.
+#[test]
+fn schema_accepts_a_root_answer_record_only() {
+    let v = validator();
+    for good in [
+        json!({"operations": {"o": {"answer": {"record": ""}}}}),
+        json!({"operations": {"o": {"request": {"record": ""}}}}),
+        json!({"operations": {"o": {"answer": {"record": "/data/result/0"}}}}),
+    ] {
+        assert_eq!(errors(&v, &good), Vec::<String>::new(), "{good}");
+    }
+    for bad in [
+        json!({"operations": {"o": {"answer": {"records": ""}}}}),
+        json!({"operations": {"o": {"request": {"records": ""}}}}),
+        json!({"operations": {"o": {"changes": {"m": {"from_request": ""}}}}}),
+        json!({"operations": {"o": {"answer": {"record": "data"}}}}),
+    ] {
+        assert!(!v.is_valid(&bad), "should be refused: {bad}");
+    }
+}

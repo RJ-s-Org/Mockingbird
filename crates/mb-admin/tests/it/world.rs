@@ -1251,6 +1251,46 @@ async fn patch_world(
     .await
 }
 
+/// The root pointer `""` says a create's answer is itself the record: the
+/// write stores it, refusing nothing, and the effective view shows it.
+#[tokio::test]
+async fn put_world_accepts_a_root_answer_record() {
+    let (_st, app, uri, _t) = widgets_v1().await;
+    let doc = json!({"operations": {"createWidget": {"answer": {"record": ""}}}});
+    let result = put_world(&app, &uri, &doc).await;
+    assert_eq!(result["refused"], json!([]), "{result}");
+    assert_eq!(
+        result["applied"]["operations"]["createWidget"]["answer"]["record"], "",
+        "{result}"
+    );
+    let (status, _, view) =
+        call(&app, Method::GET, &uri, "application/json", &[], Vec::new()).await;
+    assert_eq!(status, 200, "{view}");
+    assert_eq!(view["refused"], json!([]), "{view}");
+    assert_eq!(
+        view["world"]["operations"]["createWidget"]["answer"]["record"], "",
+        "{view}"
+    );
+    // The same pointer on a list is no record pointer: still refused.
+    let (status, ctype, body) = call(
+        &app,
+        Method::PUT,
+        &uri,
+        "application/json",
+        &[],
+        json!({"operations": {"createWidget": {"answer": {"records": ""}}}})
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(ctype, "application/problem+json");
+    assert_eq!(
+        body["path"], "/operations/createWidget/answer/records",
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn put_world_stores_applied_only_and_reports_refused() {
     let (_st, app, uri, t) = widgets_v1().await;
