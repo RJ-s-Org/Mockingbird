@@ -4,7 +4,7 @@ A **world description** says how a contract behaves as a world: which member hol
 
 A description is optional: a contract alone still works. It is not a dataset and holds no records, no values from traffic and no credentials.
 
-The mock answers from the description wherever it says something and keeps its heuristics wherever it is silent, key by key; a new revision applies at once ([At runtime](#at-runtime)).
+The mock answers from the description wherever it says something and keeps its heuristics wherever it is silent, key by key; a write returns once the running mock serves the new revision ([At runtime](#at-runtime)).
 
 ## Who writes it
 
@@ -81,7 +81,7 @@ Some documents are refused whole: the write fails with an `application/problem+j
 
 ### Revisions
 
-Each write adds a numbered revision (from 1) attached to its contract version, with its author. The newest revision applies at once. A change never recompiles the contract or adds a contract version.
+Each write adds a numbered revision (from 1) attached to its contract version, with its author. The newest revision applies once the mock has rebuilt on it, which the write waits for (`runtime` in its answer). A change never recompiles the contract or adds a contract version.
 
 Two writers can meet. Send the revision you read as `expect_revision` (the `If-Match` header in the Admin API). If someone wrote since, the write is refused with `412 revision_conflict`: read again and redo the change. Without it, the write adds a revision on top of the newest.
 
@@ -171,7 +171,7 @@ A mock answers from its active contract version's effective description: tier 0 
 
 What reads or writes stored records works per session, with `consistency: on` (the default), on calls with no scenario and no forced status; lists answered from state also need an LLM and an HTTP route. GraphQL, gRPC and SOAP operations take kind, type, target, transitions, changes and lifecycles by operation id; the header and status keys do not apply to them.
 
-**Loading and hot reload.** The description is compiled into the mock's runtime when it is built, so a request costs only lookups by operation id and type name. Every new revision of the active contract version (`put_world`, `patch_world`, a restore, carry-forward at activation, a config file's `world:`, a snapshot import) rebuilds the mock, as a scenario change does, on every node. A rebuild keeps the session's stored records and forgets what the runtime holds in memory (which collection a record was placed in, path aliases), so the next request follows the new revision. A revision that changes a type's identity member or pattern migrates nothing: records stored before stay under their old key and are still reached by the new member's value and by either form of a patterned id. When the store cannot read the description, the mock keeps serving the description it served before for the same contract version, else tier 0, logs a warning, and retries the build after 1 second, doubling up to 60 seconds, until it loads. A newest revision that is not a world description at all serves tier 0 and logs the refusal.
+**Loading and hot reload.** The description is compiled into the mock's runtime when it is built, so a request costs only lookups by operation id and type name. Every new revision of the active contract version (`put_world`, `patch_world`, a restore, carry-forward at activation, a config file's `world:`, a snapshot import) rebuilds the mock, as a scenario change does, on every node. A write through the Admin API (or `patch_world` over MCP) returns once this node's running mock serves the new revision, waiting at most 10 seconds; its answer's `runtime` says `mounted` (the next call uses it), `pending` (the rebuild has not landed in time, or the description could not be loaded and a retry is due), `not_served` (the version is not the active one, or the mock is not mounted on this node) or `unknown` (a `control` node, which runs no mocks). Other nodes rebuild on their own, a moment later. A rebuild keeps the session's stored records and forgets what the runtime holds in memory (which collection a record was placed in, path aliases), so the next request follows the new revision. A revision that changes a type's identity member or pattern migrates nothing: records stored before stay under their old key and are still reached by the new member's value and by either form of a patterned id. When the store cannot read the description, the mock keeps serving the description it served before for the same contract version, else tier 0, logs a warning, and retries the build after 1 second, doubling up to 60 seconds, until it loads. A newest revision that is not a world description at all serves tier 0 and logs the refusal.
 
 **Kind, type, target and answer.** `kind`, `type`, `target` and `answer.record` are written into the compiled operations, so every heuristic that reads an operation's kind or identity follows them unchanged: a `kind: delete` on an action route deletes its target, a `kind: list` over what the importer took for a read answers a list. `answer.record` may point deep into the answer (`/data/0/item`), and `""` says the answer itself is the record.
 

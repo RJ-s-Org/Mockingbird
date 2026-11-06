@@ -126,6 +126,7 @@ use crate::{
         world::GapSchema,
         world::GapCodeSchema,
         world::WorldWriteResult,
+        world::WorldMount,
         world::RevisionInfoView,
         world::RevisionView,
         world::WorldDiff,

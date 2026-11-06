@@ -16,6 +16,7 @@ use axum::extract::Request;
 use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt as _;
+use mb_admin::{WorldMount, WorldMounts};
 use mb_mcm::{Channel, ChannelBinding, Direction, Protocol};
 use mb_protocols::events::{ChannelMode, ChannelRuntime, ChannelSetup, EventSetup};
 use mb_protocols::grpc::{GrpcError, GrpcMock, GrpcServer};
@@ -237,6 +238,9 @@ pub struct MockRegistry {
     /// This registry, for the retry tasks it spawns (which must not keep it
     /// alive).
     me: Weak<MockRegistry>,
+    /// Counts the publishes of the mounted set, so [`Self::wait_world`]
+    /// wakes when a rebuild lands.
+    publishes: tokio::sync::watch::Sender<u64>,
 }
 
 impl std::fmt::Debug for MockRegistry {
@@ -262,7 +266,40 @@ impl MockRegistry {
             generations: AtomicU64::new(0),
             world_retries: std::sync::Mutex::new(HashMap::new()),
             me: me.clone(),
+            publishes: tokio::sync::watch::channel(0).0,
         })
+    }
+
+    /// Waits, at most `within`, until mounted mock `name` in `workspace`
+    /// serves contract version `version` with world revision `revision` or
+    /// a newer one, loaded (not a fallback while a retry is due).
+    /// [`WorldMount::Pending`] when the time ran out while the mock is
+    /// mounted, [`WorldMount::NotServed`] when it is not mounted here.
+    pub async fn wait_world(
+        &self,
+        workspace: &str,
+        name: &str,
+        version: i64,
+        revision: i64,
+        within: Duration,
+    ) -> WorldMount {
+        // Subscribed before the first look, so a publish in between wakes it.
+        let mut published = self.publishes.subscribe();
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let world = self.mounted_world(workspace, name);
+            if world
+                .as_ref()
+                .is_some_and(|w| w.version == version && w.revision >= revision && !w.pending)
+            {
+                return WorldMount::Mounted;
+            }
+            match tokio::time::timeout_at(deadline, published.changed()).await {
+                Ok(Ok(())) => {}
+                _ if world.is_some() => return WorldMount::Pending,
+                _ => return WorldMount::NotServed,
+            }
+        }
     }
 
     /// `(revision, pending)` of the world description mounted mock `name`
@@ -1067,6 +1104,7 @@ impl MockRegistry {
             })
             .collect();
         self.mounted.store(Arc::new(next));
+        self.publishes.send_modify(|n| *n = n.wrapping_add(1));
         self.refresh_claimed();
         self.publish_grpc(grpc).await;
     }
@@ -1392,6 +1430,21 @@ async fn event_setup(
             ServeMode::ControlOnly => ChannelMode::PublishOnly,
         },
     })
+}
+
+#[async_trait::async_trait]
+impl WorldMounts for MockRegistry {
+    async fn wait(
+        &self,
+        workspace: &str,
+        mock: &str,
+        version: i64,
+        revision: i64,
+        within: Duration,
+    ) -> WorldMount {
+        self.wait_world(workspace, mock, version, revision, within)
+            .await
+    }
 }
 
 #[cfg(test)]

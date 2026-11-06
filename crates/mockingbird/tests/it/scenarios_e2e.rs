@@ -344,3 +344,38 @@ async fn snapshot_roundtrips_world() {
     assert_eq!(refused.len(), 1, "{out}");
     assert_eq!(refused[0]["path"], "/operations/noSuchOperation", "{out}");
 }
+
+/// A world write through the Admin API returns once the running mock
+/// serves the new revision: the very next call follows it, with no wait.
+#[tokio::test]
+async fn a_world_write_applies_to_the_next_call() {
+    let app = start().await;
+    seed(&app, &orders_with_conflict()).await;
+    let http = reqwest::Client::new();
+    let uri = format!(
+        "{}/api/v1/workspaces/default/mocks/orders/contracts/active/world",
+        app.admin
+    );
+    let effective: Value = http.get(&uri).send().await.unwrap().json().await.unwrap();
+    let order = effective["world"]["operations"]["createOrder"]["type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("createOrder has a type: {effective}"))
+        .to_owned();
+    for (revision, state) in [(1, "shipped"), (2, "pending")] {
+        let doc = json!({"version": 1, "types": {&order: {"lifecycle": {"member": "status", "initial": state}}}});
+        let r = http.put(&uri).json(&doc).send().await.unwrap();
+        assert_eq!(r.status(), 201);
+        let written: Value = r.json().await.unwrap();
+        assert_eq!(written["refused"], json!([]), "{written}");
+        assert_eq!(written["revision"], revision, "{written}");
+        assert_eq!(written["runtime"], "mounted", "{written}");
+        // No sleep, no retry: every create made right after the write
+        // starts in the described state.
+        for _ in 0..5 {
+            let r = create_order(&app, None).await;
+            assert_eq!(r.status(), 201);
+            let created: Value = r.json().await.unwrap();
+            assert_eq!(created["status"], state, "revision {revision}: {created}");
+        }
+    }
+}
