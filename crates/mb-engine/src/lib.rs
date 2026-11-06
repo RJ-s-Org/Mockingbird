@@ -706,11 +706,13 @@ impl Engine {
     }
 
     /// The seed of the local repairs of `op_id`'s answer to `calls` (values
-    /// the faker refills in an LLM answer, see [`guards`]): the calls'
-    /// [`SEED_HEADER`], else the engine's seed, mixed with the contract,
-    /// the operation and each call's path parameters, query and body, so
-    /// identical calls repair alike and different calls differ. `None`
-    /// without a seed: the repairs are random.
+    /// the faker refills in an LLM answer and its PII replacements, see
+    /// [`guards`]): the calls' [`SEED_HEADER`], else the engine's seed,
+    /// mixed with the contract, the operation and each call's path
+    /// parameters, query and body, so identical calls repair alike and
+    /// different calls differ. The PII the scrubber finds in the request is
+    /// masked first (see [`Engine::masked`]), so no original value seeds a
+    /// replacement. `None` without a seed: the repairs are random.
     fn repair_seed<'c>(
         &self,
         bundle: &Bundle,
@@ -726,7 +728,12 @@ impl Engine {
             .into_iter()
             .flat_map(|call| {
                 let [path, query, body] = seed::call_parts(call);
-                [Value::from(call.operation_id.as_str()), path, query, body]
+                [
+                    Value::from(call.operation_id.as_str()),
+                    self.masked(path),
+                    self.masked(query),
+                    self.masked(body),
+                ]
             })
             .collect();
         let parts: Vec<&Value> = parts.iter().collect();
@@ -735,6 +742,18 @@ impl Engine {
             &[&bundle.source_digest, op_id, "repair"],
             &parts,
         ))
+    }
+
+    /// `value` with each PII value the scrubber finds replaced by one that
+    /// depends on its place and kind alone (a fixed seed, see
+    /// [`pii::Scrubber::scrub_value_seeded`]), so that what seeds a repair
+    /// stays the same whatever PII the request held. `value` itself without
+    /// a scrubber. Not counted as replacements.
+    fn masked(&self, mut value: Value) -> Value {
+        if let Some(scrubber) = &self.guards.scrubber {
+            scrubber.scrub_value_seeded(&mut value, Some(0));
+        }
+        value
     }
 
     /// The headers `op` declares for `status`, each with a value (see

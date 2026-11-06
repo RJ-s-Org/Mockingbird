@@ -221,8 +221,12 @@ impl Scrubber {
         self.scrub_value_seeded(v, None)
     }
 
-    /// [`Scrubber::scrub_value`] with replacements drawn as
-    /// [`Scrubber::scrub_str_seeded`] does.
+    /// [`Scrubber::scrub_value`] with each string's replacements drawn as
+    /// [`Scrubber::scrub_str_seeded`] does, from `seed` mixed with the
+    /// string's place in `v` (its path of member names and indexes): the
+    /// same seed and place give the same replacements whatever the string
+    /// held, and the same original in two places gets two. `seed` must not
+    /// be derived from the values scrubbed.
     pub fn scrub_value_seeded(&self, v: &mut Value, seed: Option<u64>) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         self.scrub_value_into(v, seed, &mut counts);
@@ -246,13 +250,15 @@ impl Scrubber {
                 }
             }
             Value::Array(items) => {
-                for item in items {
-                    self.scrub_value_into(item, seed, counts);
+                for (i, item) in items.iter_mut().enumerate() {
+                    let at = seed.map(|s| crate::seed::derive(s, &["[]", &i.to_string()], &[]));
+                    self.scrub_value_into(item, at, counts);
                 }
             }
             Value::Object(map) => {
-                for (_, item) in map.iter_mut() {
-                    self.scrub_value_into(item, seed, counts);
+                for (key, item) in map.iter_mut() {
+                    let at = seed.map(|s| crate::seed::derive(s, &["{}", key], &[]));
+                    self.scrub_value_into(item, at, counts);
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -266,8 +272,12 @@ impl Scrubber {
     }
 
     /// [`Scrubber::scrub_str`] with the replacements drawn from a generator
-    /// seeded by `seed` and `s` when there is a seed (the same string gets
-    /// the same replacement), else at random.
+    /// seeded by `seed` alone when there is a seed, else at random. The
+    /// text scrubbed never seeds it: the same seed gives the same
+    /// replacements whatever originals `s` holds (only their kinds and
+    /// shapes count), so a replacement says nothing about its original to
+    /// anyone knowing the seed. `seed` should name where `s` is (the call
+    /// and the place in its answer), never what it holds.
     pub fn scrub_str_seeded(
         &self,
         s: &str,
@@ -277,7 +287,7 @@ impl Scrubber {
         if s.len() > MAX_SCRUB_BYTES || (self.builtins.is_empty() && self.custom.is_empty()) {
             return (s.to_owned(), counts);
         }
-        let mut rng = crate::seed::repair_rng(seed, "pii", s);
+        let mut rng = crate::seed::label_rng(seed, "pii");
         let mut text = s.to_owned();
         let mut protected = Vec::new();
         // A replacement can (rarely) turn a neighbouring candidate of an

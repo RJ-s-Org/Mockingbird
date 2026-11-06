@@ -399,17 +399,41 @@ proptest! {
 }
 
 #[test]
-fn seeded_scrubbing_repeats_per_string() {
+fn seeded_scrubbing_never_takes_the_original() {
     let s = all();
-    let text = "mail jane.doe@acme-corp.io or call 415-555-0123";
+    let text = "mail jane.doe@acme-corp.io or call 415-867-5309 ssn 123-45-6789";
     let (a, _) = s.scrub_str_seeded(text, Some(7));
     let (b, _) = s.scrub_str_seeded(text, Some(7));
-    assert_eq!(a, b, "the same seed and string scrub alike");
+    assert_eq!(a, b, "the same seed scrubs alike");
     assert_ne!(a, text);
-    let (other, _) = s.scrub_str_seeded("mail john.roe@acme-corp.io or call 415-555-0199", Some(7));
-    assert_ne!(a, other);
+    // Only the originals change: a replacement that came from them would
+    // let anyone knowing the seed test candidate originals offline.
+    let (other, _) = s.scrub_str_seeded(
+        "mail john.roe@other-corp.io or call 212-867-5310 ssn 234-56-7890",
+        Some(7),
+    );
+    assert_eq!(a, other, "the replacements do not depend on the originals");
     let (reseeded, _) = s.scrub_str_seeded(text, Some(8));
     assert_ne!(a, reseeded, "another seed scrubs otherwise");
     let unseeded: std::collections::HashSet<String> = (0..4).map(|_| s.scrub_str(text).0).collect();
     assert!(unseeded.len() > 1, "{unseeded:?}");
+}
+
+#[test]
+fn seeded_value_scrubbing_draws_by_position() {
+    let s = all();
+    let scrub = |v: serde_json::Value, seed| {
+        let mut v = v;
+        s.scrub_value_seeded(&mut v, Some(seed));
+        v
+    };
+    let doc = json!({"a": "jane@corp.com", "b": ["jane@corp.com"]});
+    let once = scrub(doc.clone(), 7);
+    assert_eq!(once, scrub(doc.clone(), 7), "same seed and position");
+    // The same original in two places is not linked by its replacement.
+    assert_ne!(once["a"], once["b"][0], "{once}");
+    // Another original in the same place gets the same replacement.
+    let other = scrub(json!({"a": "bob@else.org", "b": ["ann@x.io"]}), 7);
+    assert_eq!(once, other);
+    assert_ne!(once, scrub(doc, 8));
 }
