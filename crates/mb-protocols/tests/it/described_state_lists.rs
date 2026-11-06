@@ -676,3 +676,154 @@ async fn a_cursor_paged_list_from_state_keeps_its_count() {
     assert_eq!(seen, ["t1", "t2", "t3"]);
     assert_eq!(h.provider.requests().len(), 1);
 }
+
+/// Templates listed in an envelope that requires its next-page member, which declares
+/// an example; `{member}` is replaced by that member's name and schema.
+const REQUIRED_NEXT: &str = r##"
+openapi: 3.1.0
+info: {title: Required next, version: "1"}
+paths:
+  /templates:
+    get:
+      operationId: listTemplates
+      parameters:
+        - {name: from, in: query, schema: {type: string}}
+        - {name: rows, in: query, schema: {type: integer, minimum: 1}}
+        - {name: sheet, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templates, {name}]
+                properties:
+                  templates: {type: array, items: {$ref: "#/components/schemas/Template"}}
+                  {name}: {member}
+  /templates/{templateId}:
+    get:
+      operationId: getTemplate
+      parameters: [{name: templateId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+components:
+  schemas:
+    Template:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        email: {type: string, format: email}
+"##;
+
+fn required_next(name: &str, member: &str) -> String {
+    REQUIRED_NEXT
+        .replace("{name}", name)
+        .replace("{member}", member)
+}
+
+fn three_with(name: &str, next: Value) -> Value {
+    let mut body = list(vec![
+        template("t1", "a@x.io", 1),
+        template("t2", "b@x.io", 2),
+        template("t3", "c@x.io", 3),
+    ]);
+    body[name] = next;
+    body
+}
+
+fn cursor_paging() -> Value {
+    json!({"paging": {"style": "cursor", "request": "from", "response": "continuation", "size": "rows"}})
+}
+
+/// A page from state with no next position never carries the next-page member's
+/// declared example: a required cursor is the empty text, or `null` where it may be.
+#[tokio::test]
+async fn a_last_page_from_state_carries_no_example_cursor() {
+    for (member, end) in [
+        (r#"{type: string, examples: ["c-example"]}"#, json!("")),
+        (
+            r#"{type: [string, "null"], examples: ["c-example"]}"#,
+            Value::Null,
+        ),
+    ] {
+        let h = support::described(
+            &required_next("continuation", member),
+            world(cursor_paging()),
+            vec![three_with("continuation", json!("model-token"))],
+        );
+        get(&h, "/templates").await;
+        // The whole list, uncut: no next page.
+        let (source, body) = get(&h, "/templates").await;
+        assert_eq!(source, "state", "{member}: {body}");
+        assert_eq!(ids(&body, "templates"), ["t1", "t2", "t3"]);
+        assert_eq!(body["continuation"], end, "{member}: {body}");
+        assert_eq!(h.provider.requests().len(), 1, "{member}");
+    }
+}
+
+/// A page from state that is cut carries a token that reaches the next page, and the
+/// last page ends the list.
+#[tokio::test]
+async fn a_middle_page_from_state_carries_a_token_to_the_next() {
+    let h = support::described(
+        &required_next("continuation", r#"{type: string, examples: ["c-example"]}"#),
+        world(cursor_paging()),
+        vec![three_with("continuation", json!("model-token"))],
+    );
+    get(&h, "/templates").await;
+    let (source, body) = get(&h, "/templates?rows=2").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(ids(&body, "templates"), ["t1", "t2"]);
+    let token = body["continuation"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!token.is_empty() && token != "c-example", "{body}");
+    let (_, body) = get(&h, &format!("/templates?rows=2&from={token}")).await;
+    assert_eq!(ids(&body, "templates"), ["t3"], "{body}");
+    assert_ne!(body["continuation"], json!("c-example"), "{body}");
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+/// The last numbered page from state: a required next page number is `null` where it
+/// may be; where no value says "no more", the example stays and the answer is marked.
+#[tokio::test]
+async fn a_last_numbered_page_from_state_carries_no_example_page() {
+    let paging = json!({"paging": {"style": "page", "request": "sheet", "size": "rows", "response": "nextSheet"}});
+    let h = support::described(
+        &required_next("nextSheet", r#"{type: [integer, "null"], examples: [2]}"#),
+        world(paging.clone()),
+        vec![three_with("nextSheet", json!(2))],
+    );
+    get(&h, "/templates").await;
+    let (source, body) = get(&h, "/templates?rows=2&sheet=1").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(body["nextSheet"], json!(2), "{body}");
+    let (source, body) = get(&h, "/templates?rows=2&sheet=2").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(ids(&body, "templates"), ["t3"]);
+    assert_eq!(body["nextSheet"], Value::Null, "{body}");
+    assert!(
+        h.records()
+            .iter()
+            .all(|r| r.request.get("world_gap").is_none()),
+        "no gap is marked"
+    );
+
+    // No `null`, nor any other end: the answer is as before, and marked.
+    let h = support::described(
+        &required_next("nextSheet", "{type: integer, examples: [2]}"),
+        world(paging),
+        vec![three_with("nextSheet", json!(2))],
+    );
+    get(&h, "/templates").await;
+    let (source, body) = get(&h, "/templates?rows=2&sheet=2").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(body["nextSheet"], json!(2), "{body}");
+    let records = h.records();
+    assert_eq!(
+        records.last().and_then(|r| r.request.get("world_gap")),
+        Some(&json!(["no_page_end"])),
+    );
+}
