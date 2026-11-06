@@ -19,7 +19,9 @@ It is the bench's budget hard stop: cumulative spend (the ledger's cost, plus
 any --prior-ledger, plus in-flight reservations) never crosses --budget-usd;
 once it would, every call gets 402 and `<ledger dir>/BUDGET_TRIPPED` exists.
 
-`GET /stats` reports spend; `GET /healthz` answers 200. Standard library only.
+`GET /stats` reports spend; `GET /healthz` answers 200. `--record` and `--replay`
+serve replay.py's gate: `--replay` answers from recordings and never calls upstream
+or reads the key. Standard library only.
 """
 
 import argparse
@@ -38,6 +40,9 @@ import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import replay  # noqa: E402
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 UPSTREAM_TIMEOUT_S = 120.0
@@ -543,7 +548,16 @@ class Proxy:
         self.stream_upgrade = not args.no_stream_upgrade
         self.dump_path = args.dump
         self.dump_lock = threading.Lock()
-        self.ledger = Ledger(args.ledger, args.budget_usd, args.prior_ledger or [])
+        # --replay answers every call from recordings: no upstream, no key, no ledger.
+        replays = getattr(args, "replay", None) or []
+        self.replayer = replay.Replayer(replays, getattr(args, "replay_log", None)) if replays else None
+        record = getattr(args, "record", None)
+        self.recorder = replay.Recorder(record) if record and not self.replayer else None
+        ledger = args.ledger
+        if self.replayer and not ledger:
+            import tempfile
+            ledger = os.path.join(tempfile.mkdtemp(prefix="mb-replay-ledger-"), "calls.jsonl")
+        self.ledger = Ledger(ledger, args.budget_usd, [] if self.replayer else (args.prior_ledger or []))
         self.prices = load_prices(args.prices)
         self.pins = load_provider_pins(getattr(args, "provider_pins", None))
         if self.prices:
@@ -554,7 +568,7 @@ class Proxy:
             self.fallback = (max(self.fallback[0], FALLBACK_PRICES[0]), max(self.fallback[1], FALLBACK_PRICES[1]))
         else:
             self.fallback = FALLBACK_PRICES
-        self.key = os.environ.get("OPENROUTER_API_KEY", "")
+        self.key = "" if self.replayer else os.environ.get("OPENROUTER_API_KEY", "")
         if self.key:
             SECRETS.append(self.key)
         split = urllib.parse.urlsplit(self.upstream)
@@ -654,6 +668,9 @@ class Handler(BaseHTTPRequestHandler):
         received = time.monotonic()
         path = urllib.parse.urlsplit(self.path).path
         raw = self.read_body()
+        if path == "/bench/mark":
+            self.mark(raw)
+            return
         parts = path.split("/", 3)  # "", "r", label, rest
         if len(parts) < 4 or parts[1] != "r" or not parts[2]:
             self.send_json(404, {"error": {"message": f"use /r/<label>/api/v1/...; got {path}"}})
@@ -670,7 +687,58 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             self.send_json(400, {"error": {"message": f"bad JSON body: {e}"}})
             return
+        if self.proxy.replayer:
+            self.replay(label, body)
+            return
         self.chat(label, body, received)
+
+    # ---- record and replay (replay.py)
+
+    def mark(self, raw: bytes) -> None:
+        """`{label, journey, rep}`: the journey's calls from now on belong to that rep."""
+        tags = self.proxy.replayer or self.proxy.recorder
+        try:
+            doc = json.loads(raw or b"{}")
+            if tags:
+                tags.mark(str(doc["label"]), str(doc["journey"]), int(doc["rep"]))
+        except (ValueError, KeyError, TypeError) as e:
+            self.send_json(400, {"error": {"message": f"bad mark: {e}"}})
+            return
+        self.send_json(200, {"ok": True, "recording": tags is not None})
+
+    def replay(self, label: str, body: Dict[str, Any]) -> None:
+        """Answers from the recording: no upstream call, no key."""
+        ans = self.proxy.replayer.answer(label, self.headers, body)
+        if ans["status"] != 200:
+            self.send_json(ans["status"], {"error": {"message": ans["error"] or f"replayed {ans['status']}",
+                                                     "code": ans["status"]}})
+            return
+        model = body.get("model")
+        content = ans["content"]
+        finish = ans["finish_reason"] or "stop"
+        usage = {"prompt_tokens": 0, "completion_tokens": len(content) // 4, "total_tokens": len(content) // 4}
+        if not body.get("stream"):
+            self.send_json(200, {"id": "replay", "object": "chat.completion", "model": model, "provider": "replay",
+                                 "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
+                                              "finish_reason": finish}], "usage": usage})
+            return
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            base = {"id": "replay", "object": "chat.completion.chunk", "model": model, "provider": "replay"}
+            for i in range(0, len(content), 400):
+                chunk = dict(base, choices=[{"index": 0, "delta": {"content": content[i:i + 400]},
+                                             "finish_reason": None}])
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            end = dict(base, choices=[{"index": 0, "delta": {}, "finish_reason": finish}], usage=usage)
+            self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
+            self.wfile.flush()
+        except OSError:
+            pass
 
     # ---- the proxied call
 
@@ -712,6 +780,8 @@ class Handler(BaseHTTPRequestHandler):
             "provider_pin": None,
             "provider_pin_by": None,
         }
+        tag = px.recorder.tag(label, self.headers, body) if px.recorder else None
+        self.last_outcome = None
         estimate = px.estimate(model, body)
         if not px.ledger.reserve(estimate):
             rec.update(status=402, error_kind="budget", error_excerpt="bench budget exhausted", total_ms=0.0)
@@ -728,6 +798,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(502, {"error": {"message": rec["error_excerpt"]}})
         finally:
             px.ledger.settle(estimate, rec, reserved=True)
+            if tag is not None:
+                out = self.last_outcome
+                px.recorder.write(tag, rec, redact("".join(out.content)) if out else "",
+                                  out.finish_reason if out else None)
 
     def forward(
         self,
@@ -776,6 +850,7 @@ class Handler(BaseHTTPRequestHandler):
         for _ in range(3):
             rec["attempts"] += 1
             out = Outcome()
+            self.last_outcome = out
             try:
                 resp = px.post(up, out)
             except (socket.timeout, TimeoutError) as e:
@@ -1108,7 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--ledger", required=True, help="calls.jsonl to append to")
+    ap.add_argument("--ledger", help="calls.jsonl to append to (required unless --replay)")
     ap.add_argument("--budget-usd", type=float, default=9.0)
     ap.add_argument("--prices", help="roster.json (per-token prices)")
     ap.add_argument("--provider-pins", default=DEFAULT_PROVIDER_PINS,
@@ -1122,10 +1197,17 @@ def main() -> int:
     ap.add_argument("--no-format-fallback", action="store_true",
                     help="pass a rejected response_format's error to the client instead of retrying without it")
     ap.add_argument("--dump", help="exchanges.jsonl: append each call's messages and answer")
+    ap.add_argument("--record", help="raw recording (replay.py): append each call's journey tag and answer")
+    ap.add_argument("--replay", action="append",
+                    help="answer every call from these recordings (files or directories; repeatable): "
+                         "no upstream, no key, no network")
+    ap.add_argument("--replay-log", help="with --replay: append each call's match (exact/key/nearest/none)")
     ap.add_argument("--upstream", default=OPENROUTER_URL, help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if not args.ledger and not args.replay:
+        ap.error("--ledger is required unless --replay")
 
-    if args.upstream == OPENROUTER_URL and not os.environ.get("OPENROUTER_API_KEY"):
+    if not args.replay and args.upstream == OPENROUTER_URL and not os.environ.get("OPENROUTER_API_KEY"):
         print("proxy: OPENROUTER_API_KEY is not set (source ~/.zshenv)", file=sys.stderr)
         return 2
     proxy = Proxy(args)

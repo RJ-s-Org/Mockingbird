@@ -409,12 +409,26 @@ class Sink:
             print(f"  [{mark}] {self.suite}/{case} #{rep}: {lat} {source}", file=sys.stderr)
 
 
-def write_config(directory, model, base_url, ports, mocks, suite):
+def write_config(directory, model, base_url, ports, mocks, suite, tag_journeys=False):
+    """`tag_journeys` (replay.py's record and replay): each mock gets its own copy of the
+    profile that sends `x-bench-journey: <mock>`, so the proxy can tell the journeys'
+    calls apart, and a fixed `faker_seed`, so a fallback answers the same each run."""
     lines = [
         "llm:\n  default_profile: bench\n  profiles:\n    bench:\n",
         "      api_key: env:OPENROUTER_API_KEY\n",
         f"      base_url: {json.dumps(base_url)}\n",
         f"      model: {json.dumps(model)}\n",
+    ]
+    if tag_journeys:
+        for name in mocks:
+            lines += [
+                f"    bench_{name}:\n",
+                "      api_key: env:OPENROUTER_API_KEY\n",
+                f"      base_url: {json.dumps(base_url)}\n",
+                f"      model: {json.dumps(model)}\n",
+                f"      headers:\n        x-bench-journey: {json.dumps(name)}\n",
+            ]
+    lines += [
         f"storage:\n  url: sqlite://{directory}/mockingbird.db\n",
         f"server:\n  port: {ports[0]}\n  admin_port: {ports[1]}\n  grpc_port: {ports[2]}\n",
     ]
@@ -429,6 +443,8 @@ def write_config(directory, model, base_url, ports, mocks, suite):
             lines.append(f"    route_prefix: {prefix}\n")
             if persona:
                 lines.append(f"    persona: {json.dumps(persona)}\n")
+            if tag_journeys:
+                lines.append(f"    llm_profile: bench_{name}\n    faker_seed: 1\n")
     path = os.path.join(directory, "mockingbird.yaml")
     with open(path, "w") as f:
         f.write("".join(lines))
@@ -563,7 +579,8 @@ class Server:
 
     def use_ports(self, ports):
         self.ports = ports
-        self.config = write_config(self.dir, self.args.model, self.base_url, ports, self.mocks, self.suite)
+        self.config = write_config(self.dir, self.args.model, self.base_url, ports, self.mocks, self.suite,
+                                   tag_journeys=getattr(self.args, "tag_journeys", False))
         self.data = f"http://127.0.0.1:{ports[0]}"
         self.admin = f"http://127.0.0.1:{ports[1]}"
         self.api = f"{self.admin}/api/v1/workspaces/default"
@@ -1165,6 +1182,7 @@ def run_one_journey(name, steps, srv, sink, args, rep):
     provider error (`Journey.check` labels it `detail.infra`), the checks it skips carry
     the label too. A journey that breaks on an exception is the model's: `call()` never
     raises, so the exception comes from reading an answer, which may be an earlier one."""
+    mark_rep(srv, args, name, rep)
     j = Journey(name, srv, sink, args, rep)
     ended_on_infra = None
     try:
@@ -1343,8 +1361,31 @@ DEFAULT_JOURNEYS = ("stripe", "travel", "github")
 
 
 def run_journeys(srv, sink, args):
+    names = args.journey or DEFAULT_JOURNEYS
+    if getattr(args, "tag_journeys", False):
+        run_units([functools.partial(run_reps, JOURNEYS[name], srv, sink, args) for name in names], args)
+        return
     run_units([functools.partial(JOURNEYS[name], srv, sink, args, rep)
-               for rep in range(args.repeat) for name in args.journey or DEFAULT_JOURNEYS], args)
+               for rep in range(args.repeat) for name in names], args)
+
+
+def run_reps(unit, srv, sink, args):
+    """A journey's reps one after another (--tag-journeys): the proxy tells reps apart by
+    the mark each one posts, so two reps of one journey must never overlap."""
+    for rep in range(args.repeat):
+        unit(srv, sink, args, rep)
+
+
+def mark_rep(srv, args, journey, rep):
+    """Tells the bench proxy that `journey`'s calls from now on are rep `rep`
+    (--tag-journeys only; replay.py keys recorded answers by it)."""
+    if not getattr(args, "tag_journeys", False):
+        return
+    body = json.dumps({"label": run_label(args.model, srv.suite, args), "journey": journey, "rep": rep}).encode()
+    req = urllib.request.Request(f"{args.proxy_base.rstrip('/')}/bench/mark", data=body, method="POST",
+                                 headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        r.read()
 
 
 def run_journey_table(table, srv, sink, args):
@@ -1352,6 +1393,10 @@ def run_journey_table(table, srv, sink, args):
     own session (`<model>-<stamp>-<journey>-<rep>`, unique within the suite's
     server), its own seeded rng and its own record of checks; the step
     functions keep no module state."""
+    if getattr(args, "tag_journeys", False):
+        run_units([functools.partial(run_reps, functools.partial(run_one_journey, name, steps), srv, sink, args)
+                   for name, steps in table.items()], args)
+        return
     run_units([functools.partial(run_one_journey, name, steps, srv, sink, args, rep)
                for rep in range(args.repeat) for name, steps in table.items()], args)
 
@@ -8533,6 +8578,9 @@ def main():
                         "derived (Mockingbird's heuristic description written back as a revision) or agent "
                         "(a coding agent's, authored blind from the contract and cached per contract hash; "
                         "see world_author.py)")
+    p.add_argument("--tag-journeys", action="store_true",
+                   help="for replay.py: each mock's LLM calls carry x-bench-journey, each journey rep is "
+                        "marked at the proxy, a journey's reps run one after another, and fallbacks are seeded")
     world_author.add_author_args(p)
     args = p.parse_args()
     if args.jobs < 1:
