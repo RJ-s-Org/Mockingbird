@@ -52,7 +52,7 @@ The LLM that is best placed to write it already sits next to the user. Mockingbi
 | 2 | Mockingbird's configured LLM (`mockingbird world draft`) | A fallback where no assistant is involved. It is off by default, uses the import profile and budget, and goes through the same validator. |
 | 3 | A person editing the file | Always possible. |
 
-Each entry records its author (`heuristic`, `agent`, `llm` or `user`). A later tier overrides an earlier one entry by entry. Recompiling a changed contract keeps the entries written by an assistant, LLM or person that still validate. The ones that no longer validate are reported in the diagnostics.
+Each entry records its author (`heuristic`, `agent`, `llm` or `user`). A later tier overrides an earlier one entry by entry. A type's `identity` and an operation's `target` and `answer` merge field by field: a tier that sets only `answer.identity_header` keeps the earlier tier's `answer.record`, and one that sets only `identity.alternates` keeps the earlier `identity.member`. Lists (such as `alternates`) replace whole. Recompiling a changed contract keeps the entries written by an assistant, LLM or person that still validate. The ones that no longer validate are reported in the diagnostics.
 
 ## The description
 
@@ -101,7 +101,7 @@ operations:
 Vocabulary:
 
 - **types:**
-  - `identity`: member, optional pattern.
+  - `identity`: member, optional pattern, optional `alternates` (other members a path value may name the record by, e.g. an alias next to the id; `[]` says there are none). The member may be left out only where a lower tier names one; an effective identity with no member is refused (`invalid` at `identity/member`).
   - `parent`.
   - `lifecycle`: status member, states, initial state, soft delete and how it is listed.
   - `unique`: member sets, scope, declared conflict status.
@@ -116,6 +116,7 @@ Vocabulary:
   - `type` and `target`: which path parameter or body member names the record.
   - `request` and `answer`: JSON pointers to the record or records. This covers nested envelopes, one-item arrays, bulk arrays and long-running operations.
     `answer.record: ""` (and `request.record: ""`) says the answer (the request body) is itself the record.
+    `answer.identity_header`: the 2xx response header a create names the new record's id in (e.g. `Location` or a `…-ID` header), or `false` when it names it in none (which turns off a header the heuristics guessed). HTTP only.
   - `transition`: a state set or moved by an action.
   - `changes`: request members applied to the target.
   - `scope`, `filters`, `order`, `paging`: style, the request and response members or headers, page size.

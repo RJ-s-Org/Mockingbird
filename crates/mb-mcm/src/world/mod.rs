@@ -116,12 +116,22 @@ pub struct TypeDesc {
 /// The member that names a record.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct IdentityDesc {
-    /// A dotted path to the member, e.g. `name` or `meta.id`.
-    pub member: String,
+    /// A dotted path to the member, e.g. `name` or `meta.id`. Absent in an
+    /// overlay that sets only `pattern` or `alternates`, which keeps the
+    /// lower tier's member; an effective world never holds an identity
+    /// without one ([`effective`] refuses it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
     /// How the id is embedded in the member's value, holding exactly one
     /// `{id}`, e.g. `folders/{id}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Other members a path value may name a record by, e.g. an alias next to
+    /// the id. Absent keeps the lower tier's; `[]` says there are none, which
+    /// removes a wrongly guessed alias. A set list replaces the lower tier's
+    /// whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternates: Option<Vec<String>>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
@@ -378,9 +388,62 @@ pub struct AnswerDesc {
     /// The answer is a long-running operation wrapping the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub long_running: Option<LongRunning>,
+    /// The response header a create names the new record's id in, or `false`
+    /// for none. Absent keeps the lower tier's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_header: Option<IdentityHeader>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// The response header a create names its id in: a header name, or `false`
+/// in JSON for none (which turns off a header a lower tier guessed). `true`
+/// is not a value of this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityHeader {
+    /// This response header holds the id, e.g. `Resource-ID` or `Location`.
+    Named(String),
+    /// The create names its id in no header.
+    Off,
+}
+
+impl IdentityHeader {
+    /// The header name, `None` for [`IdentityHeader::Off`].
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Named(h) => Some(h),
+            Self::Off => None,
+        }
+    }
+}
+
+impl Serialize for IdentityHeader {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Named(h) => s.serialize_str(h),
+            Self::Off => s.serialize_bool(false),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for IdentityHeader {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Named(String),
+            Flag(bool),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Named(h) => Ok(Self::Named(h)),
+            Raw::Flag(false) => Ok(Self::Off),
+            Raw::Flag(true) => Err(serde::de::Error::custom(
+                "identity_header is a header name or `false`, not `true`",
+            )),
+        }
+    }
 }
 
 /// A long-running operation answer.
@@ -642,7 +705,10 @@ impl fmt::Display for Pointer {
 
 /// Overlays `top` on `base` entry by entry: each type and operation of `top`
 /// is merged into `base`'s field by field, a field set in `top` replacing
-/// `base`'s. Vectors and maps replace whole; unknown keys merge key by key.
+/// `base`'s. A type's `identity` and an operation's `target` and `answer`
+/// merge field by field too, so `answer: {identity_header: ..}` keeps the
+/// lower tier's `answer.record`. Other sub-objects, vectors and maps replace
+/// whole (`identity.alternates` among them); unknown keys merge key by key.
 pub fn overlay(base: &World, top: &World) -> World {
     let mut out = base.clone();
     for (name, t) in &top.types {
@@ -687,8 +753,39 @@ fn merge_extra(field: &mut Extra, top: &Extra) {
     }
 }
 
+/// Merges `top` into `field` by `overlay_fields`, or takes `top` when `field`
+/// has none.
+fn merge_sub<T: Clone>(field: &mut Option<T>, top: &Option<T>, overlay_fields: fn(&mut T, &T)) {
+    match (field.as_mut(), top) {
+        (Some(b), Some(t)) => overlay_fields(b, t),
+        (None, Some(_)) => field.clone_from(top),
+        (_, None) => {}
+    }
+}
+
+fn overlay_identity(b: &mut IdentityDesc, t: &IdentityDesc) {
+    set(&mut b.member, &t.member);
+    set(&mut b.pattern, &t.pattern);
+    set(&mut b.alternates, &t.alternates);
+    merge_extra(&mut b.extra, &t.extra);
+}
+
+fn overlay_target(b: &mut TargetDesc, t: &TargetDesc) {
+    set(&mut b.path_param, &t.path_param);
+    set(&mut b.member, &t.member);
+    merge_extra(&mut b.extra, &t.extra);
+}
+
+fn overlay_answer(b: &mut AnswerDesc, t: &AnswerDesc) {
+    set(&mut b.record, &t.record);
+    set(&mut b.records, &t.records);
+    set(&mut b.long_running, &t.long_running);
+    set(&mut b.identity_header, &t.identity_header);
+    merge_extra(&mut b.extra, &t.extra);
+}
+
 fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
-    set(&mut b.identity, &t.identity);
+    merge_sub(&mut b.identity, &t.identity, overlay_identity);
     set(&mut b.parent, &t.parent);
     set(&mut b.lifecycle, &t.lifecycle);
     set_vec(&mut b.unique, &t.unique);
@@ -701,9 +798,9 @@ fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
 fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     set(&mut b.kind, &t.kind);
     set(&mut b.r#type, &t.r#type);
-    set(&mut b.target, &t.target);
+    merge_sub(&mut b.target, &t.target, overlay_target);
     set(&mut b.request, &t.request);
-    set(&mut b.answer, &t.answer);
+    merge_sub(&mut b.answer, &t.answer, overlay_answer);
     set(&mut b.transition, &t.transition);
     set_map(&mut b.changes, &t.changes);
     set(&mut b.scope, &t.scope);
@@ -805,7 +902,10 @@ mod tests {
         let out = overlay(&base, &top);
 
         let folder = &out.types["folder"];
-        assert_eq!(folder.identity.as_ref().unwrap().member, "name");
+        assert_eq!(
+            folder.identity.as_ref().unwrap().member.as_deref(),
+            Some("name")
+        );
         assert_eq!(folder.lifecycle, base.types["folder"].lifecycle);
         // Vectors replace whole.
         assert_eq!(folder.unique.len(), 1);
@@ -818,6 +918,89 @@ mod tests {
         assert_eq!(get.r#type.as_deref(), Some("folder"));
         assert_eq!(get.not_found, Some(404));
         assert_eq!(out.operations["ListFolders"].kind, Some(OpKind::List));
+    }
+
+    #[test]
+    fn overlay_keeps_base_answer_members_the_top_leaves_out() {
+        let base: World = serde_json::from_value(
+            json!({"operations": {"createZone": {"answer": {"record": "/data"}}}}),
+        )
+        .unwrap();
+        let top: World = serde_json::from_value(
+            json!({"operations": {"createZone": {"answer": {"identity_header": "Resource-ID"}}}}),
+        )
+        .unwrap();
+        let out = overlay(&base, &top);
+        assert_eq!(
+            serde_json::to_value(&out.operations["createZone"].answer).unwrap(),
+            json!({"record": "/data", "identity_header": "Resource-ID"})
+        );
+    }
+
+    #[test]
+    fn overlay_identity_header_false_replaces_the_base_header() {
+        let base: World = serde_json::from_value(
+            json!({"operations": {"c": {"answer": {"identity_header": "Resource-ID"}}}}),
+        )
+        .unwrap();
+        let off: World = serde_json::from_value(
+            json!({"operations": {"c": {"answer": {"identity_header": false}}}}),
+        )
+        .unwrap();
+        let header = |w: &World| {
+            w.operations["c"]
+                .answer
+                .as_ref()
+                .and_then(|a| a.identity_header.clone())
+        };
+        assert_eq!(header(&overlay(&base, &off)), Some(IdentityHeader::Off));
+        let silent: World =
+            serde_json::from_value(json!({"operations": {"c": {"answer": {"record": "/x"}}}}))
+                .unwrap();
+        assert_eq!(
+            header(&overlay(&base, &silent)),
+            Some(IdentityHeader::Named("Resource-ID".into()))
+        );
+    }
+
+    #[test]
+    fn overlay_keeps_base_identity_member_when_only_alternates_are_set() {
+        // A revision that sets only alternates deserializes as a World.
+        let top: World = serde_json::from_value(
+            json!({"types": {"template": {"identity": {"alternates": ["Alias"]}}}}),
+        )
+        .unwrap();
+        let base: World = serde_json::from_value(
+            json!({"types": {"template": {"identity": {"member": "TemplateId", "pattern": "t/{id}"}}}}),
+        )
+        .unwrap();
+        let out = overlay(&base, &top);
+        assert_eq!(
+            serde_json::to_value(&out.types["template"].identity).unwrap(),
+            json!({"member": "TemplateId", "pattern": "t/{id}", "alternates": ["Alias"]})
+        );
+        // A set list replaces the lower tier's whole; `[]` is kept as set.
+        let none: World = serde_json::from_value(
+            json!({"types": {"template": {"identity": {"alternates": []}}}}),
+        )
+        .unwrap();
+        let out = overlay(&out, &none);
+        let id = out.types["template"].identity.as_ref().unwrap();
+        assert_eq!(id.alternates, Some(vec![]));
+        assert_eq!(id.member.as_deref(), Some("TemplateId"));
+    }
+
+    #[test]
+    fn overlay_keeps_base_target_members_the_top_leaves_out() {
+        let base: World =
+            serde_json::from_value(json!({"operations": {"o": {"target": {"path_param": "id"}}}}))
+                .unwrap();
+        let top: World =
+            serde_json::from_value(json!({"operations": {"o": {"target": {"member": "id"}}}}))
+                .unwrap();
+        let target = overlay(&base, &top).operations["o"].target.clone().unwrap();
+        assert_eq!(target.path_param.as_deref(), Some("id"));
+        assert_eq!(target.member.as_deref(), Some("id"));
     }
 
     #[test]

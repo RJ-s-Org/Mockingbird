@@ -2172,6 +2172,9 @@ pub(crate) struct ResourceHint {
     resource_type: Option<String>,
     identity: Option<String>,
     action: Option<bool>,
+    /// The operation's `tags`, which name the type of a path with no static segment
+    /// that no schema name does ([`type_parameter_paths`]).
+    tags: Vec<String>,
 }
 
 /// Whether `name` can be a resource type: letters, digits, `_`, `-` and `.`,
@@ -2186,7 +2189,17 @@ fn is_type_name(name: &str) -> bool {
 /// Reads operation `op`'s [`RESOURCE_EXT`], with a warning for each value
 /// that is not valid, which then does not count.
 pub(crate) fn resource_hint(op: &Value, op_id: &str, ctx: &mut Ctx) -> ResourceHint {
-    let mut hint = ResourceHint::default();
+    let mut hint = ResourceHint {
+        tags: op
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        ..ResourceHint::default()
+    };
     let Some(ext) = op.get(RESOURCE_EXT) else {
         return hint;
     };
@@ -2282,7 +2295,18 @@ pub(crate) fn apply_action_routes(
     defs: &Map<String, Value>,
     ctx: &mut Ctx,
 ) {
+    let creates = type_parameter_paths(operations, hints, defs);
     let keys = record_keys(operations, defs);
+    for index in creates {
+        let op = &operations[index];
+        let item_route = http_path(op).map_or(0, |(_, path)| segments(path).len() + 1);
+        let read = gets(operations, |route| {
+            route.len() == item_route && route.iter().all(|s| is_param(s))
+        })
+        .find(|read| read.resource_type == op.resource_type && !is_stream(read));
+        let identity = record_identity(op, read, defs, keys.of(op.resource_type.as_deref()));
+        operations[index].identity = identity;
+    }
     apply_keys(operations, defs, &keys);
     apply_envelopes(operations, defs, &keys);
     apply_item_envelopes(operations, defs);
@@ -2365,18 +2389,22 @@ pub(crate) fn apply_action_routes(
     drop_untyped_identities(operations, hints, ctx);
 }
 
-/// Takes the identity off what has no resource type. A path with no static segment
-/// (`/{db}`, `/{db}/{docid}`) names no type, and its parameters name what holds the
-/// record (`POST /{db}` adds to the collection `{db}`), not the record: an identity
-/// is only ever the key of a record of some type. A declared identity on such an
-/// operation is ignored with a warning; declaring its type keeps it.
+/// Takes the identity off every operation that, once every other rule has run, has
+/// no resource type, declared or inferred: an identity is only ever the key of a
+/// record of some type. That is the last resort for a path with no static segment
+/// whose routes share no schema name or tag ([`type_parameter_paths`]); there a
+/// parameter may name what holds the record (`POST /{db}` adds to the collection
+/// `{db}`), not the record. A declared identity that was applied is dropped with a
+/// warning; declaring its type keeps it.
 fn drop_untyped_identities(operations: &mut [Operation], hints: &[ResourceHint], ctx: &mut Ctx) {
     for (op, hint) in operations.iter_mut().zip(hints) {
-        if op.resource_type.is_some() || op.identity.is_none() {
+        if op.resource_type.is_some() {
             continue;
         }
-        op.identity = None;
-        if hint.identity.is_some() {
+        let Some(identity) = op.identity.take() else {
+            continue;
+        };
+        if hint.identity.as_ref() == Some(&identity.field) {
             let id = op.id.clone();
             ctx.warn(
                 INVALID_RESOURCE_EXT,
@@ -2387,6 +2415,128 @@ fn drop_untyped_identities(operations: &mut [Operation], hints: &[ResourceHint],
             );
         }
     }
+}
+
+/// Whether every segment of `path` is a parameter (`/{db}`, `/{bucket}/{key}`): a
+/// path that names no resource type ([`infer_resource_type`]).
+fn no_static_segment(path: &str) -> bool {
+    let segs = segments(path);
+    !segs.is_empty() && segs.iter().all(|s| is_param(s))
+}
+
+/// The schemas `op` names by `$ref` for what it sends and what it answers on a
+/// success: a body, or the items of an array body, that is one named schema. Each
+/// comes with whether it shows the record itself: a request body, or a `GET`'s
+/// answer, does; what a write answers may be an acknowledgement of it
+/// (`DocumentResult {id, ok, rev}` beside `Document`), which does not.
+fn schema_names<'a>(op: &'a Operation, defs: &Map<String, Value>) -> HashMap<&'a str, bool> {
+    let reads = http_path(op).is_some_and(|(method, _)| method == HttpMethod::Get);
+    let successes = op
+        .outputs
+        .iter()
+        .filter(|o| matches!(o.status, StatusSelector::Code(200..=299)))
+        .filter_map(|o| o.schema.as_ref())
+        .map(|schema| (schema, reads));
+    let mut names: HashMap<&'a str, bool> = HashMap::new();
+    for (schema, record) in op.input.body.iter().map(|b| (b, true)).chain(successes) {
+        let named = |s: &'a Value| s.get("$ref").and_then(Value::as_str).and_then(defs_name);
+        let Some(name) = named(schema)
+            .or_else(|| schema.get("items").and_then(named))
+            .filter(|name| defs.contains_key(*name))
+        else {
+            continue;
+        };
+        *names.entry(name).or_default() |= record;
+    }
+    names
+}
+
+/// Gives the routes on paths with no static segment the type the contract names for
+/// them, where their path names none. A route is of the record its path addresses,
+/// except that a `POST` to a path one parameter short of another such route's
+/// (`POST /{db}` beside `/{db}/{docid}`) adds to that route's collection: it is a
+/// create of that record. The routes of one record are of the schema that shows the
+/// record (a request body, or a `GET`'s answer) more often than any other
+/// (`Document`), else of the one tag they all carry and no other. What a write
+/// answers counts only between schemas that show the record as often as each other,
+/// so a named acknowledgement (`DocumentResult`) never outvotes the record. A create found this way is returned, to be keyed once the
+/// contract's keys are known; none is keyed by the parameter it is posted under,
+/// which names its collection. Routes with no such schema or tag keep no type.
+fn type_parameter_paths(
+    operations: &mut [Operation],
+    hints: &[ResourceHint],
+    defs: &Map<String, Value>,
+) -> Vec<usize> {
+    let param_routes: HashSet<usize> = operations
+        .iter()
+        .filter(|op| !is_stream(op))
+        .filter_map(http_path)
+        .filter(|(_, path)| no_static_segment(path))
+        .map(|(_, path)| segments(path).len())
+        .collect();
+    // Each such operation's record route, by its length (two routes of parameters
+    // only are one route when they are as long), and whether it adds to it.
+    let mut groups: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+    for (index, op) in operations.iter().enumerate() {
+        let Some((method, path)) = http_path(op).filter(|_| !is_stream(op)) else {
+            continue;
+        };
+        if op.resource_type.is_some() || !no_static_segment(path) {
+            continue;
+        }
+        let len = segments(path).len();
+        let creates = method == HttpMethod::Post && param_routes.contains(&(len + 1));
+        let route = if creates { len + 1 } else { len };
+        groups.entry(route).or_default().push((index, creates));
+    }
+    let mut creates = Vec::new();
+    for members in groups.into_values() {
+        // How often each schema shows the record, then how often it is used at all.
+        let mut uses: HashMap<&str, (usize, usize)> = HashMap::new();
+        for (index, _) in &members {
+            for (name, record) in schema_names(&operations[*index], defs) {
+                let count = uses.entry(name).or_default();
+                count.0 += usize::from(record);
+                count.1 += 1;
+            }
+        }
+        let most = uses.values().copied().max().unwrap_or((0, 0));
+        let mut named = uses
+            .iter()
+            .filter(|(_, n)| **n == most)
+            .map(|(name, _)| *name);
+        let by_schema = match (named.next(), named.next()) {
+            (Some(name), None) => Some(name.to_owned()),
+            _ => None,
+        };
+        let by_tag = || {
+            let mut shared = members.iter().map(|(index, _)| &hints[*index].tags);
+            let first = shared.next()?;
+            let rest: Vec<&Vec<String>> = shared.collect();
+            let common: HashSet<&String> = first
+                .iter()
+                .filter(|tag| rest.iter().all(|t| t.contains(tag)))
+                .collect();
+            let mut common = common.into_iter();
+            match (common.next(), common.next()) {
+                (Some(tag), None) => Some(tag.clone()),
+                _ => None,
+            }
+        };
+        let Some(resource_type) = by_schema.or_else(by_tag).filter(|t| is_type_name(t)) else {
+            continue;
+        };
+        for (index, adds) in members {
+            let op = &mut operations[index];
+            op.resource_type = Some(resource_type.clone());
+            if adds {
+                op.kind = OperationKind::Command(Effect::Create);
+                op.identity = None;
+                creates.push(index);
+            }
+        }
+    }
+    creates
 }
 
 /// Keys what no other rule gave an identity by a member of one of its object members:

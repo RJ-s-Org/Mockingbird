@@ -48,7 +48,7 @@ Gaps:
 
 ## Writing it
 
-A write sends an **overlay**: only the entries you want to set. The effective description is computed on every read as tier 0 overlaid with the newest revision.
+A write sends an **overlay**: only the entries you want to set. The effective description is computed on every read as tier 0 overlaid with the newest revision, entry by entry; a type's `identity` and an operation's `target` and `answer` merge field by field, so setting `answer.identity_header` keeps tier 0's `answer.record`.
 
 | MCP tool | CLI | What it does |
 | --- | --- | --- |
@@ -97,7 +97,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 
 | Key | Shape | Meaning |
 | --- | --- | --- |
-| `identity` | `{member, pattern?}` | The member holding the id; `pattern` (one `{id}`) when the id is embedded in a name. |
+| `identity` | `{member, pattern?, alternates?}` | The member holding the id; `pattern` (one `{id}`) when the id is embedded in a name; `alternates`, other members a path value may name the record by (an alias next to the id), `[]` for none. `member` may be left out of an overlay that sets only `pattern` or `alternates` on a type that already has one; elsewhere that identity is refused. |
 | `parent` | `{type, member?, path_param?, pattern?}` | The parent record and where it is named. |
 | `lifecycle` | `{member, states?, initial?, soft_delete?}` | The status member and its states; `soft_delete: {state, listed_with?: {param, value}}` for a delete that only moves the record to a state, and the list parameter that still shows it. |
 | `unique` | `[{members, scope?, conflict?}]` | Member sets that must be unique, optionally within a member's scope, with the declared conflict status. |
@@ -111,7 +111,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `kind` | `create`, `read`, `list`, `update`, `replace`, `delete`, `action` | What the operation does. |
 | `type` | string | Its resource type. |
 | `target` | `{path_param}` or `{member}` | What names the record it acts on. |
-| `request`, `answer` | `{record}` or `{records}` (JSON pointers) | Where the body holds the record or records: nested envelopes, one-item arrays, bulk arrays. `answer.record: ""` (and `request.record: ""`) says the answer (the request body) is itself the record. `answer.long_running: {done, result}` for long-running operations. |
+| `request`, `answer` | `{record}` or `{records}` (JSON pointers) | Where the body holds the record or records: nested envelopes, one-item arrays, bulk arrays. `answer.record: ""` (and `request.record: ""`) says the answer (the request body) is itself the record. `answer.long_running: {done, result}` for long-running operations. `answer.identity_header`: the 2xx response header a create names its id in (a declared header name, HTTP only), or `false` for none. |
 | `transition` | `{<member>: <value>}` | Members an action sets; the type needs a `lifecycle`. |
 | `changes` | `{<member>: {from_request: <pointer>} \| {value}}` | Members of the target the operation changes. |
 | `scope` | `{param, member}` | The parameter that limits a list to one scope. |

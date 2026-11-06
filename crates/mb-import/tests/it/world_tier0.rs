@@ -104,14 +104,11 @@ fn tier0_matches_bundle_identity() {
                 .filter_map(|o| o.identity.as_ref().map(|i| i.field.as_str()))
                 .collect();
             if let Some(member) = world.types.get(t).and_then(|d| d.identity.as_ref()) {
-                assert!(
-                    fields.contains(&member.member.as_str()),
-                    "{at}: {}",
-                    member.member
-                );
+                let member = member.member.as_deref().unwrap_or_default();
+                assert!(fields.contains(&member), "{at}: {member}");
                 let agrees = b.operations.iter().all(|o| {
                     o.resource_type.as_deref() != Some(t)
-                        || o.identity.as_ref().is_none_or(|i| i.field == member.member)
+                        || o.identity.as_ref().is_none_or(|i| i.field == member)
                 });
                 if agrees {
                     agreeing += 1;
@@ -241,6 +238,6 @@ components:
     });
     let world = tier0(&b);
     let identity = world.types.get(&t).and_then(|d| d.identity.as_ref());
-    assert_eq!(identity.map(|i| i.member.as_str()), Some("odata.id"));
+    assert_eq!(identity.and_then(|i| i.member.as_deref()), Some("odata.id"));
     assert!(validate(&world, &b).refused.is_empty());
 }

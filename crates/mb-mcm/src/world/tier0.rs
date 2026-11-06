@@ -61,7 +61,7 @@ pub fn tier0(bundle: &Bundle) -> World {
             t,
             TypeDesc {
                 identity: Some(IdentityDesc {
-                    member,
+                    member: Some(member),
                     ..IdentityDesc::default()
                 }),
                 ..TypeDesc::default()
@@ -108,7 +108,7 @@ fn identities(bundle: &Bundle, ops: &World) -> BTreeMap<String, String> {
                 .collect();
             let identity = TypeDesc {
                 identity: Some(IdentityDesc {
-                    member: (*field).to_owned(),
+                    member: Some((*field).to_owned()),
                     ..IdentityDesc::default()
                 }),
                 ..TypeDesc::default()

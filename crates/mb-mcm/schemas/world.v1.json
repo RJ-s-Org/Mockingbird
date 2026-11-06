@@ -100,11 +100,14 @@
         },
         "pattern": {
           "$ref": "#/$defs/pattern"
+        },
+        "alternates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/member"
+          }
         }
-      },
-      "required": [
-        "member"
-      ]
+      }
     },
     "parent": {
       "type": "object",
@@ -334,6 +337,17 @@
               "required": [
                 "done",
                 "result"
+              ]
+            },
+            "identity_header": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "const": false
+                }
               ]
             }
           }

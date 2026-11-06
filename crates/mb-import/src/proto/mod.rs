@@ -221,19 +221,21 @@ fn kind(method: &MethodDescriptor) -> OperationKind {
     }
 }
 
+/// The identity of what `method` answers: its `id`, when the method names a
+/// resource type. An identity is the key of a record of some type, so a method
+/// whose name names none (`Get`) has none.
 fn identity(method: &MethodDescriptor, resource_type: Option<&str>) -> Option<Identity> {
+    let resource_type = resource_type?;
     method.output().fields().find(|f| f.json_name() == "id")?;
     let input = method.input();
-    let resource_id = resource_type.map(|r| format!("{r}Id"));
+    let resource_id = format!("{resource_type}Id");
     let input_field = input
         .fields()
         .find(|f| f.json_name() == "id")
         .or_else(|| {
-            input.fields().find(|f| {
-                resource_id
-                    .as_deref()
-                    .is_some_and(|r| f.json_name().eq_ignore_ascii_case(r))
-            })
+            input
+                .fields()
+                .find(|f| f.json_name().eq_ignore_ascii_case(&resource_id))
         })
         .map(|f| f.json_name().to_owned());
     Some(Identity {

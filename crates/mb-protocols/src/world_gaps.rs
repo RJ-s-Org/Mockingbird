@@ -157,7 +157,7 @@ pub fn gaps(bundle: &Bundle, world: &World, refused: &[Refusal]) -> Vec<Gap> {
                 .types
                 .get(&t)
                 .and_then(|d| d.identity.as_ref())
-                .map(|i| i.member.as_str());
+                .and_then(|i| i.member.as_deref());
             if let (Some(member), Some(answer)) = (member, success_schema(op))
                 && is_object(bundle, answer)
                 && !fits(bundle, answer, &t, member)
