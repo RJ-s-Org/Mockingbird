@@ -421,12 +421,16 @@ async fn serve_call(
     report.latency = started.elapsed();
     if rt.recorder.is_some() {
         let effects = report.request["effects"].take();
+        let world_gap = report.request["world_gap"].take();
         report.request = json!({
             "headers": recorded_headers(rt, &headers),
             "body": decoded.unwrap_or_else(|| Value::String(UNDECODABLE.into())),
         });
         if !effects.is_null() {
             report.request["effects"] = effects;
+        }
+        if !world_gap.is_null() {
+            report.request["world_gap"] = world_gap;
         }
         report.response = Some(answer.record);
     }
@@ -531,8 +535,10 @@ async fn answer(
                 report.session = s;
             }
             if let PlanError::RateLimited(r) = &error
-                && let Some(generated) = call::declared_rate_limited(rt, op)
+                && let Some(mut generated) = call::declared_rate_limited(rt, op)
             {
+                call::seed_world_gaps(rt, op, &mut generated);
+                call::record_effects(&mut report.request, &generated);
                 return rate_limited_fault(rt, op, version, r, generated);
             }
             return plan_fault(version, error, &rt.name);
@@ -624,6 +630,7 @@ async fn forced_fault(
         Ok(g) => g,
         Err(e) => return engine_fault(version, op, e),
     };
+    call::record_effects(&mut report.request, &generated);
     report.usage = generated.usage;
     let body = generated.body.unwrap_or(Value::Null);
     let detail = match json_to_xml(&body, &rt.bundle.with_reachable_defs(schema)) {

@@ -35,10 +35,14 @@ mod collections;
 mod creates;
 mod cursors;
 mod deleted;
+mod derived;
+mod described;
 mod effects;
 mod entities;
 mod envelopes;
 mod header_ids;
+mod lifecycle;
+mod list_query;
 mod lists;
 mod lookup;
 mod minted;
@@ -47,15 +51,19 @@ mod owner_tie_tests;
 mod owners;
 mod pages;
 mod ranges;
+mod records;
 mod relations;
 mod repeats;
+mod replays;
 mod reporting;
 mod runs;
 mod session_memory;
 mod state_access;
+mod state_lists;
 #[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
 mod streams;
 mod tokens;
+mod transitions;
 mod value_index;
 mod world;
 mod write_memory;
@@ -66,6 +74,7 @@ pub(crate) use bundle_index::*;
 pub(crate) use canonical::*;
 pub(crate) use collections::*;
 use creates::*;
+pub(crate) use described::Described;
 pub(crate) use effects::*;
 use entities::*;
 use lookup::*;
@@ -169,6 +178,18 @@ fn reference_prefix(field: &str) -> Option<&str> {
         .filter(|p| !p.is_empty())
 }
 
+/// Adds the static gaps of `op` (what the world description leaves open about it, see
+/// [`Described::gaps`]) to `generated.world_gaps`, for the request log. Extends and
+/// deduplicates, so a mark pushed earlier stays and seeding twice adds nothing.
+pub(crate) fn seed_world_gaps(rt: &MockRuntime, op: &Operation, generated: &mut GeneratedResponse) {
+    for code in rt.described().gaps(&op.id) {
+        let name = code.as_str();
+        if !generated.world_gaps.iter().any(|g| g == name) {
+            generated.world_gaps.push(name.to_owned());
+        }
+    }
+}
+
 /// Reads the target and related resources, generates one response, writes
 /// state for a 2xx and keeps the session alive.
 #[cfg(any(feature = "http-rest", feature = "grpc", feature = "soap"))]
@@ -237,7 +258,10 @@ pub(crate) async fn generate_narrowed(
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
     match prepare(rt, plan, call, response_schema).await {
-        Prepared::Answered(answer) => Ok(*answer),
+        Prepared::Answered(mut answer) => {
+            seed_world_gaps(rt, plan.op, &mut answer);
+            Ok(*answer)
+        }
         Prepared::Pending(pending) => {
             generate_pending(rt, plan, call, *pending, response_schema).await
         }
@@ -619,6 +643,7 @@ pub(crate) async fn prepare<'a>(
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         };
         // The answer's items were seeded when it was generated; writes and
         // resets that could remove them also clear the cache.
@@ -811,6 +836,7 @@ pub(crate) async fn complete(
     pending: Pending<'_>,
     mut generated: GeneratedResponse,
 ) -> GeneratedResponse {
+    seed_world_gaps(rt, plan.op, &mut generated);
     let Pending {
         mut state,
         mut target_id,

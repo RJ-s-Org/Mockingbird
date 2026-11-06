@@ -1043,6 +1043,7 @@ impl Engine {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         })
     }
 }

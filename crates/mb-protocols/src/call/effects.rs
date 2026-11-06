@@ -77,8 +77,11 @@ pub(super) async fn apply_effects(
 }
 
 /// Adds what became of `generated`'s effects to a request record's `request`
-/// (nothing when it listed none), under `effects`.
+/// (nothing when it listed none), under `effects`, and what the world description
+/// leaves open about its operation ([`GeneratedResponse::world_gaps`]), under
+/// `world_gap`, each name once.
 pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse) {
+    record_world_gaps(request, &generated.world_gaps);
     if generated.effect_outcomes.is_empty() {
         return;
     }
@@ -102,6 +105,33 @@ pub(crate) fn record_effects(request: &mut Value, generated: &GeneratedResponse)
             Some(Value::Array(list)) => list.extend(recorded),
             _ => {
                 request.insert("effects".to_string(), Value::Array(recorded.collect()));
+            }
+        }
+    }
+}
+
+/// Adds `gaps` to a request record's `request` under `world_gap`, each name once.
+fn record_world_gaps(request: &mut Value, gaps: &[String]) {
+    if gaps.is_empty() {
+        return;
+    }
+    tracing::info!(world_gap = ?gaps, "the world description leaves this operation open");
+    if request.is_null() {
+        *request = serde_json::json!({});
+    }
+    let Value::Object(request) = request else {
+        return;
+    };
+    let list = request
+        .entry("world_gap")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !list.is_array() {
+        *list = Value::Array(Vec::new());
+    }
+    if let Value::Array(list) = list {
+        for gap in gaps {
+            if !list.iter().any(|g| g.as_str() == Some(gap)) {
+                list.push(Value::from(gap.as_str()));
             }
         }
     }

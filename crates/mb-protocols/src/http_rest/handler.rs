@@ -118,6 +118,9 @@ struct CallLog {
     /// What became of the answer's effects, as the record's `request` keeps
     /// them; `null` when it listed none.
     effects: Value,
+    /// What the world description leaves open about the answer's operation, as the
+    /// record's `request` keeps it (`world_gap`); `null` when nothing.
+    world_gap: Value,
     /// The response is an event stream, which reports the call itself when
     /// its body is dropped and sleeps any latency before its first event.
     streaming: bool,
@@ -140,6 +143,7 @@ impl CallLog {
             declared_body_type: None,
             validation: Vec::new(),
             effects: Value::Null,
+            world_gap: Value::Null,
             streaming: false,
         }
     }
@@ -154,6 +158,20 @@ impl CallLog {
         resp
     }
 
+    /// An answer of operation `op`, remembered for the request record with what the
+    /// world description leaves open about `op` (see [`call::seed_world_gaps`]). Every
+    /// answer of an operation goes through here, whether or not it reached the
+    /// pipeline that seeds it too.
+    fn answered(
+        &mut self,
+        rt: &MockRuntime,
+        op: &Operation,
+        mut generated: GeneratedResponse,
+    ) -> Response {
+        call::seed_world_gaps(rt, op, &mut generated);
+        self.generated(generated)
+    }
+
     /// A generated response, remembered for the request record.
     fn generated(&mut self, generated: GeneratedResponse) -> Response {
         self.source = Some(generated.source);
@@ -164,6 +182,7 @@ impl CallLog {
             let mut recorded = Value::Null;
             call::record_effects(&mut recorded, &generated);
             self.effects = recorded["effects"].take();
+            self.world_gap = recorded["world_gap"].take();
             self.response = generated.body;
         }
         resp
@@ -435,7 +454,7 @@ async fn serve(
                 PlanError::Rejected(r) => log.rejected(r),
                 PlanError::RateLimited(r) => match call::declared_rate_limited(rt, op) {
                     Some(generated) => {
-                        let mut resp = log.generated(as_xml(rt, op, generated));
+                        let mut resp = log.answered(rt, op, as_xml(rt, op, generated));
                         set_retry_after(&mut resp, r.retry_after);
                         add_headers(&mut resp, rt, op, None);
                         resp
@@ -496,7 +515,7 @@ async fn serve(
             .and_then(|s| s.canonical_reason())
             .unwrap_or("Error");
         let message = format!("{reason} ({})", crate::chaos::CHAOS_ERROR_DETAIL);
-        let mut resp = log.generated(filled_error(rt, op, variant, status, &message));
+        let mut resp = log.answered(rt, op, filled_error(rt, op, variant, status, &message));
         mark_chaos(&mut resp);
         return resp;
     }
@@ -547,8 +566,8 @@ async fn serve(
     let entity_tag = call::entity_tag(rt, &plan, &call, &generated).await;
     let next_range = call::next_range(rt, &plan, &call, &generated);
     let settled = generated.headers.clone();
-    let mut resp =
-        tracing::info_span!("mb.encode").in_scope(|| log.generated(as_xml(rt, op, generated)));
+    let mut resp = tracing::info_span!("mb.encode")
+        .in_scope(|| log.answered(rt, op, as_xml(rt, op, generated)));
     // Headers the call settled (a created record's id) stand over the declared ones'
     // faker values; a scenario's still replace them.
     for (name, value) in settled {
@@ -681,6 +700,9 @@ async fn report(
         }
         if !log.effects.is_null() {
             request["effects"] = log.effects;
+        }
+        if !log.world_gap.is_null() {
+            request["world_gap"] = log.world_gap;
         }
         request
     } else {
@@ -1022,7 +1044,7 @@ async fn invalid_input(
             });
             let mut rejected = with_facts(rt, op, base, &reasons, &errors, violations);
             rejected.source = Source::Rejected;
-            log.generated(rejected)
+            log.answered(rt, op, rejected)
         }
         None => log.problem(400, "Invalid request", reasons.clone()),
     };
@@ -1379,6 +1401,7 @@ mod tests {
             new_record: false,
             patched: None,
             headers: Vec::new(),
+            world_gaps: Vec::new(),
         }
     }
 

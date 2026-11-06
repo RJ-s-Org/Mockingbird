@@ -5,7 +5,8 @@ use std::future::Future;
     feature = "grpc",
     feature = "graphql",
     feature = "soap",
-    feature = "sse"
+    feature = "sse",
+    feature = "http-rest"
 ))]
 use std::sync::Mutex;
 use std::time::Duration;
@@ -14,7 +15,8 @@ use std::time::Duration;
     feature = "grpc",
     feature = "graphql",
     feature = "soap",
-    feature = "sse"
+    feature = "sse",
+    feature = "http-rest"
 ))]
 use mb_protocols::{RequestRecord, RequestRecorder};
 
@@ -45,7 +47,8 @@ where
     feature = "grpc",
     feature = "graphql",
     feature = "soap",
-    feature = "sse"
+    feature = "sse",
+    feature = "http-rest"
 ))]
 /// A [`RequestRecorder`] that keeps every record in memory.
 #[derive(Default)]
@@ -55,7 +58,8 @@ pub struct Records(pub Mutex<Vec<RequestRecord>>);
     feature = "grpc",
     feature = "graphql",
     feature = "soap",
-    feature = "sse"
+    feature = "sse",
+    feature = "http-rest"
 ))]
 impl RequestRecorder for Records {
     fn record(&self, r: RequestRecord) {
@@ -127,4 +131,257 @@ pub async fn stable_count(poll: Duration, count: impl Fn() -> usize) -> usize {
         }
     })
     .await
+}
+
+/// A runtime built from a contract and a world description document the way a served
+/// mock builds it, with a scripted LLM, a request recorder and its REST router.
+#[cfg(feature = "http-rest")]
+pub struct DescribedHarness {
+    pub rt: std::sync::Arc<mb_protocols::MockRuntime>,
+    pub provider: std::sync::Arc<mb_llm::ScriptedProvider>,
+    pub recorded: std::sync::Arc<Records>,
+    router: axum::Router,
+}
+
+/// How a [`DescribedHarness`] is built.
+#[cfg(feature = "http-rest")]
+#[derive(Default)]
+pub struct HarnessOptions {
+    /// Wrap the state store in a response cache, as a served mock does.
+    pub cached: bool,
+    /// Answer a read of an id the session does not hold with its `404`.
+    pub unknown_ids_not_found: bool,
+}
+
+/// [`described`]'s runtime, with `configure` applied to the bare runtime before it is
+/// served: the one constructor every other builds on.
+#[cfg(feature = "http-rest")]
+pub fn harness(
+    contract: &str,
+    script: Vec<serde_json::Value>,
+    options: &HarnessOptions,
+    configure: impl FnOnce(mb_protocols::MockRuntime) -> mb_protocols::MockRuntime,
+) -> DescribedHarness {
+    let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+    harness_of(bundle, script, options, configure)
+}
+
+/// [`harness`] over a compiled contract.
+#[cfg(feature = "http-rest")]
+pub fn harness_of(
+    bundle: mb_mcm::Bundle,
+    script: Vec<serde_json::Value>,
+    options: &HarnessOptions,
+    configure: impl FnOnce(mb_protocols::MockRuntime) -> mb_protocols::MockRuntime,
+) -> DescribedHarness {
+    use std::sync::Arc;
+
+    use mb_engine::{Engine, EngineConfig};
+    use mb_llm::{Provider, ScriptedProvider};
+    use mb_state::{CachingStateStore, MemoryStore, StateStore};
+
+    let provider = Arc::new(ScriptedProvider::new(
+        script.into_iter().map(|v| Ok(v.to_string())).collect(),
+    ));
+    let mut store: Arc<dyn StateStore> = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    if options.cached {
+        store = CachingStateStore::wrap(
+            store,
+            Duration::from_secs(3600),
+            mb_state::DEFAULT_CACHE_ENTRIES,
+        );
+    }
+    let mut rt = mb_protocols::MockRuntime::new(
+        "described",
+        Arc::new(bundle),
+        Arc::new(Engine::new(
+            Some(Arc::clone(&provider) as Arc<dyn Provider>),
+            EngineConfig::default(),
+        )),
+        store,
+    );
+    if options.unknown_ids_not_found {
+        rt.unknown_ids = mb_protocols::UnknownIds::NotFound;
+    }
+    let recorded = Arc::new(Records::default());
+    rt.recorder = Some(Arc::clone(&recorded) as Arc<dyn RequestRecorder>);
+    let rt = Arc::new(configure(rt));
+    DescribedHarness {
+        router: mb_protocols::http_rest::router(Arc::clone(&rt)),
+        rt,
+        provider,
+        recorded,
+    }
+}
+
+/// The effective world of `world`, a revision document, over `bundle`'s tier 0, as the
+/// runtime computes it: `(base, effective, refusals)`.
+#[cfg(feature = "http-rest")]
+pub fn effective_world(
+    bundle: &mb_mcm::Bundle,
+    world: serde_json::Value,
+) -> (
+    mb_mcm::world::World,
+    mb_mcm::world::World,
+    Vec<mb_mcm::world::Refusal>,
+) {
+    let doc: mb_mcm::world::World = serde_json::from_value(world).unwrap();
+    let base = mb_mcm::world::tier0(bundle);
+    let (effective, refused) = mb_mcm::world::effective(bundle, &base, &doc);
+    (base, effective, refused)
+}
+
+/// A runtime of `contract` serving `world` (a revision document, as an author writes
+/// it) at revision 1, through its effective world over tier 0. Panics when the
+/// effective world refuses any entry, so a test whose world has a typo fails instead
+/// of testing tier 0; [`described_allowing_refusals`] does not.
+#[cfg(feature = "http-rest")]
+pub fn described(
+    contract: &str,
+    world: serde_json::Value,
+    script: Vec<serde_json::Value>,
+) -> DescribedHarness {
+    described_with(contract, world, script, &HarnessOptions::default(), false)
+}
+
+/// [`described`], without the refusal check.
+#[cfg(feature = "http-rest")]
+pub fn described_allowing_refusals(
+    contract: &str,
+    world: serde_json::Value,
+    script: Vec<serde_json::Value>,
+) -> DescribedHarness {
+    described_with(contract, world, script, &HarnessOptions::default(), true)
+}
+
+/// [`described`], then each operation in `gaps` given those static gaps.
+#[cfg(feature = "http-rest")]
+pub fn described_with_gaps(
+    contract: &str,
+    world: serde_json::Value,
+    script: Vec<serde_json::Value>,
+    gaps: std::collections::HashMap<String, Vec<mb_protocols::world_gaps::GapCode>>,
+) -> DescribedHarness {
+    described_with_gaps_and(contract, world, script, gaps, &HarnessOptions::default())
+}
+
+/// [`described_with_gaps`], built with `options`.
+#[cfg(feature = "http-rest")]
+pub fn described_with_gaps_and(
+    contract: &str,
+    world: serde_json::Value,
+    script: Vec<serde_json::Value>,
+    gaps: std::collections::HashMap<String, Vec<mb_protocols::world_gaps::GapCode>>,
+    options: &HarnessOptions,
+) -> DescribedHarness {
+    harness(contract, script, options, |rt| {
+        with_effective(rt, world, false).with_test_gaps(gaps)
+    })
+}
+
+/// [`described`], built with `options`.
+#[cfg(feature = "http-rest")]
+pub fn described_with(
+    contract: &str,
+    world: serde_json::Value,
+    script: Vec<serde_json::Value>,
+    options: &HarnessOptions,
+    allow_refusals: bool,
+) -> DescribedHarness {
+    harness(contract, script, options, |rt| {
+        with_effective(rt, world, allow_refusals)
+    })
+}
+
+/// `rt` serving `world` (a revision document) at revision 1 through its effective
+/// world over tier 0, as [`described`] builds it; panics on a refused entry unless
+/// `allow_refusals`.
+#[cfg(feature = "http-rest")]
+pub fn with_effective(
+    rt: mb_protocols::MockRuntime,
+    world: serde_json::Value,
+    allow_refusals: bool,
+) -> mb_protocols::MockRuntime {
+    let (base, effective, refused) = effective_world(rt.bundle(), world);
+    assert!(
+        allow_refusals || refused.is_empty(),
+        "the test world has refused entries: {refused:?}"
+    );
+    rt.with_world(&base, &effective, 1)
+}
+
+#[cfg(feature = "http-rest")]
+impl DescribedHarness {
+    /// Sends one REST request; answers its status, headers and JSON body (`null` when
+    /// empty, a string when not JSON).
+    pub async fn send(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        headers: &[(&str, &str)],
+    ) -> (
+        axum::http::StatusCode,
+        axum::http::HeaderMap,
+        serde_json::Value,
+    ) {
+        let mut req = axum::http::Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let body = body.map_or_else(axum::body::Body::empty, |b| {
+            axum::body::Body::from(b.to_string())
+        });
+        send_to(&self.router, req.body(body).unwrap()).await
+    }
+
+    /// Every request record so far.
+    pub fn records(&self) -> Vec<RequestRecord> {
+        self.recorded.0.lock().unwrap().clone()
+    }
+
+    /// The record of type `t` stored under `id` in the default session.
+    pub async fn stored(&self, t: &str, id: &str) -> Option<serde_json::Value> {
+        let session = mb_state::SessionKey {
+            workspace: self.rt.workspace.clone(),
+            mock: self.rt.name.clone(),
+            session: "default".into(),
+        };
+        self.rt
+            .state
+            .get(&session, t, id)
+            .await
+            .unwrap()
+            .map(|r| r.data)
+    }
+}
+
+/// Sends `req` to `router`; answers its status, headers and body (JSON, else a string,
+/// `null` when empty).
+#[cfg(feature = "http-rest")]
+pub async fn send_to(
+    router: &axum::Router,
+    req: axum::http::Request<axum::body::Body>,
+) -> (
+    axum::http::StatusCode,
+    axum::http::HeaderMap,
+    serde_json::Value,
+) {
+    use tower::ServiceExt;
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into()))
+    };
+    (status, headers, body)
 }

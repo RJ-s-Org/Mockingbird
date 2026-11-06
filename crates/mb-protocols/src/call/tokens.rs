@@ -1165,6 +1165,7 @@ pub(super) async fn not_modified(
         new_record: false,
         patched: None,
         headers: Vec::new(),
+        world_gaps: Vec::new(),
     })
 }
 
