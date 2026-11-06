@@ -9,7 +9,7 @@ info:
     (v2 tokens, NetBox 4.5 and later; or a legacy `Token <token>`). Bodies are JSON. Every URL ends with a slash.
 
     Objects have integer ids. `POST` to a list endpoint creates an object and answers
-    201 with it; `GET`, `PATCH` (only the fields sent change) and `DELETE` (204, no
+    it (a list of objects creates several); `GET`, `PATCH` (only the fields sent change) and `DELETE` (204, no
     body) work on `/{id}/`. A missing object answers 404 with a `detail` message
     (e.g. `{"detail": "No IPAddress matches the given query."}`).
     A choice field such as `status` is written as its value (`"active"`) and answered as
@@ -24,9 +24,9 @@ info:
     `offset`. Filters are query parameters: a field's name for an exact value
     (`status=active`, `slug=...`), a lookup suffix for others (`name__ic` contains,
     ignoring case; `name__n` is not), `q` for a search, `tag` for a tag's slug, and
-    `vrf_id` or `parent` (a prefix in CIDR notation) for IP addresses. Lists are sorted
-    by the model's ordering (sites by name, prefixes by VRF and prefix, IP addresses by
-    address) unless `ordering` names a field (`-` before it for descending).
+    `vrf_id` or `parent` (a prefix in CIDR notation) for IP addresses. The optional
+    `ordering` parameter names a field to sort by (`-` before it for descending); the
+    default order is not documented.
 
     Validation errors answer 400 with a body keyed by field: `{"slug": ["Site with this
     slug already exists."]}`. Site names and slugs are unique, and so are tag names and
@@ -34,13 +34,13 @@ info:
     prefix equal to one it holds: `{"address": ["Duplicate IP address found in VRF
     <name>: <address>"]}`.
 
-    `GET /api/ipam/prefixes/{id}/available-ips/` lists the free addresses of a prefix,
-    lowest first, as a bare array of `{family, address, vrf}`; the address carries the
-    prefix's mask (`10.0.0.1/29`). A non-pool IPv4 prefix other than a /31 or /32 leaves
-    out its network and broadcast addresses, so a /29 has six usable addresses. A
-    `POST` there allocates the lowest free addresses: a JSON object creates one IP
-    address in the prefix's VRF and answers it (201); a list creates one per item, in
-    order, and answers the list (201). The allocation is atomic. When fewer addresses are
+    `GET /api/ipam/prefixes/{id}/available-ips/` lists the free addresses of a prefix
+    as a bare array of `{family, address, vrf}`; the address carries the
+    prefix's mask (`10.0.0.1/29`). A prefix that is not a pool keeps its first and last
+    addresses (normally the network and broadcast addresses) out of use, so a /29 has six
+    usable addresses. A `POST` there provisions free addresses from the prefix: a JSON
+    object creates one IP address and answers it; a list creates one per item and
+    answers the list. The allocation is atomic. When fewer addresses are
     free than asked for, nothing is created and it answers 409 `{"detail": "An
     insufficient number of IP addresses are available within <prefix> (2 requested, 1
     available)"}`. An allocated address is no longer listed as available, and a deleted
@@ -307,8 +307,8 @@ paths:
     post:
       tags: [ipam]
       operationId: ipam_prefixes_available_ips_create
-      summary: Allocate a prefix's lowest free addresses
-      description: "An object allocates one address and answers it; a list allocates one per item, in order, and answers the list."
+      summary: Allocate free addresses of a prefix
+      description: "An object allocates one free address and answers it; a list allocates one per item and answers the list."
       requestBody:
         required: true
         content:

@@ -32,11 +32,11 @@ info:
     with `{"ok": true, "id", "rev"}`, `rev` being the next revision, and leaves a
     tombstone (`_deleted: true`). A deleted document reads 404
     `{"error": "not_found", "reason": "deleted"}`; an id that never existed reads 404
-    `{"error": "not_found", "reason": "missing"}`. A deleted document is not listed by
+    (the reference gives no reason for it). A deleted document is not listed by
     `_all_docs` or found by `_find`, and is counted in `doc_del_count`, not `doc_count`.
 
     `GET /{db}/_all_docs` lists the database's documents sorted by id: `total_rows` is
-    the number of documents in the database (deleted ones are not counted), `offset`
+    the number of documents in the database (whatever `skip` and `limit` answer), `offset`
     the number of rows before the first one answered, and each row is
     `{id, key, value: {rev}}`, plus the document as `doc` with `include_docs=true`.
     `startkey` and `endkey` (JSON-encoded, so a string key is sent in double quotes)
@@ -203,7 +203,7 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/Document"}
         "404":
-          description: "`{error: not_found, reason: missing}`, or `reason: deleted` for a deleted document."
+          description: "`{error: not_found, reason}`; `reason: deleted` for a deleted document."
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
@@ -289,7 +289,7 @@ components:
       type: object
       properties:
         error: {type: string, example: not_found}
-        reason: {type: string, example: missing}
+        reason: {type: string, example: deleted}
     WriteResult:
       type: object
       properties:

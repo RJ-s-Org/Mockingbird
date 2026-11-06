@@ -17,13 +17,13 @@ info:
     `user {id, name}`.
 
     Work is organised as clients, their projects, and tasks assigned to projects. A
-    project bills by `bill_by`: with `Tasks` the billable rate of time on the project is
-    the `hourly_rate` of the task's assignment to it (`POST
+    project bills by `bill_by` (`Project`, `Tasks`, `People` or `none`); a task is put on a
+    project, with an `hourly_rate`, by a task assignment (`POST
     /v2/projects/{project_id}/task_assignments`). A task with `is_default` true is
     automatically assigned to every project created after it, so a new project may already
     hold assignments for the account's default tasks. A time entry records time a user spent
     on a project's task on a day (`spent_date`), and answers its `client`, `project`,
-    `task`, `task_assignment`, `billable` and `billable_rate` (null when not billable).
+    `task`, `task_assignment` (the assignment of its task), `billable` and `billable_rate`.
 
     This account tracks time by duration. A time entry created with `hours` is stopped
     (`is_running` false) and holds those hours. One created without `hours` starts a
@@ -41,7 +41,7 @@ info:
     page. `per_page` is 1 to 2000 (default 2000). The next page is reached by following
     `links.next`, whose query may hold a `cursor` instead of a `page` (with a cursor,
     `page`, `next_page` and `previous_page` are null except on the first and last page).
-    Time entries are listed by `spent_date`, the latest first, and can be filtered by
+    Time entries are sorted by `spent_date` (the reference does not say which way), and can be filtered by
     `user_id`, `client_id`, `project_id`, `task_id`, `is_billed`, `is_running`,
     `updated_since` and the `spent_date` range `from` to `to` (both included).
 servers:
@@ -553,7 +553,7 @@ components:
         ended_time: {type: string, nullable: true}
         billable: {type: boolean}
         budgeted: {type: boolean}
-        billable_rate: {type: number, nullable: true, description: "The rate the time bills at; with bill_by Tasks, the task assignment's hourly_rate."}
+        billable_rate: {type: number, nullable: true, description: "The billable rate for the time entry."}
         cost_rate: {type: number, nullable: true}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}

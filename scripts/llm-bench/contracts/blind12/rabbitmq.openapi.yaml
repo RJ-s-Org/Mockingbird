@@ -10,68 +10,54 @@ info:
     Objects are named, not numbered: a virtual host by its name, and a queue or an
     exchange by its virtual host and its name, both in the path
     (`/api/queues/{vhost}/{name}`; the default virtual host `/` is written `%2F`).
-    Declaring is idempotent: `PUT` of a virtual host, a queue or an exchange creates it
-    (the server answers 201 Created; the reference states no status code for it). A
-    `PUT` of one that already exists with the same properties changes nothing and
-    succeeds (the server answers 204, which the reference does not show). A queue or exchange that exists with other
-    properties (`durable`, `auto_delete` or `arguments` such as `x-max-length`) is not
-    changed and the declaration is refused (as AMQP refuses an inequivalent
-    re-declaration; the server answers 400 with a `reason` such as
-    `PRECONDITION_FAILED - inequivalent arg ...`, which the reference does not document).
+    `PUT` of a virtual host, a queue or an exchange declares it. The reference's example
+    of creating a virtual host answers `201 Created` and its example of a delete answers
+    `204 No Content`; it states no other status codes, and says no body is answered to a
+    `PUT` or `DELETE` unless it fails. Declaring a queue that exists with the same
+    properties changes nothing. AMQP 0-9-1, which the HTTP API declares through, refuses
+    a declaration of an existing queue with other `durable`, `exclusive`, `auto_delete`
+    or `arguments` (such as `x-max-length`) and leaves the queue as it was; the HTTP
+    reference gives no code for that refusal.
 
     A binding routes an exchange's messages to a queue:
     `POST /api/bindings/{vhost}/e/{exchange}/q/{queue}` with a `routing_key` (and
-    optional `arguments`) creates one and answers with a `Location` header holding the
-    new binding's URI, which ends in its `properties_key` (the server answers 201; the
-    reference states no status code for it). A binding is named by its
-    `properties_key`: its routing key when it has no arguments, else the routing key,
-    `~` and a hash of the arguments. `GET` on the same path lists the bindings between
-    that exchange and that queue (there may be several). A `topic` exchange routes a
-    message to every queue bound with a pattern its routing key matches (`*` one word,
-    `#` zero or more words); a `direct` exchange routes on an equal routing key.
+    optional `arguments`) creates one, and the response holds a `Location` header with
+    the URI of the new binding: `/api/bindings/{vhost}/e/{exchange}/q/{queue}/{props}`,
+    `{props}` being the binding's `properties_key` from a bindings listing. `GET` on the
+    same path lists the bindings between that exchange and that queue. A `topic`
+    exchange routes a message to every queue bound with a pattern its routing key
+    matches (`*` one word, `#` zero or more words).
 
     `POST /api/exchanges/{vhost}/{name}/publish` publishes one message, with
     `properties`, `routing_key`, `payload` and `payload_encoding` (`string` or
-    `base64`), all required. It answers 200 `{"routed": true}` when the message reached
-    at least one queue and `{"routed": false}` when no binding matched. The endpoint is
-    for development and troubleshooting. Every virtual host has the default exchange,
-    which the HTTP API names `amq.default` in the path (its AMQP name is the empty
-    string): it routes a message to the queue named by its routing key, with no binding
-    declared, so `POST /api/exchanges/{vhost}/amq.default/publish` with `routing_key` set
-    to a queue's name puts the message on that queue.
+    `base64`), all mandatory. It answers `{"routed": true}`: `routed` is true if the
+    message was sent to at least one queue. The endpoint is for development and
+    troubleshooting. Every virtual host has the default exchange, which the HTTP API
+    names `amq.default` in the path: it routes a message to the queue named by its
+    routing key, with no binding declared.
 
-    `POST /api/queues/{vhost}/{name}/get` takes up to `count` messages from the head of
-    the queue (oldest first) and answers them as an array; an empty queue answers `[]`.
-    `ackmode` decides what happens to them: `ack_requeue_false` removes them,
-    `ack_requeue_true` and `reject_requeue_true` put them back where they were (they are
-    marked `redelivered` the next time they are got), and `reject_requeue_false` drops
-    them. Each message answers `payload`, `payload_bytes`, `payload_encoding`,
-    `redelivered`, `exchange`, `routing_key`, `properties` and `message_count`: the
-    number of messages left in the queue after this one. `encoding` is `auto` (the
-    payload as a string when it is valid UTF-8, else base64) or `base64`. The queue's
-    own `messages` counters are statistics refreshed every few seconds, not at once.
+    `POST /api/queues/{vhost}/{name}/get` gets up to `count` messages from the queue and
+    answers them as an array, each with its `payload` (with `encoding` `auto`, a string
+    when it is valid UTF-8, else base64). A queue hands out its messages in the order
+    they were put on it, oldest first. `ackmode` decides what happens to them:
+    `ack_requeue_true` and `reject_requeue_true` requeue them, and `ack_requeue_false`
+    and `reject_requeue_false` remove them. A message that was delivered before and
+    requeued is delivered again with `redelivered` true (as AMQP's basic.get-ok marks
+    it). The queue's own `messages` counters are statistics refreshed every few
+    seconds, not at once.
 
-    `DELETE /api/queues/{vhost}/{name}` deletes a queue (204). With `if-empty=true` it is
-    deleted only when it holds no messages, and with `if-unused=true` only when it has
-    no consumers: the reference says these prevent the delete from succeeding, so the
-    queue is kept and the request does not succeed (the server answers 400 with a
-    `reason` such as `PRECONDITION_FAILED - queue ... not empty`, which the reference
-    does not document). `DELETE .../contents` purges a queue
-    (204): its ready messages are removed. A deleted object then answers 404.
+    `DELETE /api/queues/{vhost}/{name}` deletes a queue. `if-empty=true` and
+    `if-unused=true` make the delete conditional: they prevent it from succeeding if the
+    queue holds messages, or has consumers. `DELETE .../contents` purges a queue (removes
+    its messages in the Ready state).
 
-    `GET /api/queues/{vhost}` lists the virtual host's queues as a bare array; the order
-    is not promised unless `sort` names a field to sort by (`sort=name`, with
-    `sort_reverse=true` for descending). With `page` (from 1) it answers one page instead,
-    an object whose `items` are that page's queues and whose `page` is the page number.
-    `page_size` is 1 to 500 (default 100); `name` keeps only the queues whose name holds
-    it as a substring (the server's match, which the reference does not state; with
-    `use_regex=true` it is a regular expression). The reference lists only
-    these request parameters; the server also answers `page_size`, `page_count`,
-    `item_count`, `filtered_count` and `total_count`, which the reference does not
-    document.
+    `GET /api/queues/{vhost}` lists the virtual host's queues. `sort` names a field to
+    sort by (one field only) and `sort_reverse=true` reverses the order; `columns`
+    restricts the fields answered. The pagination parameters are `page`, `page_size`
+    (default 100, at most 500), `name` (a filter by name) and `use_regex` (read `name` as
+    a regular expression); the reference does not document the paginated answer.
 
-    Errors answer `{error, reason}` (the server's error bodies; the reference does not
-    document them).
+    The reference does not document error bodies (the server answers `{error, reason}`).
 servers:
   - url: http://localhost:15672
 security:
@@ -155,7 +141,7 @@ paths:
       parameters:
         - {name: page, in: query, description: "From 1; asks for a page instead of every queue.", schema: {type: integer, minimum: 1}}
         - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
-        - {name: name, in: query, description: "Only queues whose name holds this.", schema: {type: string}}
+        - {name: name, in: query, description: "Filter by name.", schema: {type: string}}
         - {name: use_regex, in: query, description: Read name as a regular expression., schema: {type: boolean, default: false}}
         - {name: sort, in: query, description: "The field to sort by, e.g. name.", schema: {type: string}}
         - {name: sort_reverse, in: query, schema: {type: boolean, default: false}}
@@ -190,7 +176,7 @@ paths:
       tags: [Queues]
       operationId: declareQueue
       summary: Declare a queue
-      description: "Created when new (the server answers 201); a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
+      description: "Declares it. One that exists with the same properties is unchanged; AMQP refuses a declaration with other ones and leaves it unchanged."
       requestBody:
         content:
           application/json:
@@ -215,7 +201,7 @@ paths:
       responses:
         "204": {description: Deleted.}
         "400":
-          description: "Kept: a condition asked for does not hold, so the delete does not succeed (the server answers 400, `PRECONDITION_FAILED - queue ... not empty`)."
+          description: "Kept: a condition asked for does not hold, so the delete does not succeed."
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
@@ -282,7 +268,7 @@ paths:
       tags: [Exchanges]
       operationId: declareExchange
       summary: Declare an exchange
-      description: "Created when new (the server answers 201); a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
+      description: "Declares it. One that exists with the same properties is unchanged; AMQP refuses a declaration with other ones and leaves it unchanged."
       requestBody:
         required: true
         content:
@@ -493,5 +479,5 @@ components:
         redelivered: {type: boolean, description: It was got and put back before.}
         exchange: {type: string}
         routing_key: {type: string}
-        message_count: {type: integer, description: Messages left in the queue after this one.}
+        message_count: {type: integer}
         properties: {type: object, additionalProperties: true}

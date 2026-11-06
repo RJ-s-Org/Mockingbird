@@ -23,7 +23,8 @@ info:
     hold that pair, and `date_created[gt|gte|lt|lte]` bounds the creation date.
 
     `DELETE /v1/addresses/{id}` deletes an address and answers
-    `{"id": "adr_...", "deleted": true}`; it is then no longer listed.
+    `{"id": "adr_...", "deleted": true}` (`deleted` is only returned when the address was
+    deleted).
 
     A letter is created with `to` and `from` (an address id, or an address object made
     inline), `file` (HTML, a URL or a PDF), `color` and `use_type` (`marketing` or
@@ -34,7 +35,7 @@ info:
     the rendered letter) and `tracking_events`. This account has no cancellation window:
     a letter created without `send_date` goes to production at once, and its
     `send_date` is its `date_created`. A `send_date` up to 180 days ahead schedules it;
-    `expected_delivery_date` is then after `send_date`. `scheduled=true` lists only
+    `expected_delivery_date` is the expected delivery date based on the `send_date`. `scheduled=true` lists only
     letters whose `send_date` is later than their `date_created`, and `scheduled=false`
     only those where they are equal.
 
@@ -42,11 +43,13 @@ info:
     cancelled letter is not charged) and answers `{"id": "ltr_...", "deleted": true}`
     (`deleted` is only returned when the resource was deleted).
 
-    A `POST /v1/letters` with an `Idempotency-Key` header (at most 256 characters) is
-    safe to retry: a second request with the same key within 24 hours creates nothing
-    and answers the letter the first one created.
+    A `POST /v1/letters` with an `Idempotency-Key` header (at most 256 characters, one
+    that uniquely identifies the letter) is safe to retry: the key makes sure no mail
+    piece is created more than once, so a second request with the same key creates
+    nothing and answers the letter the first one created.
 
-    Errors answer `{error: {message, status_code, code}}`: 401 for a missing or wrong
+    Errors answer an `error` holding a developer-facing `message` (and `status_code` and
+    `code`): 401 for a missing or wrong
     key, 404 `not_found`, 422 for parameters that failed validation (`invalid`,
     `bad_request`, `not_deletable`) and 429.
 servers:
@@ -117,7 +120,7 @@ paths:
       summary: Delete an address
       responses:
         "200":
-          description: Deleted; it is no longer listed.
+          description: Deleted.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Deleted"}
