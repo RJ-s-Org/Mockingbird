@@ -764,6 +764,40 @@ mod tests {
         errs
     }
 
+    /// The runtime answers from the description, so the guides no longer
+    /// say it does not: `docs/world.md` describes it module by module, with
+    /// the hot reload and the request log's `world_gap`, and the skill
+    /// sends the assistant from a `world_gap` in a recorded call to the
+    /// entry to write next.
+    #[test]
+    fn world_guides_describe_the_runtime() {
+        assert!(
+            !WORLD_DOC.contains("does not yet answer from it"),
+            "docs/world.md still says the runtime ignores the description"
+        );
+        for needle in [
+            "## At runtime",
+            "world_gap",
+            "tier 0",
+            "rebuilds",
+            "soft_delete",
+            "listed_with",
+            "idempotency",
+            "derived",
+            "not_found",
+        ] {
+            assert!(WORLD_DOC.contains(needle), "docs/world.md: {needle}");
+        }
+        let skill = skill("mockingbird-world");
+        for needle in ["world_gap", "get_request"] {
+            assert!(skill.contains(needle), "mockingbird-world: {needle}");
+        }
+        assert!(
+            !skill.contains("`[]` removes a wrongly guessed one"),
+            "mockingbird-world: described alternates add to the guess, never remove it"
+        );
+    }
+
     /// The worked examples fit the published format.
     #[test]
     fn world_examples_fit_the_schema() {
