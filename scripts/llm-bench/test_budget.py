@@ -466,6 +466,9 @@ class ParallelStopTest(Reset):
     suite still running; a suite that finished before it stays valid."""
 
     def test_parallel_suites_and_units_stop_together(self):
+        # Events order every step; SAFETY only keeps a broken run from hanging forever,
+        # it never decides the order.
+        SAFETY = 60
         srv = serve(FakeMock, self)
         clean_done, victim_started = threading.Event(), threading.Event()
 
@@ -473,16 +476,30 @@ class ParallelStopTest(Reset):
             units = [lambda i=i: server_suites.run_one_journey("fake", steps_of("ok", "ok"), srv_, sink, args, i)
                      for i in range(2)]
             server_suites.run_units(units, args)
-            clean_done.set()
+
+        # The clean suite counts as done only once run_suite has returned for it, after
+        # it took its own view of the stop: setting the event inside its runner left a
+        # window in which the budget suite could trip before that snapshot.
+        real_run_suite = server_suites.run_suite
+
+        wrapped = []
+
+        def run_suite(suite, args_):
+            wrapped.append(suite)
+            try:
+                return real_run_suite(suite, args_)
+            finally:
+                if suite == "journeys":
+                    clean_done.set()
 
         def budget(srv_, sink, args):
             def unit(i):
                 if i == 1:
-                    victim_started.wait(5)
+                    victim_started.wait(SAFETY)
                     server_suites.run_one_journey("fake", steps_of("ok", "budget"), srv_, sink, args, i)
                 else:
                     server_suites.run_one_journey("fake", steps_of("ok", "ok"), srv_, sink, args, i)
-            clean_done.wait(5)
+            clean_done.wait(SAFETY)
             server_suites.run_units([functools.partial(unit, i) for i in range(2)], args)
 
         def victim(srv_, sink, args):
@@ -491,11 +508,11 @@ class ParallelStopTest(Reset):
                     j.call("GET", "/ok")
                     j.check("check 0", True)
                     victim_started.set()
-                    server_suites.STOP.wait(5)
+                    server_suites.STOP.wait(SAFETY)
                     j.call("GET", "/ok")
                     j.check("check 1", True)
                 server_suites.run_one_journey("fake", steps, srv_, sink, args, i)
-            clean_done.wait(5)
+            clean_done.wait(SAFETY)
             server_suites.run_units([functools.partial(unit, i) for i in range(2)], args)
 
         @contextlib.contextmanager
@@ -508,10 +525,13 @@ class ParallelStopTest(Reset):
                 mock.patch.dict(server_suites.RUNNERS, {"journeys": ({}, clean), "journeys_blind": ({}, budget),
                                                         "journeys_blind2": ({}, victim)}), \
                 mock.patch.object(server_suites, "Server", fake_server), \
+                mock.patch.object(server_suites, "run_suite", run_suite), \
                 mock.patch.object(server_suites, "proxy_stats", lambda a: None), \
                 contextlib.redirect_stderr(io.StringIO()):
             failed = server_suites.run_suites(["journeys", "journeys_blind", "journeys_blind2"], args)
         self.assertTrue(failed)
+        self.assertIn("journeys", wrapped)  # the ordering wrapper ran
+        self.assertTrue(server_suites.STOP.is_set())  # the refusal stopped the run
         self.assertEqual(server_suites.exit_code(failed), server_suites.EXIT_BUDGET)
         rows = self.written()
         self.assertNotIn("suite_error", [r["case"] for r in rows])
