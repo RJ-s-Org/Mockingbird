@@ -351,6 +351,8 @@ pub(super) async fn answer(
             items.push(item);
         }
     }
+    // Each item's derived members, from one listing per child type.
+    derived::fill_page(state, session, t, &mut items, Some(&items_schema)).await;
     list_query::sort(&q, &mut items);
     let mut next: Option<usize> = None;
     let mut cut = None;

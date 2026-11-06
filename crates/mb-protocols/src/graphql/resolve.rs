@@ -448,9 +448,15 @@ async fn generate_in(
                                 engine: plan.engine.clone(),
                             };
                             match b.join(rt, part).await {
-                                Some(Ok(joined)) => {
-                                    Ok(call::complete(rt, &plan, &call, pending, joined).await)
-                                }
+                                Some(Ok(joined)) => Ok(call::complete(
+                                    rt,
+                                    &plan,
+                                    &call,
+                                    pending,
+                                    joined,
+                                    narrowed.as_deref(),
+                                )
+                                .await),
                                 Some(Err(reason)) => Err(Failure::new(500, reason)),
                                 None => call::generate_pending(
                                     rt,

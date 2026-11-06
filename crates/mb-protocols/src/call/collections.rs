@@ -314,6 +314,20 @@ impl Collections {
         (record.digest == OwnReads::digest(&r.data)).then(|| record.collection.clone())
     }
 
+    /// Whether this runtime's create stored the record of type `t` under `id` in
+    /// `session`, in a collection or at the top level, whatever was written to it since.
+    pub(super) fn created(&self, session: &SessionKey, t: &str, id: &str) -> bool {
+        let key = OwnRead {
+            session: session.clone(),
+            resource_type: t.to_string(),
+            id: id.to_string(),
+        };
+        self.0.lock().is_ok_and(|held| {
+            held.records.get(&key).is_some_and(|record| record.created)
+                || held.top_level.contains_key(&key)
+        })
+    }
+
     /// Whether a record for `r`'s key exists, as `r` may not be what it recorded.
     pub(super) fn has(&self, session: &SessionKey, r: &StoredResource) -> bool {
         self.0

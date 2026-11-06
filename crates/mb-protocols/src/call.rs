@@ -350,7 +350,7 @@ pub(crate) async fn generate_pending(
         );
         return Ok(answer);
     }
-    Ok(complete(rt, plan, call, pending, generated).await)
+    Ok(complete(rt, plan, call, pending, generated, response_schema).await)
 }
 
 /// What [`prepare`] found: an answer that needs no generation, or the
@@ -596,15 +596,28 @@ pub(crate) async fn prepare<'a>(
     // Whether a stored answer stands depends on what is remembered; otherwise
     // what is remembered waits until the cache has had its say.
     let mut recalled = None;
+    // The held record with the members the description derives from its children; the
+    // record as stored when that answer does not suit the schema.
+    let derived = match &target {
+        Some(stored) if matches!(op.kind, OperationKind::Query) && plain(plan) => {
+            derived::filled(&mut state, session, stored)
+                .instrument(state_span())
+                .await
+        }
+        _ => None,
+    };
+    let held = |stored: &StoredResource, kept: Option<&Map<String, Value>>| {
+        derived
+            .as_ref()
+            .and_then(|filled| serve_held(rt, op, filled, kept, response_schema))
+            .or_else(|| serve_held(rt, op, stored, kept, response_schema))
+    };
     if matches!(op.kind, OperationKind::Query)
         && plain(plan)
         && let Some(stored) = &target
         // What the schema alone tells of the envelope costs no read; what the session's
         // answers said of it ([`envelopes`]) is read only for an answer that stands.
-        && let (bare, enveloped) = (
-            serve_held(rt, op, stored, None, response_schema),
-            envelopes::applies(rt, op),
-        )
+        && let (bare, enveloped) = (held(stored, None), envelopes::applies(rt, op))
         && (bare.is_some() || enveloped)
     {
         let mut earlier = write_memory::recall(
@@ -627,9 +640,7 @@ pub(crate) async fn prepare<'a>(
                 }
                 false => None,
             };
-            let served = kept
-                .and_then(|kept| serve_held(rt, op, stored, Some(&kept), response_schema))
-                .or(bare);
+            let served = kept.and_then(|kept| held(stored, Some(&kept))).or(bare);
             if let Some(mut served) = served {
                 write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
                 state.touch(session).instrument(state_span()).await;
@@ -899,15 +910,45 @@ async fn member_read(
         .serve_stored(&rt.bundle, op, member, response_schema)
 }
 
+/// Whether `answer` fits `plan`'s operation's schema for `status`: the narrowed
+/// `response_schema` when given, else the output variant `status` selects.
+fn answer_fits(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    status: u16,
+    answer: &Value,
+    response_schema: Option<&Value>,
+) -> bool {
+    let op = plan.op;
+    let variant = op.output_for_status(status);
+    let success = op.success_output();
+    // The success variant (or a narrowed schema) has a cached validator.
+    if response_schema.is_some()
+        || variant.is_some_and(|v| success.is_some_and(|s| std::ptr::eq(v, s)))
+    {
+        return plan
+            .engine
+            .serve_stored(&rt.bundle, op, answer, response_schema)
+            .is_some();
+    }
+    let Some(schema) = variant.and_then(|v| v.schema.as_ref()) else {
+        return false;
+    };
+    mb_engine::SchemaValidator::for_output(&rt.bundle.with_reachable_defs(schema))
+        .is_ok_and(|validator| validator.is_valid(answer))
+}
+
 /// Writes a generated answer's state (a 2xx command's resource, a list
 /// read's seeded items), keeps the session alive, sends webhooks and caches
-/// a read's answer.
+/// a read's answer. `response_schema` is the 2xx schema narrowed to what the caller
+/// reads, when it was (see [`generate_narrowed`]).
 pub(crate) async fn complete(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     pending: Pending<'_>,
     mut generated: GeneratedResponse,
+    response_schema: Option<&Value>,
 ) -> GeneratedResponse {
     seed_world_gaps(rt, plan.op, &mut generated);
     let Pending {
@@ -1557,6 +1598,48 @@ pub(crate) async fn complete(
             };
             if let Some(id) = target_id.clone().or_else(created) {
                 tokens::after_answer(&mut state, plan, t, &id).await;
+            }
+        }
+        // A held record's derived members, from its children as state now has them.
+        if (200..300).contains(&generated.status)
+            && !unstored
+            && !foreign_key
+            && let Some(t) = resource_type
+            && derived::describes(rt, t)
+            && match op.kind {
+                OperationKind::Command(Effect::Create) => true,
+                OperationKind::Command(Effect::Delete) => false,
+                _ => target.is_some(),
+            }
+            && let Some(body) = generated.body.as_mut()
+            && entity_fits(rt, t, body)
+        {
+            let before = body.clone();
+            let set = derived::fill(&mut state, session, t, body).await;
+            // The answer it ends up in, put back in its envelope, still fits the
+            // operation's schema for its status; else the model's values stay.
+            if !set.is_empty() {
+                let whole = match (held_in, answered.as_ref()) {
+                    (Some(identity), Some(answer)) => {
+                        let mut whole = answer.clone();
+                        identity
+                            .record_in_mut(&mut whole)
+                            .map(|slot| *slot = body.clone())
+                            .map(|()| whole)
+                    }
+                    _ => Some(body.clone()),
+                };
+                let fits = whole.is_some_and(|whole| {
+                    answer_fits(rt, plan, generated.status, &whole, response_schema)
+                });
+                if !fits {
+                    tracing::info!(
+                        mock = %rt.name,
+                        operation = %op.id,
+                        "an answer with its derived members does not fit its schema: not set"
+                    );
+                    *body = before;
+                }
             }
         }
         // Served as it was answered, holding the record as state now has it.
