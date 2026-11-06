@@ -212,6 +212,9 @@ impl PersonaFormats {
     /// `body` with every object's declared formats kept; values equal to
     /// one in `protected` (what the request or path set) are not touched.
     /// `None` when nothing changed or the patched body does not validate.
+    /// The random characters are drawn at random; the engine applies the
+    /// formats with [`PersonaFormats::apply_with`] and its answer's draws, so
+    /// a seeded answer repeats them.
     pub fn apply(
         &self,
         validator: &SchemaValidator,

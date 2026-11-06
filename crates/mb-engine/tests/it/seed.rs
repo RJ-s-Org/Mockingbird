@@ -332,3 +332,116 @@ async fn seeded_shopify_answers_validate_offline() {
     }
     assert!(invalid.is_empty(), "{invalid:?}");
 }
+
+/// An LLM answer for `getOrder` whose `note` breaks its pattern: the engine
+/// repairs it locally with a faker value.
+const BAD_NOTE: &str = r#"{"orderId": "o-1", "ref": "6f1c2a52-4f0e-4b8e-9d8a-0c7d2d1f5a10", "total": 12.5, "placedAt": "2026-01-01T00:00:00Z", "placedOn": "2026-01-01", "created_at": 1767225600, "note": "not a note", "lines": [{"sku": "a-1", "qty": 1}]}"#;
+
+/// The `note` the engine repaired `BAD_NOTE` to for `call`, on a fresh
+/// engine with `seed`.
+async fn repaired_note(seed: Option<u64>, call: &OperationCall) -> String {
+    let bundle = bundle();
+    let provider: Arc<dyn Provider> =
+        Arc::new(ScriptedProvider::new(vec![Ok(BAD_NOTE.to_string())]));
+    let engine = Engine::new(Some(provider), EngineConfig::default());
+    let engine = match seed {
+        Some(seed) => engine.with_faker_seed(seed),
+        None => engine,
+    };
+    let op = bundle.operation("getOrder").unwrap();
+    let response = engine
+        .generate(&bundle, op, call, GenerationContext::default())
+        .await
+        .unwrap();
+    assert_eq!(response.source, Source::Patched);
+    let body = response.body.unwrap();
+    assert!(valid(&bundle, "getOrder", &body), "{body}");
+    let note = body["note"].as_str().unwrap().to_string();
+    assert_ne!(note, "not a note");
+    note
+}
+
+#[tokio::test]
+async fn seeded_repairs_of_an_llm_answer_repeat() {
+    let first = repaired_note(Some(7), &get_order("o-1")).await;
+    let second = repaired_note(Some(7), &get_order("o-1")).await;
+    assert_eq!(first, second, "the same seed and call repair alike");
+
+    let other_call = repaired_note(Some(7), &get_order("o-2")).await;
+    assert_ne!(first, other_call, "another call repairs otherwise");
+    let other_seed = repaired_note(Some(8), &get_order("o-1")).await;
+    assert_ne!(first, other_seed, "another seed repairs otherwise");
+
+    let mut by_header = get_order("o-1");
+    by_header.headers.insert(SEED_HEADER.into(), json!("7"));
+    assert_eq!(repaired_note(None, &by_header).await, first);
+}
+
+#[tokio::test]
+async fn unseeded_repairs_stay_random() {
+    let call = get_order("o-1");
+    let notes: std::collections::HashSet<String> =
+        futures::future::join_all((0..4).map(|_| repaired_note(None, &call)))
+            .await
+            .into_iter()
+            .collect();
+    assert!(notes.len() > 1, "{notes:?}");
+}
+
+const HEADERS: &str = r##"
+openapi: 3.0.3
+info: {title: t, version: "1"}
+paths:
+  /mail/send:
+    post:
+      operationId: send
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {to: {type: string}}}
+      responses:
+        "202":
+          description: ok
+          headers:
+            X-Message-Id: {schema: {type: string}}
+            X-RateLimit-Limit: {schema: {type: integer}}
+            X-RateLimit-Remaining: {schema: {type: integer}}
+            X-Note: {schema: {type: string, pattern: "^[a-z]{12}$"}}
+"##;
+
+fn send(to: &str) -> OperationCall {
+    OperationCall {
+        operation_id: "send".into(),
+        body: Some(json!({ "to": to })),
+        ..OperationCall::default()
+    }
+}
+
+#[test]
+fn seeded_declared_headers_repeat_per_call() {
+    let bundle = compile(HEADERS.as_bytes()).unwrap();
+    let op = bundle.operation("send").unwrap();
+    let headers =
+        |engine: &Engine, call: &OperationCall| engine.declared_headers(&bundle, op, 202, call);
+    let seeded = || offline().with_faker_seed(7);
+
+    let first = headers(&seeded(), &send("a@x.io"));
+    assert_eq!(first.len(), 4);
+    assert_eq!(first, headers(&seeded(), &send("a@x.io")));
+    let other = headers(&seeded(), &send("b@x.io"));
+    let id = |h: &[(String, String)]| {
+        h.iter()
+            .find(|(n, _)| n == "X-Message-Id")
+            .unwrap()
+            .1
+            .clone()
+    };
+    assert_ne!(id(&first), id(&other), "another call draws another id");
+
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(Vec::new()));
+    let unseeded = Engine::new(Some(provider), EngineConfig::default());
+    let ids: std::collections::HashSet<String> = (0..4)
+        .map(|_| id(&headers(&unseeded, &send("a@x.io"))))
+        .collect();
+    assert!(ids.len() > 1, "{ids:?}");
+}

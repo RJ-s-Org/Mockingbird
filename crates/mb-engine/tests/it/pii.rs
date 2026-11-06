@@ -397,3 +397,19 @@ proptest! {
         prop_assert_eq!(total(&c2), 0);
     }
 }
+
+#[test]
+fn seeded_scrubbing_repeats_per_string() {
+    let s = all();
+    let text = "mail jane.doe@acme-corp.io or call 415-555-0123";
+    let (a, _) = s.scrub_str_seeded(text, Some(7));
+    let (b, _) = s.scrub_str_seeded(text, Some(7));
+    assert_eq!(a, b, "the same seed and string scrub alike");
+    assert_ne!(a, text);
+    let (other, _) = s.scrub_str_seeded("mail john.roe@acme-corp.io or call 415-555-0199", Some(7));
+    assert_ne!(a, other);
+    let (reseeded, _) = s.scrub_str_seeded(text, Some(8));
+    assert_ne!(a, reseeded, "another seed scrubs otherwise");
+    let unseeded: std::collections::HashSet<String> = (0..4).map(|_| s.scrub_str(text).0).collect();
+    assert!(unseeded.len() > 1, "{unseeded:?}");
+}

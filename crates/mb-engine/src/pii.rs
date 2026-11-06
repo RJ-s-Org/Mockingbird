@@ -218,15 +218,26 @@ impl Scrubber {
 
     /// Replaces matches inside every JSON string (object keys untouched); returns replacements per pattern name.
     pub fn scrub_value(&self, v: &mut Value) -> BTreeMap<String, usize> {
+        self.scrub_value_seeded(v, None)
+    }
+
+    /// [`Scrubber::scrub_value`] with replacements drawn as
+    /// [`Scrubber::scrub_str_seeded`] does.
+    pub fn scrub_value_seeded(&self, v: &mut Value, seed: Option<u64>) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
-        self.scrub_value_into(v, &mut counts);
+        self.scrub_value_into(v, seed, &mut counts);
         counts
     }
 
-    fn scrub_value_into(&self, v: &mut Value, counts: &mut BTreeMap<String, usize>) {
+    fn scrub_value_into(
+        &self,
+        v: &mut Value,
+        seed: Option<u64>,
+        counts: &mut BTreeMap<String, usize>,
+    ) {
         match v {
             Value::String(s) => {
-                let (out, c) = self.scrub_str(s);
+                let (out, c) = self.scrub_str_seeded(s, seed);
                 if !c.is_empty() {
                     *s = out;
                     for (k, n) in c {
@@ -236,12 +247,12 @@ impl Scrubber {
             }
             Value::Array(items) => {
                 for item in items {
-                    self.scrub_value_into(item, counts);
+                    self.scrub_value_into(item, seed, counts);
                 }
             }
             Value::Object(map) => {
                 for (_, item) in map.iter_mut() {
-                    self.scrub_value_into(item, counts);
+                    self.scrub_value_into(item, seed, counts);
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -251,11 +262,22 @@ impl Scrubber {
     /// Scrubs one string; returns the result and the replacements per
     /// pattern name (patterns with no replacement are absent).
     pub fn scrub_str(&self, s: &str) -> (String, BTreeMap<String, usize>) {
+        self.scrub_str_seeded(s, None)
+    }
+
+    /// [`Scrubber::scrub_str`] with the replacements drawn from a generator
+    /// seeded by `seed` and `s` when there is a seed (the same string gets
+    /// the same replacement), else at random.
+    pub fn scrub_str_seeded(
+        &self,
+        s: &str,
+        seed: Option<u64>,
+    ) -> (String, BTreeMap<String, usize>) {
         let mut counts = BTreeMap::new();
         if s.len() > MAX_SCRUB_BYTES || (self.builtins.is_empty() && self.custom.is_empty()) {
             return (s.to_owned(), counts);
         }
-        let mut rng = rand::rng();
+        let mut rng = crate::seed::repair_rng(seed, "pii", s);
         let mut text = s.to_owned();
         let mut protected = Vec::new();
         // A replacement can (rarely) turn a neighbouring candidate of an

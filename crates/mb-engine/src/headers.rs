@@ -15,14 +15,26 @@ const LIMITS: [u64; 4] = [60, 100, 1000, 5000];
 
 /// The headers `op` declares for `status` (its exact variant, else
 /// `default`), each with a value.
+/// The values are random; [`crate::Engine::declared_headers`] draws them
+/// from the engine's faker seed when it has one.
 pub fn declared_headers(bundle: &Bundle, op: &Operation, status: u16) -> Vec<(String, String)> {
+    declared_headers_with(bundle, op, status, &mut rand::rng())
+}
+
+/// [`declared_headers`], drawing the values from `rng` (a seeded generator
+/// repeats them).
+pub fn declared_headers_with<R: Rng>(
+    bundle: &Bundle,
+    op: &Operation,
+    status: u16,
+    rng: &mut R,
+) -> Vec<(String, String)> {
     let Some(variant) = op.output_for_status(status) else {
         return Vec::new();
     };
     if variant.headers.is_empty() {
         return Vec::new();
     }
-    let mut rng = rand::rng();
     let limit = LIMITS[rng.random_range(0..LIMITS.len())];
     let remaining = if status == 429 {
         0
@@ -39,7 +51,7 @@ pub fn declared_headers(bundle: &Bundle, op: &Operation, status: u16) -> Vec<(St
         .headers
         .iter()
         .map(|(name, schema)| {
-            let value = header_value(bundle, name, schema, status, rate_limit, &mut rng);
+            let value = header_value(bundle, name, schema, status, rate_limit, rng);
             (name.clone(), value)
         })
         .collect()

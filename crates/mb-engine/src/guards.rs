@@ -346,7 +346,7 @@ impl Engine {
     /// Replaces the PII in `value`, counting it. Nothing without a scrubber.
     pub fn scrub(&self, value: &mut Value) {
         if let Some(scrubber) = &self.guards.scrubber {
-            for (pattern, n) in scrubber.scrub_value(value) {
+            for (pattern, n) in scrubber.scrub_value_seeded(value, self.faker_seed) {
                 metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)
                     .increment(n as u64);
             }
@@ -364,7 +364,7 @@ impl Engine {
         checks: &Checks<'_>,
         fill_missing: bool,
     ) -> Checked {
-        let (fill, echoes) = (checks.fill, &checks.echoes);
+        let fill = checks.fill;
         if checks.items_envelope {
             value = unwrap_items(validator, value);
         }
@@ -379,7 +379,7 @@ impl Engine {
         self.scrub(&mut value);
         validator.mend_member_names(&mut value);
         if let Some(fill) = fill
-            && let Some(filled) = self.fill(validator, &value, fill)
+            && let Some(filled) = self.fill(validator, &value, fill, checks.seed)
         {
             value = filled;
         }
@@ -387,21 +387,21 @@ impl Engine {
             // Filled only when the value is not valid as it is (or
             // unwrapped), and never around a wrapper: a wrapped answer has
             // its inner value filled, so its own data stays the answer.
-            match self.check_value(validator, value.clone(), echoes) {
+            match self.check_value(validator, value.clone(), checks) {
                 Checked::Invalid(errors) => {
                     let target = wrapped(validator, &value).cloned().unwrap_or(value);
                     if !answers_root(validator, &target) {
                         return Checked::Invalid(errors);
                     }
-                    match self.fill_missing(validator, &target) {
-                        Some(filled) => self.check_value(validator, filled, echoes),
+                    match self.fill_missing(validator, &target, checks.seed) {
+                        Some(filled) => self.check_value(validator, filled, checks),
                         None => Checked::Invalid(errors),
                     }
                 }
                 checked => checked,
             }
         } else {
-            self.check_value(validator, value, echoes)
+            self.check_value(validator, value, checks)
         };
         match checked {
             Checked::Valid(v) => match validator.truncate_runaway(&v) {
@@ -422,18 +422,18 @@ impl Engine {
         &self,
         validator: &SchemaValidator,
         value: Value,
-        echoes: &Echoes<'_>,
+        checks: &Checks<'_>,
     ) -> Checked {
         match validator.validate(&value) {
-            Ok(()) => self.check_formats(validator, value, echoes),
+            Ok(()) => self.check_formats(validator, value, checks),
             Err(errors) => match unwrap_envelope(validator, &value)
                 .or_else(|| wrap_single_item(validator, &value))
             {
-                Some(inner) => self.check_formats(validator, inner, echoes),
+                Some(inner) => self.check_formats(validator, inner, checks),
                 None => match sole_list(&value)
-                    .and_then(|list| self.patch(validator, list, echoes))
+                    .and_then(|list| self.patch(validator, list, checks))
                     .filter(Value::is_array)
-                    .or_else(|| self.patch(validator, &value, echoes))
+                    .or_else(|| self.patch(validator, &value, checks))
                 {
                     Some(patched) => {
                         tracing::info!(errors = %errors.join("; "), "patched the answer locally");
@@ -452,12 +452,12 @@ impl Engine {
         &self,
         validator: &SchemaValidator,
         value: Value,
-        echoes: &Echoes<'_>,
+        checks: &Checks<'_>,
     ) -> Checked {
-        if validator.formats_hold(&value, &|_, v| echoes.keeps(v)) {
+        if validator.formats_hold(&value, &|_, v| checks.echoes.keeps(v)) {
             return Checked::Valid(value);
         }
-        match self.patch(validator, &value, echoes) {
+        match self.patch(validator, &value, checks) {
             Some(patched) => {
                 tracing::info!("patched values breaking their format");
                 Checked::Patched(patched)
@@ -489,6 +489,11 @@ pub(crate) struct Checks<'a> {
     pub effects_envelope: bool,
     /// The declared error statuses the envelope may refuse with (see [`refusals`]).
     pub refusals: &'a [u16],
+    /// What seeds the local repairs of the answer (values refilled by the
+    /// faker), mixed with the value repaired: derived from the faker seed and
+    /// the call (see [`crate::Engine::repair_seed`]). `None` draws them at
+    /// random.
+    pub seed: Option<u64>,
 }
 
 /// The member an array answer is asked for under (see [`items_envelope`]).
@@ -1545,12 +1550,18 @@ fn unwrap_items(validator: &SchemaValidator, value: Value) -> Value {
 impl Engine {
     /// `value` with the required members the output budget left out filled
     /// by the faker from the full schema; `None` when nothing was missing.
-    fn fill(&self, validator: &SchemaValidator, value: &Value, fill: &Fill<'_>) -> Option<Value> {
+    fn fill(
+        &self,
+        validator: &SchemaValidator,
+        value: &Value,
+        fill: &Fill<'_>,
+        seed: Option<u64>,
+    ) -> Option<Value> {
         if !fill.shaped.fills_any() {
             return None;
         }
         let faker = crate::Faker::new(self.config.faker_depth).with_hints(fill.hints.clone());
-        let mut rng = rand::rng();
+        let mut rng = crate::seed::repair_rng_for(seed, "fill", value);
         validator.fill_required_nodes(
             value,
             |location, property| fill.shaped.fills(location, property),
@@ -1560,9 +1571,14 @@ impl Engine {
 
     /// `value` with every missing required member filled by the faker;
     /// `None` when nothing was missing.
-    fn fill_missing(&self, validator: &SchemaValidator, value: &Value) -> Option<Value> {
+    fn fill_missing(
+        &self,
+        validator: &SchemaValidator,
+        value: &Value,
+        seed: Option<u64>,
+    ) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
-        let mut rng = rand::rng();
+        let mut rng = crate::seed::repair_rng_for(seed, "fill_missing", value);
         validator.fill_required_nodes(
             value,
             |_, _| true,
@@ -1574,13 +1590,13 @@ impl Engine {
         &self,
         validator: &SchemaValidator,
         value: &Value,
-        echoes: &Echoes<'_>,
+        checks: &Checks<'_>,
     ) -> Option<Value> {
         let faker = crate::Faker::new(self.config.faker_depth);
-        let mut rng = rand::rng();
+        let mut rng = crate::seed::repair_rng_for(checks.seed, "patch", value);
         validator.patch_nodes(
             value,
-            |_, v| echoes.keeps(v),
+            |_, v| checks.echoes.keeps(v),
             |node| faker.fake_node(validator.schema(), node, None, validator.costs(), &mut rng),
         )
     }
