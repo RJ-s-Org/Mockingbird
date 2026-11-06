@@ -2825,7 +2825,8 @@ fn reflect(
                 let body = match (ctx.target, settling_guard(op, ctx, &response)) {
                     (Some(target), Some(guard)) => {
                         let named = named_inputs(call);
-                        let body = settled_update(validator, guard, body, target, named.as_deref());
+                        let named = named.as_deref();
+                        let body = settled_update(validator, guard, body, target, named, &op.id);
                         // The query's members as it says them, then the body's over them.
                         let body = if call.query.is_empty() {
                             body
@@ -3366,9 +3367,11 @@ fn settled_update(
     answer: Value,
     target: &StoredResource,
     request: Option<&Value>,
+    operation: &str,
 ) -> Value {
     let root = validator.schema();
-    let settled = settled_members(root, Some(root), &answer, &target.data, request, true);
+    let at = Settling { root, operation };
+    let settled = settled_members(at, Some(root), &answer, &target.data, request, true);
     let settled = guard.keep_identity(settled);
     if !guard.keeps_owner(&settled) {
         return overlay(
@@ -3408,8 +3411,10 @@ fn without_other_owners(
 /// Objects go member by member, unless a `oneOf` or `anyOf` says either is a branch,
 /// which is taken whole or not at all. A named array takes the request's value, as a cap
 /// or an empty answer could have cut the answer's. A null is only the request's to write.
+/// A scalar the request sends for a member held as an object goes to the one member of
+/// that object that admits it ([`chosen_member`]).
 fn settled_members(
-    root: &Value,
+    at: Settling<'_>,
     schema: Option<&Value>,
     answer: &Value,
     stored: &Value,
@@ -3419,6 +3424,7 @@ fn settled_members(
     let (Value::Object(answer_members), Value::Object(stored_members)) = (answer, stored) else {
         return stored.clone();
     };
+    let root = at.root;
     let union = schema.is_some_and(|node| schema_level(root, node, None, 0).0);
     let mut out = stored_members.clone();
     for (k, v) in answer_members {
@@ -3444,14 +3450,112 @@ fn settled_members(
             out.insert(k.clone(), Value::Null);
         } else if v.is_null() || (held.is_array() && !named.is_array()) {
             continue;
+        } else if let (Value::Object(held), Value::Object(answered), false) =
+            (held, v, named.is_object() || named.is_array())
+        {
+            // A scalar sent for an object, as a value-of-choice member `{value, label}`
+            // takes its value. Only an object (or array) sent goes member by member below.
+            match chosen_member(root, inner, held, answered, named) {
+                Ok(member) => {
+                    out.insert(k.clone(), member);
+                }
+                Err(reason) => tracing::info!(
+                    operation = %at.operation,
+                    member = %k,
+                    reason,
+                    world_gap = ?[k.as_str()],
+                    "a scalar sent for an object member names no one member of it; the stored object stands"
+                ),
+            }
         } else if held.is_object() && v.is_object() && !union && !is_union(root, inner) {
-            let member = settled_members(root, inner, v, held, Some(named), false);
+            let member = settled_members(at, inner, v, held, Some(named), false);
             out.insert(k.clone(), member);
         } else {
             out.insert(k.clone(), answered.clone());
         }
     }
     Value::Object(out)
+}
+
+/// What [`settled_members`] reads at every level: the schema's root, and the operation
+/// it logs a gap under.
+#[derive(Clone, Copy)]
+struct Settling<'a> {
+    root: &'a Value,
+    operation: &'a str,
+}
+
+/// The object a request's scalar `sent` makes of `held`, a member the stored copy holds
+/// as an object of schema `schema`, `answered` being the answer's: the one scalar member
+/// that admits `sent` takes it. A member admits it by its schema's `enum`, `const` or
+/// examples, and failing any such, a member with none of them whose answered value is
+/// `sent`. The answered object stands when that member there is `sent`, as the answer
+/// applied the change; else `held` with the member set. No member, or more than one,
+/// is the reason returned, and `held` stands.
+fn chosen_member(
+    root: &Value,
+    schema: Option<&Value>,
+    held: &Map<String, Value>,
+    answered: &Map<String, Value>,
+    sent: &Value,
+) -> Result<Value, &'static str> {
+    let scalar = |v: Option<&Value>| v.is_none_or(|v| !v.is_object() && !v.is_array());
+    let keys = held
+        .keys()
+        .chain(answered.keys().filter(|k| !held.contains_key(*k)))
+        .filter(|k| scalar(held.get(*k)) && scalar(answered.get(*k)));
+    let (mut declared, mut echoed) = (Vec::new(), Vec::new());
+    for key in keys {
+        let member = schema
+            .and_then(|node| schema_level(root, node, Some(key), 0).1)
+            .map(|node| resolved(root, node, 0));
+        match member.and_then(|node| admits(node, sent)) {
+            Some(true) => declared.push(key),
+            Some(false) => {}
+            None if answered.get(key) == Some(sent) => echoed.push(key),
+            None => {}
+        }
+    }
+    let key = match (declared.as_slice(), echoed.as_slice()) {
+        ([key], _) | ([], [key]) => *key,
+        ([], []) => return Err("no member of the object admits the value"),
+        _ => return Err("several members of the object admit the value"),
+    };
+    if answered.get(key) == Some(sent) {
+        return Ok(Value::Object(answered.clone()));
+    }
+    let mut out = held.clone();
+    out.insert(key.clone(), sent.clone());
+    Ok(Value::Object(out))
+}
+
+/// `node` past its `$ref`s.
+fn resolved<'a>(root: &'a Value, node: &'a Value, depth: usize) -> &'a Value {
+    match node
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix('#'))
+        .and_then(|pointer| root.pointer(pointer))
+    {
+        Some(target) if depth < 8 => resolved(root, target, depth + 1),
+        _ => node,
+    }
+}
+
+/// Whether a member's schema admits `value`: by its `enum` or `const`, which say every
+/// value it takes, or its examples, which say only some. `None` when none says.
+fn admits(node: &Value, value: &Value) -> Option<bool> {
+    if let Some(values) = node.get("enum").and_then(Value::as_array) {
+        return Some(values.contains(value));
+    }
+    if let Some(constant) = node.get("const") {
+        return Some(constant == value);
+    }
+    let listed = node
+        .get("examples")
+        .and_then(Value::as_array)
+        .is_some_and(|examples| examples.contains(value));
+    (listed || node.get("example") == Some(value)).then_some(true)
 }
 
 /// Whether a member's schema has a `oneOf` or `anyOf`.

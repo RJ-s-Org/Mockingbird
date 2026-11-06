@@ -8,6 +8,7 @@
 #![cfg(test)]
 
 mod budget;
+mod choice_member;
 mod contract_values;
 mod debug;
 mod error_quality;
