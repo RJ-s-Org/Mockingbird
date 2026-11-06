@@ -14,7 +14,9 @@ The proxy injects the real OpenRouter key, so the server itself only gets a
 placeholder `OPENROUTER_API_KEY`: the real key never reaches it.
 
 Every check appends one JSON line to `<out>/server.jsonl`:
-`{model, suite, case, rep, ok, latency_ms, ttfe_ms?, source, detail}`.
+`{model, suite, case, rep, ok, latency_ms, ttfe_ms?, source, detail, run_id}`.
+A faker answer forced by the bench proxy's own budget stops the run and marks it
+invalid in `<out>/invalid.jsonl` (exit 3); see the README's Budget section.
 Server logs go to `<out>/server-logs/<slug>~<suite>.log`.
 
 Suites (contracts are in-repo, so the bench is reproducible):
@@ -151,6 +153,7 @@ from datetime import datetime, timedelta, timezone
 from xml.etree import ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import proxy as bench_proxy  # noqa: E402  (budget_exhausted; proxy.py runs nothing on import)
 import world_author  # noqa: E402
 from world_author import WORLDS  # noqa: E402
 
@@ -323,6 +326,48 @@ class Stopped(BaseException):
 # Set when a parallel run is interrupted: units still running stop at their next call.
 STOP = threading.Event()
 
+# Set once a call's answer was a faker answer the bench proxy's own budget forced
+# (the proxy refused the LLM call with 402). Such an answer says nothing about the
+# model, so the run stops (STOP), writes no further row, records itself in
+# <out>/invalid.jsonl and exits EXIT_BUDGET; aggregate.py leaves its rows out.
+BUDGET_TRIPPED = threading.Event()
+BUDGET_FIRST_REASON = []  # the first such fallback reason seen
+_BUDGET_LOCK = threading.Lock()
+EXIT_BUDGET = 3
+# Identifies this process's rows in server.jsonl, so an invalid run's rows can be
+# told from a later re-run's of the same model and suite.
+RUN_ID = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+# The max_tokens a server profile sends when it sets none (the engine's default,
+# see `docs/configuration.md`): what each server call reserves at the proxy.
+SERVER_MAX_TOKENS = 16384
+
+
+def budget_exhausted():
+    return BUDGET_TRIPPED.is_set()
+
+
+def reset_budget_state():
+    """For tests: forget a budget stop (and the STOP it set)."""
+    with _BUDGET_LOCK:
+        BUDGET_TRIPPED.clear()
+        BUDGET_FIRST_REASON.clear()
+    STOP.clear()
+
+
+def check_budget(reason, where):
+    """Stops the run when `reason` (a fallback reason or an import job's error) is the
+    bench proxy refusing a call on its budget: raises Stopped, so no row is written
+    for the answer, and every other unit stops at its next call."""
+    if not bench_proxy.budget_exhausted(reason):
+        return
+    with _BUDGET_LOCK:
+        if not BUDGET_TRIPPED.is_set():
+            BUDGET_FIRST_REASON.append(str(reason)[:300])
+            BUDGET_TRIPPED.set()
+            print(f"  bench budget exhausted (at {where}): stopping the run; it is invalid", file=sys.stderr)
+    STOP.set()
+    raise Stopped(f"bench budget exhausted: {where}")
+
 
 def run_units(units, args, jobs=None):
     """Runs independent zero-argument callables and returns their results in
@@ -394,10 +439,13 @@ class Sink:
         row["detail"] = detail
         if self.world != "none":
             row["world"] = self.world
+        row["run_id"] = RUN_ID
         line = (json.dumps(row, ensure_ascii=False) + "\n").encode()
         mark = "ok " if ok else "BAD"
         lat = "-" if latency_ms is None else f"{latency_ms / 1000:.1f}s"
         with self.lock:
+            if BUDGET_TRIPPED.is_set():
+                return  # the run is invalid: nothing after the bench's budget ran out is a result
             with open(self.path, "ab") as f:
                 fcntl.flock(f, fcntl.LOCK_EX)
                 try:
@@ -505,6 +553,7 @@ def request(url, method="GET", headers=None, json_body=None, form=None, data=Non
     except (urllib.error.URLError, OSError) as e:
         return (time.monotonic() - started) * 1000, 0, {}, None, str(e).encode()
     elapsed = (time.monotonic() - started) * 1000
+    check_budget(fallback_reason(hdrs), f"{method} {urllib.parse.urlsplit(url).path}")
     try:
         body = json.loads(raw) if raw else None
     except ValueError:
@@ -805,6 +854,7 @@ def read_sse(url, headers, want, timeout):
         conn.request("GET", parts.path + (f"?{parts.query}" if parts.query else ""), headers=headers)
         resp = conn.getresponse()
         status = resp.status
+        check_budget(fallback_reason(resp.headers), f"GET {parts.path}")
         if status != 200:
             return status, None, (time.monotonic() - started) * 1000, [], excerpt(resp.read())
         deadline = started + timeout
@@ -1013,6 +1063,7 @@ def import_one(srv, args, mock, name, path, expected):
         _, st, _, polled, _ = request(f"{srv.api}/mocks/{mock}/imports/{job_id}", timeout=30)
         if st == 200 and isinstance(polled, dict):
             job = polled
+    check_budget(job.get("error"), f"import {name}")
     elapsed = (time.monotonic() - started) * 1000
     detail = {"job_status": job.get("status"), "error": job.get("error"), "progress": job.get("progress"),
               "result_version": job.get("result_version"), "expected": expected}
@@ -8617,11 +8668,17 @@ def main():
     if args.suites_parallel:
         # A suite's server log is named by model and suite, so each runs once.
         suites = list(dict.fromkeys(suites))
+    warn_headroom(args, suites)
+    if args.suites_parallel:
         failed = any(run_units([functools.partial(run_suite, suite, args) for suite in suites], args,
                                jobs=len(suites)))
     else:
-        failed = any([run_suite(suite, args) for suite in suites])
-    sys.exit(1 if failed else 0)
+        failed = False
+        for suite in suites:
+            failed = run_suite(suite, args) or failed
+            if BUDGET_TRIPPED.is_set():
+                break  # the rest would only meet the same refusal
+    sys.exit(exit_code(failed))
 
 
 def run_suite(suite, args):
@@ -8635,9 +8692,15 @@ def run_suite(suite, args):
         with Server(args, suite, mocks) as srv:
             apply_worlds(srv, args, suite, mocks)
             runner(srv, sink, args)
+    except Stopped:
+        if not BUDGET_TRIPPED.is_set():
+            raise
     except Exception as e:  # one broken suite must not stop the others
         failed = True
         sink.add("suite_error", -1, False, None, "error", {"error": f"{type(e).__name__}: {e}"[:500]})
+    if BUDGET_TRIPPED.is_set():
+        mark_invalid(args, suite, world, sink)
+        return True
     n_ok = sum(1 for r in sink.rows if r["ok"])
     n_infra = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra"))
     n_cascade = sum(1 for r in sink.rows if not r["ok"] and obj(r.get("detail")).get("infra_cascade"))
@@ -8649,6 +8712,87 @@ def run_suite(suite, args):
     if mix:
         print(f"  {suite}: providers {mix}", file=sys.stderr)
     return failed
+
+
+def mark_invalid(args, suite, world, sink):
+    """Records the (model, suite) run as invalid in <out>/invalid.jsonl (aggregate.py
+    leaves its rows, by `run_id`, out of every score) and says so on stderr."""
+    stats = proxy_stats(args) or {}
+    spent, cap = stats.get("spent_usd"), stats.get("budget_usd")
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "invalid": True,
+           "reason": bench_proxy.BUDGET_EXHAUSTED_MESSAGE, "run_id": RUN_ID, "model": args.model, "suite": suite,
+           "world": world, "rows_written": len(sink.rows),
+           "fallback_reason": BUDGET_FIRST_REASON[0] if BUDGET_FIRST_REASON else None,
+           "spent_usd": spent, "budget_usd": cap}
+    world_author.append_jsonl(os.path.join(args.out, "invalid.jsonl"), rec)
+    money = (f"spent ${spent:.4f} of ${cap:.2f} cap" if isinstance(spent, (int, float)) and isinstance(cap, (int, float))
+             else "spend unknown: proxy /stats did not answer")
+    print(f"  {suite}: INVALID: bench budget exhausted ({money}); the {len(sink.rows)} row(s) written before "
+          f"it are excluded by aggregate.py (run {RUN_ID}, {args.out}/invalid.jsonl)", file=sys.stderr)
+
+
+def exit_code(failed):
+    """EXIT_BUDGET when the bench's own budget stopped the run, else 1 if a suite broke, else 0."""
+    if BUDGET_TRIPPED.is_set():
+        return EXIT_BUDGET
+    return 1 if failed else 0
+
+
+def proxy_get(args, path):
+    """The bench proxy's JSON answer to GET `path`, or None."""
+    try:
+        with urllib.request.urlopen(f"{args.proxy_base.rstrip('/')}{path}", timeout=5) as r:
+            got = json.load(r)
+    except (OSError, ValueError):
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def proxy_stats(args):
+    return proxy_get(args, "/stats")
+
+
+def calls_in_flight(args, suites):
+    """LLM calls this process can have in flight at once: --jobs per suite, times the
+    suites when they run in parallel."""
+    jobs = max(1, int(getattr(args, "jobs", 1) or 1))
+    return jobs * (len(suites) if getattr(args, "suites_parallel", False) else 1)
+
+
+# Warn when the budget left is under this many times what the run's in-flight
+# reservations hold: the proxy refuses a call once spend + reservations reach the
+# cap, well before the spend itself does.
+HEADROOM_FACTOR = 2.0
+
+
+def headroom_warning(budget, spent, reserved, per_call, in_flight, basis):
+    """The warning to print when the budget left is under HEADROOM_FACTOR x the
+    reservations `in_flight` calls hold, else None."""
+    need = in_flight * per_call
+    left = budget - spent - reserved
+    if left >= HEADROOM_FACTOR * need:
+        return None
+    return (f"WARNING: bench budget headroom is low: cap ${budget:.2f}, spent ${spent:.4f}, reserved by other "
+            f"calls ${reserved:.4f}, so ${left:.4f} left; {in_flight} calls in flight x ${per_call:.4f} reserved "
+            f"each ({basis.replace('_', ' ')}) = ${need:.4f}, and {HEADROOM_FACTOR:g}x that is "
+            f"${HEADROOM_FACTOR * need:.2f}. The proxy refuses calls once spend + reservations reach the cap, "
+            f"which stops this run as invalid; raise --budget-usd or lower --jobs / --suites-parallel.")
+
+
+def warn_headroom(args, suites):
+    """Prints headroom_warning for this run, from the proxy's `/reserve`; silent when
+    the proxy does not answer it (an older proxy, or --replay)."""
+    q = urllib.parse.urlencode({"model": args.model, "max_tokens": SERVER_MAX_TOKENS})
+    got = proxy_get(args, f"/reserve?{q}")
+    if not got:
+        return
+    try:
+        msg = headroom_warning(float(got["budget_usd"]), float(got["spent_usd"]), float(got.get("reserved_usd") or 0),
+                               float(got["reserve_usd"]), calls_in_flight(args, suites), str(got.get("basis") or "?"))
+    except (KeyError, TypeError, ValueError):
+        return
+    if msg:
+        print(msg, file=sys.stderr, flush=True)
 
 
 def suite_mocks(suite, args):
@@ -8684,11 +8828,7 @@ def provider_mix(args, suite):
     """The suite's calls per serving provider, from the bench proxy's /stats
     (`Fireworks 412 (98.6%), Darkbloom 6 (1.4%)`); None when the proxy has none."""
     label = run_label(args.model, suite, args)
-    try:
-        with urllib.request.urlopen(f"{args.proxy_base.rstrip('/')}/stats", timeout=5) as r:
-            stats = json.load(r)
-    except (OSError, ValueError):
-        return None
+    stats = proxy_stats(args)
     entry = (stats.get("per_label") or {}).get(label) if isinstance(stats, dict) else None
     counts = (entry or {}).get("providers") or {}
     total = sum(counts.values())
