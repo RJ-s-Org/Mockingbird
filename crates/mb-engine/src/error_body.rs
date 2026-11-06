@@ -426,7 +426,10 @@ type Change = (String, Value);
 /// messages, and each of `violations` in the path-like and pointer members of one
 /// item of an array of error objects (the last one in the items past them), with its
 /// reason in that item's message-like member. Outside such an array, the first
-/// violation names the field and the message-like member keeps every reason. Each change is kept only while the body
+/// violation names the field and the message-like member keeps every reason. A map
+/// of reasons ([`reasons_map`]) is keyed by the violated fields, and an array of
+/// objects naming no field says the reasons in their message-like member
+/// ([`message_items`]). Each change is kept only while the body
 /// still validates; a body not valid to begin with is left as it is.
 #[must_use]
 pub fn with_reasons(
@@ -776,6 +779,9 @@ fn walk_body(
             // As `error_arrays` finds them: not one inside an error item.
             let errors = !matches!(scope, Scope::Item(_))
                 && item_schema.is_some_and(|s| error_object(s, defs, 0));
+            if !errors && matches!(scope, Scope::Outside) {
+                message_items(items, item_schema, walk, at, out);
+            }
             for (i, v) in items.iter().enumerate() {
                 let len = at.len();
                 at.push('/');
@@ -791,6 +797,25 @@ fn walk_body(
             false
         }
         Value::Object(members) => {
+            // The body itself, or a member named as the reasons (`{"errors": {…}}`):
+            // another map (a `metadata` one) says something else.
+            let reasons_member = depth == 0
+                || at
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| MESSAGES_ARRAYS.contains(&folded(name).as_str()));
+            if matches!(scope, Scope::Outside)
+                && reasons_member
+                && let Some(shape) = reasons_map(schema, defs)
+            {
+                return match keyed_reasons(members, shape, walk) {
+                    Some(map) => {
+                        out.push((at.clone(), map));
+                        !violations.is_empty()
+                    }
+                    None => false,
+                };
+            }
             let last = violations.len().saturating_sub(1);
             let violation = match scope {
                 Scope::Outside => violations.first(),
@@ -875,6 +900,130 @@ fn walk_body(
             names_field
         }
         _ => false,
+    }
+}
+
+/// How a map of reasons ([`reasons_map`]) holds each member's reasons.
+#[derive(Clone, Copy)]
+enum ReasonsShape {
+    /// One string.
+    Text,
+    /// An array of strings.
+    Texts,
+}
+
+/// Whether objects `schema` declares are a map of reasons (Rails'
+/// `{"name": ["can't be blank"]}`): they declare no member, and every other member is
+/// a string or an array of strings.
+fn reasons_map(schema: Option<&Value>, defs: &Map<String, Value>) -> Option<ReasonsShape> {
+    let parts = branches(schema?, defs);
+    let declares = parts.iter().any(|b| {
+        b.get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|p| !p.is_empty())
+    });
+    if declares {
+        return None;
+    }
+    parts.iter().find_map(|b| {
+        let rest = b.get("additionalProperties").filter(|r| r.is_object())?;
+        let rest_parts = branches(rest, defs);
+        let kinds = types(&rest_parts);
+        if kinds.contains(&"string") {
+            return Some(ReasonsShape::Text);
+        }
+        let items = items_schema(Some(rest), defs)?;
+        (kinds.contains(&"array") && types(&branches(items, defs)).contains(&"string"))
+            .then_some(ReasonsShape::Texts)
+    })
+}
+
+/// A map of reasons ([`reasons_map`]) saying the walk's facts: each violated field
+/// keyed by its name (`address.city`) holding its reason, or, when no violation names
+/// a field, the map's own keys holding every reason. `None` when there is nothing to
+/// say.
+fn keyed_reasons(
+    members: &Map<String, Value>,
+    shape: ReasonsShape,
+    walk: &Walk<'_>,
+) -> Option<Value> {
+    let mut keyed: Vec<(String, Vec<String>)> = Vec::new();
+    for violation in walk.violations {
+        let Some(field) = violation.field() else {
+            continue;
+        };
+        match keyed.iter_mut().find(|(name, _)| *name == field) {
+            Some((_, reasons)) => reasons.push(violation.reason.clone()),
+            None => keyed.push((field, vec![violation.reason.clone()])),
+        }
+    }
+    if keyed.is_empty() {
+        if walk.reasons.is_empty() || members.is_empty() {
+            return None;
+        }
+        keyed = members
+            .keys()
+            .map(|name| (name.clone(), walk.reasons.to_vec()))
+            .collect();
+    }
+    let map = keyed
+        .into_iter()
+        .map(|(name, reasons)| {
+            let value = match shape {
+                ReasonsShape::Text => Value::String(reasons.join("; ")),
+                ReasonsShape::Texts => {
+                    Value::Array(reasons.into_iter().map(Value::String).collect())
+                }
+            };
+            (name, value)
+        })
+        .collect();
+    Some(Value::Object(map))
+}
+
+/// Collects the changes that say the walk's facts in an array, at `at`, of objects
+/// with a message-like string member and no member naming a violation (JSON:API's
+/// `{"errors": [{"status", "title"}]}`): item `i`'s message is violation `i`'s reason
+/// (the last one's past them), or, with no violation, every reason.
+fn message_items(
+    items: &[Value],
+    item_schema: Option<&Value>,
+    walk: &Walk<'_>,
+    at: &str,
+    out: &mut Vec<Change>,
+) {
+    let Some(item_schema) = item_schema else {
+        return;
+    };
+    let declared: Vec<&Map<String, Value>> = branches(item_schema, walk.defs)
+        .into_iter()
+        .filter_map(|b| b.get("properties").and_then(Value::as_object))
+        .collect();
+    let message = MESSAGE_FIELDS.iter().find_map(|wanted| {
+        let wanted = folded(wanted);
+        declared.iter().find_map(|p| {
+            p.iter()
+                .find(|(name, prop)| {
+                    folded(name) == wanted && types(&branches(prop, walk.defs)).contains(&"string")
+                })
+                .map(|(name, _)| name.clone())
+        })
+    });
+    let Some(message) = message else {
+        return;
+    };
+    let every = walk.reasons.join("; ");
+    let last = walk.violations.len().saturating_sub(1);
+    for (i, item) in items.iter().enumerate() {
+        let text = match walk.violations.get(i.min(last)) {
+            Some(violation) => violation.reason.clone(),
+            None if !every.is_empty() => every.clone(),
+            None => continue,
+        };
+        if item.get(&message).is_some_and(Value::is_string) {
+            let pointer = format!("{at}/{i}/{}", message.replace('~', "~0").replace('/', "~1"));
+            out.push((pointer, Value::String(text)));
+        }
     }
 }
 
@@ -1569,6 +1718,53 @@ mod tests {
             &violations,
         );
         assert_eq!(out["errors"], json!(["r1"]));
+    }
+
+    #[test]
+    fn a_map_of_reasons_is_keyed_by_each_violated_field() {
+        let texts = json!({"type": "object", "additionalProperties": {
+            "type": "array", "items": {"type": "string"}
+        }});
+        let validator = SchemaValidator::new(&texts).unwrap();
+        let violations = [violation("/name", "r1"), violation("/address/city", "r2")];
+        let out = with_reasons(&validator, json!({"x": ["y"]}), &[], &violations);
+        assert_eq!(out, json!({"name": ["r1"], "address.city": ["r2"]}));
+        // No field: the map's own keys hold every reason.
+        let out = with_reasons(&validator, json!({"x": ["y"]}), &["r".into()], &[]);
+        assert_eq!(out, json!({"x": ["r"]}));
+
+        let text = json!({"type": "object", "additionalProperties": {"type": "string"}});
+        let validator = SchemaValidator::new(&text).unwrap();
+        let out = with_reasons(&validator, json!({"x": "y"}), &[], &violations[..1]);
+        assert_eq!(out, json!({"name": "r1"}));
+
+        // Under a member named as the reasons, too; another map is left.
+        let nested = json!({"type": "object", "properties": {
+            "errors": texts,
+            "meta": {"type": "object", "additionalProperties": {"type": "string"}}
+        }});
+        let validator = SchemaValidator::new(&nested).unwrap();
+        let body = json!({"errors": {"x": ["y"]}, "meta": {"k": "v"}});
+        let out = with_reasons(&validator, body, &[], &violations[..1]);
+        assert_eq!(out, json!({"errors": {"name": ["r1"]}, "meta": {"k": "v"}}));
+    }
+
+    #[test]
+    fn error_objects_naming_no_field_say_the_reason() {
+        let schema = json!({"type": "object", "properties": {"errors": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"status": {"type": "string"}, "title": {"type": "string"}}
+        }}}});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body =
+            json!({"errors": [{"status": "a", "title": "b"}, {"status": "c", "title": "d"}]});
+        let out = with_reasons(&validator, body.clone(), &[], &[violation("/name", "r1")]);
+        assert_eq!(
+            out,
+            json!({"errors": [{"status": "a", "title": "r1"}, {"status": "c", "title": "r1"}]})
+        );
+        let out = with_reasons(&validator, body, &["r1".into(), "r2".into()], &[]);
+        assert_eq!(out["errors"][0]["title"], "r1; r2");
     }
 
     /// A member that holds a URI (problem+json's `type`) or an integer HTTP status

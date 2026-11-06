@@ -179,3 +179,86 @@ fn a_taken_set_names_each_member_and_value() {
     );
     assert_eq!(facts.members(), ["displayName", "rank"]);
 }
+
+/// `POST /aliases` refusing with `422` whose body is `error` (YAML).
+fn refusing_with(error: &str) -> Bundle {
+    let src = format!(
+        r##"
+openapi: 3.1.0
+info: {{title: Aliases, version: "1"}}
+paths:
+  /aliases:
+    post:
+      operationId: createAlias
+      requestBody: {{content: {{application/json: {{schema: {{type: object, properties: {{alias: {{type: string}}}}}}}}}}}}
+      responses:
+        "201": {{description: created, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string}}}}}}}}}}}}
+        "422": {{description: refused, content: {{application/json: {{schema: {error}}}}}}}
+"##
+    );
+    compile(src.as_bytes()).unwrap()
+}
+
+/// A map of reasons (`{"alias": ["…"]}`) is keyed by the taken member, with or
+/// without a model (its schema has no code for one to write).
+#[tokio::test]
+async fn a_map_of_reasons_is_keyed_by_the_taken_member() {
+    let bundle =
+        refusing_with("{type: object, additionalProperties: {type: array, items: {type: string}}}");
+    let op = bundle.operation("createAlias").unwrap();
+    let (provider, engine) = scripted(vec![]);
+    let out = engine
+        .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+        .await
+        .unwrap();
+    assert_eq!((out.status, out.source), (422, Source::State));
+    assert_eq!(
+        out.body.unwrap(),
+        json!({"alias": ["alias 'welcome-1' is already in use"]})
+    );
+    assert!(provider.requests().is_empty());
+
+    // Facts about no member: each of the map's keys holds the message.
+    let out = engine
+        .refuse_held(
+            &bundle,
+            op,
+            &call(),
+            422,
+            ErrorCause::Stale,
+            &RefusalFacts::stale(),
+        )
+        .await
+        .unwrap();
+    let body = out.body.unwrap();
+    let map = body.as_object().unwrap();
+    assert!(!map.is_empty(), "{body}");
+    for reasons in map.values() {
+        assert_eq!(reasons, &json!([RefusalFacts::stale().text()]), "{body}");
+    }
+}
+
+/// An array of error objects naming no field (JSON:API's `{status, title}`) says the
+/// message in each item's message-like member.
+#[tokio::test]
+async fn an_array_of_error_objects_says_the_message() {
+    let bundle = refusing_with(
+        "{type: object, properties: {errors: {type: array, minItems: 1, items: {type: object, properties: {status: {type: string}, title: {type: string}}}}}}",
+    );
+    let op = bundle.operation("createAlias").unwrap();
+    let engine = Engine::new(None, EngineConfig::default());
+    let out = engine
+        .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+        .await
+        .unwrap();
+    assert_eq!((out.status, out.source), (422, Source::State));
+    let body = out.body.unwrap();
+    let errors = body["errors"].as_array().unwrap();
+    assert!(!errors.is_empty(), "{body}");
+    for error in errors {
+        assert_eq!(
+            error["title"], "alias 'welcome-1' is already in use",
+            "{body}"
+        );
+    }
+}
