@@ -2,6 +2,8 @@
 //! a list response, the field that identifies them, and the schema of one
 //! of their properties.
 
+use std::collections::HashSet;
+
 use mb_mcm::{Bundle, Operation, OperationKind};
 use serde_json::Value;
 
@@ -248,6 +250,38 @@ pub fn property_schema(bundle: &Bundle, schema: &Value, field: &str) -> Option<V
     field.split('.').try_fold(schema.clone(), |at, step| {
         member_property_schema(bundle, &at, step)
     })
+}
+
+/// The member names object `schema` declares, looking through `$ref`s and
+/// `allOf`/`oneOf`/`anyOf` members; `None` when it declares none (a free-form object).
+pub fn declared_members(bundle: &Bundle, schema: &Value) -> Option<HashSet<String>> {
+    fn collect(bundle: &Bundle, schema: &Value, depth: usize, out: &mut HashSet<String>) {
+        if depth > 8 {
+            return;
+        }
+        let schema = deref(bundle, schema);
+        if let Some(Value::Object(props)) = schema.get("properties") {
+            out.extend(props.keys().cloned());
+        }
+        ["allOf", "oneOf", "anyOf"]
+            .iter()
+            .filter_map(|k| schema.get(*k).and_then(Value::as_array))
+            .flatten()
+            .for_each(|member| collect(bundle, member, depth + 1, out));
+    }
+    let mut out = HashSet::new();
+    collect(bundle, schema, 0, &mut out);
+    (!out.is_empty()).then_some(out)
+}
+
+/// Whether `names`, the members a schema declares, hold `member`: by its very name, or
+/// a dotted one (`metadata.name`, see [`mb_mcm::member_at`]) by its first step.
+#[must_use]
+pub fn declares_member(names: &HashSet<String>, member: &str) -> bool {
+    names.contains(member)
+        || member
+            .split_once('.')
+            .is_some_and(|(first, _)| names.contains(first))
 }
 
 /// [`property_schema`] of one member's very name, a dotted one too.
