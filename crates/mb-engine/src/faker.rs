@@ -171,7 +171,7 @@ where
 }
 
 /// The compiled regex of `pattern`, cached.
-fn check_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
+pub(crate) fn check_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
     cached(&CHECKS, pattern.to_string(), || {
         regex::Regex::new(pattern).ok().map(Arc::new)
     })

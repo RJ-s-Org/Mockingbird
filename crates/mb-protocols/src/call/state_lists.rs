@@ -28,6 +28,11 @@
 //! of a cursor, next-URL or header-cursor paging is a [`pages`] token, kept with the
 //! rest; a page number or offset is answered from state again, and its next position
 //! is written at the described `response` member or `response_header` when it fits.
+//! A page with no next position (the last, or one not cut) never carries the value the
+//! envelope filled that `response` member with (its contract example, or a fixed
+//! value), which no client could follow: the member is left out, else `null`, else
+//! empty text, the first the answer validates with. When none does, the filled value
+//! stays and the answer is marked `no_page_end` in its request record's `world_gap`.
 //! Every page counts the list alike: the one integer member beside the list that the
 //! schema declares and names as its count ([`deleted::count_member`]), required or
 //! not, holds what the query keeps before the page is cut, where the answer validates
@@ -281,6 +286,20 @@ fn with_count(
     pages::placed(body, &at, Some(Value::from(total)))
 }
 
+/// The mark a page from state carries in its request record's `world_gap` when the
+/// schema of the described paging `response` member admits no value saying there is no
+/// next page, so the value the envelope was filled with stays.
+const NO_PAGE_END: &str = "no_page_end";
+
+/// `body` with no next page at `path`, the described paging `response` member, in the
+/// order tried: the member left out, `null`, then empty text.
+fn page_ends(body: &Value, path: &[String]) -> Vec<Value> {
+    [None, Some(Value::Null), Some(Value::String(String::new()))]
+        .into_iter()
+        .filter_map(|end| pages::placed(body, path, end))
+        .collect()
+}
+
 /// The answer to list `call` from the session's records (see the module's doc), tagged
 /// `State`; `None` when it is not one to answer so, the collection was not listed this
 /// session, or the answer does not validate: the list is then generated.
@@ -421,13 +440,38 @@ pub(super) async fn answer(
     {
         body = counted;
     }
+    // The paging member the envelope was filled with (a fixed value, or the contract's
+    // example) is no position of this list: with no next page to write there, it ends.
+    let at_next = q
+        .page
+        .as_ref()
+        .and_then(|ask| ask.response.as_deref())
+        .map(|member| member.split('.').map(str::to_string).collect::<Vec<_>>());
+    let mut no_end = false;
+    if let Some(at) = at_next.as_deref().filter(|_| next.is_none())
+        && at.iter().try_fold(&body, |v, name| v.get(name)).is_some()
+    {
+        match page_ends(&body, at)
+            .into_iter()
+            .find(|end| valid(end).is_some())
+        {
+            Some(end) => body = end,
+            None => {
+                tracing::info!(
+                    operation = %op.id,
+                    world_gap = NO_PAGE_END,
+                    "no value of the list's next-page member says there is no next page; the page from state keeps the one filled"
+                );
+                no_end = true;
+            }
+        }
+    }
     let mut header = None;
     if let (Some(next), Some(ask)) = (next, q.page.as_ref()) {
-        if let Some(member) = &ask.response {
-            let at: Vec<String> = member.split('.').map(str::to_string).collect();
+        if let Some(at) = &at_next {
             body = [Value::from(next), Value::String(next.to_string())]
                 .into_iter()
-                .filter_map(|value| pages::placed(&body, &at, Some(value)))
+                .filter_map(|value| pages::placed(&body, at, Some(value)))
                 .find(|candidate| valid(candidate).is_some())?;
         }
         if let Some(name) = &ask.response_header {
@@ -440,6 +484,9 @@ pub(super) async fn answer(
     }
     let mut served = valid(&body)?;
     served.headers.extend(header);
+    if no_end {
+        served.world_gaps.push(NO_PAGE_END.to_string());
+    }
     if let Some((rest, size, size_param)) = cut {
         let cut = lists::Cut {
             stored: rest.len(),

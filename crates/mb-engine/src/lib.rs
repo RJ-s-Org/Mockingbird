@@ -1553,9 +1553,14 @@ impl Engine {
     }
 
     /// `response`, an error body the mock answers itself, saying its own HTTP status
-    /// where its schema shows a member holds it ([`with_http_status`]): a body the model
-    /// wrote once serves every later status it is kept for.
-    fn with_own_status(
+    /// where its schema shows a member holds it (an integer `status`, or a string
+    /// member shown as a 3-digit HTTP status, at the top level or in an array of error
+    /// objects), each change kept only while the body still validates: a body the
+    /// model wrote once serves every later status it is kept for, and states the
+    /// status it is answered with, not the one it wrote. Run once, after the call's
+    /// facts are laid over it.
+    #[must_use]
+    pub fn with_own_status(
         &self,
         bundle: &Bundle,
         op: &Operation,
@@ -1615,7 +1620,8 @@ impl Engine {
     /// rendered as a forced status's is offline: the contract's response for that
     /// status, the body the LLM wrote for it when it is valid against that response's
     /// schema, else faker-filled, then holding what the contract names for its members
-    /// (see [`contract_values`]). Tagged with the LLM's `source`, as the LLM chose it,
+    /// (see [`contract_values`]) and saying its own status ([`Self::with_own_status`]).
+    /// Tagged with the LLM's `source`, as the LLM chose it,
     /// and with no effects; a body the faker could not make valid is tagged `Fallback`,
     /// with its reason.
     fn refused(
@@ -1644,7 +1650,7 @@ impl Engine {
                     &mut response,
                     (refusal.repeated, only_empty),
                 );
-                response
+                self.with_own_status(bundle, op, response)
             }
             // Not offered: a refusal names only a status the operation declares.
             None => GeneratedResponse {
