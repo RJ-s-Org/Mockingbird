@@ -240,6 +240,7 @@ paths:
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}, "404": {description: missing}}
     delete:
       operationId: deleteNote
+      parameters: [{name: Idempotency-Key, in: header, schema: {type: string}}]
       responses: {"204": {description: deleted}}
   /tags:
     post:
@@ -451,4 +452,135 @@ async fn an_executed_write_settles_what_write_memory_kept_for_its_record() {
         "{:?}",
         capture.of("getFolder")
     );
+}
+
+/// Boxes are deleted answering their record in an envelope, an acknowledgement sharing
+/// the record's id, or a message sharing nothing with it.
+const ANSWERS: &str = r##"
+openapi: 3.0.0
+info: {title: Answers, version: "1"}
+paths:
+  /boxes:
+    post:
+      operationId: createBox
+      requestBody: {content: {application/json: {schema: {type: object, properties: {label: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Box"}}}}}
+  /boxes/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getBox
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Box"}}}}, "404": {description: missing}}
+    delete:
+      operationId: deleteBox
+      responses:
+        "200":
+          description: deleted
+          content: {application/json: {schema: {type: object, required: [data], properties: {data: {$ref: "#/components/schemas/Box"}}}}}
+  /boxes/{id}/ack:
+    delete:
+      operationId: dropBox
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: dropped
+          content: {application/json: {schema: {type: object, required: [id, deleted], properties: {id: {type: string}, deleted: {type: boolean}}}}}
+  /boxes/{id}/said:
+    delete:
+      operationId: binBox
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: binned
+          content: {application/json: {schema: {type: object, required: [message], properties: {message: {type: string}}}}}
+components:
+  schemas:
+    Box:
+      type: object
+      required: [id, label]
+      properties: {id: {type: string}, label: {type: string}}
+"##;
+
+/// The `Box` type, its create made and served from state.
+async fn a_box(world: serde_json::Value) -> support::DescribedHarness {
+    let h = support::harness(
+        ANSWERS,
+        vec![json!({"id": "b1", "label": "red"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/boxes", Some(json!({"label": "red"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    h
+}
+
+#[tokio::test]
+async fn a_delete_answers_its_record_in_the_envelope_its_operation_holds_it_in() {
+    let (_capture, _guard) = Capture::install();
+    let h = a_box(json!({"operations": {"deleteBox": {"answer": {"record": "/data"}}}})).await;
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!({"data": {"id": "b1", "label": "red"}}));
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_acknowledgement_takes_the_record_s_members_and_the_faker_s_for_the_rest() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"dropBox": {"kind": "delete", "type": "boxes"}}});
+    let h = a_box(world).await;
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1/ack", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["id"], json!("b1"), "{body}");
+    assert!(body["deleted"].is_boolean(), "{body}");
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_answer_sharing_nothing_with_the_record_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"binBox": {"kind": "delete", "type": "boxes"}}});
+    let h = a_box(world).await;
+    h.send("DELETE", "/boxes/b1/said", None, &[]).await;
+    assert_eq!(
+        capture.of("binBox"),
+        vec![ExecLine {
+            operation: "binBox".into(),
+            exec: "delete".into(),
+            exec_fallback: Some("render_failed".into())
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_idempotency_key_replays_an_executed_delete() {
+    let (capture, _guard) = Capture::install();
+    let world =
+        json!({"operations": {"deleteNote": {"idempotency": {"header": "Idempotency-Key"}}}});
+    let h = support::harness(
+        DELETES,
+        vec![json!({"id": "n1", "text": "hi"})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/notes", Some(json!({"text": "hi"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let key = [("idempotency-key", "k-1")];
+    let (first, _, _) = h.send("DELETE", "/notes/n1", None, &key).await;
+    let (again, _, _) = h.send("DELETE", "/notes/n1", None, &key).await;
+    assert_eq!(first, StatusCode::NO_CONTENT);
+    assert_eq!(again, StatusCode::NO_CONTENT);
+    // The repeat is the first answer replayed: it never reaches the executor.
+    assert_eq!(
+        capture.of("deleteNote").len(),
+        1,
+        "{:?}",
+        capture.of("deleteNote")
+    );
+    assert_eq!(h.provider.requests().len(), 1);
 }

@@ -2,13 +2,12 @@
 //! and replaces are not yet, and generate.
 
 use mb_engine::GeneratedResponse;
-use mb_engine::consistency::property_schema;
+use mb_engine::consistency::declared_members;
 use mb_mcm::world::OpKind;
-use mb_state::StoredResource;
-use serde_json::{Map, Value};
+use serde_json::{Value, json};
 
-use super::{Fallback, Held, Ran, Write, answered, bodiless, commit, fell_back};
-use crate::call::{CallPlan, OperationCall, StateAccess, lifecycle, serve_held};
+use super::{Fallback, Held, Ran, Write, answered, commit, fell_back, render};
+use crate::call::{CallPlan, OperationCall, StateAccess, lifecycle};
 
 /// Whether the executor takes updates and replaces.
 pub(super) const EXECUTES: bool = false;
@@ -46,7 +45,7 @@ async fn delete(
     let t = stored.resource_type.as_str();
     let mut data = stored.data.clone();
     let soft = lifecycle::soft_delete(rt, t, &mut data);
-    let Some(answer) = delete_answer(rt, plan, (stored, data.clone()), response_schema) else {
+    let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
         return Ran::Generate(None);
     };
@@ -62,35 +61,24 @@ async fn delete(
     Ran::Answered(Box::new(answer))
 }
 
-/// What a delete answers: nothing when its success response declares no body; else its
-/// own schema rendered from the record as the delete leaves it: the record in the
-/// envelope the operation holds it in, or the record's members the schema declares (an
-/// empty object for a schema declaring none).
+/// What a delete answers: an empty object when its success response's schema declares
+/// no members, else its answer rendered from the record as the delete leaves it.
 fn delete_answer(
     rt: &crate::MockRuntime,
     plan: &CallPlan<'_>,
-    (stored, data): (&StoredResource, Value),
+    call: &OperationCall,
+    (id, data): (&str, &Value),
     response_schema: Option<&Value>,
 ) -> Option<GeneratedResponse> {
     let op = plan.op;
-    if let Some(none) = bodiless(op) {
-        return Some(none);
+    let free_form = op
+        .success_output()
+        .and_then(|v| response_schema.or(v.schema.as_ref()))
+        .is_some_and(|schema| declared_members(&rt.bundle, schema).is_none());
+    if free_form && op.identity.as_ref().is_none_or(|i| i.record.is_none()) {
+        return rt
+            .engine
+            .serve_stored(&rt.bundle, op, &json!({}), response_schema);
     }
-    if op.identity.as_ref().is_some_and(|i| i.record.is_some()) {
-        let left = StoredResource {
-            data,
-            ..stored.clone()
-        };
-        return serve_held(rt, op, &left, None, response_schema);
-    }
-    let schema = response_schema.or_else(|| op.success_output()?.schema.as_ref())?;
-    let declared: Map<String, Value> = match data {
-        Value::Object(members) => members
-            .into_iter()
-            .filter(|(name, _)| property_schema(&rt.bundle, schema, name).is_some())
-            .collect(),
-        _ => Map::new(),
-    };
-    rt.engine
-        .serve_stored(&rt.bundle, op, &Value::Object(declared), response_schema)
+    render(rt, plan, call, (id, data), response_schema)
 }

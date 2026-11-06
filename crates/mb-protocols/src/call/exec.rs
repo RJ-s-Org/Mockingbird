@@ -14,6 +14,7 @@
 //! never through [`super::complete`]'s reconciliation of a generated answer.
 
 use mb_engine::GeneratedResponse;
+use mb_engine::consistency::{declared_members, property_schema};
 use mb_mcm::world::OpKind;
 use mb_mcm::{Effect, OperationKind};
 use mb_state::StoredResource;
@@ -352,7 +353,8 @@ pub(super) enum Write {
 }
 
 /// Applies a write the executor decided, with the side effects every write has, and
-/// returns `answer` as it is: the session listed, the record stored in its collection (a create noted as a
+/// returns `answer` as it is: the session listed, the write noted as the session's
+/// latest and told to its list routes' memory, the record stored in its collection (a create noted as a
 /// member of its listed collection), a removal marked deleted under its route's parent
 /// and its tokens ended, the requests write memory kept for it forgotten (the executor's
 /// record is authoritative), the entity tag's state, the answer kept for a repeat of its
@@ -390,10 +392,13 @@ pub(super) async fn commit(
                     deleted::mark(state, session, (op, call), t, &id, held).await;
                 }
                 tokens::forget(state, session, t, &id).await;
-                world::after_delete(state, plan, Some(&id), &answer).await;
                 id
             }
         };
+        // What earlier answers said of a deleted record goes, a soft-deleted one too.
+        world::after_delete(state, plan, Some(&id), &answer).await;
+        // The session's latest write, and what its list routes remember of it.
+        write_memory::after_route_write(state, plan, call, &answer, (false, false)).await;
         // A session only reads had written to is listed once a write lands.
         let (_, unlisted) = world::recall_answers(state, plan).await;
         world::list_session(state, plan, unlisted, &answer).await;
@@ -444,4 +449,82 @@ pub(super) fn bodiless(op: &mb_mcm::Operation) -> Option<GeneratedResponse> {
         headers: Vec::new(),
         world_gaps: Vec::new(),
     })
+}
+
+/// `record` (of the call's target type) as the call's operation answers a write of it
+/// (spec §4): no body when its success response declares none; the record in the
+/// envelope the operation holds it in; the record itself when the schema declares every
+/// member it holds; else (an acknowledgement such as `{ok, id, rev}`) the faker's
+/// answer with each member the record holds under the same name, and
+/// the operation's identity member, taking the record's value. `None` when the schema
+/// declares members of which the record holds none, or nothing rendered validates.
+/// Tagged `state`.
+pub(super) fn render(
+    rt: &crate::MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    (id, record): (&str, &Value),
+    response_schema: Option<&Value>,
+) -> Option<GeneratedResponse> {
+    let op = plan.op;
+    if let Some(none) = bodiless(op) {
+        return Some(none);
+    }
+    if op.identity.as_ref().is_some_and(|i| i.record.is_some()) {
+        let held = StoredResource {
+            resource_type: op.resource_type.clone().unwrap_or_default(),
+            id: id.to_owned(),
+            data: record.clone(),
+        };
+        return serve_held(rt, op, &held, None, response_schema);
+    }
+    let bundle = &rt.bundle;
+    let variant = op.success_output()?;
+    let schema = response_schema.or(variant.schema.as_ref())?;
+    let declares = |name: &str| property_schema(bundle, schema, name).is_some();
+    let mut shown: Map<String, Value> = record
+        .as_object()
+        .map(|members| {
+            members
+                .iter()
+                .filter(|(name, _)| declares(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(field) = op.identity.as_ref().map(|i| i.field.as_str())
+        && declares(field)
+        && !shown.contains_key(field)
+    {
+        shown.insert(field.to_owned(), Value::String(id.to_owned()));
+    }
+    if shown.is_empty() && declared_members(bundle, schema).is_some_and(|m| !m.is_empty()) {
+        return None;
+    }
+    // An answer declaring every member of the record is the record.
+    let whole = record
+        .as_object()
+        .is_some_and(|members| members.keys().all(|name| declares(name)));
+    if whole
+        && let Some(answer) =
+            rt.engine
+                .serve_stored(bundle, op, &Value::Object(shown.clone()), response_schema)
+    {
+        return Some(answer);
+    }
+    let status = match variant.status {
+        mb_mcm::StatusSelector::Code(code) => code,
+        _ => 200,
+    };
+    let ctx = mb_engine::GenerationContext {
+        response_schema,
+        ..mb_engine::GenerationContext::default()
+    };
+    let faked = rt.engine.fallback(bundle, op, variant, status, call, &ctx);
+    let Some(Value::Object(mut answer)) = faked.body else {
+        return None;
+    };
+    answer.extend(shown);
+    rt.engine
+        .serve_stored(bundle, op, &Value::Object(answer), response_schema)
 }
