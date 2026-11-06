@@ -1426,27 +1426,13 @@ impl Engine {
             }
             None => None,
         };
-        let declared = declared.map(|mut response| {
-            let schema = op
-                .output_for_status(response.status)
-                .filter(|variant| !media::is_non_json(op, variant))
-                .and_then(|variant| variant.schema.as_ref());
-            if let (Some(schema), Some(body)) = (schema, response.body.take()) {
-                let mut body = body;
-                let unchanged = body.clone();
-                error_body::set_message(&mut body, schema, &bundle.defs, detail);
-                let body = match self.error_validator(bundle, op, response.status) {
-                    Some(validator) if validator.is_valid(&body) => {
-                        error_body::with_reasons(&validator, body, &[detail.to_string()], &[])
-                    }
-                    Some(validator) => {
-                        error_body::with_reasons(&validator, unchanged, &[detail.to_string()], &[])
-                    }
-                    None => body,
-                };
-                response.body = Some(body);
-            }
-            response
+        let declared = declared.map(|response| {
+            self.with_facts(
+                bundle,
+                op,
+                response,
+                &error_body::RefusalFacts::message(detail),
+            )
         });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
             status: 404,
@@ -1525,29 +1511,78 @@ impl Engine {
             })
     }
 
-    /// A write's refusal decided from state alone, before any LLM call (a stale
-    /// concurrency token): `op`'s response declared for `code` by that very status,
-    /// rendered as an LLM's refusal is, tagged `State`. `None` when `op` declares no
-    /// response for `code` itself (a `default` one is not a refusal the contract names).
-    #[must_use]
-    pub fn refuse_from_state(
+    /// A refusal decided from state alone, before generating (a unique value
+    /// another record holds, a stale concurrency token, a record the description says
+    /// is gone): `op`'s response declared for `code` by that very status, its body
+    /// [`Engine::error_answer`]'s for `cause` (written once per operation, status and
+    /// cause by the model, else the faker's), refusing the repeated value of `facts`'
+    /// members, with `facts` laid over it while it still validates: their message in
+    /// its message-like member, and their members in its path-like ones (see
+    /// [`error_body::with_reasons`]). Tagged `State` (`Fallback` when the faker could
+    /// not make its body valid), with the usage of a body written now. `None` when `op`
+    /// declares no response for `code` itself (a `default` one is not a refusal the
+    /// contract names).
+    pub async fn refuse_held(
         &self,
         bundle: &Bundle,
         op: &Operation,
         call: &OperationCall,
         code: u16,
+        cause: error_body::ErrorCause,
+        facts: &error_body::RefusalFacts,
     ) -> Option<GeneratedResponse> {
-        op.outputs
-            .iter()
-            .any(|o| o.status == StatusSelector::Code(code))
-            .then(|| {
-                let refusal = Refusal {
-                    code,
-                    repeated: &[],
-                    written: None,
-                };
-                self.refused(bundle, op, call, refusal, (Source::State, Usage::default()))
-            })
+        if !guards::declares_code(op, code) {
+            return None;
+        }
+        let response = self
+            .error_answer_repeating(bundle, op, call, (code, cause), facts.members())
+            .await?;
+        let mut response = self.with_facts(bundle, op, response, facts);
+        tracing::info!(operation = %op.id, status = code, cause = ?cause, "the call was refused from state with a declared error");
+        response.source = if response.fallback_reason.is_some() {
+            Source::Fallback
+        } else {
+            Source::State
+        };
+        Some(response)
+    }
+
+    /// `response`, an error body the mock answers itself, with `facts` laid over it:
+    /// their message in its message-like member ([`error_body::set_message`]), then
+    /// their message and members in the members that name the reasons and the
+    /// violated field ([`error_body::with_reasons`]), each change kept only while the
+    /// body still validates.
+    fn with_facts(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        mut response: GeneratedResponse,
+        facts: &error_body::RefusalFacts,
+    ) -> GeneratedResponse {
+        let schema = op
+            .output_for_status(response.status)
+            .filter(|variant| !media::is_non_json(op, variant))
+            .and_then(|variant| variant.schema.as_ref());
+        let (Some(schema), Some(body)) = (schema, response.body.take()) else {
+            return response;
+        };
+        let mut body = body;
+        let unchanged = body.clone();
+        let message = facts.text();
+        error_body::set_message(&mut body, schema, &bundle.defs, message);
+        let reasons = [message.to_string()];
+        let violations = facts.violations();
+        let body = match self.error_validator(bundle, op, response.status) {
+            Some(validator) if validator.is_valid(&body) => {
+                error_body::with_reasons(&validator, body, &reasons, &violations)
+            }
+            Some(validator) => {
+                error_body::with_reasons(&validator, unchanged, &reasons, &violations)
+            }
+            None => body,
+        };
+        response.body = Some(body);
+        response
     }
 
     /// The declared error status an LLM refused a call with (see [`guards::refusals`]),

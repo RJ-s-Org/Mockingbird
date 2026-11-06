@@ -27,12 +27,14 @@
 //! record unchanged (it names the holder's identity and value, so it is no new record).
 //!
 //! **A described unique set** (`types.<t>.unique` in the world description) is checked
-//! first, before any LLM call, by [`described_conflict`]: a create, or an update, whose
+//! first, before generating, by [`described_conflict`]: a create, or an update, whose
 //! values of the set's members equal a stored record's (another record, for an update),
 //! within the same value of the set's `scope` member, is refused with the set's
-//! `conflict` status, else the first refusal the operation declares. An operation that
-//! declares no response for that status is not refused. A type the description gives
-//! no unique set keeps the heuristics above.
+//! `conflict` status when the operation declares a response for it, else the first
+//! refusal the operation declares; a set the operation can refuse with neither is
+//! skipped, and the next set is checked. The refusal's body names the set's members
+//! and the request's values of them. A type the description gives no unique set keeps
+//! the heuristics above.
 
 use mb_engine::{GeneratedResponse, OperationCall};
 use mb_mcm::{Effect, Operation, OperationKind};
@@ -43,19 +45,38 @@ use super::{
     CallPlan, MAX_SCAN, MockRuntime, StateAccess, collection_of, in_create_collection, plain,
 };
 
-/// The status a create or an update `plan` of `call` is refused with, before any
+/// A described unique set a write repeats: the status it is refused with, and the
+/// set's members with the values the write gives them.
+#[derive(Debug)]
+pub(super) struct Conflict {
+    /// The declared status of the refusal.
+    pub code: u16,
+    /// Each member of the set (a dotted path), with the value the write gives it.
+    pub taken: Vec<(String, Value)>,
+}
+
+/// The status `op` refuses a repeat of `set` with: the set's `conflict` when `op`
+/// declares a response for it, else the first refusal `op` declares; `None` when it
+/// declares neither.
+fn set_status(op: &Operation, set: &mb_mcm::world::UniqueDesc) -> Option<u16> {
+    set.conflict
+        .filter(|code| mb_engine::guards::declares_code(op, *code))
+        .or_else(|| mb_engine::guards::refusal_codes(op).first().copied())
+}
+
+/// What a create or an update `plan` of `call` is refused with, before any
 /// generation, for repeating a stored record's values of a unique set its type's world
 /// description declares (see the module's documentation). `target` is the update's
 /// target id and the record held there, when there is one; that record is never a
 /// conflict of its own update. At most [`MAX_SCAN`] records of the type are compared.
-/// `None` when nothing conflicts, the type describes no unique set, or the call has a
-/// scenario or a forced status.
+/// `None` when nothing conflicts, the type describes no unique set the operation can
+/// refuse, or the call has a scenario or a forced status.
 pub(super) async fn described_conflict(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     target: (Option<&str>, Option<&StoredResource>),
-) -> Option<u16> {
+) -> Option<Conflict> {
     let rt: &MockRuntime = state.rt;
     let op = plan.op;
     let creates = op.kind == OperationKind::Command(Effect::Create);
@@ -86,6 +107,10 @@ pub(super) async fn described_conflict(
     let gone = super::lifecycle::exclusion(rt, t);
     let mut listed: Option<Vec<StoredResource>> = None;
     for set in &desc.unique {
+        // A set this operation declares no refusal for is not its to refuse.
+        let Some(code) = set_status(op, set) else {
+            continue;
+        };
         let sent = |m: &str| mb_mcm::member_at(request, m).filter(|v| !v.is_null());
         // An update that sets none of the set's members, nor its scope, changes none of it.
         if updates
@@ -151,9 +176,6 @@ pub(super) async fn described_conflict(
         let Some(taken) = taken else {
             continue;
         };
-        let code = set
-            .conflict
-            .or_else(|| mb_engine::guards::refusal_codes(op).first().copied())?;
         tracing::info!(
             mock = %rt.name,
             operation = %op.id,
@@ -161,7 +183,13 @@ pub(super) async fn described_conflict(
             status = code,
             "write refused before generation: it repeats a described unique set"
         );
-        return Some(code);
+        return Some(Conflict {
+            code,
+            taken: values
+                .into_iter()
+                .map(|(m, v)| (m.to_string(), v))
+                .collect(),
+        });
     }
     None
 }

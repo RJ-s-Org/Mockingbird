@@ -3,6 +3,7 @@
 //! a `const`, a one-value `enum`, an example, or a value the response's description
 //! names in code position. Anything else stays the faker's.
 
+use mb_engine::error_body::{ErrorCause, RefusalFacts};
 use mb_engine::{Engine, EngineConfig, OperationCall, Source};
 use mb_import::compile;
 use mb_mcm::Bundle;
@@ -51,9 +52,15 @@ fn not_found_body(bundle: &Bundle) -> Value {
 
 fn conflict_body(bundle: &Bundle) -> Value {
     let op = bundle.operation("putThing").unwrap();
-    let out = offline()
-        .refuse_from_state(bundle, op, &OperationCall::default(), 409)
-        .unwrap();
+    let out = futures::executor::block_on(offline().refuse_held(
+        bundle,
+        op,
+        &OperationCall::default(),
+        409,
+        ErrorCause::Stale,
+        &RefusalFacts::stale(),
+    ))
+    .unwrap();
     assert_eq!((out.status, out.source), (409, Source::State));
     out.body.unwrap()
 }
@@ -176,9 +183,15 @@ fn a_refusal_needs_its_status_declared_by_code() {
     let bundle = contract((PLAIN, "Not found."), (PLAIN, "Conflict."));
     let op = bundle.operation("putThing").unwrap();
     assert!(
-        offline()
-            .refuse_from_state(&bundle, op, &OperationCall::default(), 412)
-            .is_none()
+        futures::executor::block_on(offline().refuse_held(
+            &bundle,
+            op,
+            &OperationCall::default(),
+            412,
+            ErrorCause::Stale,
+            &RefusalFacts::stale(),
+        ))
+        .is_none()
     );
 }
 
@@ -382,11 +395,17 @@ fn the_api_description_names_a_repeats_code() {
     assert_ne!(repeat_body(&bundle, 409, "sku")["code"], "sku_taken");
     assert_ne!(repeat_body(&bundle, 400, "name")["code"], "sku_taken");
     let op = bundle.operation("createThing").unwrap();
-    let body = offline()
-        .refuse_from_state(&bundle, op, &OperationCall::default(), 400)
-        .unwrap()
-        .body
-        .unwrap();
+    let body = futures::executor::block_on(offline().refuse_held(
+        &bundle,
+        op,
+        &OperationCall::default(),
+        400,
+        ErrorCause::Stale,
+        &RefusalFacts::stale(),
+    ))
+    .unwrap()
+    .body
+    .unwrap();
     assert_ne!(body["code"], "sku_taken", "{body}");
     // The status named in another sentence than the member's ties nothing.
     let bundle =

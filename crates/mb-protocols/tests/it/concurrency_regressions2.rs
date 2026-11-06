@@ -250,7 +250,13 @@ async fn an_etag_copied_from_a_list_after_a_mint_goes_through() {
 #[tokio::test]
 async fn a_read_only_member_the_client_tracks_is_a_token() {
     let c = |name: &str, total: i64| json!({"id": "c1", "name": name, "total": total});
-    let h = harness(vec![c("a", 0), answer(c("b", 5)), answer(c("c", 6))]);
+    let refused = json!({"code": "stale_token"});
+    let h = harness(vec![
+        c("a", 0),
+        answer(c("b", 5)),
+        answer(c("c", 6)),
+        refused,
+    ]);
     h.send("POST", "/carts", Some(json!({"name": "a"})), &[])
         .await;
     let put = |name: &str, total: i64| json!({"id": "c1", "name": name, "total": total});
@@ -261,5 +267,5 @@ async fn a_read_only_member_the_client_tracks_is_a_token() {
     assert_eq!(s, StatusCode::OK, "{b}");
     let (s, _, b) = h.send("PUT", "/carts/c1", Some(put("d", 5)), &[]).await;
     assert_eq!(s, StatusCode::CONFLICT, "{b}");
-    assert_eq!(h.calls(), 3);
+    assert_eq!(h.calls(), 4, "the refusal's body only");
 }
