@@ -373,8 +373,9 @@ pub fn writes_code(schema: &Value, defs: &Map<String, Value>) -> bool {
 }
 
 /// Whether a string member, declared by `parts`, holds the HTTP status as text: every
-/// value the contract shows for it (`example`, `examples`, `default`, `enum`) is a
-/// 3-digit code, or, showing none, its `pattern` takes 3-digit codes only: `status`,
+/// value the contract shows for it (`example`, `examples`, `default`, `enum`) is an
+/// HTTP status, a 3-digit code from `100` to `599` (`"000"` or `"999"` is the API's
+/// own code), or, showing none, its `pattern` takes 3-digit codes only: `status`,
 /// but neither a shorter nor a longer number (`^[0-9]+$` is a numeric code's, a hex
 /// pattern a request id's) nor a word. A member whose values are words (`"fail"`,
 /// `"error"`) is the API's own. Its name says nothing.
@@ -382,7 +383,11 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
     if !types(parts).contains(&"string") {
         return false;
     }
-    let code = |v: &str| v.len() == 3 && v.bytes().all(|b| b.is_ascii_digit());
+    let code = |v: &str| {
+        v.len() == 3
+            && v.bytes().all(|b| b.is_ascii_digit())
+            && v.parse::<u16>().is_ok_and(|n| (100..=599).contains(&n))
+    };
     let mut shown = shown_values(parts).peekable();
     if shown.peek().is_some() {
         return shown.all(code);
@@ -394,7 +399,7 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
         .iter()
         .filter_map(|b| b.get("pattern").and_then(Value::as_str))
         .any(|pattern| {
-            regex::Regex::new(pattern).is_ok_and(|re| {
+            crate::faker::check_regex(pattern).is_some_and(|re| {
                 re.is_match(&text)
                     && ![shorter.as_str(), longer.as_str(), "error"]
                         .iter()
@@ -1943,6 +1948,22 @@ mod tests {
         }
         assert!(!held(json!({"type": "string"})));
         assert!(!held(json!({"type": "integer", "examples": [422]})));
+    }
+
+    #[test]
+    fn status_text_shows_http_statuses_only() {
+        let held = |examples: &[&str]| {
+            let schema = json!({"type": "string", "examples": examples});
+            holds_status_text(&[&schema], 422)
+        };
+        // Every value shown must be an HTTP status, 100 to 599 inclusive: a 3-digit
+        // code outside that range is the API's own.
+        for own in [&["000"][..], &["099"], &["600"], &["999"], &["422", "700"]] {
+            assert!(!held(own), "{own:?}");
+        }
+        for status in [&["100"][..], &["599"], &["404", "422"]] {
+            assert!(held(status), "{status:?}");
+        }
     }
 
     #[test]

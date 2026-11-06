@@ -1082,8 +1082,10 @@ fn filled_error(
 
 /// `generated`, an error body the mock made itself, holding the call's facts: its
 /// message-like member says `message`, arrays of messages hold `reasons`, and its
-/// path-like members name the fields of `violations` (see [`mb_engine::error_body`]).
-/// Rendered as XML when declared so.
+/// path-like members name the fields of `violations` (see [`mb_engine::error_body`]),
+/// and a member that holds the HTTP status says `generated`'s (see
+/// [`mb_engine::Engine::with_own_status`]), whatever a model wrote there. Rendered as
+/// XML when declared so.
 fn with_facts(
     rt: &MockRuntime,
     op: &Operation,
@@ -1111,6 +1113,7 @@ fn with_facts(
         };
         generated.body = Some(body);
     }
+    let generated = rt.engine.with_own_status(&rt.bundle, op, generated);
     as_xml(rt, op, generated)
 }
 

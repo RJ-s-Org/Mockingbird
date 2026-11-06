@@ -90,8 +90,55 @@ paths:
           content:
             application/json:
               schema: {type: array, minItems: 1, items: {type: object, required: [code, message], properties: {code: {type: string}, message: {type: string}}}}
+  /notes:
+    post:
+      operationId: createNote
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/NewItem"}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "400": {description: Invalid., content: {application/json: {schema: {$ref: "#/components/schemas/JsonApi"}}}}
+  /notes/{note_id}:
+    get:
+      operationId: getNote
+      parameters: [{name: note_id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "404": {description: Not found., content: {application/json: {schema: {$ref: "#/components/schemas/JsonApi"}}}}
+  /memos:
+    post:
+      operationId: createMemo
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/NewItem"}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}
+        "400": {description: Invalid., content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
 components:
   schemas:
+    JsonApi:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [status, code, detail]
+            properties:
+              status: {type: string, examples: ["422"]}
+              code: {type: string}
+              detail: {type: string}
+              source: {type: object, properties: {pointer: {type: string}}}
+    Problem:
+      type: object
+      required: [status, code, detail]
+      properties:
+        status: {type: integer}
+        code: {type: string}
+        detail: {type: string}
     NewItem:
       type: object
       required: [name]
@@ -575,4 +622,42 @@ async fn an_unwritable_error_body_admits_nothing() {
     assert_eq!(quota.0.load(Ordering::SeqCst), 0);
     assert!(limiter.try_acquire().is_ok());
     assert!(h.provider.as_ref().unwrap().requests().is_empty());
+}
+
+/// A JSON:API error body shared by a `400` and a `404`, its `status` shown as the
+/// text `"422"`: the body the model writes for an invalid request states `"400"`,
+/// whatever status it wrote, and the read of a missing record states `"404"`.
+#[tokio::test]
+async fn a_written_json_api_error_states_its_own_status() {
+    let written = json!({"errors": [{"status": "422", "code": "invalid_note", "detail": "x"}]});
+    let h = harness(Some(vec![written]));
+    for body in [r#"{"name": ""}"#, r#"{"size": 1}"#] {
+        let resp = send(&h, post_json("/notes", body)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert_eq!(body["errors"][0]["code"], "invalid_note", "{body}");
+        assert_eq!(body["errors"][0]["status"], "400", "{body}");
+    }
+    assert_eq!(h.provider.as_ref().unwrap().requests().len(), 1);
+
+    let written = json!({"errors": [{"status": "422", "code": "no_note", "detail": "x"}]});
+    let h = harness(Some(vec![written]));
+    let resp = send(&h, get("/notes/n1")).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_json(resp).await;
+    assert_eq!(body["errors"][0]["code"], "no_note", "{body}");
+    assert_eq!(body["errors"][0]["status"], "404", "{body}");
+}
+
+/// An integer `status` the model writes into an invalid request's body is the status
+/// it is answered with.
+#[tokio::test]
+async fn a_written_integer_status_is_the_answered_one() {
+    let written = json!({"status": 422, "code": "invalid_memo", "detail": "x"});
+    let h = harness(Some(vec![written]));
+    let resp = send(&h, post_json("/memos", r#"{"name": ""}"#)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["code"], "invalid_memo", "{body}");
+    assert_eq!(body["status"], 400, "{body}");
 }
