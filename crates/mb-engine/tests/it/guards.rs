@@ -621,3 +621,74 @@ fn request_scrubbing_stays_random_with_a_seed() {
         .collect();
     assert!(runs.len() > 1, "{runs:?}");
 }
+
+const ARCHIVE_CONTRACT: &str = r#"
+openapi: 3.1.0
+info: {title: Contacts, version: "1"}
+paths:
+  /contacts/{id}/archive:
+    post:
+      operationId: archiveContact
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "204":
+          description: archived
+"#;
+
+/// The `email` and `ssn` the effect of a seeded engine's bodyless answer to
+/// archiving `id` sets, with the LLM listing the same originals each time.
+async fn bodyless_effect_pair(engine: &Engine, id: &str) -> (String, String) {
+    let mut bundle = compile(ARCHIVE_CONTRACT.as_bytes()).unwrap();
+    bundle.operations[0].kind = OperationKind::Command(mb_mcm::Effect::Update);
+    let op = bundle.operation("archiveContact").unwrap();
+    let related = [mb_state::StoredResource {
+        resource_type: "contacts".into(),
+        id: "c-9".into(),
+        data: json!({"id": "c-9", "email": "old@corp.com"}),
+    }];
+    let mut call = OperationCall {
+        operation_id: "archiveContact".into(),
+        ..OperationCall::default()
+    };
+    call.path_params.insert("id".into(), json!(id));
+    let out = engine
+        .generate(
+            &bundle,
+            op,
+            &call,
+            GenerationContext {
+                related: &related,
+                ..GenerationContext::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.status, 204);
+    assert_eq!(out.effects.len(), 1, "{:?}", out.effects);
+    let set = &out.effects[0].set;
+    let field = |k: &str| set[k].as_str().unwrap().to_owned();
+    (field("email"), field("ssn"))
+}
+
+#[tokio::test]
+async fn seeded_bodyless_effects_scrub_alike_for_the_same_call() {
+    let effect = json!({
+        "effects": [{"type": "contacts", "id": "c-9", "set": {"email": "jane@corp.com", "ssn": "123-45-6789"}}],
+        "response": null
+    })
+    .to_string();
+    let engine = seeded_scrubbing_engine(vec![effect.clone(); 3]);
+    let a = bodyless_effect_pair(&engine, "c-1").await;
+    assert!(
+        a.0.ends_with("@example.com") && a.0 != "jane@corp.com",
+        "{a:?}"
+    );
+    assert_eq!(
+        a,
+        bodyless_effect_pair(&engine, "c-1").await,
+        "same seed and call, same replacements"
+    );
+    let b = bodyless_effect_pair(&engine, "c-2").await;
+    assert_ne!(a, b, "another call replaces otherwise");
+}

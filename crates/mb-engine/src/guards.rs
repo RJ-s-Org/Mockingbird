@@ -321,18 +321,23 @@ impl Engine {
 
     /// The effects `text` lists, as an answer with no body has them (see
     /// [`crate::Engine::generate`]): its `effects` member, with what is beside it
-    /// ignored, scrubbed and fitted under the size cap as an answer's are. None when
-    /// `text` holds no object.
-    pub(crate) fn effects_only(&self, text: &str) -> AnswerEffects {
+    /// ignored, scrubbed and fitted under the size cap as an answer's are, the PII
+    /// replacements drawn from `seed` as an answer's effects' are (see
+    /// [`Checks::seed`]). None when `text` holds no object.
+    pub(crate) fn effects_only(&self, text: &str, seed: Option<u64>) -> AnswerEffects {
         let Some(Value::Object(mut map)) = crate::extract_json(text) else {
             return AnswerEffects::default();
         };
         let mut effects = map
             .remove(EFFECTS_KEY)
             .map_or_else(AnswerEffects::default, parse_effects);
-        for effect in &mut effects.kept {
+        let checks = Checks {
+            seed,
+            ..Checks::default()
+        };
+        for (i, effect) in effects.kept.iter_mut().enumerate() {
             let mut set = Value::Object(std::mem::take(&mut effect.set));
-            self.scrub(&mut set);
+            self.scrub_seeded(&mut set, checks.pii_seed("effect", i));
             if let Value::Object(scrubbed) = set {
                 effect.set = scrubbed;
             }
@@ -1718,12 +1723,13 @@ mod tests {
         let engine = crate::Engine::new(None, crate::EngineConfig::default());
         let effects = engine.effects_only(
             r#"{"effects": [{"type": "books", "id": "b-1", "set": {"racked": true}}, {"type": "x"}], "response": {"made": "up"}}"#,
+            None,
         );
         assert_eq!(effects.kept.len(), 1);
         assert_eq!(effects.kept[0].id, "b-1");
         assert_eq!(effects.dropped, 1);
         for text in ["not json", "[1, 2]", r#"{"response": null}"#] {
-            let none = engine.effects_only(text);
+            let none = engine.effects_only(text, None);
             assert!(none.kept.is_empty() && none.dropped == 0, "{text}");
         }
     }

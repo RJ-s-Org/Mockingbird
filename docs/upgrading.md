@@ -31,6 +31,12 @@ Migrations run at startup under an advisory lock, for SQLite and Postgres alike,
 
 ## Upgrading past 0.1.0 (unreleased)
 
+### Seeded repairs and PII replacements follow the call
+
+No migration or configuration. With a `faker_seed` (or `X-Mockingbird-Seed`), the values the engine refills in an LLM answer and the PII replacements in it, including the effects of a write answering no body, are drawn from the seed, the operation, the request with its PII masked and the value's place, never at random; without a seed they stay random ([configuration](configuration.md#mocks)).
+
+- **Rust API**: `Scrubber::scrub_str_seeded` and `Scrubber::scrub_value_seeded` changed meaning. The same seed now gives the same replacements for any string, whatever it holds (only the kinds and shapes of its PII count), so the seed must name where the string is, never what it holds; `scrub_value_seeded` keys each string's replacements by its position in the value (its path of member names and indexes). Code that passed a seed derived from the text scrubbed gets one fixed fake value per seed instead of one per original.
+
 ### Error bodies the mock makes name the call, and missing records answer the declared status
 
 No migration or configuration.

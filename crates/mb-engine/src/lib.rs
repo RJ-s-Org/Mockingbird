@@ -2267,7 +2267,7 @@ impl Engine {
             Ok(Reply {
                 text,
                 truncated: None,
-            }) => self.effects_only(&text),
+            }) => self.effects_only(&text, self.repair_seed(bundle, &op.id, [call])),
             Ok(Reply {
                 truncated: Some(reason),
                 ..
