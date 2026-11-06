@@ -1423,6 +1423,15 @@ fn same_request(one: &Value, other: &Value) -> bool {
     timeless(one) == timeless(other)
 }
 
+/// Forgets every request remembered for stored record `t` `id`: a write the executor
+/// decided made the stored record what it is, so nothing is left for it to catch up on.
+pub(super) async fn settled(state: &mut StateAccess<'_>, session: &SessionKey, t: &str, id: &str) {
+    let key = memory_key(t, id, true);
+    if state.get(session, INTERNAL_TYPE, &key).await.is_some() {
+        state.delete(session, INTERNAL_TYPE, &key).await;
+    }
+}
+
 /// Ends what an older own body may overlay: a later write has the last word.
 async fn clear_own(state: &mut StateAccess<'_>, session: &SessionKey, key: &str) {
     let mut memory = read_memory(state, session, key).await;

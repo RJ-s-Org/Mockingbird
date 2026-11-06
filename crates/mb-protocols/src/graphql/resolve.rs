@@ -160,8 +160,6 @@ enum Route<'a, 'b> {
     Join(&'b super::batch::Batch, Box<call::Pending<'a>>),
     /// Without generating: an unknown id, a stored resource, a cached answer.
     Answered(Box<mb_engine::GeneratedResponse>),
-    /// Answered by the executor, then completed as a generated answer is.
-    Executed(Box<call::Pending<'a>>),
     /// On its own.
     Alone,
 }
@@ -424,17 +422,13 @@ async fn generate_in(
                                 call::seed_world_gaps(rt, op, &mut answer);
                                 Route::Answered(answer)
                             }
-                            call::Prepared::Pending(pending) if pending.is_executed() => {
-                                *batch = Some(b);
-                                Route::Executed(pending)
-                            }
                             call::Prepared::Pending(pending) => Route::Join(b, pending),
                         },
                         None => Route::Alone,
                     };
                     if rekeys_target {
                         stored = match &route {
-                            Route::Join(_, pending) | Route::Executed(pending) => {
+                            Route::Join(_, pending) => {
                                 pending.target.as_ref().map(|t| t.data.clone())
                             }
                             _ => call::read_state(rt, &plan, &call).await.0.map(|t| t.data),
@@ -476,11 +470,6 @@ async fn generate_in(
                             }
                         }
                         Route::Answered(answer) => Ok(*answer),
-                        Route::Executed(pending) => {
-                            call::generate_pending(rt, &plan, &call, *pending, narrowed.as_deref())
-                                .await
-                                .map_err(engine_failure)
-                        }
                         Route::Alone => {
                             call::generate_narrowed(rt, &plan, &call, narrowed.as_deref())
                                 .await

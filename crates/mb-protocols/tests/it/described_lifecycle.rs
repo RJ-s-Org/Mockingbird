@@ -205,11 +205,7 @@ async fn get(h: &DescribedHarness, uri: &str) -> Value {
 
 #[tokio::test]
 async fn a_soft_delete_keeps_the_record_readable_in_its_state() {
-    let h = support::described(
-        CONTRACT,
-        soft_spaces(),
-        vec![space("s1", "Docs", "ACTIVE"), space("s1", "Docs", "ACTIVE")],
-    );
+    let h = support::described(CONTRACT, soft_spaces(), vec![space("s1", "Docs", "ACTIVE")]);
     create_space(&h, "Docs").await;
     delete(&h, "/spaces/s1").await;
     let body = get(&h, "/spaces/s1").await;
@@ -217,8 +213,9 @@ async fn a_soft_delete_keeps_the_record_readable_in_its_state() {
     assert_eq!(body["displayName"], "Docs");
     let stored = h.stored("spaces", "s1").await.unwrap();
     assert_eq!(stored["state"], "DELETE_REQUESTED");
-    // The read is answered from state: no model call of its own.
-    assert_eq!(h.provider.requests().len(), 2);
+    // The delete is executed and the read answered from state: no model call of their
+    // own.
+    assert_eq!(h.provider.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -330,15 +327,12 @@ async fn a_record_soft_deleted_after_the_first_page_is_not_on_the_next() {
     let h = support::described(
         CONTRACT,
         soft_spaces(),
-        vec![
-            spaces(vec![
-                space("s1", "A", "ACTIVE"),
-                space("s2", "B", "ACTIVE"),
-                space("s3", "C", "ACTIVE"),
-                space("s4", "D", "ACTIVE"),
-            ]),
+        vec![spaces(vec![
+            space("s1", "A", "ACTIVE"),
+            space("s2", "B", "ACTIVE"),
             space("s3", "C", "ACTIVE"),
-        ],
+            space("s4", "D", "ACTIVE"),
+        ])],
     );
     let first = get(&h, "/spaces?limit=2").await;
     assert_eq!(ids(&first), ["s1", "s2"], "{first}");
@@ -349,7 +343,8 @@ async fn a_record_soft_deleted_after_the_first_page_is_not_on_the_next() {
     delete(&h, "/spaces/s3").await;
     let next = get(&h, &format!("/spaces?limit=2&cursor={token}")).await;
     assert_eq!(ids(&next), ["s4"], "{next}");
-    assert_eq!(h.provider.requests().len(), 2);
+    // The list, and nothing else: the delete is executed, the next page served.
+    assert_eq!(h.provider.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -427,11 +422,7 @@ async fn a_soft_deleted_records_unique_values_are_free() {
     let h = support::described(
         CONTRACT,
         world,
-        vec![
-            space("s1", "Docs", "ACTIVE"),
-            space("s1", "Docs", "ACTIVE"),
-            space("s2", "Docs", "ACTIVE"),
-        ],
+        vec![space("s1", "Docs", "ACTIVE"), space("s2", "Docs", "ACTIVE")],
     );
     create_space(&h, "Docs").await;
     delete(&h, "/spaces/s1").await;
@@ -529,16 +520,10 @@ type Mutation {
             }
         });
         let provider = Arc::new(ScriptedProvider::new(
-            [
-                widget("w1", "a"),
-                widget("w2", "b"),
-                json!(true),
-                // The payload's own view of the record: still live.
-                widget("w2", "b"),
-            ]
-            .into_iter()
-            .map(|v| Ok(v.to_string()))
-            .collect(),
+            [widget("w1", "a"), widget("w2", "b"), json!(true)]
+                .into_iter()
+                .map(|v| Ok(v.to_string()))
+                .collect(),
         ));
         let rt = MockRuntime::new(
             "described",
@@ -579,8 +564,8 @@ type Mutation {
         }
         assert_eq!(
             provider.requests().len(),
-            4,
-            "the reads after are answered from state"
+            3,
+            "the delete answering its record is executed, and the reads after are answered from state"
         );
     }
 }

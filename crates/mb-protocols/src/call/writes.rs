@@ -344,7 +344,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
 /// collection the route names (`collection`), else the one it had; a create's query
 /// scope (`query`); and, for a record the session did not hold (`was_held` false), no
 /// mark that the session deleted it.
-async fn store_one(
+pub(super) async fn store_one(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     (op, resource_type): (&Operation, &str),

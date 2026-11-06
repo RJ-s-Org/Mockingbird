@@ -199,7 +199,8 @@ async fn delete_returns_204_and_removes_state() {
         .unwrap();
     let resp = send(&h, req).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    assert_eq!(header_str(&resp, "x-mockingbird-source"), "llm");
+    // Executed from state: the held order is removed, no model asked.
+    assert_eq!(header_str(&resp, "x-mockingbird-source"), "state");
     assert!(resp.headers().get(header::CONTENT_TYPE).is_none());
     assert!(body_bytes(resp).await.is_empty());
     assert!(

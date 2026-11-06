@@ -454,6 +454,34 @@ async fn delete_without_body_carries_id() {
     );
 }
 
+/// A delete of a held record is executed from state, and still sends its event.
+#[tokio::test]
+async fn an_executed_delete_of_a_held_record_sends_its_event() {
+    let server = receiver(200).await;
+    let (router, log) = rest("orders-3.0.yaml", vec![to(&server, &["deleteOrder"])]);
+    let created = router
+        .clone()
+        .oneshot(post_json(
+            "/orders",
+            json!({"customerId": "c1", "total": 5}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let id = body_json(created).await["id"].as_str().unwrap().to_string();
+    let resp = router
+        .oneshot(delete(&format!("/orders/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.headers()["x-mockingbird-source"], "state");
+    wait_for(&log, |r| r.status == DeliveryStatus::Delivered).await;
+    let sent = sent(&server).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["type"], "order.deleted");
+    assert_eq!(sent[0]["data"]["object"]["id"], json!(id));
+}
+
 #[tokio::test]
 async fn events_filter_by_operation_or_type() {
     let server = receiver(200).await;
