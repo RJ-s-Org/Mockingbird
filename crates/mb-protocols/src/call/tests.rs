@@ -261,7 +261,8 @@ fn a_create_s_effects_copy_its_request_onto_no_sibling() {
         ),
         (vec![], vec!["1:{\"amount\":1}".to_string()])
     );
-    // An amount the request does not give, and a default it does not copy, apply.
+    // An effect copying a request value that does not name the sibling describes the
+    // new record: it goes whole, its members the request does not give too.
     assert_eq!(
         split(
             json!({"amount": 9.99, "is_default": true}),
@@ -272,9 +273,34 @@ fn a_create_s_effects_copy_its_request_onto_no_sibling() {
             )],
         ),
         (
-            vec!["1:{\"is_default\":false,\"replies\":1}".to_string()],
-            vec!["1:{\"amount\":9.99}".to_string()]
+            vec![],
+            vec!["1:{\"amount\":9.99,\"is_default\":false,\"replies\":1}".to_string()]
         )
+    );
+    assert_eq!(
+        split(
+            json!({"Alias": "receipt", "Name": "receipt"}),
+            vec![effect(
+                "payments",
+                "1002",
+                json!({"Alias": "receipt", "Name": "receipt", "LayoutTemplate": null})
+            )],
+        ),
+        (
+            vec![],
+            vec![
+                "1002:{\"Alias\":\"receipt\",\"LayoutTemplate\":null,\"Name\":\"receipt\"}"
+                    .to_string()
+            ]
+        )
+    );
+    // An effect copying nothing of the request applies: the old default unset.
+    assert_eq!(
+        split(
+            json!({"amount": 9.99, "is_default": true}),
+            vec![effect("payments", "1", json!({"is_default": false}))],
+        ),
+        (vec!["1:{\"is_default\":false}".to_string()], vec![])
     );
     // A nested object holding a copied value goes whole, its other members too.
     assert_eq!(

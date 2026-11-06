@@ -262,15 +262,19 @@ pub(super) fn copies_value(set: &Value, asked: &Value, depth: usize) -> bool {
 }
 
 /// Splits `effects`, those of a create of `resource_type` whose answer's record is
-/// `created`, into what may apply and what is rejected: on another record of its own
-/// type, every member whose value copies what the request gives that member (see
-/// [`copies_value`]) is taken out, as the request copied onto a sibling (Mollie's second
-/// payment setting the first one's amount, a request's `parent_id` making its parent its
-/// own parent), whatever the value: the sibling's own id is copied as much as any. The
-/// rest of the effect applies (a reply's count on its thread, clearing `is_default` on
-/// the old default); an effect with nothing left is rejected whole. Effects on the created record and on other
-/// types are left as they are. Each rejected part is returned as an effect of the
-/// members taken out.
+/// `created`, into what may apply and what is rejected. On another record of its own
+/// type, a member whose value copies what the request gives that member (see
+/// [`copies_value`]) is the request copied onto a sibling, whatever the value: the
+/// sibling's own id is copied as much as any (Mollie's second payment setting the
+/// first one's amount, a request's `parent_id` making its parent its own parent).
+/// When every copied value names that sibling (the request's reference to it), only
+/// those members are taken out and the rest applies (a reply's count on the record it
+/// replies to). When any copied value does not, the effect describes the new record
+/// under a sibling's id (its alias, its name, its defaults): it is rejected whole, so
+/// none of the new record's defaults land on the sibling. An effect copying nothing
+/// applies (clearing `is_default` on the old default), and an effect with nothing left
+/// is rejected. Effects on the created record and on other types are left as they
+/// are. Each rejected part is returned as an effect of the members taken out.
 pub(super) fn sibling_effects(
     resource_type: &str,
     created: Option<&str>,
@@ -292,6 +296,12 @@ pub(super) fn sibling_effects(
         let (copied, rest): (Map<String, Value>, Map<String, Value>) = std::mem::take(&mut e.set)
             .into_iter()
             .partition(|(k, v)| body.get(k).is_some_and(|asked| copies_value(v, asked, 0)));
+        if copied.values().any(|v| !names_record(v, &e.id, 0)) {
+            let mut set = copied;
+            set.extend(rest);
+            dropped.push(ResourceEffect { set, ..e });
+            continue;
+        }
         if !copied.is_empty() {
             dropped.push(ResourceEffect {
                 set: copied,
@@ -303,6 +313,17 @@ pub(super) fn sibling_effects(
         }
     }
     (kept, dropped)
+}
+
+/// Whether `value` names the record under `id`: that id itself (a string, or a number
+/// written as one), or an object holding it at any depth (`{"parent": {"id": "tr_1"}}`).
+fn names_record(value: &Value, id: &str, depth: usize) -> bool {
+    match value {
+        Value::Object(members) if depth < 8 => {
+            members.values().any(|v| names_record(v, id, depth + 1))
+        }
+        _ => id_string(value).as_deref() == Some(id),
+    }
 }
 
 /// Gives a create's answer a fresh identity when its generated one is taken (see
