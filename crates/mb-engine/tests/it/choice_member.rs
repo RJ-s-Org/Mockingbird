@@ -111,7 +111,17 @@ impl tracing::Subscriber for Events {
 /// What `PATCH` `request` on the stored device serves when the LLM answers `answer`,
 /// and the events it logs.
 async fn patched(status: &str, request: Value, answer: Value) -> (Value, Vec<String>) {
-    let bundle = compile(contract(status).as_bytes()).unwrap();
+    let (body, lines, _) = patched_with(&contract(status), request, answer).await;
+    (body, lines)
+}
+
+/// [`patched`] over a whole contract, also giving the answer's world gaps.
+async fn patched_with(
+    contract: &str,
+    request: Value,
+    answer: Value,
+) -> (Value, Vec<String>, Vec<String>) {
+    let bundle = compile(contract.as_bytes()).unwrap();
     let op = bundle.operation("patchDevice").unwrap();
     let target = StoredResource {
         resource_type: "devices".into(),
@@ -138,7 +148,7 @@ async fn patched(status: &str, request: Value, answer: Value) -> (Value, Vec<Str
     let out = engine.generate(&bundle, op, &call, context).await.unwrap();
     assert_eq!(out.source, Source::Llm, "{:?}", out.fallback_reason);
     let lines = events.0.lock().map(|l| l.clone()).unwrap_or_default();
-    (out.body.unwrap(), lines)
+    (out.body.unwrap(), lines, out.world_gaps)
 }
 
 #[tokio::test]
@@ -186,7 +196,9 @@ async fn a_scalar_two_members_admit_keeps_the_stored_choice_and_is_logged() {
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("world_gap") && l.contains("patchDevice") && l.contains("status")),
+            .any(|l| l.contains("world_gap=\"ambiguous_choice\"")
+                && l.contains("patchDevice")
+                && l.contains("member=status")),
         "{lines:?}"
     );
 }
@@ -203,6 +215,179 @@ async fn a_scalar_member_beside_the_choice_is_unaffected() {
     assert_eq!(
         body["status"],
         json!({"value": "active", "label": "Active"}),
+        "{body}"
+    );
+}
+
+/// The contract of [`contract`] with `Status` as `schema`, a whole YAML mapping.
+fn contract_with_status(schema: &str) -> String {
+    contract(CHOICE).replace(
+        &format!(
+            "    Status:\n      type: object\n      required: [value]\n      properties: {CHOICE}\n"
+        ),
+        &format!("    Status:\n{schema}\n"),
+    )
+}
+
+#[tokio::test]
+async fn an_ignored_scalar_drops_the_optional_sibling_the_old_value_set() {
+    let (body, _) = patched(
+        CHOICE,
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(body["status"], json!({"value": "reserved"}), "{body}");
+}
+
+const PAIRED_PROPERTIES: &str = "      type: object
+      required: [value, label]
+      properties:
+        value: {type: string, enum: [active, reserved, dhcp]}
+        label: {type: string}";
+
+#[tokio::test]
+async fn an_ignored_scalar_takes_the_sibling_an_enum_of_objects_pairs_with_it() {
+    let schema = format!(
+        "{PAIRED_PROPERTIES}
+      enum:
+        - {{value: active, label: Active}}
+        - {{value: reserved, label: Reserved}}
+        - {{value: dhcp, label: DHCP}}"
+    );
+    let (body, _, gaps) = patched_with(
+        &contract_with_status(&schema),
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(
+        body["status"],
+        json!({"value": "reserved", "label": "Reserved"}),
+        "{body}"
+    );
+    assert!(gaps.is_empty(), "{gaps:?}");
+}
+
+#[tokio::test]
+async fn an_ignored_scalar_takes_the_sibling_a_const_branch_pairs_with_it() {
+    let schema = format!(
+        "{PAIRED_PROPERTIES}
+      oneOf:
+        - properties: {{value: {{const: active}}, label: {{const: Active}}}}
+        - properties: {{value: {{const: reserved}}, label: {{const: Reserved}}}}
+        - properties: {{value: {{const: dhcp}}, label: {{const: DHCP}}}}"
+    );
+    let (body, _, _) = patched_with(
+        &contract_with_status(&schema),
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(
+        body["status"],
+        json!({"value": "reserved", "label": "Reserved"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn an_ignored_scalar_takes_the_sibling_an_example_pairs_with_it() {
+    let schema = format!(
+        "{PAIRED_PROPERTIES}
+      examples:
+        - {{value: active, label: Active}}
+        - {{value: reserved, label: Reserved}}"
+    );
+    let (body, _, _) = patched_with(
+        &contract_with_status(&schema),
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(
+        body["status"],
+        json!({"value": "reserved", "label": "Reserved"}),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn an_ignored_scalar_with_an_unpaired_required_sibling_keeps_the_stored_choice() {
+    let (body, lines, gaps) = patched_with(
+        &contract_with_status(PAIRED_PROPERTIES),
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(
+        body["status"],
+        json!({"value": "active", "label": "Active"}),
+        "{body}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("world_gap=\"unapplied_choice\"")
+                && l.contains("patchDevice")
+                && l.contains("member=status")),
+        "{lines:?}"
+    );
+    assert_eq!(gaps, ["unapplied_choice"]);
+}
+
+#[tokio::test]
+async fn a_member_that_is_a_union_of_a_scalar_and_an_object_switches_branch() {
+    let contract = contract(CHOICE).replace(
+        "status: {$ref: \"#/components/schemas/Status\"}",
+        "status: {oneOf: [{type: string}, {$ref: \"#/components/schemas/Status\"}]}",
+    );
+    let (body, lines, gaps) = patched_with(
+        &contract,
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(body["status"], "reserved", "{body}");
+    assert!(!lines.iter().any(|l| l.contains("world_gap")), "{lines:?}");
+    assert!(gaps.is_empty(), "{gaps:?}");
+}
+
+#[tokio::test]
+async fn a_member_whose_const_is_the_scalar_takes_it() {
+    let schema = "      type: object
+      properties: {value: {type: string, const: reserved}, label: {type: string}}";
+    let (body, _, _) = patched_with(
+        &contract_with_status(schema),
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"label": "Active"}}),
+    )
+    .await;
+    assert_eq!(body["status"], json!({"value": "reserved"}), "{body}");
+}
+
+#[tokio::test]
+async fn a_member_whose_examples_list_the_scalar_takes_it() {
+    let (body, _) = patched(
+        "{value: {type: string, examples: [active, reserved]}, label: {type: string}}",
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "active", "label": "Active"}}),
+    )
+    .await;
+    assert_eq!(body["status"], json!({"value": "reserved"}), "{body}");
+}
+
+#[tokio::test]
+async fn with_nothing_declared_the_member_the_answer_echoes_takes_the_scalar() {
+    let (body, _) = patched(
+        "{value: {type: string}, label: {type: string}}",
+        json!({"status": "reserved"}),
+        json!({"id": "d1", "name": "edge", "status": {"value": "reserved", "label": "Reserved"}}),
+    )
+    .await;
+    assert_eq!(
+        body["status"],
+        json!({"value": "reserved", "label": "Reserved"}),
         "{body}"
     );
 }
