@@ -508,3 +508,23 @@ service Orders {
         OperationKind::Command(Effect::Delete)
     );
 }
+
+/// An identity is the key of a record of some type: a method whose name names no
+/// resource (`Get`) has none, even when its answer has an `id`.
+#[test]
+fn a_method_naming_no_resource_has_no_identity() {
+    let b = compile(
+        br#"
+syntax = "proto3";
+package demo;
+service Demo {
+  rpc Get(Req) returns (Resp);
+}
+message Req { string id = 1; }
+message Resp { string id = 1; }
+"#,
+    )
+    .unwrap();
+    let op = b.operation("Demo.Get").unwrap();
+    assert_eq!((&op.resource_type, &op.identity), (&None, &None));
+}
