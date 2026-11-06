@@ -95,7 +95,7 @@
 use std::collections::BTreeSet;
 
 use mb_engine::SchemaValidator;
-use mb_engine::budget::{PageLimit, requested_page};
+use mb_engine::budget::PageLimit;
 use mb_engine::consistency::{list_items_mut, list_member};
 
 /// Items of one list answer looked up in the store, at most: one read each, as
@@ -585,34 +585,45 @@ pub(super) struct Cut {
     /// Whether more records may follow `rest` than were read: a read of the store that
     /// came back full.
     pub(super) truncated: bool,
+    /// For a list the world describes the query of, the answer as generated, before
+    /// it was narrowed: what is served when no token for the cut fits the schema.
+    pub(super) unnarrowed: Option<Value>,
+    /// For a list the world describes the query of, the answer narrowed and ordered
+    /// but not cut: what is served when the cut is not kept for another reason (no
+    /// place for a token, or a first page no run can follow).
+    pub(super) uncut: Option<Value>,
 }
 
 /// Applies a list read's equality filters and page size to its generated answer (see
-/// the module's doc), and says what the page size left out.
+/// the module's doc), and says what the page size left out. Where the world describes
+/// the list's query ([`list_query`]), each described key replaces its own heuristic:
+/// described filters the name-matched ones, a described scope is checked too, a
+/// described order sorts the kept items, and a described paging gives the page size. A
+/// request carrying a later described position (a page number, an offset or a token
+/// no kept cut serves) is the model's page, and is not cut. A described narrowing the
+/// schema refuses leaves the answer as generated, with no cut.
 pub(super) fn narrow(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
     call: &OperationCall,
     body: &mut Value,
 ) -> Option<Cut> {
-    if call.query.is_empty() {
-        return None;
-    }
     let bundle = rt.bundle();
     let op = plan.op;
+    let q = list_query::of(rt, op, call);
+    if call.query.is_empty() && q.is_none() {
+        return None;
+    }
     let schema = op.success_output().and_then(|o| o.schema.as_ref())?;
     let mut held = None;
     let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
     let fewest = declared_count(&array_parts, "minItems").unwrap_or(0);
     let query = op.input.query.as_ref();
-    let doc = std::cell::OnceCell::new();
-    let page = requested_page(
-        query,
-        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
-        call,
-    );
-    let filters: Vec<Filter<'_>> = filters_of(bundle, op, query, &item_parts, call, page)
+    let page = list_query::requested_page(rt, op, call);
+    let page_ref = page.as_ref().map(|(name, limit)| (name.as_str(), *limit));
+    let filters: Vec<Filter<'_>> = filters_of(bundle, op, query, &item_parts, call, page_ref)
         .into_iter()
+        .filter(|(param, _)| !q.as_ref().is_some_and(|q| q.pages_with(param)))
         .map(|(_, filter)| filter)
         .collect();
     let valid = |candidate: &Value| {
@@ -620,24 +631,53 @@ pub(super) fn narrow(
             .serve_stored(bundle, op, candidate, None)
             .is_some()
     };
-    if !filters.is_empty() {
+    let unnarrowed = q
+        .as_ref()
+        .filter(|q| q.page.is_some())
+        .map(|_| body.clone());
+    if !filters.is_empty() || q.is_some() {
         let mut kept = body.clone();
         if let Some(items) = list_items_mut(&mut kept) {
             let was = items.len();
-            items.retain(|item| !filters.iter().any(|filter| contradicts(item, filter)));
+            items.retain(|item| {
+                list_query::keeps(q.as_ref(), item, |i| {
+                    !filters.iter().any(|filter| contradicts(i, filter))
+                })
+            });
             let removed = was - items.len();
-            if removed > 0 && items.len() as u64 >= fewest && valid(&kept) {
-                if let Some(counted) =
-                    deleted::with_count_corrected(rt, op, body, &kept, was, removed as u64)
+            let mut reordered = false;
+            if let Some(q) = &q
+                && q.order.is_some()
+            {
+                let before = items.clone();
+                list_query::sort(q, items);
+                reordered = *items != before;
+            }
+            if (removed > 0 || reordered) && items.len() as u64 >= fewest && valid(&kept) {
+                if removed > 0
+                    && let Some(counted) =
+                        deleted::with_count_corrected(rt, op, body, &kept, was, removed as u64)
                     && valid(&counted)
                 {
                     kept = counted;
                 }
                 *body = kept;
+            } else if (removed > 0 || reordered) && q.is_some() {
+                tracing::info!(
+                    operation = %op.id,
+                    "a described list narrowing does not fit the answer's schema; the generated list is served"
+                );
+                return None;
             }
         }
     }
-    let (_, limit) = page?;
+    // A later page the request names, which no kept cut or run served, is the model's.
+    if let Some(ask) = q.as_ref().and_then(|q| q.page.as_ref())
+        && !ask.asks_first()
+    {
+        return None;
+    }
+    let (size_param, limit) = page?;
     let size = page_size(limit, &array_parts)?;
     let mut capped = body.clone();
     let items = list_items_mut(&mut capped)?;
@@ -645,16 +685,28 @@ pub(super) fn narrow(
         return None;
     }
     let rest = items.split_off(size);
+    let uncut = unnarrowed.as_ref().map(|_| body.clone());
     if !valid(&capped) {
+        if unnarrowed.is_some() {
+            tracing::info!(
+                operation = %op.id,
+                "a described page cut does not fit the answer's schema; the generated list is served"
+            );
+            if let Some(unnarrowed) = unnarrowed {
+                *body = unnarrowed;
+            }
+        }
         return None;
     }
     *body = capped;
     Some(Cut {
         rest,
         size,
-        size_param: page.map(|(name, _)| name.to_string())?,
+        size_param,
         stored: 0,
         truncated: false,
+        unnarrowed,
+        uncut,
     })
 }
 
@@ -990,12 +1042,12 @@ pub(super) async fn collection_records(
     let mut held = None;
     let (array_parts, item_parts) = list_parts(bundle, schema, body, &mut held)?;
     let items_schema = array_parts.iter().find_map(|p| p.get("items"))?;
+    let q = list_query::of(rt, op, call);
     let filters = filters_of(bundle, op, op.input.query.as_ref(), &item_parts, call, None);
-    if call
-        .query
-        .keys()
-        .any(|param| !filters.iter().any(|(name, _)| name == param))
-    {
+    if call.query.keys().any(|param| {
+        !filters.iter().any(|(name, _)| name == param)
+            && !q.as_ref().is_some_and(|q| q.knows(param))
+    }) {
         return None;
     }
     let item_type = rt
@@ -1022,9 +1074,9 @@ pub(super) async fn collection_records(
             continue;
         };
         if known.contains(&id)
-            || !filters
-                .iter()
-                .all(|(_, filter)| holds_wanted(&item, filter))
+            || !list_query::keeps(q.as_ref(), &item, |i| {
+                filters.iter().all(|(_, filter)| holds_wanted(i, filter))
+            })
         {
             continue;
         }
@@ -1247,12 +1299,9 @@ async fn stored_records(
         return cut;
     };
     let query = op.input.query.as_ref();
-    let doc = std::cell::OnceCell::new();
-    let page = requested_page(
-        query,
-        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
-        call,
-    );
+    let q = list_query::of(rt, op, call);
+    let page = list_query::requested_page(rt, op, call);
+    let page = page.as_ref().map(|(name, limit)| (name.as_str(), *limit));
     let sized = page.and_then(|(name, limit)| Some((name, page_size(limit, &array_parts)?)));
     // A page the store fills takes every record without a page size it can go by.
     let (size_param, size) = match (sized, absent) {
@@ -1271,14 +1320,8 @@ async fn stored_records(
     // next page to serve, and the store is not read (for a page the store fills, it
     // keeps nothing past the page).
     let pageable = size_param.is_some_and(|size_param| {
-        pages::slot(
-            bundle,
-            (op, call, plan.page_url.as_deref()),
-            body,
-            size_param,
-        )
-        .is_some()
-            || runs::starts(bundle, (op, call), size_param)
+        pages::slot(rt, (op, call, plan.page_url.as_deref()), body, size_param).is_some()
+            || runs::starts(rt, (op, call), size_param)
     });
     if !pageable && absent.is_none() {
         return cut;
@@ -1300,12 +1343,20 @@ async fn stored_records(
             return cut;
         }
     }
-    let filters = filters_of(bundle, op, query, &item_parts, call, page);
+    let filters: Vec<(&str, Filter<'_>)> = filters_of(bundle, op, query, &item_parts, call, page)
+        .into_iter()
+        .filter(|(param, _)| !q.as_ref().is_some_and(|q| q.pages_with(param)))
+        .collect();
     let declared = declared_names(&item_parts);
     let declared_params = query.and_then(|q| q.get("properties"));
     let mut shown: Vec<Shown<'_>> = Vec::new();
     for (param, raw) in &call.query {
-        if Some(param.as_str()) == size_param || filters.iter().any(|(name, _)| name == param) {
+        // A parameter the description names (a filter, the scope, the paging) is
+        // applied as described, never searched for.
+        if Some(param.as_str()) == size_param
+            || filters.iter().any(|(name, _)| name == param)
+            || q.as_ref().is_some_and(|q| q.knows(param))
+        {
             continue;
         }
         let texts: Vec<String> = match raw {
@@ -1444,9 +1495,9 @@ async fn stored_records(
             continue;
         };
         if known.contains(&id)
-            || !filters
-                .iter()
-                .all(|(_, filter)| holds_wanted(&item, filter))
+            || !list_query::keeps(q.as_ref(), &item, |i| {
+                filters.iter().all(|(_, filter)| holds_wanted(i, filter))
+            })
         {
             continue;
         }
@@ -1464,6 +1515,9 @@ async fn stored_records(
         }
         known.push(id);
         missing.push(item);
+    }
+    if let Some(q) = &q {
+        list_query::sort(q, &mut missing);
     }
     if missing.is_empty() {
         if !withheld.is_empty() {
@@ -1494,6 +1548,8 @@ async fn stored_records(
         size_param: size_param.to_string(),
         stored: 0,
         truncated: false,
+        unnarrowed: None,
+        uncut: None,
     });
     cut.rest.extend(missing);
     cut.stored = stored;
