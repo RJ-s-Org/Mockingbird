@@ -120,8 +120,12 @@ def value_for(schema, root, depth=0, counter=None):
 # literals, escapes (\d \w \s and their negations, escaped punctuation), `.`,
 # character classes (ranges, negation), groups ((...), (?:...)), alternation,
 # anchors and the quantifiers ? * + {n} {n,} {n,m}. Anything else (lookaround,
-# backreferences, \b, ...) is unsupported, and every generated value is checked
-# with `re` before it is used, so a pattern this cannot satisfy keeps the plain value.
+# backreferences, \b, ...) is unsupported, so a pattern this cannot satisfy keeps
+# the plain value. Python `re` only compiles the pattern (rejecting what it rejects);
+# it never searches a value, since a backtracking search has no cost bound. A generated
+# value is in the pattern's language by construction (only its anchors are checked),
+# and the plain value is checked with `matches`, a set-of-positions matcher over the
+# parsed tree that shares the step budget.
 
 DIGITS = "0123456789"
 LOWER = "abcdefghijklmnopqrstuvwxyz"
@@ -139,7 +143,7 @@ class Unsupported(Exception):
 
 class PatternParser:
     """Parses the subset into nodes: ("lit", c) | ("set", chars) | ("seq", [n])
-    | ("alt", [n]) | ("rep", n, lo, hi) | ("empty",)."""
+    | ("alt", [n]) | ("rep", n, lo, hi) | ("empty",) | ("bol",) | ("eol",)."""
 
     def __init__(self, src):
         self.src, self.i = src, 0
@@ -176,8 +180,10 @@ class PatternParser:
 
     def atom(self):
         c = self.take()
-        if c in "^$":
-            return ("empty",)
+        if c == "^":
+            return ("bol",)
+        if c == "$":
+            return ("eol",)
         if c == ".":
             return ("set", POOL)
         if c == "(":
@@ -271,6 +277,8 @@ class PatternParser:
             self.i += 1
         if atom[0] == "empty":
             return atom
+        if atom[0] in ("bol", "eol"):  # a repeated anchor is the anchor, or nothing
+            return atom if lo > 0 else ("empty",)
         return ("rep", atom, lo, hi)
 
 
@@ -286,6 +294,10 @@ class TooLong(Exception):
     """The value being generated passed its length cap."""
 
 
+class Misplaced(Exception):
+    """A `^` was generated past the start of the value."""
+
+
 class OutOfSteps(Exception):
     """pattern_value spent its step budget."""
 
@@ -294,21 +306,29 @@ class Budget:
     def __init__(self, steps):
         self.steps = steps
 
-    def spend(self):
-        self.steps -= 1
+    def spend(self, n=1):
+        self.steps -= n
         if self.steps < 0:
             raise OutOfSteps()
 
 
-def generate(node, seed, spread, out, cap, budget, branch=0):
+def generate(node, seed, spread, out, cap, budget, branch=0, eols=None):
     """Appends one string of `node` to `out`: branch `branch` of an alternation (its
     last branch when it has fewer), each repeat `spread` times clamped to its bounds,
     and a set's character picked by `seed` and the position, so ids of different
-    fields differ. Raises TooLong past `cap` characters and OutOfSteps when `budget`
-    is spent."""
+    fields differ. The string is in the pattern's language by construction except
+    for anchors: a `^` past the start raises Misplaced, and each `$` appends its
+    position to `eols`, so the caller checks they all sit at the end. Raises TooLong
+    past `cap` characters and OutOfSteps when `budget` is spent."""
     budget.spend()
     kind = node[0]
-    if kind in ("lit", "set"):
+    if kind == "bol":
+        if out:
+            raise Misplaced()
+    elif kind == "eol":
+        if eols is not None:
+            eols.append(len(out))
+    elif kind in ("lit", "set"):
         if len(out) >= cap:
             raise TooLong()
         if kind == "lit":
@@ -318,15 +338,64 @@ def generate(node, seed, spread, out, cap, budget, branch=0):
             out.append(chars[(seed + len(out)) % len(chars)])
     elif kind == "seq":
         for item in node[1]:
-            generate(item, seed, spread, out, cap, budget, branch)
+            generate(item, seed, spread, out, cap, budget, branch, eols)
     elif kind == "alt":
         branches = node[1]
-        generate(branches[min(branch, len(branches) - 1)], seed, spread, out, cap, budget, branch)
+        generate(branches[min(branch, len(branches) - 1)], seed, spread, out, cap, budget, branch, eols)
     elif kind == "rep":
         _, inner, lo, hi = node
         count = max(lo, spread if hi is None else min(hi, spread))
         for _ in range(count):
-            generate(inner, seed, spread, out, cap, budget, branch)
+            generate(inner, seed, spread, out, cap, budget, branch, eols)
+
+
+def matches(node, s, budget):
+    """Whether `node` matches somewhere in `s` (re.search semantics without flags:
+    `^` only at the start, `$` at the end or before a final newline). It tracks the
+    set of positions each node can end at, so its work is about nodes times length,
+    charged to `budget` (OutOfSteps when spent), however the repeats nest."""
+    n = len(s)
+    ends = {n, n - 1} if s.endswith("\n") else {n}
+
+    def run(node, starts):
+        budget.spend(len(starts) + 1)
+        kind = node[0]
+        if kind == "lit":
+            return {p + 1 for p in starts if p < n and s[p] == node[1]}
+        if kind == "set":
+            return {p + 1 for p in starts if p < n and s[p] in node[1]}
+        if kind == "empty":
+            return starts
+        if kind == "bol":
+            return starts & {0}
+        if kind == "eol":
+            return starts & ends
+        if kind == "seq":
+            for item in node[1]:
+                if not starts:
+                    break
+                starts = run(item, starts)
+            return starts
+        if kind == "alt":
+            out = set()
+            for branch in node[1]:
+                out |= run(branch, starts)
+            return out
+        _, inner, lo, hi = node
+        for _ in range(lo):
+            if not starts:
+                return starts
+            starts = run(inner, starts)
+        # Past the minimum, a breadth-first closure: each round extends only the
+        # positions first reached in the round before, up to `hi` rounds.
+        reached, frontier, count = set(starts), starts, lo
+        while frontier and (hi is None or count < hi):
+            frontier = run(inner, frontier) - reached
+            reached |= frontier
+            count += 1
+        return reached
+
+    return bool(run(node, set(range(n + 1))))
 
 
 def widest_alt(node):
@@ -363,32 +432,34 @@ def pattern_value(pattern, seed, min_len, max_len, plain):
         if forced_repeats(tree) > MAX_PATTERN_LEN:
             raise Unsupported("repeats above the length cap")
         width = widest_alt(tree)
-        compiled = re.compile(pattern)
+        re.compile(pattern)  # rejects what Python rejects; never used to search
     except (Unsupported, re.error, RecursionError):
         return plain
 
-    def fits(s):
-        return (len(s) >= min_len and (max_len is None or len(s) <= max_len)
-                and compiled.search(s) is not None)
-
-    if len(plain) <= MAX_PATTERN_LEN and fits(plain):
-        return plain
-    cap = MAX_PATTERN_LEN if max_len is None else min(max_len, MAX_PATTERN_LEN)
-    if min_len > cap:
-        return plain
     budget = Budget(MAX_PATTERN_STEPS)
+
+    def length_fits(s):
+        return len(s) >= min_len and (max_len is None or len(s) <= max_len)
+
+    cap = MAX_PATTERN_LEN if max_len is None else min(max_len, MAX_PATTERN_LEN)
     try:
+        if len(plain) <= MAX_PATTERN_LEN and length_fits(plain) and matches(tree, plain, budget):
+            return plain
+        if min_len > cap:
+            return plain
         for branch in range(width):
             for i, spread in enumerate([3, *range(1, max(64, min_len + 1) + 1)]):
-                out = []
+                out, eols = [], []
                 try:
-                    generate(tree, seed, spread, out, cap, budget, branch)
+                    generate(tree, seed, spread, out, cap, budget, branch, eols)
                 except TooLong:
                     if i == 0:
                         continue  # the default spread; smaller ones come next
                     break  # spreads now ascend, and a larger one is never shorter
+                except Misplaced:
+                    continue
                 s = "".join(out)
-                if fits(s):
+                if length_fits(s) and all(at == len(s) for at in eols):
                     return s
     except (OutOfSteps, RecursionError):
         return plain

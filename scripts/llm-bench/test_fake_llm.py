@@ -109,6 +109,33 @@ class PatternValueTests(unittest.TestCase):
         self.assertEqual(value({"type": "string", "pattern": "^(draft|sent|paid)$"}), "draft")
 
 
+class MatcherTests(unittest.TestCase):
+    """`matches` agrees with `re.search` on patterns where backtracking is cheap. Negated
+    sets and `.` draw from a fixed pool, so outside it `matches` may only say no."""
+
+    UNIVERSE = set(fake_llm.POOL + "-._~")
+
+    PATTERNS = [
+        r"^[a-z]+$", r"[0-9]{3}", r"^a|b$", r"^(ab|cd)*e?$", r"x{2,3}", r"^$", r"a^b", r"a$",
+        r"^\d{2}-\d{2}$", r"[^a-c]+", r"\W", r"^(?:a?){3}$", r"^.{2}$", r"(a|)+b", r"^\s*x\s*$",
+        r"^val\d+$", r"^[A-Z][a-z]*(?:_[a-z]+)*$", r"\.", r"^(?:x|xy)(?:z|yz)$", r"a{0}b",
+    ]
+    STRINGS = ["", "a", "b", "ab", "abcde", "cdabe", "xx", "xxx", "x", "12-34", "123", "a\n",
+               "val1", "Abc_de", " x ", "xyz", "b.c", "d", "aab", "e", "ba", "\n"]
+
+    def test_agrees_with_re(self):
+        for pattern in self.PATTERNS:
+            tree = fake_llm.PatternParser(pattern).parse()
+            for s in self.STRINGS:
+                with self.subTest(pattern=pattern, s=s):
+                    want = re.search(pattern, s) is not None
+                    got = fake_llm.matches(tree, s, fake_llm.Budget(fake_llm.MAX_PATTERN_STEPS))
+                    if set(s) <= self.UNIVERSE:
+                        self.assertEqual(got, want)
+                    else:
+                        self.assertFalse(got and not want)
+
+
 class CostBoundTests(unittest.TestCase):
     """Adversarial patterns: each returns quickly, with the plain value when no bounded value fits."""
 
@@ -147,6 +174,28 @@ class CostBoundTests(unittest.TestCase):
         branches = "|".join(f"(?:b{i}[0-9]+)+" for i in range(200))
         got = self.timed({"type": "string", "pattern": f"^({branches})$", "minLength": 3000, "maxLength": 3001})
         self.assertTrue(got == "val1" + "x" * 2996 or re.search(f"^({branches})$", got))
+
+    def test_padded_plain_value_on_exponential_pattern(self):
+        # `re.search` on the padded plain value ('val1' + 24 'x') backtracks for seconds.
+        got = self.timed({"type": "string", "pattern": r"(x+x+)+y", "minLength": 28})
+        self.assertGreaterEqual(len(got), 28)
+
+    def test_generated_value_on_nested_nullable_repeats(self):
+        # The generated value fits at once, but `re.search` on it does not finish.
+        pattern = r"^(?:(?:(?:(?:[a-z]{0,4000}){0,4000}){0,4000}){0,4000})y{4000}$"
+        got = self.timed({"type": "string", "pattern": pattern})
+        self.assertLessEqual(len(got), fake_llm.MAX_PATTERN_LEN)
+        self.assertRegex(got, r"^[a-z]*y{4000}$")  # the same language, cheap for `re`
+
+    def test_misplaced_anchors_pick_another_branch(self):
+        for pattern in [r"a^b|c", r"a$b|^c$"]:
+            with self.subTest(pattern=pattern):
+                got = self.timed({"type": "string", "pattern": pattern})
+                self.assertRegex(got, pattern)
+
+    def test_short_plain_value_on_nested_stars(self):
+        got = self.timed({"type": "string", "pattern": r"(((((((((.*)*)*)*)*)*)*)*)*)*Z"})
+        self.assertTrue(got == "val1" or got.endswith("Z"))
 
     def test_large_min_length_is_bounded(self):
         got = self.timed({"type": "string", "pattern": r"^[0-9]+$", "minLength": 100000})
