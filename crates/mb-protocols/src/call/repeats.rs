@@ -66,9 +66,9 @@ fn set_status(op: &Operation, set: &mb_mcm::world::UniqueDesc) -> Option<u16> {
 
 /// What a create or an update `plan` of `call` is refused with, before any
 /// generation, for repeating a stored record's values of a unique set its type's world
-/// description declares (see the module's documentation). `target` is the update's
+/// description declares (see the module's documentation). `target` is the write's
 /// target id and the record held there, when there is one; that record is never a
-/// conflict of its own update. At most [`MAX_SCAN`] records of the type are compared.
+/// conflict of its own update, but is one of a create (the record it would make). At most [`MAX_SCAN`] records of the type are compared.
 /// `None` when nothing conflicts, the type describes no unique set the operation can
 /// refuse, or the call has a scenario or a forced status.
 pub(super) async fn described_conflict(
@@ -151,7 +151,9 @@ pub(super) async fn described_conflict(
             None => listed.insert(state.list(&plan.session, t, MAX_SCAN).await),
         };
         let taken = records.iter().find(|r| {
-            Some(r.id.as_str()) != target_id
+            // A create's target is the record it would make: one already held there
+            // repeats it.
+            (creates || Some(r.id.as_str()) != target_id)
                 && gone.as_ref().is_none_or(|g| !g.excludes(&r.data))
                 && held.is_none_or(|h| h.id != r.id)
                 && values

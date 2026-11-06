@@ -48,7 +48,7 @@ Types (`types.<resource type>`):
 
 Operations (`operations.<operation id>`):
 - `kind`: `create`, `read`, `list`, `update`, `replace`, `delete` or `action`; `type`: the resource type.
-- `target: {path_param | member}`: what names the record the operation acts on.
+- `target: {path_param | member}`: what names the record the operation acts on. It replaces tier 0's target whole: a field you leave out is not kept. For a `POST` create, name the new record by its body member, not by a parent's path parameter; a `PUT` create whose route ends in the record's parameter (`PUT /buckets/{name}`) keeps that `path_param`.
 - `request` and `answer`: `{record}` or `{records}` as JSON pointers into the body (nested envelopes, one-item arrays, bulk arrays); `answer.long_running: {done, result}` for long-running operations.
 - `answer.identity_header`: the declared 2xx response header a create names its new id in (`Location`, `Resource-ID`), or `false` when it names it in none. HTTP only.
 - `transition: {<member>: <value>}`: members an action sets (the type needs a `lifecycle`).

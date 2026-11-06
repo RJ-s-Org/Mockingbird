@@ -7,7 +7,7 @@
 
 use crate::Bundle;
 
-use super::{Refusal, RefusalCode, TypeDesc, Validation, World, overlay, validate};
+use super::{OpKind, Refusal, RefusalCode, TypeDesc, Validation, World, overlay, validate};
 
 /// The effective world of `doc` over `base` (`tier0(bundle)`, passed in so a
 /// caller computes it once): `doc`'s entries that validate against `bundle`,
@@ -27,10 +27,19 @@ pub fn effective(bundle: &Bundle, base: &World, doc: &World) -> (World, Vec<Refu
 /// from the effective world and from `applied`, and refused `invalid` at
 /// `/types/<t>/identity/member`; the rest of the revision applies. So an
 /// effective world never holds a member-less identity.
+///
+/// A revision that makes an operation a create without naming a target keeps
+/// `base`'s target except a path parameter the route does not name the new
+/// record by: a `POST`'s, which names the collection or parent it posts to.
+/// A `PUT` whose last path segment is that parameter keeps it, its target URI
+/// being the record (see [`Operation::route_names_record`]).
+///
+/// [`Operation::route_names_record`]: crate::Operation::route_names_record
 #[must_use]
 pub fn effective_validated(bundle: &Bundle, base: &World, doc: &World) -> (World, Validation) {
     let mut v = validate(doc, bundle);
     let mut world = overlay(base, &v.applied);
+    drop_parent_targets(bundle, base, &v.applied, &mut world);
     let memberless: Vec<String> = world
         .types
         .iter()
@@ -54,6 +63,40 @@ pub fn effective_validated(bundle: &Bundle, base: &World, doc: &World) -> (World
         }
     }
     (world, v)
+}
+
+/// Drops from `world` the path parameter of each operation `applied` makes a
+/// create without a target, where `base` took it for another kind's target
+/// and the route does not name the new record by it.
+fn drop_parent_targets(bundle: &Bundle, base: &World, applied: &World, world: &mut World) {
+    for (id, top) in &applied.operations {
+        let made_create = top.kind == Some(OpKind::Create)
+            && base.operations.get(id).and_then(|b| b.kind) != Some(OpKind::Create);
+        if !made_create || top.target.is_some() {
+            continue;
+        }
+        let Some(desc) = world.operations.get_mut(id) else {
+            continue;
+        };
+        let Some(target) = desc.target.as_mut() else {
+            continue;
+        };
+        let names_record = |p: &str| {
+            bundle
+                .operation(id)
+                .is_some_and(|op| op.route_names_record(p))
+        };
+        if target
+            .path_param
+            .as_deref()
+            .is_some_and(|p| !names_record(p))
+        {
+            target.path_param = None;
+            if *target == super::TargetDesc::default() {
+                desc.target = None;
+            }
+        }
+    }
 }
 
 /// Removes type `name`'s identity from `world`, and the type with it when
