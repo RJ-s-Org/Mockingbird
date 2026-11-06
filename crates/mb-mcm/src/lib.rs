@@ -644,6 +644,55 @@ pub enum RecordAt {
     /// The one item of an array member of an envelope: an answer of
     /// `{"Id": ..., "Status": ..., "Contacts": [{"ContactID": ...}]}` for one contact.
     MemberItem(String),
+    /// Deeper than the three forms above: the RFC 6901 reference tokens of a
+    /// world description's `answer.record` (`/data/result/0` is
+    /// `["data", "result", "0"]`). A token `"0"` is the one item of an array
+    /// where the value there is an array, and a member named `0` otherwise. The
+    /// import heuristics never write it; a world description does.
+    Pointer(Vec<String>),
+}
+
+/// The value `tokens` lead to in `value` (see [`RecordAt::Pointer`]): an object's
+/// member, or the one item of an array at a `"0"`. `None` where a step is missing or
+/// an array does not hold exactly one object.
+fn walk_tokens<'a>(value: &'a Value, tokens: &[String]) -> Option<&'a Value> {
+    tokens.iter().try_fold(value, |at, token| match at {
+        Value::Array(items) if token == "0" => match items.as_slice() {
+            [one] if one.is_object() => Some(one),
+            _ => None,
+        },
+        Value::Object(map) => map.get(token),
+        _ => None,
+    })
+}
+
+/// [`walk_tokens`], mutably.
+fn walk_tokens_mut<'a>(value: &'a mut Value, tokens: &[String]) -> Option<&'a mut Value> {
+    tokens.iter().try_fold(value, |at, token| match at {
+        Value::Array(items) if token == "0" => match items.as_mut_slice() {
+            [one] if one.is_object() => Some(one),
+            _ => None,
+        },
+        Value::Object(map) => map.get_mut(token),
+        _ => None,
+    })
+}
+
+/// `record` placed at `tokens` in a copy of `at` (the answer's other members, kept
+/// beside it): a `"0"` over an array, or where nothing is there, is an array holding
+/// the one item; any other token is an object's member.
+fn place_at(at: Option<&Value>, tokens: &[String], record: Value) -> Value {
+    let Some((token, rest)) = tokens.split_first() else {
+        return record;
+    };
+    if token == "0" && at.is_none_or(Value::is_array) {
+        let inner = place_at(at.and_then(|a| a.get(0)), rest, record);
+        return Value::Array(vec![inner]);
+    }
+    let mut envelope = at.and_then(Value::as_object).cloned().unwrap_or_default();
+    let inner = place_at(envelope.get(token), rest, record);
+    envelope.insert(token.clone(), inner);
+    Value::Object(envelope)
 }
 
 impl Identity {
@@ -664,6 +713,9 @@ impl Identity {
                     _ => None,
                 }
             }
+            Some(RecordAt::Pointer(tokens)) => {
+                walk_tokens(answer, tokens).filter(|v| v.is_object())
+            }
         }
     }
 
@@ -681,6 +733,9 @@ impl Identity {
                     [one] if one.is_object() => Some(one),
                     _ => None,
                 }
+            }
+            Some(RecordAt::Pointer(tokens)) => {
+                walk_tokens_mut(answer, tokens).filter(|v| v.is_object())
             }
         }
     }
@@ -702,16 +757,19 @@ impl Identity {
                 envelope.insert(member.clone(), Value::Array(vec![record]));
                 Value::Object(envelope)
             }
+            Some(RecordAt::Pointer(tokens)) => place_at(rest, tokens, record),
         }
     }
 
     /// The envelope member holding the record, as [`RecordAt::Member`] or
-    /// [`RecordAt::MemberItem`] name it; `None` for an answer that is the record or
-    /// an array.
+    /// [`RecordAt::MemberItem`] name it, or the first token of a
+    /// [`RecordAt::Pointer`] (the top-level member the record is somewhere in);
+    /// `None` for an answer that is the record or an array.
     #[must_use]
     pub fn envelope_member(&self) -> Option<&str> {
         match &self.record {
             Some(RecordAt::Member(member) | RecordAt::MemberItem(member)) => Some(member),
+            Some(RecordAt::Pointer(tokens)) => tokens.first().map(String::as_str),
             None | Some(RecordAt::Item) => None,
         }
     }

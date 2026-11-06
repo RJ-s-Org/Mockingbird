@@ -115,6 +115,7 @@ Vocabulary:
   - `kind`: create, read, list, update, replace, delete, action.
   - `type` and `target`: which path parameter or body member names the record.
   - `request` and `answer`: JSON pointers to the record or records. This covers nested envelopes, one-item arrays, bulk arrays and long-running operations.
+    `answer.record: ""` (and `request.record: ""`) says the answer (the request body) is itself the record.
   - `transition`: a state set or moved by an action.
   - `changes`: request members applied to the target.
   - `scope`, `filters`, `order`, `paging`: style, the request and response members or headers, page size.

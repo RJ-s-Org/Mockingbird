@@ -3711,10 +3711,12 @@ fn force_alternative(
     [key, other]: [&str; 2],
 ) -> Value {
     // An item of a list is held nowhere this tells apart.
-    if matches!(
-        identity.record,
-        Some(mb_mcm::RecordAt::Item | mb_mcm::RecordAt::MemberItem(_))
-    ) {
+    let in_a_list = match &identity.record {
+        Some(mb_mcm::RecordAt::Item | mb_mcm::RecordAt::MemberItem(_)) => true,
+        Some(mb_mcm::RecordAt::Pointer(tokens)) => tokens.iter().any(|t| t == "0"),
+        Some(mb_mcm::RecordAt::Member(_)) | None => false,
+    };
+    if in_a_list {
         return body;
     }
     let Some(record) = identity.record_in(&body) else {
@@ -3757,9 +3759,13 @@ fn fitted(
     member: &str,
     id: &Value,
 ) -> Option<Value> {
+    // The record's full location, as a format error names it: a deep pointer's
+    // every token, not only its envelope member.
     let prefix = identity
-        .envelope_member()
-        .map_or_else(String::new, |m| format!("/{m}"));
+        .record
+        .as_ref()
+        .and_then(mb_mcm::world::record_pointer)
+        .map_or_else(String::new, |p| p.as_str().to_owned());
     let at = format!("{prefix}/{}", member.replace('.', "/"));
     let elsewhere = |location: &str, _: &Value| location != at;
     id_candidates(id).into_iter().find_map(|candidate| {
@@ -3789,8 +3795,13 @@ fn id_candidates(id: &Value) -> Vec<Value> {
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: its
-/// envelope's member, or its items.
-fn record_schema(bundle: &Bundle, identity: &mb_mcm::Identity, schema: &Value) -> Option<Value> {
+/// envelope's member, or its items; along a deep pointer, an array's items at a `"0"`
+/// and a member at any other token.
+pub(crate) fn record_schema(
+    bundle: &Bundle,
+    identity: &mb_mcm::Identity,
+    schema: &Value,
+) -> Option<Value> {
     match identity.record.as_ref()? {
         mb_mcm::RecordAt::Member(member) => consistency::property_schema(bundle, schema, member),
         mb_mcm::RecordAt::Item => consistency::deref(bundle, schema).get("items").cloned(),
@@ -3798,6 +3809,12 @@ fn record_schema(bundle: &Bundle, identity: &mb_mcm::Identity, schema: &Value) -
             let list = consistency::property_schema(bundle, schema, member)?;
             consistency::deref(bundle, &list).get("items").cloned()
         }
+        mb_mcm::RecordAt::Pointer(tokens) => tokens.iter().try_fold(schema.clone(), |at, token| {
+            let items = (token == "0")
+                .then(|| consistency::deref(bundle, &at).get("items").cloned())
+                .flatten();
+            items.or_else(|| consistency::property_schema(bundle, &at, token))
+        }),
     }
 }
 
@@ -4361,6 +4378,39 @@ components:
             let out = force_identity(&v, &op, &by_path("blue", None), None, answer.clone());
             assert_eq!(out, answer, "{record:?}");
         }
+    }
+
+    #[test]
+    fn a_compound_path_value_into_a_deep_record_keeps_the_key_format() {
+        // The record sits at `/data/zone`: a name breaks its uuid key there, so it
+        // goes to the other member, as for a record at the top.
+        let (mut op, _) = apps("{type: string, format: uuid}");
+        if let Some(identity) = op.identity.as_mut() {
+            identity.record = Some(mb_mcm::RecordAt::Pointer(vec![
+                "data".into(),
+                "zone".into(),
+            ]));
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {"data": {"type": "object", "properties": {"zone": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "name": {"type": "string"}
+                }
+            }}}}
+        });
+        let v = SchemaValidator::for_output(&schema).unwrap();
+        let id = "0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
+        let answer = json!({"data": {"zone": {"id": id, "name": "x"}}});
+        let out = force_identity(&v, &op, &by_path("green", None), None, answer);
+        assert_eq!(
+            out,
+            json!({"data": {"zone": {"id": id, "name": "green"}}}),
+            "a uuid key refuses a name at a deep pointer"
+        );
+        assert!(v.is_valid_output(&out), "{out}");
     }
 
     /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.

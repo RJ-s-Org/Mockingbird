@@ -26,6 +26,27 @@
 
 Fixes 9 (echo over a withheld null) and 11 (JSON Patch bodies) have no branch yet and touch no task here. Three blind11 mechanisms are world work in this plan, not engine fixes: 4 (soft delete / archive) is Task 7; 10 (an action route that deletes) is Tasks 1 and 6; 14 (child records from a create's request array, and sums derived from them) is Task 5 (`request.records`) and Task 11 (sums), except a child of a fixed kind (see "Not in this plan").
 
+## Where `call.rs` code lives now
+
+`crates/mb-protocols/src/call.rs` was split into submodules after this plan was written (pure moves, no behaviour change). Where the plan says "`call.rs`" for an item below, edit the file named here. `call.rs` keeps the pipeline itself: `target_id`, `generate_once`, `generate_narrowed`, `generate_pending`, `Prepared`, `prepare`, `serve_held`, `nothing_held`, `member_read`, `complete`, the `mod` lines and `reason_header`. The ordering rule for tasks that edit `call.rs` applies to each of these files the same way.
+
+| File under `crates/mb-protocols/src/call/` | Items the plan names |
+| --- | --- |
+| `admission.rs` | `plan`, `CallPlan`, `declared_rate_limited`, `PlanError` |
+| `effects.rs` | `apply_effects`, `record_effects`, `apply_effect`, `mended_set`, `Place`, `fill_stubs` |
+| `creates.rs` | `repeated_record`, `request_values`, `mint_create_id`, `unique_create_id`, `place_new_record` |
+| `bundle_index.rs` | `BundleIndex`, `record_schema_of`, `MAX_SCAN`, `entity_type` |
+| `session_memory.rs` | `PathAliases`, `OwnReads`, `WrittenTypes`, `next_numbers` |
+| `entities.rs` | `store_wrapped`, `seed_own_read`, `seed_entities` |
+| `lookup.rs` | `read_context`, `any_owner_holds`, `by_path_fields`, `alternate_members`, `by_alternate_member` |
+| `owners.rs` | `Owner`, `Collection`, `owner_of`, `in_create_collection`, `key_fits` |
+| `collections.rs` | `Collections` |
+| `state_access.rs` | `StateAccess` |
+| `relations.rs` | `related`, `follow`, `referrers` |
+| `writes.rs` | `WriteOrigin`, `WriteRequest`, `write_state` |
+| `reporting.rs`, `streams.rs`, `canonical.rs` | request-log reporting, streams and change feeds, cache keys |
+| `tests.rs` | `call.rs`'s former `mod tests` |
+
 ## Global Constraints
 
 - **Optional, never required.** A contract alone still works. With no revision, the effective world is tier 0, and every answer stays as it is today (Task 1 and Task 3 prove this).
