@@ -28,6 +28,16 @@
 //!   refusal from state: its message, and the members a taken unique set names in its
 //!   path-like members). Offline, or when the model's answer fails, the faker's body
 //!   stands, with the same facts (a failed write is asked for again after a minute).
+//! - Since a written body serves every later call, it is checked before it is kept
+//!   ([`body_flaw`]): it validates against the declared error schema; each code-like
+//!   string is a short token (at most [`MAX_CODE_LEN`] characters, no unit of two or
+//!   more characters repeated back to back [`MIN_REPEATS`] times, no whitespace run,
+//!   line break, tab or edge space), unless it is a token the API description or the
+//!   response's description names in backticks (`` `invalid_parameters` ``); and no
+//!   string is longer than [`MAX_ERROR_STRING_LEN`] characters, nor, past
+//!   [`REPEAT_FLOOR`] characters, more than [`MAX_REPEAT_SHARE`] percent one unit
+//!   repeated. A body that fails is asked for once more ([`WRITE_ASKS`] in all); when
+//!   the second fails too, the write failed: the faker's body stands.
 
 use mb_mcm::{Bundle, Operation};
 use serde_json::{Map, Value};
@@ -308,6 +318,23 @@ fn fixed(branches: &[&Value]) -> bool {
     })
 }
 
+/// Whether member `name`, declared by `prop`, is a code-like scalar whose value its
+/// schema does not fix: not a URI (problem+json's `type`) nor an integer HTTP status
+/// (`status_code`), which are no code the contract's prose says.
+fn open_code(name: &str, prop: &Value, defs: &Map<String, Value>) -> bool {
+    if !code_like(name) {
+        return false;
+    }
+    let prop_parts = branches(prop, defs);
+    let kinds = types(&prop_parts);
+    let scalar = kinds
+        .iter()
+        .any(|t| matches!(*t, "string" | "integer" | "number"));
+    let uri = uri_format(&prop_parts) || shown_values(&prop_parts).any(|v| v.contains("://"));
+    let http_status = folded(name).ends_with("statuscode") && !kinds.contains(&"string");
+    scalar && !fixed(&prop_parts) && !uri && !http_status
+}
+
 /// Whether `schema` declares a code-like scalar member, at any depth, whose value its
 /// schema does not fix: what only the contract's prose can say.
 #[must_use]
@@ -319,23 +346,12 @@ pub fn writes_code(schema: &Value, defs: &Map<String, Value>) -> bool {
         let parts = branches(schema, defs);
         parts.iter().any(|b| {
             let members = b.get("properties").and_then(Value::as_object);
-            members.into_iter().flatten().any(|(name, prop)| {
-                let prop_parts = branches(prop, defs);
-                let kinds = types(&prop_parts);
-                let scalar = kinds
-                    .iter()
-                    .any(|t| matches!(*t, "string" | "integer" | "number"));
-                // A URI (problem+json's `type`) or an integer HTTP status
-                // (`status_code`) is no code the contract's prose says.
-                let uri =
-                    uri_format(&prop_parts) || shown_values(&prop_parts).any(|v| v.contains("://"));
-                let http_status =
-                    folded(name).ends_with("statuscode") && !kinds.contains(&"string");
-                (code_like(name) && scalar && !fixed(&prop_parts) && !uri && !http_status)
-                    || walk(prop, defs, depth + 1)
-            }) || b
-                .get("items")
-                .is_some_and(|items| walk(items, defs, depth + 1))
+            members
+                .into_iter()
+                .flatten()
+                .any(|(name, prop)| open_code(name, prop, defs) || walk(prop, defs, depth + 1))
+                || b.get("items")
+                    .is_some_and(|items| walk(items, defs, depth + 1))
         })
     }
     walk(schema, defs, 0)
@@ -1027,6 +1043,201 @@ fn message_items(
     }
 }
 
+/// How many times the model is asked for an error body whose answer is degenerate
+/// ([`body_flaw`]) before the faker's stands.
+const WRITE_ASKS: usize = 2;
+/// The longest code-like value (in characters) a written error body keeps.
+pub(crate) const MAX_CODE_LEN: usize = 64;
+/// The longest string member (in characters) a written error body keeps.
+pub(crate) const MAX_ERROR_STRING_LEN: usize = 2048;
+/// A string at least this long (in characters) is checked for one repeated unit
+/// covering most of it ([`MAX_REPEAT_SHARE`]).
+pub(crate) const REPEAT_FLOOR: usize = 40;
+/// The share of a string (at least [`REPEAT_FLOOR`] long) one unit repeated back to
+/// back may cover, in percent.
+pub(crate) const MAX_REPEAT_SHARE: usize = 50;
+/// How many times a unit is repeated back to back to count as a repeat.
+const MIN_REPEATS: usize = 3;
+/// The longest unit (in characters) looked for repeated.
+const MAX_REPEAT_UNIT: usize = 256;
+
+/// Why a written error body is not kept ([`body_flaw`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flaw {
+    /// It does not validate against the declared error schema.
+    Invalid,
+    /// A code-like value is longer than [`MAX_CODE_LEN`].
+    LongCode,
+    /// A code-like value repeats a unit of two or more characters back to back.
+    RepeatedCode,
+    /// A code-like value has a whitespace run, a line break or a tab, or starts or
+    /// ends with whitespace.
+    SpacedCode,
+    /// A string member is longer than [`MAX_ERROR_STRING_LEN`].
+    LongString,
+    /// One unit repeated back to back covers most of a string member.
+    RepeatedString,
+}
+
+impl Flaw {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Flaw::Invalid => "schema",
+            Flaw::LongCode => "code length",
+            Flaw::RepeatedCode => "code repetition",
+            Flaw::SpacedCode => "code whitespace",
+            Flaw::LongString => "string length",
+            Flaw::RepeatedString => "string repetition",
+        }
+    }
+}
+
+/// The backticked spans of `texts` (`` `invalid_parameters` ``): the tokens the
+/// contract's prose names, a code-like value among which always passes
+/// ([`body_flaw`]).
+fn backticked<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<String> {
+    texts
+        .flat_map(|text| {
+            text.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The most characters of `chars` one unit covers repeated back to back at least
+/// [`MIN_REPEATS`] times (the last time without a separator that ends the unit), over the units (of at most [`MAX_REPEAT_UNIT`] characters)
+/// `unit` accepts.
+fn repeated_span(chars: &[char], unit: impl Fn(&[char]) -> bool) -> usize {
+    let n = chars.len();
+    let mut best = 0;
+    for period in 1..=MAX_REPEAT_UNIT.min((n + 1) / MIN_REPEATS) {
+        let mut start = 0;
+        let mut run = 0;
+        for i in 0..n - period {
+            if chars[i] == chars[i + period] {
+                if run == 0 {
+                    start = i;
+                }
+                run += 1;
+                let span = run + period;
+                let found = &chars[start..start + period];
+                // A unit ending in a separator (`not_found_`) repeats as often when
+                // its last separator is left off (`not_found_not_found_not_found`).
+                let separated = found.last().is_some_and(|c| !c.is_alphanumeric());
+                let repeats =
+                    span >= MIN_REPEATS * period || (separated && span + 1 >= MIN_REPEATS * period);
+                if repeats && span > best && unit(found) {
+                    best = span;
+                }
+            } else {
+                run = 0;
+            }
+        }
+    }
+    best
+}
+
+/// Why a code-like `value` is no code, if it is not: too long, a unit of two or more
+/// characters (with a letter, of two or more distinct characters: `E000` is a code)
+/// repeated back to back, or spaced oddly. A token the contract's prose names
+/// (`tokens`) always passes.
+fn code_flaw(value: &str, tokens: &[String]) -> Option<Flaw> {
+    if tokens.iter().any(|t| t == value) {
+        return None;
+    }
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() > MAX_CODE_LEN {
+        return Some(Flaw::LongCode);
+    }
+    let spaced = chars.first().is_some_and(|c| c.is_whitespace())
+        || chars.last().is_some_and(|c| c.is_whitespace())
+        || chars.iter().any(|c| c.is_whitespace() && *c != ' ')
+        || chars
+            .windows(2)
+            .any(|w| w[0].is_whitespace() && w[1].is_whitespace());
+    if spaced {
+        return Some(Flaw::SpacedCode);
+    }
+    let unit = |u: &[char]| {
+        u.len() >= 2 && u.iter().any(|c| c.is_alphabetic()) && u.iter().any(|c| *c != u[0])
+    };
+    (repeated_span(&chars, unit) > 0).then_some(Flaw::RepeatedCode)
+}
+
+/// Why a string member of a written error body is degenerate, if it is: longer than
+/// [`MAX_ERROR_STRING_LEN`], or (past [`REPEAT_FLOOR`]) more than
+/// [`MAX_REPEAT_SHARE`] percent one unit repeated.
+fn string_flaw(value: &str) -> Option<Flaw> {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() > MAX_ERROR_STRING_LEN {
+        return Some(Flaw::LongString);
+    }
+    if chars.len() < REPEAT_FLOOR {
+        return None;
+    }
+    (repeated_span(&chars, |_| true) * 100 > chars.len() * MAX_REPEAT_SHARE)
+        .then_some(Flaw::RepeatedString)
+}
+
+/// Why a written error `body`, declared by `schema`, is not to be kept, if it is not
+/// (see the module's documentation): it fails `validator`, a code-like member
+/// ([`open_code`]) is no short token ([`code_flaw`]; one of `tokens`, the backticked
+/// spans of the contract's prose, always passes), or a string member is degenerate
+/// ([`string_flaw`]).
+pub(crate) fn body_flaw(
+    body: &Value,
+    schema: &Value,
+    defs: &Map<String, Value>,
+    validator: &SchemaValidator,
+    tokens: &[String],
+) -> Option<Flaw> {
+    fn walk(
+        value: &Value,
+        schema: Option<&Value>,
+        defs: &Map<String, Value>,
+        tokens: &[String],
+        depth: usize,
+    ) -> Option<Flaw> {
+        match value {
+            Value::String(text) => string_flaw(text),
+            Value::Array(items) => {
+                let item_schema = if depth > MAX_DEPTH {
+                    None
+                } else {
+                    items_schema(schema, defs)
+                };
+                items
+                    .iter()
+                    .find_map(|item| walk(item, item_schema, defs, tokens, depth + 1))
+            }
+            Value::Object(members) => members.iter().find_map(|(name, member)| {
+                let prop = if depth > MAX_DEPTH {
+                    None
+                } else {
+                    member_schema(schema, name, defs)
+                };
+                let code = match member {
+                    Value::String(text) if prop.is_some_and(|p| open_code(name, p, defs)) => {
+                        code_flaw(text, tokens)
+                    }
+                    _ => None,
+                };
+                code.or_else(|| walk(member, prop, defs, tokens, depth + 1))
+            }),
+            _ => None,
+        }
+    }
+    if !validator.is_valid(body) {
+        return Some(Flaw::Invalid);
+    }
+    walk(body, Some(schema), defs, tokens, 0)
+}
+
 /// What the engine writes an error body with (see [`Engine::error_writable`]).
 struct Writable<'a> {
     provider: &'a dyn mb_llm::Provider,
@@ -1271,23 +1482,46 @@ impl Engine {
                         [&error_call],
                     ),
                 };
-                let answer = self
-                    .generate_with_llm(
-                        provider,
-                        &validator,
-                        messages,
-                        &format,
-                        &checks,
-                        usage,
-                    )
-                    .await;
-                match answer {
-                    Ok(answer) => Kept::now(Some(answer.value)),
-                    Err(reason) => {
-                        tracing::warn!(operation = %op.id, status, %reason, "the error body was not written: the faker's is served");
-                        Kept::now(None)
+                let tokens = backticked(
+                    [bundle.description.as_deref(), variant.description.as_deref()]
+                        .into_iter()
+                        .flatten(),
+                );
+                // A degenerate answer is asked for once more, and never kept: past a
+                // second, the faker's body stands, as for a failed write.
+                for attempt in 1..=WRITE_ASKS {
+                    let answer = self
+                        .generate_with_llm(
+                            provider,
+                            &validator,
+                            messages.clone(),
+                            &format,
+                            &checks,
+                            usage,
+                        )
+                        .await;
+                    match answer {
+                        Ok(answer) => {
+                            match body_flaw(&answer.value, schema, &bundle.defs, &validator, &tokens) {
+                                None => return Kept::now(Some(answer.value)),
+                                Some(flaw) => tracing::info!(
+                                    operation = %op.id,
+                                    status,
+                                    ?cause,
+                                    attempt,
+                                    check = flaw.as_str(),
+                                    "a written error body was not kept"
+                                ),
+                            }
+                        }
+                        Err(reason) => {
+                            tracing::warn!(operation = %op.id, status, %reason, "the error body was not written: the faker's is served");
+                            return Kept::now(None);
+                        }
                     }
                 }
+                tracing::warn!(operation = %op.id, status, ?cause, "no written error body passed its checks: the faker's is served");
+                Kept::now(None)
             })
             .await
             .body
@@ -1829,5 +2063,147 @@ mod tests {
         // The stale failure's cell is a new one, to be written again.
         assert!(!engine.error_cell(&failed).initialized());
         assert!(engine.error_cell(&written).initialized());
+    }
+
+    fn flaw_of(body: &Value, tokens: &[&str]) -> Option<Flaw> {
+        let schema = json!({
+            "type": "object",
+            "required": ["code"],
+            "properties": {
+                "code": {"type": "string"},
+                "type": {"type": "string", "format": "uri"},
+                "message": {"type": "string"},
+                "errors": {"type": "array", "items": {"type": "object", "properties": {
+                    "error_code": {"type": "string"},
+                    "detail": {"type": "string"}
+                }}}
+            }
+        });
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let tokens: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
+        body_flaw(body, &schema, &Map::new(), &validator, &tokens)
+    }
+
+    #[test]
+    fn a_body_failing_its_schema_is_not_kept() {
+        assert_eq!(flaw_of(&json!({"message": "x"}), &[]), Some(Flaw::Invalid));
+        assert_eq!(flaw_of(&json!({"code": 7}), &[]), Some(Flaw::Invalid));
+    }
+
+    #[test]
+    fn a_short_token_code_is_kept() {
+        for code in [
+            "invalid_parameters",
+            "E000123",
+            "ERR-404",
+            "resource_missing",
+            "Bad Request",
+            "banana_split",
+        ] {
+            assert_eq!(flaw_of(&json!({"code": code}), &[]), None, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_long_code_is_not_kept_unless_the_contract_names_it() {
+        let long = "invalid_parameters.required_playback_policies.missing_entries_for_signed";
+        assert!(long.len() > MAX_CODE_LEN);
+        assert_eq!(flaw_of(&json!({"code": long}), &[]), Some(Flaw::LongCode));
+        assert_eq!(flaw_of(&json!({"code": long}), &[long]), None);
+        let nested = json!({"code": "x", "errors": [{"error_code": "y".repeat(65)}]});
+        assert_eq!(flaw_of(&nested, &[]), Some(Flaw::LongCode));
+    }
+
+    #[test]
+    fn a_repeating_code_is_not_kept() {
+        let looped = "invalid_parameters!".repeat(200);
+        assert_eq!(flaw_of(&json!({"code": looped}), &[]), Some(Flaw::LongCode));
+        for code in ["ERR_ERR_ERR", "abababab", "not_found_not_found_not_found"] {
+            assert_eq!(
+                flaw_of(&json!({"code": code}), &[]),
+                Some(Flaw::RepeatedCode),
+                "{code}"
+            );
+        }
+        // Named by the contract, it is its code.
+        assert_eq!(flaw_of(&json!({"code": "abababab"}), &["abababab"]), None);
+    }
+
+    #[test]
+    fn an_oddly_spaced_code_is_not_kept() {
+        for code in [
+            "invalid  parameters",
+            " invalid",
+            "invalid ",
+            "invalid\nparameters",
+            "a\tb",
+        ] {
+            assert_eq!(
+                flaw_of(&json!({"code": code}), &[]),
+                Some(Flaw::SpacedCode),
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uri_type_is_no_code() {
+        let body =
+            json!({"code": "x", "type": "https://example.com/probs/out-of-credit/out-of-credit"});
+        assert_eq!(flaw_of(&body, &[]), None);
+    }
+
+    #[test]
+    fn a_string_one_unit_covers_is_not_kept() {
+        let looped = format!("The request is invalid: {}", "again ".repeat(20));
+        assert_eq!(
+            flaw_of(&json!({"code": "x", "message": looped}), &[]),
+            Some(Flaw::RepeatedString)
+        );
+        let dots = format!("Invalid{}", ".".repeat(60));
+        assert_eq!(
+            flaw_of(&json!({"code": "x", "errors": [{"detail": dots}]}), &[]),
+            Some(Flaw::RepeatedString)
+        );
+        // Short strings are not judged.
+        assert_eq!(flaw_of(&json!({"code": "x", "message": "aaaa"}), &[]), None);
+    }
+
+    #[test]
+    fn a_very_long_string_is_not_kept() {
+        let words: String = (0..600).map(|i| format!("w{i} ")).collect();
+        assert!(words.chars().count() > MAX_ERROR_STRING_LEN);
+        assert_eq!(
+            flaw_of(&json!({"code": "x", "message": words}), &[]),
+            Some(Flaw::LongString)
+        );
+    }
+
+    #[test]
+    fn a_long_message_that_does_not_repeat_is_kept() {
+        let message = "The request body is invalid: `title` must be a string of at most 120 \
+characters, `duration` must be a positive integer number of seconds, and `visibility` must be \
+one of public, unlisted or private. See the API reference for the full list of accepted values \
+for each field, and retry the request once every listed member is corrected.";
+        assert!(message.len() > 300);
+        assert_eq!(
+            flaw_of(
+                &json!({"code": "invalid_parameters", "message": message}),
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn backticked_spans_are_the_contracts_tokens() {
+        let tokens = backticked(
+            [
+                "Codes: `invalid_parameters`, `not_found` and ` `.",
+                "`a.b` only",
+            ]
+            .into_iter(),
+        );
+        assert_eq!(tokens, ["invalid_parameters", "not_found", "a.b"]);
     }
 }
