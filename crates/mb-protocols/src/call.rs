@@ -399,6 +399,29 @@ pub(crate) struct Pending<'a> {
     retry: bool,
 }
 
+/// Whether a GraphQL delete that removed record `id` of type `t` here leaves the marker
+/// its `write_by_id` would have left, had the record still been held when it ran: by id,
+/// and unless its payload contradicts it (see [`deleted::marks_by_id`]).
+#[cfg_attr(not(feature = "graphql"), allow(unused_variables))]
+fn graphql_marks(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    t: &str,
+    id: &str,
+    generated: &GeneratedResponse,
+) -> bool {
+    #[cfg(feature = "graphql")]
+    {
+        matches!(plan.op.binding, Binding::Graphql { .. })
+            && deleted::marks_by_id(rt, plan)
+            && !crate::graphql::contradicts(generated.body.as_ref(), Some(t), id)
+    }
+    #[cfg(not(feature = "graphql"))]
+    {
+        false
+    }
+}
+
 /// Reads the call's state and answers what needs no generation: an unknown
 /// id (404), a stored resource, a cached answer.
 pub(crate) async fn prepare<'a>(
@@ -1143,6 +1166,17 @@ pub(crate) async fn complete(
                     target_id = Some(id);
                 }
             }
+            // What the description says an update or action sets on its target shows
+            // in the answer's record too.
+            if !generated.new_record {
+                transitions::onto_answer(
+                    rt,
+                    op,
+                    call.body.as_ref(),
+                    target_id.as_deref(),
+                    &mut generated,
+                );
+            }
             // A faker list standing in for a failed LLM call seeds nothing,
             // or its items would join the session's later LLM lists.
             let seeding = is_query
@@ -1197,6 +1231,7 @@ pub(crate) async fn complete(
                         target_id: target_id.clone().filter(|_| !foreign_key),
                         generated: &generated,
                         request_body: state_call.body.as_ref(),
+                        call_body: call.body.as_ref(),
                         query: Some(&call.query),
                         collection: collection.clone(),
                         origin,
@@ -1226,9 +1261,9 @@ pub(crate) async fn complete(
                     generated.world_gaps.push(mark.to_string());
                 }
                 if op.kind == OperationKind::Command(Effect::Delete)
-                    && state.tracks_deleted
                     && !foreign_key
                     && let Some(id) = target_id.as_deref()
+                    && (state.tracks_deleted || graphql_marks(rt, plan, t, id, &generated))
                 {
                     deleted::mark(&mut state, session, (op, call), t, id, target.as_ref()).await;
                 }

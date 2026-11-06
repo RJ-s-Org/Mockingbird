@@ -655,7 +655,7 @@ fn payload_contradicts(payload: Option<&Value>, id: &str) -> bool {
 /// name it: a Relay `clientMutationId`, or the parent's `issueId`, says nothing of
 /// the record. A delete so answered is no evidence the record is gone, and leaves
 /// no marker.
-fn contradicts(payload: Option<&Value>, t: Option<&str>, id: &str) -> bool {
+pub(crate) fn contradicts(payload: Option<&Value>, t: Option<&str>, id: &str) -> bool {
     let Some(Value::Object(members)) = payload else {
         return false;
     };

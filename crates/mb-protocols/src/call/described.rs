@@ -170,7 +170,6 @@ impl Described {
     /// `false` for a boolean member, a number for a numeric one, the text otherwise.
     /// `None` when `t` has no lifecycle, or the state is not a value of the member's
     /// type or of its `enum`.
-    #[allow(dead_code, reason = "read by the lifecycle task")]
     pub(crate) fn state_value(&self, t: &str, state: &str) -> Option<Value> {
         self.type_desc(t)?.lifecycle.as_ref()?;
         match self.lifecycle_members.get(t) {
