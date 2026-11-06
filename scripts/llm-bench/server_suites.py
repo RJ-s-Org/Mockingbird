@@ -7864,7 +7864,7 @@ def rabbitmq_steps(j):
         mine = [r for r in rows if eq(r.get("routing_key"), "order.created")]
     # The reference names properties_key as a field of a bindings listing.
     j.check("the binding is listed with its routing key and properties_key",
-            j.last["status"] == 200 and len(mine) == 1 and isinstance(head(mine).get("properties_key"), str)
+            success(j.last["status"]) and len(mine) == 1 and isinstance(head(mine).get("properties_key"), str)
             and bool(head(mine).get("properties_key")),
             bindings=rows)
     first, second = f"order {tag}-1 created", f"order {tag}-2 created"
@@ -7892,14 +7892,14 @@ def rabbitmq_steps(j):
     rest = get("ledger", 5, "ack_requeue_false")
     left = get("ledger", 5, "ack_requeue_false")
     j.check("ack_requeue_false answers the oldest message and removes it",
-            j.last["status"] == 200 and payloads(got) == [one] and payloads(rest) == [two] and left == [],
+            success(j.last["status"]) and payloads(got) == [one] and payloads(rest) == [two] and left == [],
             got=got, then=rest, left=left)
     # The queues the listings must hold are the ones that read now, so a declaration that
     # failed is not these checks' miss too.
     present = []
     for name in ("audit", "ledger", created, shipped):
         queue(name)
-        if j.last["status"] == 200:
+        if success(j.last["status"]):
             present.append(name)
     present.sort()
     listed = names(sort="name")
