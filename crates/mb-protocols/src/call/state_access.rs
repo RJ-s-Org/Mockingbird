@@ -282,6 +282,11 @@ pub(crate) async fn stored(
 /// `call` asked, and, with `marks`, leaves the marker a REST delete leaves (see
 /// [`deleted`]), so that a later read of it is not generated back. Keeps the
 /// session alive.
+///
+/// A type with a described soft delete keeps the record instead, moved to its
+/// deleted state ([`lifecycle::soft_delete`]) and with no marker, as a REST
+/// delete does: also when the call's own write already soft-deleted it, or its
+/// answer, stored since, wrote another state over it.
 #[cfg(feature = "graphql")]
 pub(crate) async fn delete_resource(
     rt: &MockRuntime,
@@ -293,6 +298,15 @@ pub(crate) async fn delete_resource(
     let session = &plan.session;
     let mut state = StateAccess::new(rt);
     async {
+        let mut kept = gone.data.clone();
+        if lifecycle::soft_delete(rt, &gone.resource_type, &mut kept) {
+            if kept != gone.data {
+                let resource = StoredResource { data: kept, ..gone };
+                state.upsert(session, resource).await;
+            }
+            state.touch(session).await;
+            return;
+        }
         if state.delete(session, &gone.resource_type, &gone.id).await {
             rt.collections().forget(session, &gone);
         }

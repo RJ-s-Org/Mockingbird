@@ -472,3 +472,115 @@ async fn a_hard_deleted_read_answers_the_described_not_found_status() {
         "{body}"
     );
 }
+
+/// A described soft delete on GraphQL: a delete mutation keeps the record, in its
+/// deleted state, whether its payload is a flag or the record as the model saw it.
+#[cfg(feature = "graphql")]
+mod graphql {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mb_engine::{Engine, EngineConfig};
+    use mb_llm::{Provider, ScriptedProvider};
+    use mb_protocols::MockRuntime;
+    use mb_state::MemoryStore;
+    use serde_json::{Value, json};
+
+    const SDL: &str = r#"
+enum WidgetState { LIVE GONE }
+type Widget { id: ID! name: String! state: WidgetState }
+type Query { widget(id: ID!): Widget }
+type Mutation {
+  createWidget(name: String!): Widget
+  removeWidget(id: ID!): Boolean
+  deleteWidget(id: ID!): Widget
+}
+"#;
+
+    async fn post(router: &axum::Router, query: &str) -> Value {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({"query": query}).to_string()))
+            .unwrap();
+        crate::support::send_to(router, req).await.2
+    }
+
+    fn widget(id: &str, name: &str) -> Value {
+        json!({"__typename": "Widget", "id": id, "name": name, "state": "LIVE"})
+    }
+
+    #[tokio::test]
+    async fn a_graphql_delete_mutation_soft_deletes_a_described_type() {
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        let t = bundle
+            .operation("Query.widget")
+            .and_then(|o| o.resource_type.clone())
+            .unwrap();
+        let world = json!({
+            "types": {t.clone(): {"lifecycle": {
+                "member": "state",
+                "states": ["LIVE", "GONE"],
+                "soft_delete": {"state": "GONE"}
+            }}},
+            "operations": {
+                "Mutation.removeWidget": {"kind": "delete", "type": t, "target": {"member": "id"}}
+            }
+        });
+        let provider = Arc::new(ScriptedProvider::new(
+            [
+                widget("w1", "a"),
+                widget("w2", "b"),
+                json!(true),
+                // The payload's own view of the record: still live.
+                widget("w2", "b"),
+            ]
+            .into_iter()
+            .map(|v| Ok(v.to_string()))
+            .collect(),
+        ));
+        let rt = MockRuntime::new(
+            "described",
+            Arc::new(bundle),
+            Arc::new(Engine::new(
+                Some(Arc::clone(&provider) as Arc<dyn Provider>),
+                EngineConfig::default(),
+            )),
+            Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        );
+        let rt = crate::support::with_effective(rt, world, false);
+        let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
+        for name in ["a", "b"] {
+            let made = post(
+                &router,
+                &format!("mutation {{ createWidget(name: \"{name}\") {{ id name state }} }}"),
+            )
+            .await;
+            assert!(made.get("errors").is_none(), "{made}");
+        }
+        let removed = post(&router, "mutation { removeWidget(id: \"w1\") }").await;
+        assert!(removed.get("errors").is_none(), "{removed}");
+        let deleted = post(
+            &router,
+            "mutation { deleteWidget(id: \"w2\") { id name state } }",
+        )
+        .await;
+        assert!(deleted.get("errors").is_none(), "{deleted}");
+        for (id, name) in [("w1", "a"), ("w2", "b")] {
+            let read = post(
+                &router,
+                &format!("{{ widget(id: \"{id}\") {{ id name state }} }}"),
+            )
+            .await;
+            assert_eq!(read["data"]["widget"]["id"], json!(id), "{read}");
+            assert_eq!(read["data"]["widget"]["name"], json!(name), "{read}");
+            assert_eq!(read["data"]["widget"]["state"], json!("GONE"), "{read}");
+        }
+        assert_eq!(
+            provider.requests().len(),
+            4,
+            "the reads after are answered from state"
+        );
+    }
+}
