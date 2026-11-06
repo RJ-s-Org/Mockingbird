@@ -231,6 +231,10 @@ async fn a_refused_entry_is_allowed_where_asked_and_falls_back_to_tier0() {
     assert_eq!(gaps_of(&h.records()[0]), Some(&json!(["no_identity"])));
 }
 
+// The HTTP tests below also pass through `CallLog::answered`, which seeds the same
+// static gaps again, so they do not prove the `Prepared::Answered` arm of
+// `generate_narrowed` seeds; `a_graphql_field_prepare_answers_in_a_batch_is_marked`
+// covers that arm with a single-field GraphQL answer from the cache.
 #[tokio::test]
 async fn an_answer_prepare_refuses_is_marked() {
     let h = support::described_with_gaps_and(
@@ -372,7 +376,8 @@ async fn graphql_post(router: &axum::Router, query: &str) -> Value {
 
 /// A root field `prepare` answers in a batch (here from the response cache) carries
 /// its operation's static gaps, as the same field sent alone does, and the request's
-/// one record holds every field's.
+/// one record holds every field's. Sent alone again, the field is answered from the
+/// cache by `prepare` outside a batch and is marked the same way.
 #[cfg(feature = "graphql")]
 #[tokio::test]
 async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
@@ -410,6 +415,14 @@ async fn a_graphql_field_prepare_answers_in_a_batch_is_marked() {
         records[1].request
     );
     // The batched `thing` was not generated again.
+    assert_eq!(h.provider.requests().len(), 2);
+    // The same field alone again: a single root field is not batched, so the cache
+    // answer comes from `prepare` through `generate_narrowed`, the only place that
+    // seeds it on this path.
+    graphql_post(&router, r#"{ thing(id: "t1") { id name } }"#).await;
+    let records = h.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(gaps_of(&records[2]), Some(&json!(["no_target"])));
     assert_eq!(h.provider.requests().len(), 2);
 }
 
