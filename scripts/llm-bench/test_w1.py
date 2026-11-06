@@ -2022,5 +2022,33 @@ class ClientDisconnectTest(unittest.TestCase):
         self.assertNotIn("client_gone_after_end", rec)
         self.assertFalse(self.wait_for(self.fake_ends)[-1]["caller_closed"])
 
+
+class UnsendableHeaderTest(unittest.TestCase):
+    """A header value from an answer that HTTP cannot carry (a model's etag with curly
+    quotes, sent back as If-Match) fails that call; it does not raise and end the journey."""
+
+    def test_a_header_http_cannot_carry_fails_the_call_without_raising(self):
+        ms, status, hdrs, body, raw = server_suites.request(
+            "http://127.0.0.1:1/", headers={"If-Match": "W/\u201c1\u201d"})
+        self.assertEqual(status, 0)
+        self.assertEqual(hdrs, {})
+        self.assertIsNone(body)
+        self.assertIn(b"If-Match", raw)
+
+    def test_a_line_break_in_a_header_fails_the_call_without_raising(self):
+        status = server_suites.request("http://127.0.0.1:1/", headers={"If-Match": "W/\"1\"\r\nX: y"})[1]
+        self.assertEqual(status, 0)
+
+    def test_journey_call_records_the_failed_call(self):
+        srv = argparse.Namespace(data="http://127.0.0.1:1")
+        j = server_suites.Journey.__new__(server_suites.Journey)
+        j.srv, j.name, j.headers = srv, "x", {"If-Match": "\uff02a\uff02"}
+        j.args = argparse.Namespace(timeout=1)
+        j.earlier_infra = j.last_call_infra = False
+        self.assertEqual(j.call("PATCH", "/r"), {})
+        self.assertEqual(j.last["status"], 0)
+        self.assertIn("If-Match", j.last["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
