@@ -5,6 +5,7 @@ Offline. Run: python3 -m unittest scripts/llm-bench/test_budget.py"""
 
 import argparse
 import contextlib
+import functools
 import io
 import json
 import os
@@ -303,6 +304,308 @@ class HeadroomWarningTest(unittest.TestCase):
         with mock.patch.object(server_suites, "proxy_get", lambda a, path: None), contextlib.redirect_stderr(err):
             server_suites.warn_headroom(args, ["journeys"])
         self.assertEqual(err.getvalue(), "")
+
+
+def stats_with(label, refused, **extra):
+    """A proxy /stats answer whose `label` has `refused` budget refusals."""
+    return dict({"spent_usd": 0.5, "budget_usd": 0.55, "per_label": {label: {"calls": 3, "budget_refused": refused}}},
+                **extra)
+
+
+class SseHandler(BaseHTTPRequestHandler):
+    """A Mockingbird stand-in for the SSE suite: `/events/ticks` streams valid ticks
+    with no fallback header (the SSE handler sends its headers before generating),
+    and the request log reports `fallback_reason` as `SseHandler.logged_reason`."""
+
+    logged_reason = None
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/mocks/events/requests"):
+            raw = json.dumps([{"source": "fallback" if SseHandler.logged_reason else "llm", "prompt_tokens": 1,
+                               "completion_tokens": 1, "fallback_reason": SseHandler.logged_reason}]).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        want = int(self.headers.get("x-mockingbird-stream-items") or 1)
+        body = "".join(f"event: tick\ndata: {json.dumps({'id': 'a', 'seq': i, 'price': 1.0})}\n\n" for i in range(want))
+        raw = body.encode()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class SseBudgetBackstopTest(Reset):
+    """The SSE handler never reports a fallback reason, so a budget refusal there is
+    only visible in the proxy's /stats for the suite's label."""
+
+    def args(self):
+        return argparse.Namespace(model="m/x", timeout=10, repeat=1, jobs=1, out=self.out, world="none",
+                                  stream_items=2, proxy_base="http://127.0.0.1:9")
+
+    def run_sse_suite(self, stats_seq):
+        SseHandler.logged_reason = getattr(self, "logged", None)
+        srv = serve(SseHandler, self)
+        srv.api = srv.data
+
+        @contextlib.contextmanager
+        def fake_server(args, suite, mocks):
+            yield srv
+
+        answers = iter(stats_seq)
+        err = io.StringIO()
+        with mock.patch.dict(server_suites.RUNNERS, {"sse": ({}, server_suites.run_sse)}), \
+                mock.patch.object(server_suites, "Server", fake_server), \
+                mock.patch.object(server_suites, "proxy_stats", lambda a: next(answers)), \
+                contextlib.redirect_stderr(err):
+            failed = server_suites.run_suite("sse", self.args())
+        return failed, err.getvalue()
+
+    def test_a_refusal_in_the_proxy_stats_marks_the_sse_suite_invalid(self):
+        label = "m__x~sse"
+        failed, err = self.run_sse_suite([stats_with(label, 2), stats_with(label, 3), stats_with(label, 3)])
+        self.assertTrue(failed)
+        self.assertTrue(server_suites.budget_exhausted())
+        self.assertTrue(server_suites.STOP.is_set())
+        [inv] = self.written("invalid.jsonl")
+        self.assertEqual((inv["suite"], inv["model"]), ("sse", "m/x"))
+        self.assertIn("1 call(s)", inv["fallback_reason"])
+        self.assertIn("sse: INVALID: bench budget exhausted", err)
+        self.assertEqual(server_suites.exit_code(False), server_suites.EXIT_BUDGET)
+        # The rep's row went out before the backstop: aggregate leaves it out by the record.
+        [row] = self.written()
+        kept, dropped = aggregate.drop_invalid_runs([row], [inv])
+        self.assertEqual((kept, dropped), ([], 1))
+
+    def test_refusals_from_before_the_suite_do_not_count(self):
+        label = "m__x~sse"
+        failed, err = self.run_sse_suite([stats_with(label, 2), stats_with(label, 2), stats_with(label, 2)])
+        self.assertFalse(failed)
+        self.assertFalse(server_suites.budget_exhausted())
+        self.assertEqual(self.written("invalid.jsonl"), [])
+        self.assertEqual(len(self.written()), 1)
+
+    def test_no_baseline_no_verdict(self):
+        failed, _ = self.run_sse_suite([None, stats_with("m__x~sse", 1), stats_with("m__x~sse", 1)])
+        self.assertFalse(failed)
+        self.assertEqual(self.written("invalid.jsonl"), [])
+
+    def test_a_logged_budget_fallback_reason_stops_the_rep(self):
+        self.logged = BUDGET_REASON
+        failed, _ = self.run_sse_suite([stats_with("m__x~sse", 0)] * 3)
+        self.assertTrue(failed)
+        self.assertEqual(self.written(), [])  # the refused answer writes no row
+        [inv] = self.written("invalid.jsonl")
+        self.assertIn("402", inv["fallback_reason"])
+
+    def test_budget_refusals_reads_the_label(self):
+        self.assertEqual(server_suites.budget_refusals(stats_with("a~b", 4), "a~b"), 4)
+        self.assertEqual(server_suites.budget_refusals(stats_with("a~b", 4), "a~c"), 0)
+        self.assertIsNone(server_suites.budget_refusals(None, "a~b"))
+        self.assertIsNone(server_suites.budget_refusals({"per_label": {"a~b": {"calls": 1}}}, "a~b"))
+
+
+class InvalidSuiteScopeTest(Reset):
+    def row(self, suite, run_id="r1", world=None):
+        r = {"model": "m/x", "suite": suite, "case": "c", "rep": 0, "ok": True, "latency_ms": 1.0,
+             "source": "llm", "detail": {}, "run_id": run_id}
+        if world:
+            r["world"] = world
+        return r
+
+    def test_only_the_stopped_suite_of_a_run_is_left_out(self):
+        rows = [self.row("consistency"), self.row("consistency"), self.row("sse"), self.row("sse", run_id="r2"),
+                self.row("sse", world="agent")]
+        inv = [{"run_id": "r1", "model": "m/x", "suite": "sse", "world": "none"}]
+        kept, dropped = aggregate.drop_invalid_runs(rows, inv)
+        self.assertEqual(dropped, 1)
+        self.assertEqual([(r["suite"], r["run_id"], r.get("world")) for r in kept],
+                         [("consistency", "r1", None), ("consistency", "r1", None), ("sse", "r2", None),
+                          ("sse", "r1", "agent")])
+
+    def test_two_suites_in_one_process_one_stopped(self):
+        srv = serve(FakeMock, self)
+
+        def journey_runner(kinds):
+            def runner(srv_, sink, args):
+                server_suites.run_one_journey("fake", steps_of(*kinds), srv_, sink, args, 0)
+            return runner
+
+        @contextlib.contextmanager
+        def fake_server(args, suite, mocks):
+            yield srv
+
+        args = argparse.Namespace(model="m/x", timeout=10, repeat=1, jobs=1, out=self.out, world="none",
+                                  proxy_base="http://127.0.0.1:9", suites_parallel=False)
+        with mock.patch.dict(server_suites.JOURNEY_CHECKS, {"fake": ["check 0", "check 1"]}), \
+                mock.patch.dict(server_suites.RUNNERS, {"journeys": ({}, journey_runner(["ok", "ok"])),
+                                                        "journeys_blind": ({}, journey_runner(["ok", "budget"])),
+                                                        "sse": ({}, journey_runner(["ok", "ok"]))}), \
+                mock.patch.object(server_suites, "Server", fake_server), \
+                mock.patch.object(server_suites, "proxy_stats", lambda a: None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            server_suites.run_suites(["journeys", "journeys_blind", "sse"], args)
+        rows = self.written()
+        self.assertEqual([r["suite"] for r in rows], ["journeys", "journeys", "journeys_blind"])
+        self.assertEqual(len({r["run_id"] for r in rows}), 1)  # one process, one run_id
+        invalid = self.written("invalid.jsonl")
+        self.assertEqual([r["suite"] for r in invalid], ["journeys_blind"])  # sse never started
+        kept, dropped = aggregate.drop_invalid_runs(rows, invalid)
+        self.assertEqual(([r["suite"] for r in kept], dropped), (["journeys", "journeys"], 1))
+
+
+class ParallelStopTest(Reset):
+    """--suites-parallel with --jobs > 1: a budget refusal in one suite stops every
+    suite still running; a suite that finished before it stays valid."""
+
+    def test_parallel_suites_and_units_stop_together(self):
+        srv = serve(FakeMock, self)
+        clean_done, victim_started = threading.Event(), threading.Event()
+
+        def clean(srv_, sink, args):
+            units = [lambda i=i: server_suites.run_one_journey("fake", steps_of("ok", "ok"), srv_, sink, args, i)
+                     for i in range(2)]
+            server_suites.run_units(units, args)
+            clean_done.set()
+
+        def budget(srv_, sink, args):
+            def unit(i):
+                if i == 1:
+                    victim_started.wait(5)
+                    server_suites.run_one_journey("fake", steps_of("ok", "budget"), srv_, sink, args, i)
+                else:
+                    server_suites.run_one_journey("fake", steps_of("ok", "ok"), srv_, sink, args, i)
+            clean_done.wait(5)
+            server_suites.run_units([functools.partial(unit, i) for i in range(2)], args)
+
+        def victim(srv_, sink, args):
+            def unit(i):
+                def steps(j):
+                    j.call("GET", "/ok")
+                    j.check("check 0", True)
+                    victim_started.set()
+                    server_suites.STOP.wait(5)
+                    j.call("GET", "/ok")
+                    j.check("check 1", True)
+                server_suites.run_one_journey("fake", steps, srv_, sink, args, i)
+            clean_done.wait(5)
+            server_suites.run_units([functools.partial(unit, i) for i in range(2)], args)
+
+        @contextlib.contextmanager
+        def fake_server(args, suite, mocks):
+            yield srv
+
+        args = argparse.Namespace(model="m/x", timeout=10, repeat=1, jobs=2, out=self.out, world="none",
+                                  proxy_base="http://127.0.0.1:9", suites_parallel=True)
+        with mock.patch.dict(server_suites.JOURNEY_CHECKS, {"fake": ["check 0", "check 1"]}), \
+                mock.patch.dict(server_suites.RUNNERS, {"journeys": ({}, clean), "journeys_blind": ({}, budget),
+                                                        "journeys_blind2": ({}, victim)}), \
+                mock.patch.object(server_suites, "Server", fake_server), \
+                mock.patch.object(server_suites, "proxy_stats", lambda a: None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            failed = server_suites.run_suites(["journeys", "journeys_blind", "journeys_blind2"], args)
+        self.assertTrue(failed)
+        self.assertEqual(server_suites.exit_code(failed), server_suites.EXIT_BUDGET)
+        rows = self.written()
+        self.assertNotIn("suite_error", [r["case"] for r in rows])
+        by_suite = {}
+        for r in rows:
+            by_suite.setdefault(r["suite"], []).append(r["case"])
+        self.assertEqual(len(by_suite["journeys"]), 4)  # finished before the refusal
+        self.assertNotIn("fake.check 1", by_suite.get("journeys_blind2", []))  # nothing after the stop
+        self.assertEqual(sorted(r["suite"] for r in self.written("invalid.jsonl")),
+                         ["journeys_blind", "journeys_blind2"])
+        kept, _ = aggregate.drop_invalid_runs(rows, self.written("invalid.jsonl"))
+        self.assertEqual({r["suite"] for r in kept}, {"journeys"})
+
+
+class TrippedProxyRefusesTest(unittest.TestCase):
+    def test_a_tripped_proxy_refuses_the_run_loudly(self):
+        args = argparse.Namespace(jobs=1, suites_parallel=False, model="m/x", proxy_base="http://127.0.0.1:9")
+        answer = {"reserve_usd": 0.001, "basis": "measured", "budget_usd": 9.0, "spent_usd": 9.0,
+                  "reserved_usd": 0.0, "tripped": True}
+        err = io.StringIO()
+        with mock.patch.object(server_suites, "proxy_get", lambda a, path: answer), contextlib.redirect_stderr(err):
+            self.assertTrue(server_suites.warn_headroom(args, ["journeys"]))
+        self.assertIn("ERROR", err.getvalue())
+        self.assertIn("already tripped", err.getvalue())
+
+    def test_an_untripped_proxy_lets_the_run_start(self):
+        args = argparse.Namespace(jobs=1, suites_parallel=False, model="m/x", proxy_base="http://127.0.0.1:9")
+        answer = {"reserve_usd": 0.001, "basis": "measured", "budget_usd": 9.0, "spent_usd": 0.0,
+                  "reserved_usd": 0.0, "tripped": False}
+        with mock.patch.object(server_suites, "proxy_get", lambda a, path: answer), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(server_suites.warn_headroom(args, ["journeys"]))
+
+
+class ProxyBudgetAccountingTest(unittest.TestCase):
+    BODY = MeasuredReservationTest.BODY
+    make = MeasuredReservationTest.make
+    settle = MeasuredReservationTest.settle
+
+    def test_stats_count_budget_refusals_per_label(self):
+        px = self.make()
+        self.settle(px, 0.0, status=402, error_kind="budget")
+        self.settle(px, 0.001)
+        entry = px.ledger.stats()["per_label"]["m__x~journeys"]
+        self.assertEqual((entry["calls"], entry["budget_refused"]), (2, 1))
+
+    def test_a_proxy_error_is_charged_the_worst_case(self):
+        px = self.make()
+        for _ in range(proxy.MEASURED_MIN_CALLS):
+            self.settle(px, 0.001)
+        self.assertEqual(px.reservation("m/x", self.BODY)[1], "measured")
+        handler = type("H", (proxy.Handler,), {"proxy": px})
+        srv = serve(handler, self)
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(f"{srv.data}/r/m__x~journeys/api/v1/chat/completions",
+                                     data=json.dumps(self.BODY).encode(), method="POST",
+                                     headers={"content-type": "application/json"})
+        with mock.patch.object(proxy.Handler, "forward", side_effect=RuntimeError("boom")):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req, timeout=10)
+        cm.exception.close()
+        self.assertEqual(cm.exception.code, 502)
+        with open(px.ledger.path) as f:
+            last = [json.loads(line) for line in f if line.strip()][-1]
+        self.assertEqual(last["error_kind"], "stream_error")
+        self.assertAlmostEqual(last["cost_usd"], px.worst_case("m/x", self.BODY)[1])
+
+
+class RunRecordsBudgetStopTest(unittest.TestCase):
+    def test_exit_3_is_an_invalid_run_not_a_failure(self):
+        import run
+        self.assertEqual(run.model_status(0, run.SERVER_EXIT_BUDGET, None),
+                         ("invalid", {"invalid_reason": proxy.BUDGET_EXHAUSTED_MESSAGE}))
+        self.assertEqual(run.model_status(0, 1, None), ("failed", {}))
+        self.assertEqual(run.model_status(0, 0, None), ("done", {}))
+        self.assertEqual(run.model_status(0, None, "budget tripped"), ("partial", {}))
+        self.assertEqual(run.SERVER_EXIT_BUDGET, server_suites.EXIT_BUDGET)
+
+    def test_a_budget_stop_in_any_suite_is_the_exit(self):
+        import run
+
+        class Kids:
+            def __init__(self, rcs):
+                self.rcs = list(rcs)
+
+            def run(self, cmd, env, log):
+                return self.rcs.pop(0)
+
+        args = argparse.Namespace(server_suites="server_suites.py", suites="journeys,sse,import", provider_pins="",
+                                  no_provider_check=True)
+        px = argparse.Namespace(base="http://127.0.0.1:9")
+        self.assertEqual(run.run_server_suites(args, Kids([1, 3, 3]), px, "m/x", 1, "/tmp/x"), 3)
+        self.assertEqual(run.run_server_suites(args, Kids([0, 1, 0]), px, "m/x", 1, "/tmp/x"), 1)
 
 
 if __name__ == "__main__":

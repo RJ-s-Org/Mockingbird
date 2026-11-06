@@ -125,7 +125,7 @@ def frame(out: str, pilot: bool, budget: float, stop: float) -> (str, bool):
         frac = (n / expected) if expected else 0.0
         if status in ("done", "partial") and not pilot:
             frac = 1.0 if status == "done" else frac
-        pcolor = {"done": GREEN, "running": CYAN, "partial": YELLOW, "failed": RED, "skipped": DIM}.get(status, DIM)
+        pcolor = {"done": GREEN, "running": CYAN, "partial": YELLOW, "failed": RED, "invalid": RED, "skipped": DIM}.get(status, DIM)
         vr = f"{100 * valid / n:.0f}%" if n else "—"
         fr = f"{100 * fallback / n:.0f}%" if n else "—"
         prog = f"{bar(frac, BAR, pcolor)} {n:>3}/{expected:<3}"
