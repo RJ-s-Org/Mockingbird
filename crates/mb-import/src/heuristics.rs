@@ -2349,6 +2349,31 @@ pub(crate) fn apply_action_routes(
     apply_lookups(operations, hints, defs);
     apply_wrapped_records(operations, defs);
     apply_nested_identities(operations, defs);
+    drop_untyped_identities(operations, hints, ctx);
+}
+
+/// Takes the identity off what has no resource type. A path with no static segment
+/// (`/{db}`, `/{db}/{docid}`) names no type, and its parameters name what holds the
+/// record (`POST /{db}` adds to the collection `{db}`), not the record: an identity
+/// is only ever the key of a record of some type. A declared identity on such an
+/// operation is ignored with a warning; declaring its type keeps it.
+fn drop_untyped_identities(operations: &mut [Operation], hints: &[ResourceHint], ctx: &mut Ctx) {
+    for (op, hint) in operations.iter_mut().zip(hints) {
+        if op.resource_type.is_some() || op.identity.is_none() {
+            continue;
+        }
+        op.identity = None;
+        if hint.identity.is_some() {
+            let id = op.id.clone();
+            ctx.warn(
+                INVALID_RESOURCE_EXT,
+                Some(&id),
+                format!(
+                    "operation {id}: {RESOURCE_EXT} member identity needs a resource type, and none is declared or inferred; it is ignored"
+                ),
+            );
+        }
+    }
 }
 
 /// Keys what no other rule gave an identity by a member of one of its object members:

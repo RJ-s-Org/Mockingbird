@@ -3127,3 +3127,113 @@ components:
         OperationKind::Command(Effect::Update)
     );
 }
+
+/// A path with no static segment names no resource type, so nothing it routes is
+/// identified: `POST /{db}` posts into the collection `{db}` names, which is not the
+/// created record's key, and `GET /{db}/{docid}` reads a record of a type nothing
+/// names. An identity always comes with a resource type.
+#[test]
+fn a_parameter_only_path_gives_no_identity_without_a_resource_type() {
+    let contract = r##"
+openapi: 3.0.0
+info: {title: T, version: "1"}
+paths:
+  /{db}:
+    parameters:
+      - {name: db, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: createDocument
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  ok: {type: boolean}
+  /{db}/{docid}:
+    parameters:
+      - {name: db, in: path, required: true, schema: {type: string}}
+      - {name: docid, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getDocument
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: string}
+                  title: {type: string}
+"##;
+    let bundle = compile(contract.as_bytes()).unwrap();
+    for id in ["createDocument", "getDocument"] {
+        let op = bundle.operation(id).unwrap();
+        assert!(
+            op.identity.is_none() || op.resource_type.is_some(),
+            "{id}: identity {:?} without a resource type",
+            op.identity
+        );
+        assert_ne!(
+            op.identity.as_ref().and_then(|i| i.path_param.as_deref()),
+            Some("db"),
+            "{id}: the collection parameter is not the record's key"
+        );
+    }
+}
+
+/// A declared identity on a path that names no type is ignored with a warning; with
+/// a declared type beside it, it stands.
+#[test]
+fn a_declared_identity_needs_a_resource_type() {
+    let contract = |resource: &str| {
+        format!(
+            r##"
+openapi: 3.0.0
+info: {{title: T, version: "1"}}
+paths:
+  /{{db}}:
+    parameters:
+      - {{name: db, in: path, required: true, schema: {{type: string}}}}
+    post:
+      operationId: createDocument
+      x-mockingbird-resource: {resource}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {{type: string}}
+"##
+        )
+    };
+    let (bundle, warnings) =
+        mb_import::compile_with_warnings(contract("{identity: id}").as_bytes()).unwrap();
+    let op = bundle.operation("createDocument").unwrap();
+    assert_eq!((&op.resource_type, &op.identity), (&None, &None));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == "invalid_resource_extension"
+                && w.message.contains("needs a resource type")),
+        "{warnings:?}"
+    );
+    let (bundle, warnings) =
+        mb_import::compile_with_warnings(contract("{type: documents, identity: id}").as_bytes())
+            .unwrap();
+    let op = bundle.operation("createDocument").unwrap();
+    assert_eq!(op.resource_type.as_deref(), Some("documents"));
+    assert_eq!(op.identity.as_ref().map(|i| i.field.as_str()), Some("id"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
