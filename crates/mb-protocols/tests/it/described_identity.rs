@@ -1257,11 +1257,12 @@ async fn a_reference_by_an_alternate_key_marks_the_record_referenced() {
     let h = email_naming(
         &[layout("tpl-100001", "layout-589360")],
         "layout-589360",
-        vec![json!({"Message": "deleted"})],
+        vec![layout("tpl-100001", "layout-589360")],
     )
     .await;
     let calls = h.provider.requests().len();
-    h.send("DELETE", "/templates/tpl-100001", None, &[]).await;
+    // A read of the template generates to catch up with the email naming its layout.
+    h.send("GET", "/templates/tpl-100001", None, &[]).await;
     assert_eq!(h.provider.requests().len(), calls + 1);
     let prompt = prompt(&h, calls);
     let earlier = block(&prompt, "earlier_requests").unwrap_or_default();

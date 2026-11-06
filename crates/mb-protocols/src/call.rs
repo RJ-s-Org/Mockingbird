@@ -291,10 +291,6 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
-    // The executor's answer: completed as a generated one is, with no LLM call.
-    if let Some(answer) = pending.executed.take() {
-        return Ok(complete(rt, plan, call, pending, *answer, response_schema).await);
-    }
     let guard = pending
         .target
         .as_ref()
@@ -420,17 +416,6 @@ pub(crate) struct Pending<'a> {
     /// The write is a client's retry of the session's latest (see
     /// [`write_memory::is_retry`]).
     retry: bool,
-    /// The executor's answer ([`exec::Ran::Complete`]), completed in place of a
-    /// generated one.
-    executed: Option<Box<GeneratedResponse>>,
-}
-
-impl Pending<'_> {
-    /// Whether the executor answered the call, so it is completed without generating.
-    #[cfg(feature = "graphql")]
-    pub(crate) fn is_executed(&self) -> bool {
-        self.executed.is_some()
-    }
 }
 
 /// Whether a GraphQL delete that removed record `id` of type `t` here leaves the marker
@@ -645,17 +630,14 @@ pub(crate) async fn prepare<'a>(
         target: target.as_ref(),
         target_id: target_id.as_deref().filter(|_| !foreign_key),
     };
-    let (recalled, executed) = match exec::run(&mut state, plan, call, held, response_schema).await
-    {
+    let recalled = match exec::run(&mut state, plan, call, held, response_schema).await {
         exec::Ran::Answered(served) => {
             state.touch(session).instrument(state_span()).await;
             return Prepared::Answered(served);
         }
-        exec::Ran::Complete(answer) => (None, Some(answer)),
-        exec::Ran::Generate(recalled) => (recalled, None),
+        exec::Ran::Generate(recalled) => recalled,
     };
-    if executed.is_none()
-        && target.is_none()
+    if target.is_none()
         && let Some(served) = member_read(&mut state, plan, call, response_schema)
             .instrument(state_span())
             .await
@@ -665,8 +647,7 @@ pub(crate) async fn prepare<'a>(
     }
 
     // The next page of a list this session cut, by the token it minted.
-    if executed.is_none()
-        && target.is_none()
+    if target.is_none()
         && let Some(served) = pages::serve(&mut state, plan, call)
             .instrument(state_span())
             .await
@@ -679,8 +660,7 @@ pub(crate) async fn prepare<'a>(
     }
 
     // A described list of a collection the session listed before: from its records.
-    if executed.is_none()
-        && target.is_none()
+    if target.is_none()
         && let Some(served) = state_lists::answer(&mut state, plan, call)
             .instrument(state_span())
             .await
@@ -696,7 +676,7 @@ pub(crate) async fn prepare<'a>(
     let cache = rt
         .state
         .response_cache()
-        .filter(|_| is_query && rt.consistency && plain(plan) && executed.is_none());
+        .filter(|_| is_query && rt.consistency && plain(plan));
     let key = cache.map(|_| {
         format!(
             "{}:{}",
@@ -824,7 +804,6 @@ pub(crate) async fn prepare<'a>(
         same_values,
         tokens,
         retry: false,
-        executed,
     }))
 }
 

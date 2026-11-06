@@ -482,13 +482,12 @@ async fn a_bodyless_write_survives_a_failed_effects_call() {
 
 // A child's delete.
 
-/// Deleting a note under a rack tells the rack's next read, naming what went, and
-/// makes no call of its own.
+/// Deleting a held note under a rack is executed from state: no call of its own, and
+/// nothing told to the rack, whose stored record stands (a count the description
+/// derives from children is recomputed by `derived`, not by a catch-up).
 #[tokio::test]
-async fn a_childs_delete_is_told_to_its_parent() {
-    let h = harness(vec![
-        json!({"id": "s-1", "name": "Fiction", "note_count": 0}),
-    ]);
+async fn a_childs_executed_delete_tells_its_parent_nothing() {
+    let h = harness(vec![]);
     h.hold(
         "racks",
         "s-1",
@@ -502,12 +501,8 @@ async fn a_childs_delete_is_told_to_its_parent() {
     assert_eq!(h.calls(), 0, "a delete asks for no effects");
     let (status, rack) = h.call("GET", "/racks/s-1", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.calls(), 1, "the read catches up");
-    let prompt = h.prompt(0);
-    let told = block(&prompt, "earlier_requests").unwrap_or_else(|| panic!("{prompt}"));
-    assert!(told.contains("deleteNote"), "{prompt}");
-    assert!(told.contains("n-1"), "names what went: {prompt}");
-    assert_eq!(rack["note_count"], json!(0));
+    assert_eq!(h.calls(), 0, "the read is answered from state");
+    assert_eq!(rack["name"], json!("Fiction"));
 }
 
 /// A delete of a child under a parent the session does not hold tells nothing.
