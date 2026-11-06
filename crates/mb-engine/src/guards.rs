@@ -1008,6 +1008,15 @@ pub(crate) fn refusals(
     offered_codes(op)
 }
 
+/// Whether `op` declares a response for `code` by that very status (a `default` or a
+/// range is no refusal the contract names).
+#[must_use]
+pub fn declares_code(op: &mb_mcm::Operation, code: u16) -> bool {
+    op.outputs
+        .iter()
+        .any(|o| o.status == mb_mcm::StatusSelector::Code(code))
+}
+
 /// The statuses a refusal of `op` may name, whatever a prompt was shown: the codes
 /// among 400, 409, 412 and 422 it declares, in that order (a create's `400` only when
 /// it declares none of the others), and none when it declares none.

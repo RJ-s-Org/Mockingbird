@@ -21,5 +21,6 @@ mod repetition;
 mod salvage;
 mod scenario;
 mod seed;
+mod state_refusals;
 mod stream;
 mod support;

@@ -1,5 +1,5 @@
 //! Optimistic concurrency: a write sending a version that is not its record's current
-//! one is refused before any LLM call, as the API would.
+//! one is refused before generating, as the API would.
 //!
 //! A *token* is a top-level member of a stored record, an integer or a string with no
 //! `enum` or `const`, and no identity or path member. A write ties one to a refusal only
@@ -28,7 +28,8 @@
 //! Once an update the model answered was seen to change a token (or, for `If-Match`,
 //! once the mock advanced it, below), a write sending a stale value is answered with the
 //! declared `409`/`412` (a body's token the `409` first, a header's the `412` first),
-//! its error body filled from the contract, before any LLM call, and nothing changes. A
+//! before generating, its error body the one the model writes once for a stale token
+//! (see [`mb_engine::Engine::refuse_held`]), and nothing changes. A
 //! record's first write is never refused this way, nor is a request sending no token or
 //! `If-Match: *`, nor a write to a record nothing stores, nor a header pairing not yet
 //! seen tracked, nor an operation declaring neither status.
@@ -577,6 +578,30 @@ fn stale_described(
     sent.is_some_and(|sent| compared(sent).is_some() && stale(sent, now))
 }
 
+/// The refusal of a write `plan` of `call` for a stale token, with the first of `codes`
+/// the operation declares a response for, its body the one written for
+/// [`mb_engine::error_body::ErrorCause::Stale`] (see [`mb_engine::Engine::refuse_held`]); `None` when it
+/// declares none of them.
+async fn refuse_stale(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    mut codes: impl Iterator<Item = u16>,
+) -> Option<GeneratedResponse> {
+    let op = plan.op;
+    let code = codes.find(|code| mb_engine::guards::declares_code(op, *code))?;
+    plan.engine
+        .refuse_held(
+            rt.bundle(),
+            op,
+            call,
+            code,
+            mb_engine::error_body::ErrorCause::Stale,
+            &mb_engine::error_body::RefusalFacts::stale(),
+        )
+        .await
+}
+
 /// What a write `plan` to `target` decides of its tokens, before any generation: the
 /// refusal of a stale one (see the module's documentation), or what its answer
 /// advances.
@@ -624,10 +649,8 @@ pub(super) async fn check(
         } else {
             [409, 412]
         };
-        if let Some(refusal) = conflict
-            .iter()
-            .chain(order.iter())
-            .find_map(|code| plan.engine.refuse_from_state(rt.bundle(), op, call, *code))
+        if let Some(refusal) =
+            refuse_stale(rt, plan, call, conflict.iter().chain(order.iter()).copied()).await
         {
             tracing::info!(
                 mock = %rt.name,
@@ -682,10 +705,7 @@ pub(super) async fn check(
             }
         }
     }
-    if let Some(refusal) = codes
-        .iter()
-        .find_map(|code| plan.engine.refuse_from_state(rt.bundle(), op, call, *code))
-    {
+    if let Some(refusal) = refuse_stale(rt, plan, call, codes.iter().copied()).await {
         tracing::info!(
             mock = %rt.name,
             operation = %op.id,

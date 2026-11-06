@@ -658,3 +658,212 @@ async fn a_described_token_is_not_minted_past_its_schema() {
         assert_eq!(calls(&h), 2);
     }
 }
+
+/// Aliases unique by `alias` (with `slug`, unique on its own), refused with
+/// `{ErrorCode, Message}`: `create` declares `codes` for its refusals, and the update
+/// declares `409` and `412`, so a set's `409` validates whatever the create declares.
+fn aliases(codes: &[u16]) -> String {
+    let refusals: String = codes
+        .iter()
+        .map(|c| {
+            format!(
+                "        \"{c}\": {{description: refused, content: {{application/json: {{schema: {{$ref: \"#/components/schemas/Error\"}}}}}}}}\n"
+            )
+        })
+        .collect();
+    format!(
+        r##"
+openapi: 3.0.0
+info: {{title: Aliases, version: "1"}}
+paths:
+  /aliases:
+    post:
+      operationId: createAlias
+      parameters:
+        - {{name: Idempotency-Key, in: header, schema: {{type: string}}}}
+      requestBody: {{content: {{application/json: {{schema: {{$ref: "#/components/schemas/AliasInput"}}}}}}}}
+      responses:
+        "201": {{description: created, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Alias"}}}}}}}}
+{refusals}  /aliases/{{aliasId}}:
+    parameters: [{{name: aliasId, in: path, required: true, schema: {{type: string}}}}]
+    get:
+      operationId: getAlias
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Alias"}}}}}}}}}}
+    patch:
+      operationId: updateAlias
+      parameters: [{{name: If-Match, in: header, schema: {{type: string}}}}]
+      requestBody: {{content: {{application/json: {{schema: {{$ref: "#/components/schemas/AliasInput"}}}}}}}}
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Alias"}}}}}}}}
+        "403": {{description: refused, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Error"}}}}}}}}
+        "409": {{description: taken, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Error"}}}}}}}}
+        "412": {{description: stale, content: {{application/json: {{schema: {{$ref: "#/components/schemas/Error"}}}}}}}}
+components:
+  schemas:
+    Alias:
+      type: object
+      required: [id]
+      properties:
+        id: {{type: string}}
+        alias: {{type: string}}
+        slug: {{type: string}}
+        etag: {{type: string, readOnly: true}}
+    AliasInput:
+      type: object
+      properties: {{alias: {{type: string}}, slug: {{type: string}}}}
+    Error:
+      type: object
+      required: [ErrorCode, Message]
+      properties: {{ErrorCode: {{type: integer}}, Message: {{type: string}}}}
+"##
+    )
+}
+
+fn alias(id: &str, name: &str) -> Value {
+    json!({"id": id, "alias": name, "slug": name, "etag": "e-1"})
+}
+
+fn unique_alias() -> Value {
+    json!({"types": {"aliases": {"unique": [{"members": ["alias"], "conflict": 409}]}}})
+}
+
+async fn create_alias(
+    h: &DescribedHarness,
+    name: &str,
+    key: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/aliases",
+            Some(json!({"alias": name, "slug": name})),
+            key,
+        )
+        .await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn a_taken_unique_value_answers_the_models_written_body_naming_it() {
+    let written = json!({"ErrorCode": 1122, "Message": "The alias is already in use"});
+    let h = support::described(
+        &aliases(&[409]),
+        unique_alias(),
+        vec![alias("a1", "welcome-1"), written],
+    );
+    create_alias(&h, "welcome-1", &[]).await;
+    for _ in 0..2 {
+        let (status, body) = create_alias(&h, "welcome-1", &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["ErrorCode"], 1122, "{body}");
+        let message = body["Message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("alias") && message.contains("welcome-1"),
+            "{message}"
+        );
+    }
+    // One create, one written body: the second refusal asks nothing.
+    assert_eq!(calls(&h), 2);
+    let records = h.records();
+    assert_eq!(records[1].source.as_deref(), Some("state"));
+    assert_eq!(records[2].source.as_deref(), Some("state"));
+}
+
+#[tokio::test]
+async fn a_stale_token_answers_its_own_written_body() {
+    let world = json!({"types": {"aliases": {
+        "unique": [{"members": ["alias"], "conflict": 409}],
+        "concurrency": {"member": "etag", "header": "If-Match", "conflict": 412}
+    }}});
+    let h = support::described(
+        &aliases(&[409]),
+        world,
+        vec![
+            alias("a1", "welcome-1"),
+            json!({"ErrorCode": 1122, "Message": "taken"}),
+            json!({"ErrorCode": 3001, "Message": "stale"}),
+        ],
+    );
+    create_alias(&h, "welcome-1", &[]).await;
+    let (status, taken) = create_alias(&h, "welcome-1", &[]).await;
+    assert_eq!(
+        (status, &taken["ErrorCode"]),
+        (StatusCode::CONFLICT, &json!(1122))
+    );
+    let (status, _, stale) = h
+        .send(
+            "PATCH",
+            "/aliases/a1",
+            Some(json!({"slug": "other"})),
+            &[("If-Match", "\"e-9\"")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{stale}");
+    assert_eq!(stale["ErrorCode"], 3001, "{stale}");
+    assert_eq!(calls(&h), 3);
+}
+
+#[tokio::test]
+async fn a_set_whose_status_the_create_does_not_declare_takes_its_declared_refusal() {
+    // #301: the set names 409, the create declares only 422.
+    let h = support::described(
+        &aliases(&[422]),
+        unique_alias(),
+        vec![alias("a1", "welcome-1")],
+    );
+    create_alias(&h, "welcome-1", &[]).await;
+    let (status, body) = create_alias(&h, "welcome-1", &[]).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(calls(&h), 1 + 1, "the create, then the 422's body");
+}
+
+#[tokio::test]
+async fn a_set_the_create_cannot_refuse_is_skipped_for_a_later_one() {
+    // The first set's 409 is not the create's, and it declares no refusal of its own:
+    // the second set, refused with the 403 it declares, still refuses.
+    let world = json!({"types": {"aliases": {"unique": [
+        {"members": ["alias"], "conflict": 409},
+        {"members": ["slug"], "conflict": 403}
+    ]}}});
+    let h = support::described(&aliases(&[403]), world, vec![alias("a1", "welcome-1")]);
+    create_alias(&h, "welcome-1", &[]).await;
+    let (status, body) = create_alias(&h, "welcome-1", &[]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let message = body["Message"].as_str().unwrap_or_default();
+    assert!(message.contains("slug"), "{message}");
+}
+
+#[tokio::test]
+async fn a_refusal_with_a_written_body_is_replayed_for_its_key() {
+    // #300: a retry of the refused key answers the refusal as it was, asking nothing.
+    let world = json!({
+        "operations": {"createAlias": {"idempotency": {"header": "Idempotency-Key"}}},
+        "types": {"aliases": {"unique": [{"members": ["alias"], "conflict": 409}]}}
+    });
+    let h = support::described(
+        &aliases(&[409]),
+        world,
+        vec![
+            alias("a1", "welcome-1"),
+            json!({"ErrorCode": 1122, "Message": "taken"}),
+            alias("a1", "renamed"),
+        ],
+    );
+    create_alias(&h, "welcome-1", &[("Idempotency-Key", "k-1")]).await;
+    let k2 = [("Idempotency-Key", "k-2")];
+    let (status, refused) = create_alias(&h, "welcome-1", &k2).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = h
+        .send(
+            "PATCH",
+            "/aliases/a1",
+            Some(json!({"alias": "renamed", "slug": "renamed"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, again) = create_alias(&h, "welcome-1", &k2).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(refused, again);
+    assert_eq!(calls(&h), 3);
+}

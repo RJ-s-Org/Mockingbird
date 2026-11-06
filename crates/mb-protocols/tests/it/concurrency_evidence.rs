@@ -1,7 +1,8 @@
 //! Optimistic concurrency tied by evidence, not by wording: a token the client sends in
 //! a request header (`If-Match`, or another header holding a member of the record), or a
 //! body member the write requires and no create sets, under a write declaring a `409` or
-//! a `412` whose description names nothing. A stale one is refused before any LLM call;
+//! a `412` whose description names nothing. A stale one is refused before generating
+//! (the model writes only its error body, once);
 //! a successful update advances it. Driven over HTTP with a scripted LLM.
 #![cfg(test)]
 use std::sync::Arc;
@@ -256,15 +257,23 @@ fn answer(body: Value) -> Value {
     json!({"effects": [], "response": body})
 }
 
+/// The error body the model writes, once per operation and status, for a stale token.
+fn refused() -> Value {
+    json!({"code": "stale_token", "message": "stale"})
+}
+
 /// `If-Match` holding the note's `etag`: the update's new etag is the model's, not the
 /// stored copy's, and is served in the declared `ETag` header. An etag no longer current
-/// is refused with the declared `412` before any LLM call, and nothing changes; a weak
+/// is refused with the declared `412` before generating (the model writes its body once),
+/// and nothing changes; a weak
 /// form of the current one goes through.
 #[tokio::test]
 async fn a_stale_if_match_is_refused_and_the_etag_advances() {
     let h = harness(vec![
         note("a", "\"e1\""),
         answer(note("b", "\"e2\"")),
+        refused(),
+        refused(),
         answer(note("c", "\"e3\"")),
     ]);
     let (status, _, _) = h
@@ -289,7 +298,8 @@ async fn a_stale_if_match_is_refused_and_the_etag_advances() {
 
     let (status, _, body) = h.patch_note(Some("\"e1\""), "stale").await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
-    assert_eq!(h.calls(), 2, "refused without an LLM call");
+    assert_eq!(h.calls(), 3, "refused before generating; its body written");
+    assert_eq!(body["code"], "stale_token", "{body}");
     let held = h.held("notes", "n1").await;
     assert_eq!(
         (held["title"].clone(), held["etag"].clone()),
@@ -301,6 +311,7 @@ async fn a_stale_if_match_is_refused_and_the_etag_advances() {
         .send("DELETE", "/notes/n1", None, &[("If-Match", "\"e1\"")])
         .await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(h.calls(), 4, "the delete's own body");
     assert_eq!(h.held("notes", "n1").await["title"], "b");
 
     // A weak entity tag compares by its opaque value.
@@ -313,7 +324,11 @@ async fn a_stale_if_match_is_refused_and_the_etag_advances() {
 /// one, minted in the same format, served and stored, and the old one is stale.
 #[tokio::test]
 async fn an_unchanged_etag_is_minted_anew() {
-    let h = harness(vec![note("a", "\"7f3a\""), answer(note("b", "\"7f3a\""))]);
+    let h = harness(vec![
+        note("a", "\"7f3a\""),
+        answer(note("b", "\"7f3a\"")),
+        refused(),
+    ]);
     h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     let (status, headers, body) = h.patch_note(Some("\"7f3a\""), "b").await;
@@ -331,7 +346,7 @@ async fn an_unchanged_etag_is_minted_anew() {
     );
     let (status, _, _) = h.patch_note(Some("\"7f3a\""), "c").await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(h.calls(), 2);
+    assert_eq!(h.calls(), 3, "the refusal's body only");
 }
 
 /// No `If-Match`, `If-Match: *`, and the record's first write with an etag it never
@@ -388,6 +403,8 @@ async fn a_body_token_is_tied_by_evidence() {
     let h = harness(vec![
         ledger("a", 1),
         answer(ledger("b", 2)),
+        refused(),
+        refused(),
         answer(ledger("c", 3)),
         answer(ledger("d", 4)),
     ]);
@@ -410,7 +427,7 @@ async fn a_body_token_is_tied_by_evidence() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let (status, _, _) = h.send("DELETE", "/ledgers/l1?revision=1", None, &[]).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(h.calls(), 2);
+    assert_eq!(h.calls(), 4, "each refusal's body, written once");
     assert_eq!(h.held("ledgers", "l1").await, before, "nothing changed");
 
     let (status, _, body) = h
@@ -423,7 +440,7 @@ async fn a_body_token_is_tied_by_evidence() {
         .send("PUT", "/ledgers/l1", Some(rename(9, "d")), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(h.calls(), 4);
+    assert_eq!(h.calls(), 6);
 }
 
 /// A header of the contract's own that the client fills with the board's `revision`
@@ -438,6 +455,7 @@ async fn a_version_header_pairs_once_the_client_tracks_it() {
         answer(board("b", 5)),
         answer(board("c", 5)),
         answer(board("d", 6)),
+        refused(),
     ]);
     h.send("POST", "/boards", Some(json!({"name": "a"})), &[])
         .await;
@@ -450,5 +468,5 @@ async fn a_version_header_pairs_once_the_client_tracks_it() {
     assert_eq!(h.put_board("d", "5").await.0, StatusCode::OK);
     assert_eq!(h.held("boards", "b1").await["revision"], 6);
     assert_eq!(h.put_board("stale", "5").await.0, StatusCode::CONFLICT);
-    assert_eq!(h.calls(), 4);
+    assert_eq!(h.calls(), 5, "the refusal's body only");
 }

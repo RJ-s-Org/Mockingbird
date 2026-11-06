@@ -1,5 +1,7 @@
-//! Error bodies the mock answers itself: a request that fails its schema, and a read
-//! of what the session does not hold. They are the contract's declared error response,
+//! Error bodies the mock answers itself: a request that fails its schema, a read of
+//! what the session does not hold, and a write refused from state (a value a unique set
+//! keeps already held by another record, a stale concurrency token; see
+//! [`crate::Engine::refuse_held`] and [`RefusalFacts`]). They are the contract's declared error response,
 //! but what a faker draws for their members says nothing: a validation error read
 //! `{"path": "nectar"}` and a missing record `{"type": "quartz"}`.
 //!
@@ -22,9 +24,10 @@
 //!   whose schema does not fix its value ([`writes_code`]) is the contract's to say, often in prose (an error-code table in
 //!   the API description). With an LLM, the body is written once per operation,
 //!   status and [`ErrorCause`] by the model, told the status and the cause, and kept
-//!   ([`crate::Engine::error_answer`]); the call's facts are then laid over it. Offline,
-//!   or when the model's answer fails, the faker's body stands (a failed write is
-//!   asked for again after a minute).
+//!   ([`crate::Engine::error_answer`]); the call's facts are then laid over it (a
+//!   refusal from state: its message, and the members a taken unique set names in its
+//!   path-like members). Offline, or when the model's answer fails, the faker's body
+//!   stands, with the same facts (a failed write is asked for again after a minute).
 
 use mb_mcm::{Bundle, Operation};
 use serde_json::{Map, Value};
@@ -108,6 +111,12 @@ pub enum ErrorCause {
     Invalid,
     /// What the call names is not there: never held, or deleted.
     Missing,
+    /// A value the request gives a member the API keeps unique is already held by
+    /// another record.
+    Taken,
+    /// The request's concurrency token or precondition does not match the record's
+    /// current version.
+    Stale,
 }
 
 impl ErrorCause {
@@ -118,7 +127,85 @@ impl ErrorCause {
 member is missing, of the wrong type, or out of its bounds)"
             }
             ErrorCause::Missing => "the resource the request names does not exist",
+            ErrorCause::Taken => {
+                "a value the request gives a member the API keeps unique is already held by \
+another record"
+            }
+            ErrorCause::Stale => {
+                "the request's concurrency token or precondition does not match the record's \
+current version"
+            }
         }
+    }
+}
+
+/// What a refusal decided from state says of the call, laid over its error body (see
+/// [`crate::Engine::refuse_held`]): a message, and the request members it is about.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefusalFacts {
+    message: String,
+    members: Vec<String>,
+}
+
+impl RefusalFacts {
+    /// A unique set whose values `taken` (each member, as a dotted path, and the value
+    /// the request gives it) another record holds: `name 'x' is already in use`, the
+    /// members joined by `with`.
+    #[must_use]
+    pub fn taken(taken: &[(String, Value)]) -> Self {
+        let named: Vec<String> = taken
+            .iter()
+            .map(|(member, value)| match value {
+                Value::String(s) => format!("{member} '{s}'"),
+                other => format!("{member} {other}"),
+            })
+            .collect();
+        Self {
+            message: format!("{} is already in use", named.join(" with ")),
+            members: taken.iter().map(|(m, _)| m.clone()).collect(),
+        }
+    }
+
+    /// A concurrency token or precondition that is not the record's current one.
+    #[must_use]
+    pub fn stale() -> Self {
+        Self::message("the request's concurrency token does not match the record's current version")
+    }
+
+    /// Only `message`, about no member.
+    #[must_use]
+    pub fn message(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            members: Vec::new(),
+        }
+    }
+
+    /// The message-like member's text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.message
+    }
+
+    /// The request members the refusal is about, as dotted paths.
+    #[must_use]
+    pub fn members(&self) -> &[String] {
+        &self.members
+    }
+
+    /// One body [`Violation`] per member, each with the message as its reason.
+    pub(crate) fn violations(&self) -> Vec<Violation> {
+        self.members
+            .iter()
+            .map(|member| Violation {
+                location: "body".into(),
+                pointer: member
+                    .split('.')
+                    .map(|step| format!("/{}", step.replace('~', "~0").replace('/', "~1")))
+                    .collect(),
+                reason: self.message.clone(),
+            })
+            .collect()
     }
 }
 
@@ -829,6 +916,21 @@ impl Engine {
         status: u16,
         cause: ErrorCause,
     ) -> Option<GeneratedResponse> {
+        self.error_answer_repeating(bundle, op, call, (status, cause), &[])
+            .await
+    }
+
+    /// [`Self::error_answer`], its body refusing the repeated value of the request
+    /// members `repeated` (what the contract names for such a repeat, see
+    /// [`crate::contract_values`]).
+    pub(crate) async fn error_answer_repeating(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        call: &OperationCall,
+        (status, cause): (u16, ErrorCause),
+        repeated: &[String],
+    ) -> Option<GeneratedResponse> {
         let variant = op.output_for_status(status)?;
         let ctx = GenerationContext {
             forced_status: Some(status),
@@ -841,7 +943,7 @@ impl Engine {
         let only_empty = written.is_some();
         let mut response =
             written.unwrap_or_else(|| self.fallback(bundle, op, variant, status, call, &ctx));
-        self.fill_contract_values(bundle, op, variant, &mut response, (&[], only_empty));
+        self.fill_contract_values(bundle, op, variant, &mut response, (repeated, only_empty));
         response.usage = usage;
         Some(response)
     }

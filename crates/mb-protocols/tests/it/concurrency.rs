@@ -1,7 +1,7 @@
 //! Optimistic concurrency the contract declares: a server-managed body member a write's
-//! `409`/`412` names in its description. A stale one is refused before any LLM call and
-//! changes nothing; nothing else is ever refused, and nothing else of a request is
-//! rewritten. Driven over HTTP with a scripted LLM, counting the calls it was sent.
+//! `409`/`412` names in its description. A stale one is refused before generating (the
+//! model writes only its error body, once) and changes nothing; nothing else is ever
+//! refused, and nothing else of a request is rewritten. Driven over HTTP with a scripted LLM, counting the calls it was sent.
 #![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -287,13 +287,20 @@ fn answer(body: Value) -> Value {
 }
 
 /// The `version` the `409` names advances with the model's answer, and a `PUT` sending
-/// another one is refused with the declared `409`, its code the one the description
-/// names, before any LLM call. The model's answer moves neither the owner nor the id.
+/// another one is refused with the declared `409` before generating, its body the one
+/// the model writes for a stale token. The model's answer moves neither the owner nor the id.
 #[tokio::test]
 async fn a_stale_version_the_409_names_is_refused_before_the_llm() {
     let mut moved = doc("b", 2);
     moved["owner_id"] = json!("someone_else");
-    let h = harness(vec![doc("a", 1), answer(moved), answer(doc("d", 3))]);
+    // The refusal's body is the model's, written once for the stale token's cause.
+    let refused = json!({"error": {"code": "version_conflict", "message": "stale"}});
+    let h = harness(vec![
+        doc("a", 1),
+        answer(moved),
+        refused,
+        answer(doc("d", 3)),
+    ]);
     let (status, _) = h
         .send("POST", "/docs", Some(json!({"title": "a"})), &[])
         .await;
@@ -326,7 +333,9 @@ async fn a_stale_version_the_409_names_is_refused_before_the_llm() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["error"]["code"], "version_conflict", "{body}");
-    assert_eq!(h.calls(), 2, "refused without an LLM call");
+    assert_eq!(h.calls(), 3, "refused before generating; its body written");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("current version"), "{body}");
     let held = h.held("docs", "d1").await;
     assert_eq!(
         (held["title"].clone(), held["version"].clone()),

@@ -10,6 +10,7 @@ use axum::http::HeaderMap;
 use mb_engine::consistency::{
     ENVELOPE_KEYS, item_identity, item_schema, list_items, list_members, property_schema,
 };
+use mb_engine::error_body::{ErrorCause, RefusalFacts};
 use mb_engine::{
     EffectOutcome, EngineError, FAKER_INVALID_REASON, GeneratedResponse, GenerationContext,
     OFFLINE_REASON, OperationCall, ResourceEffect, Source,
@@ -567,7 +568,7 @@ pub(crate) async fn prepare<'a>(
 
     // A create or update repeating a described unique set is refused before generating.
     if !foreign_key
-        && let Some(code) = repeats::described_conflict(
+        && let Some(conflict) = repeats::described_conflict(
             &mut state,
             plan,
             call,
@@ -575,7 +576,17 @@ pub(crate) async fn prepare<'a>(
         )
         .instrument(state_span())
         .await
-        && let Some(refusal) = plan.engine.refuse_from_state(rt.bundle(), op, call, code)
+        && let Some(refusal) = plan
+            .engine
+            .refuse_held(
+                rt.bundle(),
+                op,
+                call,
+                conflict.code,
+                ErrorCause::Taken,
+                &RefusalFacts::taken(&conflict.taken),
+            )
+            .await
     {
         replays::keep(&mut state, plan, call, &refusal)
             .instrument(state_span())
@@ -862,7 +873,17 @@ async fn nothing_held(
     // A status the description gives a missing record, in the body its response
     // declares.
     if let Some(code) = lifecycle::not_found(rt, op)
-        && let Some(refusal) = plan.engine.refuse_from_state(&rt.bundle, op, call, code)
+        && let Some(refusal) = plan
+            .engine
+            .refuse_held(
+                &rt.bundle,
+                op,
+                call,
+                code,
+                ErrorCause::Missing,
+                &RefusalFacts::message(detail),
+            )
+            .await
     {
         return refusal;
     }
