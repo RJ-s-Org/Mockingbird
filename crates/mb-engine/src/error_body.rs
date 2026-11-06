@@ -388,8 +388,7 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
         .iter()
         .filter_map(|b| b.get("pattern").and_then(Value::as_str))
         .any(|pattern| {
-            regex::Regex::new(pattern)
-                .is_ok_and(|re| re.is_match(&text) && !re.is_match("error"))
+            regex::Regex::new(pattern).is_ok_and(|re| re.is_match(&text) && !re.is_match("error"))
         })
 }
 
@@ -473,7 +472,10 @@ pub fn with_status_text(
         let Some(items) = items_schema(Some(&prop), defs) else {
             continue;
         };
-        let held = body.get(&name).and_then(Value::as_array).map_or(0, Vec::len);
+        let held = body
+            .get(&name)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
         for (item_name, item_prop) in members(items) {
             if holds_status_text(&branches(&item_prop, defs), status) {
                 for i in 0..held {
@@ -1833,7 +1835,11 @@ mod tests {
             json!({"type": "object", "properties": {"errors": {"type": "array", "items": {"type": "object", "properties": props}}}})
         };
         assert!(!writes_text(&item(json!({})), &defs, 422));
-        assert!(writes_text(&item(json!({"title": {"type": "string"}})), &defs, 422));
+        assert!(writes_text(
+            &item(json!({"title": {"type": "string"}})),
+            &defs,
+            422
+        ));
         for filled in [
             json!({"kind": {"type": "string", "enum": ["a", "b"]}}),
             json!({"at": {"type": "string", "format": "date-time"}}),
@@ -1860,7 +1866,9 @@ mod tests {
         assert!(held(json!({"type": "string", "examples": ["404", "422"]})));
         assert!(held(json!({"type": "string", "enum": ["400", "422"]})));
         assert!(held(json!({"type": "string", "pattern": "^[0-9]{3}$"})));
-        assert!(!held(json!({"type": "string", "examples": ["fail", "error"]})));
+        assert!(!held(
+            json!({"type": "string", "examples": ["fail", "error"]})
+        ));
         assert!(!held(json!({"type": "string", "pattern": "^.*$"})));
         assert!(!held(json!({"type": "string"})));
         assert!(!held(json!({"type": "integer", "examples": [422]})));

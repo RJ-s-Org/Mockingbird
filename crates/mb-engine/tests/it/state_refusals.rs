@@ -317,8 +317,7 @@ async fn a_status_text_member_says_the_refusals_status_offline() {
         let body = out.body.unwrap();
         assert_eq!(body["errors"][0]["status"], "422", "{body}");
         assert_eq!(
-            body["errors"][0]["detail"],
-            "alias 'welcome-1' is already in use",
+            body["errors"][0]["detail"], "alias 'welcome-1' is already in use",
             "{body}"
         );
         assert_eq!(body["errors"][0]["source"]["pointer"], "/alias", "{body}");
