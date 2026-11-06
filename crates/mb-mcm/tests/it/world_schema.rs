@@ -50,7 +50,7 @@ fn schema_accepts_every_serialized_field() {
         "version": 1,
         "types": {
             "account": {
-                "identity": {"member": "id", "pattern": "accounts/{id}"},
+                "identity": {"member": "id", "pattern": "accounts/{id}", "alternates": ["email"]},
                 "parent": {"type": "org", "member": "org_id", "path_param": "org", "pattern": "orgs/{id}"},
                 "lifecycle": {
                     "member": "status",
@@ -72,7 +72,7 @@ fn schema_accepts_every_serialized_field() {
                 "type": "account",
                 "target": {"path_param": "id", "member": "id"},
                 "request": {"record": "/account", "records": "/accounts"},
-                "answer": {"record": "/result", "records": "/results", "long_running": {"done": "done", "result": "response"}},
+                "answer": {"record": "/result", "records": "/results", "long_running": {"done": "done", "result": "response"}, "identity_header": "Location"},
                 "transition": {"status": "closed"},
                 "changes": {"name": {"from_request": "/name"}, "flag": {"value": false}},
                 "scope": {"param": "org", "member": "org_id"},
@@ -110,4 +110,31 @@ fn schema_accepts_a_root_answer_record_only() {
     ] {
         assert!(!v.is_valid(&bad), "should be refused: {bad}");
     }
+}
+
+#[test]
+fn schema_accepts_alternates_and_identity_header() {
+    let v = validator();
+    let mut doc: Value = serde_json::from_str(SPEC_EXCERPT).unwrap();
+    doc["types"]["probe"] =
+        json!({"identity": {"member": "id", "alternates": ["alias", "meta.slug"]}});
+    for header in [json!("Resource-ID"), json!(false)] {
+        doc["operations"]["probeCreate"] = json!({"answer": {"identity_header": header}});
+        assert_eq!(errors(&v, &doc), Vec::<String>::new(), "{header}");
+        let world: World = serde_json::from_value(doc.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&world).unwrap(), doc);
+    }
+    for bad in [json!(true), json!(""), json!(3)] {
+        doc["operations"]["probeCreate"] = json!({"answer": {"identity_header": bad}});
+        assert!(!v.is_valid(&doc), "should be refused: {bad}");
+    }
+}
+
+#[test]
+fn schema_accepts_an_identity_without_member() {
+    let v = validator();
+    let doc = json!({"types": {"t": {"identity": {"alternates": ["a"]}}}});
+    assert_eq!(errors(&v, &doc), Vec::<String>::new());
+    assert!(serde_json::from_value::<World>(doc).is_ok());
+    assert!(!v.is_valid(&json!({"types": {"t": {"identity": {"alternates": "a"}}}})));
 }

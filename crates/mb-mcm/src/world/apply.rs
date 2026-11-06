@@ -92,7 +92,7 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
         w.types
             .get(t)
             .and_then(|d| d.identity.as_ref())
-            .map(|i| i.member.clone())
+            .and_then(|i| i.member.clone())
     };
     let (world_member, base_member) = match t.as_deref() {
         Some(t) => (member_of(world, t), member_of(base, t)),
@@ -511,8 +511,13 @@ mod tests {
         ));
         let base = tier0(&b);
         assert_eq!(
-            base.types["workspace"].identity.as_ref().unwrap().member,
-            "id"
+            base.types["workspace"]
+                .identity
+                .as_ref()
+                .unwrap()
+                .member
+                .as_deref(),
+            Some("id")
         );
         // The same member as tier 0: nothing is written.
         let same = world(json!({"types": {"workspace": {"identity": {"member": "id"}}}}));
