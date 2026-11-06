@@ -39,7 +39,9 @@ use mb_mcm::{Effect, Operation, OperationKind};
 use mb_state::{SessionKey, StoredResource};
 use serde_json::Value;
 
-use super::{CallPlan, MAX_SCAN, MockRuntime, StateAccess, in_create_collection, plain};
+use super::{
+    CallPlan, MAX_SCAN, MockRuntime, StateAccess, collection_of, in_create_collection, plain,
+};
 
 /// The status a create or an update `plan` of `call` is refused with, before any
 /// generation, for repeating a stored record's values of a unique set its type's world
@@ -79,6 +81,7 @@ pub(super) async fn described_conflict(
         .parent
         .as_ref()
         .and_then(|p| Some((p.member.as_deref()?, p.path_param.as_deref()?)));
+    let in_collection = collection_of(op, call).is_some();
     let mut listed: Option<Vec<StoredResource>> = None;
     for set in &desc.unique {
         let sent = |m: &str| mb_mcm::member_at(request, m).filter(|v| !v.is_null());
@@ -106,13 +109,15 @@ pub(super) async fn described_conflict(
             continue;
         };
         let scope = set.scope.as_deref().map(|scope| {
-            let from_path = || {
-                parent_param
-                    .filter(|(member, _)| *member == scope)
-                    .and_then(|(_, param)| call.path_params.get(param))
-                    .cloned()
-            };
-            (scope, after(scope).or_else(from_path))
+            let from_path = parent_param
+                .filter(|(member, _)| *member == scope)
+                .and_then(|(_, param)| call.path_params.get(param))
+                .cloned();
+            // Only a create whose scope the path gives (a parent's parameter naming the
+            // scope member, or a collection under a parent path) can tell, from where a
+            // record was placed, whether one holding no scope value shares it.
+            let path_scoped = creates && (from_path.is_some() || in_collection);
+            (scope, after(scope).or(from_path), path_scoped)
         });
         let records = match &listed {
             Some(records) => records,
@@ -124,14 +129,17 @@ pub(super) async fn described_conflict(
                 && values
                     .iter()
                     .all(|(m, v)| same_scalar(mb_mcm::member_at(&r.data, m), v))
-                && scope.as_ref().is_none_or(|(member, asked)| {
-                    match (asked, mb_mcm::member_at(&r.data, member)) {
-                        (Some(asked), Some(kept)) if !kept.is_null() => {
-                            same_scalar(Some(kept), asked)
-                        }
+                && scope.as_ref().is_none_or(|(member, asked, path_scoped)| {
+                    let kept = mb_mcm::member_at(&r.data, member).filter(|v| !v.is_null());
+                    match (asked, kept) {
+                        (Some(asked), Some(kept)) => same_scalar(Some(kept), asked),
                         // Where a record is that holds no scope value, only the
-                        // collection a create runs in tells.
-                        _ if creates => in_create_collection(rt, &plan.session, op, call, r),
+                        // collection a create runs in tells, when the path scopes it.
+                        (_, None) if *path_scoped => {
+                            in_create_collection(rt, &plan.session, op, call, r)
+                        }
+                        // No scope value is the same scope only as no scope value; a
+                        // value against none is another scope.
                         (None, None) => true,
                         _ => false,
                     }

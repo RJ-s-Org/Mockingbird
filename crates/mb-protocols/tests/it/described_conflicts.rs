@@ -547,3 +547,114 @@ async fn a_heuristic_idempotency_key_does_not_replay_under_tier0() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_root_create_and_a_scoped_one_with_the_same_values_are_accepted() {
+    // A flat collection whose scope member is in the body: no scope value is another
+    // scope than any value, both ways.
+    let root = |id: &str| json!({"id": id, "displayName": "Docs", "etag": "e-1"});
+    let h = support::described(
+        CONTRACT,
+        unique(),
+        vec![
+            folder("f1", "Docs", "p1"),
+            root("f2"),
+            folder("f3", "Docs", "p2"),
+        ],
+    );
+    let (status, _) = create_folder(&h, "Docs", "p1").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let send_root = || {
+        h.send(
+            "POST",
+            "/folders",
+            Some(json!({"displayName": "Docs"})),
+            &[],
+        )
+    };
+    let (status, _, body) = send_root().await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = create_folder(&h, "Docs", "p2").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(calls(&h), 3);
+    for id in ["f1", "f2", "f3"] {
+        assert!(h.stored("folders", id).await.is_some(), "{id}");
+    }
+    // Two records with no scope value share it.
+    let (status, _, _) = send_root().await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(calls(&h), 3);
+}
+
+/// Pages whose `stamp` is a date-time and whose `rev` is at most three characters.
+const PAGES: &str = r##"
+openapi: 3.0.0
+info: {title: Pages, version: "1"}
+paths:
+  /pages:
+    post:
+      operationId: createPage
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/PageInput"}}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Page"}}}}
+  /pages/{pageId}:
+    parameters: [{name: pageId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getPage
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Page"}}}}}
+    patch:
+      operationId: updatePage
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/PageInput"}}}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Page"}}}}
+        "409": {description: stale, content: {application/json: {schema: {$ref: "#/components/schemas/Problem"}}}}
+components:
+  schemas:
+    Page:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        stamp: {type: string, format: date-time, readOnly: true}
+        rev: {type: string, maxLength: 3, readOnly: true}
+    PageInput:
+      type: object
+      properties: {title: {type: string}, stamp: {type: string}, rev: {type: string}}
+    Problem:
+      type: object
+      properties: {message: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_described_token_is_not_minted_past_its_schema() {
+    const STAMP: &str = "2024-01-01T00:00:00Z";
+    for (member, held) in [("stamp", STAMP), ("rev", "e-9")] {
+        let page = |title: &str| json!({"id": "g1", "title": title, member: held});
+        let h = support::described(
+            PAGES,
+            json!({"types": {"pages": {"concurrency": {"member": member, "conflict": 409}}}}),
+            vec![page("a"), page("b")],
+        );
+        h.send("POST", "/pages", Some(json!({"title": "a"})), &[])
+            .await;
+        let (status, _, body) = h
+            .send(
+                "PATCH",
+                "/pages/g1",
+                Some(json!({"title": "b", member: held})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{member}: {body}");
+        // The model's value stays: a minted one would not be a date-time, or would be
+        // four characters long.
+        assert_eq!(body[member], held, "{member}");
+        assert_eq!(
+            h.stored("pages", "g1").await.map(|r| r[member].clone()),
+            Some(json!(held)),
+            "{member}"
+        );
+        assert_eq!(calls(&h), 2);
+    }
+}

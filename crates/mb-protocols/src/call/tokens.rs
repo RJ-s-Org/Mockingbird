@@ -853,8 +853,9 @@ pub(super) async fn check(
 }
 
 /// After a 2xx update of `before` the model answered: each advancing token it changed is
-/// confirmed, so a later write sending a stale value is refused; an `If-Match` token it
-/// left as it was is minted anew, in the store and in the served record `served`. The
+/// confirmed, so a later write sending a stale value is refused; an `If-Match` or a
+/// described token it left as it was is minted anew, in the store and in the served
+/// record `served`, when the new value fits the member's schema ([`mint_fits`]). The
 /// header pairings the write found are kept.
 pub(super) async fn after_update(
     state: &mut StateAccess<'_>,
@@ -886,7 +887,11 @@ pub(super) async fn after_update(
             if !tokens.mintable.contains(member) {
                 continue;
             }
-            let Some(new) = mint(was, &format!("{t}\0{}", before.id)) else {
+            // A value the member's declared schema does not take is not minted: the
+            // model's value stays.
+            let Some(new) = mint(was, &format!("{t}\0{}", before.id))
+                .filter(|new| mint_fits(state.rt, t, member, new))
+            else {
                 continue;
             };
             minted.insert(member.clone(), new);
@@ -1299,6 +1304,21 @@ async fn not_modified_tag(
     let tags = if_none_match(op, call)?;
     let (_, value) = current_etag(&mut state, &plan.session, &target, tags.as_deref()).await?;
     Some((name, as_entity_tag(value)))
+}
+
+/// Whether `minted`, a new value of type `t`'s token `member`, is valid by the member's
+/// schema in the type's record schema, formats asserted ([`write_memory::read_schema`]):
+/// one past a `maximum`, wider than a `maxLength`, or no longer a `date-time` is not
+/// minted. A member the schema does not declare takes anything.
+fn mint_fits(rt: &MockRuntime, t: &str, member: &str, minted: &Value) -> bool {
+    let bundle = rt.bundle();
+    let Some(schema) =
+        write_memory::read_schema(rt, t).and_then(|record| property_schema(bundle, record, member))
+    else {
+        return true;
+    };
+    mb_engine::SchemaValidator::for_output(&bundle.with_reachable_defs(&schema))
+        .is_ok_and(|v| v.is_valid_output(minted))
 }
 
 /// A new value of token `held`, in its format: an integer one higher; a string's
