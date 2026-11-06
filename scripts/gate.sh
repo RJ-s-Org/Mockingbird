@@ -15,6 +15,9 @@
 #     count as changes to mockingbird-cli
 #   - the console's typecheck, lint and tests when crates/mb-console/web changed
 #   - the bench's Python tests when scripts/llm-bench changed
+#   - the replay gate (scripts/llm-bench/replay.py: the journeys against recorded LLM
+#     answers, offline and free) when mb-protocols, mb-engine, mb-import or
+#     scripts/llm-bench changed; it builds the release binary
 # A change to the root Cargo.toml, Cargo.lock, rust-toolchain.toml, clippy.toml,
 # deny.toml, .cargo/ or .config/ runs the full workspace. Transitive dependents are left
 # to CI, which runs everything (cargo-deny, docs and the slim build included).
@@ -83,6 +86,12 @@ fi
 if grep -q '^scripts/llm-bench/' <<<"$changed"; then
   step "bench: python tests"
   python3 -m unittest discover -s scripts/llm-bench -p 'test_*.py'
+fi
+
+if grep -qE '^(crates/mb-protocols/|crates/mb-engine/|crates/mb-import/|scripts/llm-bench/)' <<<"$changed"; then
+  step "replay gate: journeys against recorded LLM answers"
+  cargo build --release -p mockingbird-cli --locked
+  python3 scripts/llm-bench/replay.py gate --binary "${CARGO_TARGET_DIR:-target}/release/mockingbird"
 fi
 
 step "gate passed"

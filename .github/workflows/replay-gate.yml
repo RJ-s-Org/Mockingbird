@@ -1,0 +1,68 @@
+name: Replay gate
+
+# Replays the recorded LLM answers of the journeys suites (scripts/llm-bench/recordings)
+# against the release binary of this change, offline and with no key, and fails when a
+# check the recording passed now fails although every LLM call of its journey was
+# answered from the recording. Such a failure is the engine's, so it shows here for
+# free instead of in a paid bench run. See scripts/llm-bench/README.md#replay-gate.
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/mb-protocols/**
+      - crates/mb-engine/**
+      - crates/mb-import/**
+      - scripts/llm-bench/**
+      - .github/workflows/replay-gate.yml
+  pull_request:
+    paths:
+      - crates/mb-protocols/**
+      - crates/mb-engine/**
+      - crates/mb-import/**
+      - scripts/llm-bench/**
+      - .github/workflows/replay-gate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replay-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  replay:
+    runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      # Only main saves the cache, as in ci.yml; PRs restore main's.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: replay-gate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The default features (no Kafka, so no librdkafka); the console's placeholder
+      # page is enough here.
+      - name: Build the release binary
+        run: cargo build --release -p mockingbird-cli --locked
+      - name: Replay tests (matching, comparison, security scan, end to end with fake_llm)
+        env:
+          MB_BENCH_BINARY: target/release/mockingbird
+        run: python3 -m unittest discover -s scripts/llm-bench -p 'test_replay.py'
+      - name: Replay gate
+        run: |
+          set -o pipefail
+          python3 scripts/llm-bench/replay.py gate --binary target/release/mockingbird \
+            --report "$RUNNER_TEMP/replay-gate.json" | tee "$RUNNER_TEMP/replay-gate.md"
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/replay-gate.md" ]; then
+            { echo "## Replay gate"; echo; cat "$RUNNER_TEMP/replay-gate.md"; } >> "$GITHUB_STEP_SUMMARY"
+          fi

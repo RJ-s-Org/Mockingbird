@@ -12,6 +12,8 @@ This harness runs OpenRouter models through Mockingbird's real LLM code paths: t
 | `aggregate.py` | Joins all outputs into `results.json`, `results.csv` and `tables.md`. |
 | `world_author.py` | World descriptions for `--world`: blind authoring by a coding agent, the cache per contract hash, and applying a description to a suite's mocks. |
 | `stub_author.py` | A free, deterministic stand-in author for dry runs and tests. |
+| `replay.py` | Recordings of the journeys suites' LLM answers, and the replay gate that runs on them (see [Replay gate](#replay-gate)). |
+| `recordings/` | The committed recordings, one `<model slug>~<suite>.json.gz` per (model, suite). |
 
 ## The key
 
@@ -95,6 +97,7 @@ Children never see the key: `run.py` drops `OPENROUTER_API_KEY`, any variable wi
 ## Proxy details
 
 - `GET /stats` returns spend, call count, the trip flag and per-label totals. `GET /healthz` returns 200.
+- `--record <raw.jsonl>` appends each call's journey tag (from `x-bench-journey` and the `POST /bench/mark` marks) and answer, never a header; `--replay <recordings>` answers every call from recordings with no upstream, no key and no ledger needed, and `--replay-log` records each call's match. Both are for `replay.py` (see [Replay gate](#replay-gate)).
 - When the client did not ask for streaming, the proxy upgrades the call to streaming (turn this off with `--no-stream-upgrade`). This lets it measure TTFT, the time to the first non-empty `delta.content`. TTFR is the time to the first reasoning delta. Both are measured from when the attempt that succeeded had its upstream connection up (TCP and TLS are excluded: a real client reuses pooled connections). `total_ms` is measured from when the client's request arrived.
 - OpenRouter's keep-alive comments (`: OPENROUTER PROCESSING`) are skipped. The proxy reads usage, including `usage.cost`, from the final chunk. A mid-stream `error` object, or `finish_reason: "error"`, becomes a 502 carrying the error body. If the client asked for a stream, the 200 header has already gone out, so the error passes through inside the stream.
 - If the upstream rejects `reasoning: {"enabled": false}` (400/404/422 with "reasoning" in the body), the proxy retries once without it and remembers that for the model. It does the same for `response_format` (400/422 that mentions response_format or JSON mode).
@@ -250,6 +253,55 @@ python3 scripts/llm-bench/aggregate.py --out $OUT
 
 `run.py full --world agent` passes the flag on to every model's server suites, with `--author`, `--author-model`, `--author-isolation`, `--world-cache` and `--refresh-world` (sent as `--refresh`). Under `--journey`, only the named journeys' contracts are authored and applied. The default suites (`consistency`, `sse`) would author the full Stripe, TMDB and Square specs, so name the suites you want measured. The headline is the `agent` tier on a blind set that was never diagnosed, judged against `derived` on the same model and providers. A dry run needs no spend: `fake_llm.py` stands in for the proxy (`--proxy-base http://127.0.0.1:<its port>`) and `--author stub --world-cache <scratch dir>` stands in for the agent.
 
+## Replay gate
+
+A regression that is deterministic given the model's answers (a check answered from stored state going from pass to fail after an engine change) does not need a paid run to be found. `replay.py gate` runs the journeys suites against recorded LLM answers, offline and with no key, and compares each check with the recording's result. The `Replay gate` workflow runs it on every pull request that touches `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import` or `scripts/llm-bench`, and `scripts/gate.sh` runs it locally for the same paths.
+
+```sh
+cargo build --release -p mockingbird-cli
+python3 scripts/llm-bench/replay.py gate [--suite journeys_blind6] [--keep] [--report verdict.json]
+```
+
+**Recordings.** `recordings/<model slug>~<suite>.json.gz` holds, for rep 0 of one (model, suite) run: every LLM call's journey, operation, order and prompt hash with the answer the model gave (`content`, `finish_reason`, or the error status), and the run's per-check results (`case` -> `ok`). It holds no prompt, no header and no key: `test_replay.py` scans every committed recording for an Authorization header and for any `sk-or-` string, and `replay.py scan` does the same on demand. The recorder drops anything shaped like an OpenRouter key from what it writes.
+
+**How a call is answered.** The gate starts `proxy.py --replay recordings/`, which never opens an upstream connection and never reads the key, and runs `server_suites.py --tag-journeys --repeat 1` against it. `--tag-journeys` gives each mock its own copy of the LLM profile that sends `x-bench-journey: <mock>`, posts a mark (`POST /bench/mark`) before each journey rep so the proxy knows the rep, runs a journey's reps one after another, and seeds the faker (`faker_seed: 1`) so a fallback answers the same each run. An engine change can change the prompt, so a call is matched in this order:
+
+| match | rule |
+|---|---|
+| `exact` | the same prompt hash (messages and `response_format`, timestamps blanked) in the same label |
+| `key` | the same (journey, rep, operation, n-th call of that operation in the journey) |
+| `nearest` | the recorded call of the same operation closest in order, in the same journey if it has one |
+| `none` | no call of that operation: a 503 whose message starts `REPLAY_UNMATCHED`, which the engine answers with its fallback |
+
+The operation is the prompt's `Operation:` line (else `HTTP:`, else the `response_format` schema name). A replayed answer's timestamps (ISO strings, and Unix times in fields named like `created` or `*_at`) move by the time between the recording's clock and the replay's, fixed per journey at its first call, so a check of "created recently" holds a week later and a timestamp two answers share stays equal. Exact matches are fewer than you might expect: the engine makes up the part of an id the model's answer leaves out of its pattern, so later prompts differ; key matches carry those journeys.
+
+**The verdict.** Per check of the recording:
+
+- **regressed**: passed in the recording, fails (or is missing) now, and every LLM call of its journey matched `exact` or `key`. The gate fails. A suite with one is replayed again (`--confirm`, default 2 re-runs) and a check counts only when it regressed every time, since the engine's own randomness can flip a check once.
+- **drift-masked**: the same, but some call of the journey matched only `nearest` or `none`, so the model may have been asked something new. Reported, never a failure.
+- **improved**: failed in the recording, passes now. Reported.
+- **unstable**: listed in the recording's `unstable`, never compared. When a recording is made, it is replayed `--calibrate` times (default 4) on the binary that made it, and every check whose result differs from the recorded one in any replay is marked unstable.
+
+A server that does not start, or a suite that breaks, fails the gate too. The table lists, per suite, the checks, recorded and replayed passes, the four counts and the calls per match kind.
+
+**When the gate is red on purpose.** A change that is meant to alter what a recorded check returns re-records in the same pull request: `replay.py record --fake` for the free seed, and the next paid run for a paid recording (or delete that recording, and say so in the pull request).
+
+**Recording.** Re-recording happens only on a recording run, never in the gate.
+
+```sh
+# The free seed: fake_llm.py answers every call, recorded as model bench/fake-llm (about 25 s)
+python3 scripts/llm-bench/replay.py record --fake
+
+# A paid recording: one rep of every journeys suite through the budget-guarded proxy
+source ~/.zshenv >/dev/null 2>&1   # OPENROUTER_API_KEY, never printed
+python3 scripts/llm-bench/replay.py record --model deepseek/deepseek-v4.1-flash-1017 \
+  --budget-usd 3 --prices docs/benchmarks/<latest run>/roster.json [--suite journeys_blind6 ...]
+```
+
+`record` starts `proxy.py --record`, which forwards each call as usual (budget, pins, ledger) and also appends the call's journey tag and answer to a raw file; it runs the suites once with `--tag-journeys`, then `replay.py pack` joins the raw file with `server.jsonl` into `recordings/`, calibrates, and scans the result. Only the proxy gets the key; `server_suites.py` and the server get a placeholder. The paid run's cost is about one rep of each suite: check the pilot projection for the model first. Commit the new `recordings/*.json.gz` with the run.
+
+The recordings committed now are the free seed (`source: "fake_llm.py"`, model `bench/fake-llm`). Its answers are schema-shaped values, so its passing checks are mostly the ones the engine answers from state: reads of what a write stored, lists that hold a created item, deletes that leave a 404. That is what the gate protects first. The 2026-10-30 dumps under `docs/benchmarks` (`exchanges.jsonl.gz`) predate the journey tags and many engine changes, so they cannot seed it. A paid recording adds the checks that pass only with a real model's answers.
+
 ## Testing without spend
 
 Both scripts accept a hidden `--upstream URL` flag that points the proxy at a fake chat endpoint. With it, `run.py` skips the key calls. `fake_llm.py` can stand in for OpenRouter:
@@ -259,5 +311,7 @@ python3 scripts/llm-bench/fake_llm.py --port 18999 &
 env -u OPENROUTER_API_KEY python3 scripts/llm-bench/run.py pilot --out /tmp/bench-test \
   --models a/x,b/y --upstream http://127.0.0.1:18999/api/v1/chat/completions
 ```
+
+`test_replay.py` tests the matching, the shift of timestamps, the comparison, packing, the security scan and the proxy's replay mode (with every upstream connection patched to fail). Its end-to-end test records the `journeys` suite against `fake_llm.py`, replays it green, then claims a failing check passed and expects the gate to fail; it runs when the release binary is built (`target/release/mockingbird`, `$CARGO_TARGET_DIR/release/mockingbird` or `MB_BENCH_BINARY`).
 
 `python3 -m unittest scripts/llm-bench/test_world.py` tests the `--world` mode with fakes only: transcript parsing, the agent's blind tool set and environment, the cache, applying each tier, the row and label changes, and the aggregate split. One end-to-end test runs `stub_author.py` against a real `mockingbird serve` when `target/release/mockingbird` is built.
