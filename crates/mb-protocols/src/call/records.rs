@@ -11,7 +11,8 @@
 //! - [`alternates`] and [`extra_fields`]: the members a path value may name a record by
 //!   besides the ones each lookup site already tries.
 //! - [`request_record`]: where a create's request holds its one record.
-//! - [`created`]: the records a create described as bulk or long-running makes.
+//! - [`created`]: the records a create described as bulk or long-running makes, and
+//!   [`mint_created`] the ids of those that hold none.
 //! - [`patterned`], [`bare_id`] and [`held_by_key`]: a key read by a path value tries
 //!   the other form of a patterned id (`7` and `folders/7`).
 //!
@@ -149,7 +150,8 @@ pub(super) fn identity_member<'a>(rt: &'a MockRuntime, op: &'a Operation, t: &st
 }
 
 /// The records a create described as bulk or long-running makes, each an object: the
-/// items at `answer.records`, else those at `request.records`, else the
+/// items at `answer.records`, else those at `request.records` (`minted`, the request's
+/// items with the ids [`mint_created`] gave them, when it gave any), else the
 /// `long_running.result` member of the answer. Empty when the description says none of
 /// these, or they hold no object; the create's one record (`answer.record`, which
 /// [`mb_mcm::world::apply`] wrote into the bundle, or a header-named one) is then found
@@ -157,22 +159,19 @@ pub(super) fn identity_member<'a>(rt: &'a MockRuntime, op: &'a Operation, t: &st
 pub(super) fn created(
     rt: &MockRuntime,
     op: &Operation,
-    request: Option<&Value>,
+    (request, minted): (Option<&Value>, &[Value]),
     answer: Option<&Value>,
 ) -> Vec<Value> {
     let Some(desc) = rt.described().op(&op.id) else {
         return Vec::new();
     };
-    let items = |doc: Option<&Value>, at: Option<&mb_mcm::world::Pointer>| -> Vec<Value> {
-        let Some(Value::Array(items)) = doc.zip(at).and_then(|(d, p)| d.pointer(p.as_str())) else {
-            return Vec::new();
-        };
-        items.iter().filter(|i| i.is_object()).cloned().collect()
-    };
     let answered = desc.answer.as_ref();
     let from_answer = items(answer, answered.and_then(|a| a.records.as_ref()));
     if !from_answer.is_empty() {
         return from_answer;
+    }
+    if !minted.is_empty() {
+        return minted.to_vec();
     }
     let from_request = items(
         request,
@@ -188,6 +187,120 @@ pub(super) fn created(
         .filter(|r| r.is_object())
         .map(|r| vec![r.clone()])
         .unwrap_or_default()
+}
+
+/// The object items of the array at `at` in `doc`.
+fn items(doc: Option<&Value>, at: Option<&mb_mcm::world::Pointer>) -> Vec<Value> {
+    let Some(Value::Array(items)) = doc.zip(at).and_then(|(d, p)| d.pointer(p.as_str())) else {
+        return Vec::new();
+    };
+    items.iter().filter(|i| i.is_object()).cloned().collect()
+}
+
+/// How many ids are drawn for one record before giving up on one the session does not
+/// hold.
+const MINT_ATTEMPTS: u32 = 8;
+
+/// Gives each record [`created`] finds for `op`'s create (of type `t`) that holds no
+/// identity value one, drawn as a header-named create's id is
+/// ([`header_ids::draw_record_id`]: as the type declares the member, in its pattern),
+/// one the session holds no record of the type under, the request does not carry and
+/// no other record of this create was given. An item of `answer.records` or the
+/// `long_running.result` gets it in the answer, where the client reads it; the items
+/// of `request.records`, when they are the records made, are returned with theirs, for
+/// [`write_state`] to store (empty otherwise). A record no id can be drawn for is left
+/// as it is, and not stored.
+pub(super) async fn mint_created(
+    state: &mut StateAccess<'_>,
+    (session, op, t, call): (&SessionKey, &Operation, &str, &OperationCall),
+    generated: &mut GeneratedResponse,
+) -> Vec<Value> {
+    let rt = state.rt;
+    let Some(desc) = rt.described().op(&op.id) else {
+        return Vec::new();
+    };
+    let field = identity_member(rt, op, t);
+    let lacks = |record: &Value| mb_mcm::member_at(record, field).is_none_or(Value::is_null);
+    let carried = request_values(op, call);
+    let mut given: Vec<String> = Vec::new();
+    let answered = desc.answer.as_ref();
+    // The answer's records: each gets its id where the answer holds it.
+    let at = answered.and_then(|a| a.records.as_ref());
+    if !items(generated.body.as_ref(), at).is_empty() {
+        let Some(Value::Array(records)) = at
+            .zip(generated.body.as_mut())
+            .and_then(|(p, body)| body.pointer_mut(p.as_str()))
+        else {
+            return Vec::new();
+        };
+        for record in records.iter_mut().filter(|r| r.is_object() && lacks(r)) {
+            if let Some(id) = mint_one(state, session, (t, field), &carried, &mut given).await {
+                mb_mcm::set_member_at(record, field, id);
+            }
+        }
+        return Vec::new();
+    }
+    // The request's records: each is stored with its id.
+    let request = call.body.as_ref().map(|b| request_record(rt, op, b));
+    let mut sent = items(
+        request,
+        desc.request.as_ref().and_then(|r| r.records.as_ref()),
+    );
+    if !sent.is_empty() {
+        for record in sent.iter_mut().filter(|r| lacks(r)) {
+            if let Some(id) = mint_one(state, session, (t, field), &carried, &mut given).await {
+                mb_mcm::set_member_at(record, field, id);
+            }
+        }
+        return sent;
+    }
+    // A long-running create's result.
+    let Some(lr) = answered.and_then(|a| a.long_running.as_ref()) else {
+        return Vec::new();
+    };
+    let lacking = generated
+        .body
+        .as_ref()
+        .and_then(|body| mb_mcm::member_at(body, &lr.result))
+        .is_some_and(|r| r.is_object() && lacks(r));
+    if lacking
+        && let Some(id) = mint_one(state, session, (t, field), &carried, &mut given).await
+        && let Some(result) = generated
+            .body
+            .as_mut()
+            .and_then(|body| mb_mcm::member_at_mut(body, &lr.result))
+    {
+        mb_mcm::set_member_at(result, field, id);
+    }
+    Vec::new()
+}
+
+/// One id for a record of type `t` keyed by `field` (see [`mint_created`]), noted in
+/// `given`; `None` when none could be drawn.
+async fn mint_one(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (t, field): (&str, &str),
+    carried: &HashSet<String>,
+    given: &mut Vec<String>,
+) -> Option<Value> {
+    for _ in 0..MINT_ATTEMPTS {
+        let Some(id) = header_ids::draw_record_id(state.rt, t, field) else {
+            continue;
+        };
+        let Some(text) = id_string(&id) else {
+            continue;
+        };
+        if carried.contains(&text)
+            || given.contains(&text)
+            || state.get(session, t, &text).await.is_some()
+        {
+            continue;
+        }
+        given.push(text);
+        return Some(id);
+    }
+    None
 }
 
 /// Settles a create's answer as the description says before it is stored: a

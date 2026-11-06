@@ -19,6 +19,8 @@ use crate::support::{self, DescribedHarness, HarnessOptions};
 /// Conversations, threads, notes and tickets answer their ids in headers; folders and
 /// labels answer the record; zones an envelope holding a one-item array; contacts are
 /// put in bulk; a report's create is long-running; templates are read by their id.
+/// Files are listed under their folder or project, and pages read under their space
+/// by title.
 const CONTRACT: &str = r##"
 openapi: 3.0.0
 info: {title: Identity, version: "1"}
@@ -105,6 +107,39 @@ paths:
     delete:
       operationId: deleteFolder
       responses: {"204": {description: gone}}
+  /folders/{folderId}/files:
+    get:
+      operationId: listFiles
+      parameters: [{name: folderId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/File"}}}}}}
+  /projects:
+    post:
+      operationId: createProject
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, code: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}}
+  /projects/{project}:
+    get:
+      operationId: getProject
+      parameters: [{name: project, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Project"}}}}, "404": {description: missing}}
+  /projects/{project}/files:
+    get:
+      operationId: listProjectFiles
+      parameters: [{name: project, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/File"}}}}}}
+  /spaces/{spaceKey}/pages:
+    post:
+      operationId: createPage
+      parameters: [{name: spaceKey, in: path, required: true, schema: {type: string}}]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, handle: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Page"}}}}}
+  /spaces/{spaceKey}/pages/{title}:
+    get:
+      operationId: getPage
+      parameters:
+        - {name: spaceKey, in: path, required: true, schema: {type: string}}
+        - {name: title, in: path, required: true, schema: {type: string}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Page"}}}}, "404": {description: missing}}
   /labels:
     post:
       operationId: createLabel
@@ -179,6 +214,15 @@ components:
     Folder:
       type: object
       properties: {id: {type: string}, displayName: {type: string}, slug: {type: string}}
+    File:
+      type: object
+      properties: {id: {type: string}, name: {type: string}}
+    Project:
+      type: object
+      properties: {id: {type: string}, title: {type: string}, code: {type: string}}
+    Page:
+      type: object
+      properties: {id: {type: string}, title: {type: string}, handle: {type: string}}
     Label:
       type: object
       properties: {id: {type: string, maxLength: 6}, name: {type: string}}
@@ -888,4 +932,192 @@ async fn a_described_alternate_adds_to_the_detected_members() {
         let (_, headers, _) = h.send("GET", "/drafts/hi", None, &[]).await;
         assert_ne!(source(&headers), "state");
     }
+}
+
+/// The last message of the `n`th prompt the model was sent.
+fn prompt(h: &DescribedHarness, n: usize) -> String {
+    h.provider.requests()[n]
+        .messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
+}
+
+/// Every contact stored in the default session.
+async fn contacts(h: &DescribedHarness) -> Vec<Value> {
+    let session = mb_state::SessionKey {
+        workspace: h.rt.workspace.clone(),
+        mock: h.rt.name.clone(),
+        session: "default".into(),
+    };
+    let mut held: Vec<Value> =
+        h.rt.state
+            .list(&session, "contacts", 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.data)
+            .collect();
+    held.sort_by_key(|c| c["Name"].as_str().unwrap_or_default().to_string());
+    held
+}
+
+#[tokio::test]
+async fn a_bulk_create_from_the_request_alone_stores_each_record_under_a_minted_id() {
+    let world = json!({
+        "operations": {"putContacts": {"kind": "create", "request": {"records": "/Contacts"}}}
+    });
+    let h = support::described(CONTRACT, world, vec![json!({"Contacts": []})]);
+    let request = json!({"Contacts": [{"Name": "a"}, {"Name": "b"}]});
+    let (status, _, body) = h.send("PUT", "/contacts", Some(request), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let held = contacts(&h).await;
+    assert_eq!(held.len(), 2, "{held:?}");
+    let ids: Vec<String> = held
+        .iter()
+        .map(|c| c["ContactID"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(ids.iter().all(|id| !id.is_empty()), "{held:?}");
+    assert_ne!(ids[0], ids[1]);
+    for (id, name) in ids.iter().zip(["a", "b"]) {
+        let (status, headers, body) = h.send("GET", &format!("/contacts/{id}"), None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source(&headers), "state", "{body}");
+        assert_eq!(body["Name"], json!(name), "{body}");
+    }
+    assert_eq!(gaps(&h, 0), Value::Null);
+}
+
+#[tokio::test]
+async fn a_bulk_answer_whose_records_hold_no_ids_is_given_them() {
+    let world = json!({
+        "operations": {"putContacts": {"kind": "create", "answer": {"records": "/Contacts"}}}
+    });
+    let answer = json!({"Contacts": [{"Name": "a"}, {"Name": "b"}]});
+    let h = support::described(CONTRACT, world, vec![answer]);
+    let request = json!({"Contacts": [{"Name": "a"}, {"Name": "b"}]});
+    let (status, _, body) = h.send("PUT", "/contacts", Some(request), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for (item, name) in body["Contacts"].as_array().unwrap().iter().zip(["a", "b"]) {
+        let id = item["ContactID"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{body}"));
+        let (status, headers, read) = h.send("GET", &format!("/contacts/{id}"), None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source(&headers), "state", "{read}");
+        assert_eq!(read["Name"], json!(name), "{read}");
+    }
+    assert_eq!(contacts(&h).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_long_running_result_with_no_id_is_given_one() {
+    let world = json!({
+        "operations": {"createReport": {"answer": {"long_running": {"done": "done", "result": "response"}}}}
+    });
+    let answer = json!({"name": "operations/1", "done": false, "response": {"title": "a"}});
+    let h = support::described(CONTRACT, world, vec![answer]);
+    let (status, _, body) = h
+        .send("POST", "/reports", Some(json!({"title": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["response"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{body}"));
+    let (_, headers, read) = h.send("GET", &format!("/reports/{id}"), None, &[]).await;
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read["title"], json!("a"));
+}
+
+#[tokio::test]
+async fn a_nested_route_reaches_a_patterned_parent_by_its_bare_id() {
+    // Stored under the patterned id, named bare by the path; then the reverse.
+    for (stored_as, named) in [("fld_7", "7"), ("7", "fld_7")] {
+        let folder = json!({"id": stored_as, "displayName": "Quarterly-Plans"});
+        let h = support::described(CONTRACT, patterned(), vec![folder, json!([])]);
+        let (status, _, body) = h
+            .send(
+                "POST",
+                "/folders",
+                Some(json!({"displayName": "Quarterly-Plans"})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(h.stored("folders", stored_as).await.is_some(), "{body}");
+        let (status, _, body) = h
+            .send("GET", &format!("/folders/{named}/files"), None, &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            prompt(&h, 1).contains("Quarterly-Plans"),
+            "{stored_as} by {named}: {}",
+            prompt(&h, 1)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_nested_route_reaches_its_parent_by_a_described_alternate() {
+    // `{project}` names no member: the parent is looked up by name, then by `code`.
+    let script = || {
+        vec![
+            json!({"id": "pr1", "title": "Annual-Budget", "code": "RM"}),
+            json!([]),
+        ]
+    };
+    let world = json!({"types": {"projects": {"identity": {"alternates": ["code"]}}}});
+    let described = support::described(CONTRACT, world, script());
+    let plain = plain(script());
+    let mut shown = Vec::new();
+    for h in [&described, &plain] {
+        let request = json!({"title": "Annual-Budget", "code": "RM"});
+        h.send("POST", "/projects", Some(request), &[]).await;
+        let (status, _, body) = h.send("GET", "/projects/RM/files", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        shown.push(prompt(h, 1).contains("Annual-Budget"));
+    }
+    // With no world the alternate is not tried.
+    assert_eq!(shown, [true, false]);
+}
+
+#[tokio::test]
+async fn another_owners_record_named_by_a_described_alternate_is_not_missing() {
+    let options = HarnessOptions {
+        unknown_ids_not_found: true,
+        ..HarnessOptions::default()
+    };
+    let script = || {
+        vec![
+            json!({"id": "p1", "title": "a", "handle": "hx"}),
+            json!({"id": "p2", "title": "b", "handle": "hx"}),
+        ]
+    };
+    let world = json!({"types": {"pages": {"identity": {"alternates": ["handle"]}}}});
+    let described = support::described_with(CONTRACT, world, script(), &options, false);
+    let plain = support::harness(CONTRACT, script(), &options, |rt| rt);
+    let mut statuses = Vec::new();
+    for h in [&described, &plain] {
+        let (status, _, body) = h
+            .send(
+                "POST",
+                "/spaces/s1/pages",
+                Some(json!({"title": "a", "handle": "hx"})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        // Another space's page goes by `hx`: a route that cannot tell whose it is does
+        // not call it missing.
+        let (status, _, _) = h.send("GET", "/spaces/s2/pages/hx", None, &[]).await;
+        statuses.push(status);
+        let (status, _, _) = h.send("GET", "/spaces/s2/pages/zz9", None, &[]).await;
+        statuses.push(status);
+        let (status, _, _) = h.send("GET", "/spaces/s1/pages/hx", None, &[]).await;
+        statuses.push(status);
+    }
+    // Under its own space it is read by `handle` too; a value no page holds is missing.
+    // With no world `handle` names nothing.
+    let (ok, missing) = (StatusCode::OK, StatusCode::NOT_FOUND);
+    assert_eq!(statuses, [ok, missing, ok, missing, missing, missing]);
 }

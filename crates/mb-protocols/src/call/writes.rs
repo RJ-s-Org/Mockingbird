@@ -27,6 +27,10 @@ pub(super) struct WriteRequest<'a> {
     pub(super) held: bool,
     /// The id a create's answer named its record by in a header (see [`header_ids`]).
     pub(super) header_id: Option<Value>,
+    /// The records a create's `request.records` makes, with the ids
+    /// [`records::mint_created`] gave them; empty when its request's items are not
+    /// the records made.
+    pub(super) request_records: Vec<Value>,
 }
 
 /// What [`write_state`] did with an answer: how many records it located and handed to
@@ -67,6 +71,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
         origin,
         held: was_held,
         header_id,
+        request_records,
     } = w;
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
@@ -131,7 +136,12 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
     };
     // A create the description says makes several records, or a long-running one.
     if is_create {
-        let made = records::created(rt, op, request_body, generated.body.as_ref());
+        let made = records::created(
+            rt,
+            op,
+            (request_body, &request_records),
+            generated.body.as_ref(),
+        );
         if !made.is_empty() {
             let field = records::identity_member(rt, op, resource_type);
             let mut outcome = WriteOutcome::default();

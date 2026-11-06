@@ -318,6 +318,30 @@ fn draw(
         .next()
 }
 
+/// An id for a record of type `t` that holds none, drawn as [`mint`] draws one with no
+/// header to serve it in: as the type's records declare their identity `field` (a
+/// plain string where they do not), in the type's identity pattern where it has one.
+/// `None` when the draw is not one the records hold (a pattern past the member's
+/// `maxLength`). Whether the session holds it already is the caller's to check.
+pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<Value> {
+    let declared = record_id_schema(rt, t, field);
+    let string = json!({"type": "string"});
+    let string_identity = declared
+        .as_ref()
+        .and_then(|d| d.get("type"))
+        .and_then(Value::as_str)
+        == Some("string");
+    let checks = IdChecks::new(rt, declared.as_ref(), &string, false)?;
+    let id = draw(rt, declared.as_ref(), &string, string_identity, &checks)?;
+    match id_string(&id).and_then(|text| records::in_pattern(rt, t, &text)) {
+        Some(formed) => {
+            let held = Value::String(formed);
+            checks.identity_holds(&held).then_some(held)
+        }
+        None => Some(id),
+    }
+}
+
 /// Whether `id` can stand in a URL path segment as it is.
 fn url_safe(id: &str) -> bool {
     id.chars()
