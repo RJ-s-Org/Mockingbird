@@ -7,8 +7,10 @@ MB_BENCH_BINARY); without it, it is skipped.
 """
 
 import argparse
+import contextlib
 import gzip
 import http.client
+import io
 import json
 import os
 import shutil
@@ -137,6 +139,16 @@ class MatchTest(unittest.TestCase):
         matches = [line["match"] for line in lines(self.log)]
         self.assertEqual(matches, ["exact", "key", "key", "nearest", "nearest", "none"])
 
+    def test_a_consumed_exact_call_is_reused_not_exact(self):
+        self.ask(body(request='{"exact":1}'))  # createIssue #0: exact
+        self.ask(body(op="createIssue", request='{"x":1}'))  # #1: key
+        a = self.ask(body(request='{"exact":1}'))  # #2: the exact call again, already used
+        self.assertEqual((a["match"], a["content"]), ("reused", '{"key":"exact"}'))
+        log = lines(self.log)
+        self.assertEqual([line["match"] for line in log], ["exact", "key", "reused"])
+        self.assertEqual(log[0]["used"], ["jira", 0, "createIssue", 0])
+        self.assertEqual(log[2]["used"], ["jira", 0, "createIssue", 0])
+
     def test_nearest_falls_back_to_another_journey(self):
         a = self.ask(body(op="listTickets"), journey="jira")
         self.assertEqual((a["match"], a["content"]), ("nearest", '{"tickets":[]}'))
@@ -165,40 +177,140 @@ class MatchTest(unittest.TestCase):
 
 
 class CompareTest(unittest.TestCase):
-    def doc(self, **kw):
-        return recording([], results={"a.read": True, "a.write": True, "a.list": False, "b.read": True,
-                                      "b.gone": True, "c.flip": True}, **kw)
+    # Journey a: read, write; b: read; c: flip. One recorded call per (journey, op).
+    RECORDED = [call("a", "read", 0, "{}"), call("a", "write", 0, "{}"), call("b", "read", 0, "{}"),
+                call("c", "flip", 0, "{}")]
+
+    def doc(self, calls=None, **kw):
+        return recording(self.RECORDED if calls is None else calls,
+                         results={"a.read": True, "a.write": True, "a.list": False, "b.read": True,
+                                  "b.gone": True, "c.flip": True}, **kw)
 
     def rows(self, **ok):
         return [{"case": c.replace("_", "."), "ok": v, "rep": 0} for c, v in ok.items()]
 
+    def a_read_fails(self):
+        """Every recorded check as recorded, but a.read now fails."""
+        return self.rows(a_read=False, a_write=True, a_list=False, b_read=True, b_gone=True, c_flip=True)
+
+    @staticmethod
+    def replayed(journey, op, n, match, used=True, label="m~journeys_x"):
+        return {"label": label, "journey": journey, "rep": 0, "op": op, "n": n, "match": match,
+                "used": [journey, 0, op, n] if used and match != "none" else None}
+
+    def clean(self):
+        return [self.replayed(c["journey"], c["op"], c["n"], "exact" if c["journey"] != "b" else "key")
+                for c in self.RECORDED]
+
     def test_regressions_masked_improvements(self):
-        calls = [{"label": "m~journeys_x", "journey": "a", "match": "exact"},
-                 {"label": "m~journeys_x", "journey": "a", "match": "key"},
-                 {"label": "m~journeys_x", "journey": "b", "match": "nearest"},
-                 {"label": "m~journeys_x", "journey": "c", "match": "none"},
-                 {"label": "other", "journey": "a", "match": "none"}]
+        calls = [self.replayed("a", "read", 0, "exact"), self.replayed("a", "write", 0, "key"),
+                 self.replayed("b", "read", 0, "nearest"), self.replayed("c", "flip", 0, "none"),
+                 self.replayed("a", "read", 0, "none", label="other")]
         r = replay.compare(self.doc(), self.rows(a_read=False, a_write=True, a_list=True, b_read=False,
                                                  c_flip=False), calls)
         self.assertEqual(r["regressions"], ["a.read"])
         self.assertEqual(sorted(r["masked"]), ["b.gone", "b.read", "c.flip"])
         self.assertEqual(r["improvements"], ["a.list"])
         self.assertEqual(r["missing"], ["b.gone"])
-        self.assertEqual(r["calls"], {"exact": 1, "key": 1, "nearest": 1, "none": 1})
-        self.assertIn("a.read", replay.render([r]))
+        self.assertEqual(r["calls"], {"exact": 1, "reused": 0, "key": 1, "nearest": 1, "none": 1})
+        self.assertEqual(sorted(r["dirty"]), ["b", "c"])
+        out = replay.render([r])
+        self.assertIn("a.read", out)
+        self.assertIn("c: flip #0 matched none", out)
 
     def test_missing_check_of_a_clean_journey_regresses(self):
-        r = replay.compare(self.doc(), self.rows(a_write=True), [])
+        r = replay.compare(self.doc(), self.rows(a_write=True), self.clean())
         self.assertIn("a.read", r["regressions"])
 
     def test_unstable_checks_never_count(self):
-        r = replay.compare(self.doc(unstable=["a.read"]), self.rows(a_read=False, a_write=True), [])
+        r = replay.compare(self.doc(unstable=["a.read"]), self.rows(a_read=False, a_write=True), self.clean())
         self.assertNotIn("a.read", r["regressions"])
         self.assertEqual(r["unstable"], 1)
+
+    def test_an_extra_call_of_an_operation_makes_the_journey_dirty(self):
+        # Every call matched exactly or by key, but a.read was asked twice, recorded once.
+        calls = self.clean() + [self.replayed("a", "read", 1, "key", used=False)]
+        r = replay.compare(self.doc(), self.a_read_fails(), calls)
+        self.assertEqual(r["regressions"], [])
+        self.assertIn("a.read", r["masked"])
+        self.assertEqual(r["dirty"], {"a": ["read called 2 time(s), recorded 1"]})
+
+    def test_a_missing_call_of_an_operation_makes_the_journey_dirty(self):
+        calls = [c for c in self.clean() if (c["journey"], c["op"]) != ("a", "write")]
+        r = replay.compare(self.doc(), self.a_read_fails(), calls)
+        self.assertEqual(r["regressions"], [])
+        self.assertIn("write called 0 time(s), recorded 1", r["dirty"]["a"])
+        self.assertIn("recorded write #0 never used", r["dirty"]["a"])
+
+    def test_an_unused_recorded_call_makes_the_journey_dirty(self):
+        # Same counts per operation and only exact/key matches, but the replay's two
+        # reads both answered from recorded read #1: read #0 went unused.
+        recorded = [call("a", "read", 0, "{}"), call("a", "read", 1, "{}")]
+        calls = [dict(self.replayed("a", "read", 0, "exact"), used=["a", 0, "read", 1]),
+                 dict(self.replayed("a", "read", 1, "key"), used=["a", 0, "read", 1])]
+        r = replay.compare(self.doc(recorded), self.a_read_fails(), calls)
+        self.assertEqual(r["regressions"], [])
+        self.assertEqual(r["dirty"], {"a": ["recorded read #0 never used"]})
+
+    def test_a_reused_answer_makes_the_journey_dirty(self):
+        calls = self.clean()
+        calls[0] = self.replayed("a", "read", 0, "reused")
+        r = replay.compare(self.doc(), self.a_read_fails(), calls)
+        self.assertEqual(r["regressions"], [])
+        self.assertIn("a.read", r["masked"])
+        self.assertEqual(r["calls"]["reused"], 1)
+
+    def test_a_clean_journey_has_no_dirt(self):
+        r = replay.compare(self.doc(), self.rows(a_read=True, a_write=True, b_read=True, c_flip=True), self.clean())
+        self.assertEqual(r["dirty"], {})
+
+    def test_expected_change_checks_are_not_compared(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "r.json.gz")
+        replay.write_recording(path, self.doc())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(replay.cmd_expect(argparse.Namespace(recording=path, check=["a.read"])), 0)
+            self.assertEqual(replay.cmd_expect(argparse.Namespace(recording=path, check=["a.nope"])), 2)
+        doc = replay.read_recording(path)
+        self.assertEqual(doc["expected_change"], ["a.read"])
+        r = replay.compare(doc, self.a_read_fails(), self.clean())
+        self.assertEqual((r["regressions"], r["expected"]), ([], ["a.read"]))
+        self.assertIn("expected to change", replay.render([r]))
 
     def test_suite_error_is_reported(self):
         rows = [{"case": "suite_error", "ok": False, "rep": -1, "detail": {"error": "boom"}}]
         self.assertEqual(replay.compare(self.doc(), rows, [])["suite_error"], [{"error": "boom"}])
+
+
+class CalibrateTest(unittest.TestCase):
+    """Record time reports, and keeps, the journeys that are dirty on the recording's own binary."""
+
+    def test_baseline_dirty_journeys_are_reported_and_kept(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "r.json.gz")
+        recorded = [call("a", "read", 0, "{}"), call("b", "read", 0, "{}")]
+        replay.write_recording(path, recording(recorded, results={"a.x": True, "b.x": True}))
+        rows = [{"model": "m", "suite": "journeys_x", "case": c, "ok": True, "rep": 0} for c in ("a.x", "b.x")]
+        runs = [[{"label": "m~journeys_x", "journey": "a", "rep": 0, "op": "read", "n": 0, "match": "exact",
+                  "used": ["a", 0, "read", 0]},
+                 {"label": "m~journeys_x", "journey": "b", "rep": 0, "op": "read", "n": 0, "match": "key",
+                  "used": ["b", 0, "read", 0]},
+                 {"label": "m~journeys_x", "journey": "b", "rep": 0, "op": "read", "n": 1, "match": "reused",
+                  "used": ["b", 0, "read", 0]}]]
+        with mock.patch.object(replay, "replay_once", side_effect=[(rows, c) for c in runs * 2]):
+            dirty = replay.calibrate([path], argparse.Namespace(), 2)
+        self.assertEqual(list(dirty), ["m~journeys_x"])
+        self.assertEqual(sorted(dirty["m~journeys_x"]), ["b"])
+        self.assertIn("read called 2 time(s), recorded 1", dirty["m~journeys_x"]["b"])
+        doc = replay.read_recording(path)
+        self.assertEqual(doc["baseline_dirty"], ["b"])
+        self.assertEqual(doc["unstable"], [])
+        text = replay.render_baseline_dirty(dirty)
+        self.assertIn("m~journeys_x / b:", text)
+        self.assertIn("matched reused", text)
+        self.assertIn("replays clean", replay.render_baseline_dirty({}))
 
 
 class RecordTest(unittest.TestCase):
