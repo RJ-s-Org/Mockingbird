@@ -74,6 +74,22 @@ python3 scripts/llm-bench/server_suites.py --model <id> --proxy-base http://127.
 
 `run.py full --server-jobs N` passes `--jobs N` on. The number of calls in flight per model is about (number of suites running) × `--jobs`, and the proxy reserves a budget estimate for each call in flight, so leave `--budget-usd` some headroom. A journeys suite of 5 journeys × 3 reps has 15 units, so `--jobs 4` makes it about 3–4× faster, and `--jobs 15` makes it as fast as its slowest journey. The server allows 64 LLM generations at once (`limits.max_concurrent_generations`); a call that waits past its LLM timeout is answered by the faker, so keep the total well under that.
 
+## Comparing two commits (A/B)
+
+To tell a regression from model variance, run the same suites on two builds with the same bench scripts and model. Build the binaries one after another into one persistent target dir. The second build then recompiles only the crates that changed, where two cold builds in their own target dirs each take minutes. Copy each binary out as soon as it is built, since the next build overwrites it:
+
+```sh
+T=/private/tmp/claude-502/bis-target   # shared by every A/B run on this machine
+for c in <sha-a> <sha-b>; do
+  git worktree add -q --detach /private/tmp/claude-502/bis-$c $c
+  (cd /private/tmp/claude-502/bis-$c && CARGO_TARGET_DIR=$T cargo build -q --release -p mockingbird-cli) \
+    && mkdir -p <out>/bin && cp $T/release/mockingbird <out>/bin/mb-$c
+  git worktree remove --force /private/tmp/claude-502/bis-$c
+done
+```
+
+Then run `server_suites.py ... --binary <out>/bin/mb-<sha>` for each build, with the scripts from one checkout, so only the binary differs. Use `--repeat 4` or more: at repeat 2, a check that passes half the time moves by a whole rep.
+
 ## Budget
 
 The proxy stops spending. Before each call it reserves an estimate of the call's cost: prompt characters / 3 × input price, plus `max_tokens` (default 4096) × output price. It refuses the call with 402 when the following would reach `--budget-usd` (default 9.0):
