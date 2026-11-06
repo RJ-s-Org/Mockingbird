@@ -13,7 +13,8 @@ use crate::support::{self, DescribedHarness, HarnessOptions};
 
 /// Workspaces are deleted by an action route; files are read by a body member; folders
 /// are archived and moved by custom methods; things are patched with a wrapped record
-/// answering an acknowledgement, and put whole.
+/// answering an acknowledgement, and put whole; gadgets are patched and put answering
+/// nothing.
 const CONTRACT: &str = r##"
 openapi: 3.0.0
 info: {title: Kinds, version: "1"}
@@ -82,6 +83,24 @@ paths:
       operationId: putThing
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /gadgets:
+    post:
+      operationId: createGadget
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, note: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}}
+  /gadgets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getGadget
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}, "404": {description: missing}}
+    patch:
+      operationId: patchGadget
+      requestBody: {content: {application/json: {schema: {type: object, properties: {data: {type: object, properties: {title: {type: string}}}, title: {type: string}}}}}}
+      responses: {"204": {description: done}}
+    put:
+      operationId: putGadget
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Gadget"}}}}
+      responses: {"204": {description: done}}
 components:
   schemas:
     Workspace:
@@ -103,6 +122,14 @@ components:
         id: {type: string}
         title: {type: string}
         note: {type: string}
+        createdAt: {type: string, readOnly: true}
+    Gadget:
+      type: object
+      properties:
+        id: {type: string}
+        title: {type: string}
+        note: {type: string}
+        state: {type: string, enum: [DRAFT, LIVE]}
         createdAt: {type: string, readOnly: true}
     Ack:
       type: object
@@ -372,6 +399,146 @@ async fn a_replace_drops_members_it_does_not_send() {
         .await;
     let held = h.stored(&t, "t1").await.unwrap();
     assert_eq!(held["note"], json!("n"), "{held}");
+}
+
+/// Creates gadget `g1` (titled "a", noted "n", `DRAFT`) through `h`, whose first
+/// scripted answer is its record.
+async fn create_gadget(h: &DescribedHarness) {
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/gadgets",
+            Some(json!({"title": "a", "note": "n"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["id"], json!("g1"), "{body}");
+}
+
+fn gadget() -> Value {
+    json!({"id": "g1", "title": "a", "note": "n", "state": "DRAFT", "createdAt": "2026-01-01T00:00:00Z"})
+}
+
+/// `h`'s stored copy of gadget `g1`, read back from state.
+async fn read_gadget(h: &DescribedHarness) -> Value {
+    let (status, headers, body) = h.send("GET", "/gadgets/g1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    body
+}
+
+#[tokio::test]
+async fn a_transition_on_an_update_answering_nothing_is_stored() {
+    let world = json!({
+        "types": {"gadgets": {"lifecycle": {"member": "state", "states": ["DRAFT", "LIVE"]}}},
+        "operations": {"patchGadget": {"kind": "update", "target": {"path_param": "id"}, "transition": {"state": "LIVE"}}}
+    });
+    let h = support::described(CONTRACT, world, vec![gadget(), gadget()]);
+    create_gadget(&h).await;
+    let (status, _, body) = h
+        .send("PATCH", "/gadgets/g1", Some(json!({"title": "b"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let mut want = gadget();
+    want["title"] = json!("b");
+    want["state"] = json!("LIVE");
+    assert_eq!(read_gadget(&h).await, want);
+}
+
+#[tokio::test]
+async fn changes_on_an_update_answering_nothing_are_stored() {
+    let world = json!({
+        "operations": {"patchGadget": {"kind": "update", "target": {"path_param": "id"}, "changes": {"note": {"from_request": "/title"}, "state": {"value": "LIVE"}}}}
+    });
+    let h = support::described(CONTRACT, world, vec![gadget(), gadget()]);
+    create_gadget(&h).await;
+    let (status, _, body) = h
+        .send("PATCH", "/gadgets/g1", Some(json!({"title": "b"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let mut want = gadget();
+    want["title"] = json!("b");
+    want["note"] = json!("b");
+    want["state"] = json!("LIVE");
+    assert_eq!(read_gadget(&h).await, want);
+}
+
+#[tokio::test]
+async fn a_replace_answering_nothing_drops_members_it_does_not_send() {
+    let world = json!({"operations": {"putGadget": {"kind": "replace"}}});
+    let h = support::described(CONTRACT, world, vec![gadget(), gadget()]);
+    create_gadget(&h).await;
+    let (status, _, body) = h
+        .send(
+            "PUT",
+            "/gadgets/g1",
+            Some(json!({"title": "b", "state": "LIVE"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        read_gadget(&h).await,
+        json!({"id": "g1", "title": "b", "state": "LIVE", "createdAt": "2026-01-01T00:00:00Z"})
+    );
+
+    // With no world, a put answering nothing merges as today: what it did not send stays.
+    let h = support::harness(
+        CONTRACT,
+        vec![gadget(), gadget()],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    create_gadget(&h).await;
+    h.send(
+        "PUT",
+        "/gadgets/g1",
+        Some(json!({"title": "b", "state": "LIVE"})),
+        &[],
+    )
+    .await;
+    let t = type_of(&h, "getGadget");
+    let held = h.stored(&t, "g1").await.unwrap();
+    assert_eq!(held["note"], json!("n"), "{held}");
+}
+
+#[tokio::test]
+async fn an_update_answering_nothing_merges_the_record_its_request_wraps() {
+    let world = json!({
+        "operations": {"patchGadget": {"target": {"path_param": "id"}, "request": {"record": "/data"}}}
+    });
+    let h = support::described(CONTRACT, world, vec![gadget(), gadget()]);
+    create_gadget(&h).await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/gadgets/g1",
+            Some(json!({"data": {"title": "b"}})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let held = read_gadget(&h).await;
+    assert_eq!(held["title"], json!("b"), "{held}");
+    assert_eq!(held["note"], json!("n"), "{held}");
+    assert!(held.get("data").is_none(), "{held}");
+
+    // With no world, the wrapper is no member of the record and nothing inside it is
+    // laid on.
+    let h = plain(vec![gadget(), gadget()]);
+    create_gadget(&h).await;
+    h.send(
+        "PATCH",
+        "/gadgets/g1",
+        Some(json!({"data": {"title": "b"}})),
+        &[],
+    )
+    .await;
+    let t = type_of(&h, "getGadget");
+    let held = h.stored(&t, "g1").await.unwrap();
+    assert_eq!(held["title"], json!("a"), "{held}");
+    assert!(held.get("data").is_none(), "{held}");
 }
 
 #[cfg(feature = "graphql")]

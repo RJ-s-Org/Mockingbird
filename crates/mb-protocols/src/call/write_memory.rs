@@ -464,10 +464,12 @@ pub(super) async fn silent_write_target(
 }
 
 /// Whether a write leaves the stored copy to [`after_write`]: an update answering
-/// nothing, which merges what it can. Storing the request in the copy's place would
-/// lose what it did not repeat, identity included. Offline, and with consistency
-/// off, the request still replaces it. An update the description calls a replace
-/// does not: [`onto_record`] replaces the copy, keeping its identity.
+/// nothing, which merges what it can (the record its request holds, then what the
+/// description says it sets; see [`update_without_answer`]). Storing the request in
+/// the copy's place would lose what it did not repeat, identity included. Offline,
+/// and with consistency off, the request still replaces it. An update the
+/// description calls a replace does not: [`onto_record`] replaces the copy, keeping
+/// its identity, and `after_write` leaves it so.
 pub(super) fn keeps_stored(
     rt: &MockRuntime,
     plan: &CallPlan<'_>,
@@ -2183,6 +2185,12 @@ fn member_named<'a>(
 /// it could into the stored copy (which publishes the change). One the session did
 /// not hold stored its request as it came, so that holds itself; one with no body
 /// has only its path to tell.
+///
+/// What the description says of the update applies here too: its request's record
+/// is where `request.record` points (see [`records::request_record`]), and its
+/// `transition` and `changes` are set on the merged copy (see [`transitions::apply`]).
+/// A replace was stored by `write_state` (see [`keeps_stored`]), and is left
+/// as it stored it.
 async fn update_without_answer(
     state: &mut StateAccess<'_>,
     rt: &MockRuntime,
@@ -2193,32 +2201,53 @@ async fn update_without_answer(
     acted_on: Option<&str>,
 ) -> Option<Tell> {
     let session = &plan.session;
-    let (Some(raw), Some(held)) = (raw, w.held) else {
+    let op = plan.op;
+    let Some(held) = w.held else {
         return match raw {
             Some(_) => None,
             None => acted_on.map(|id| Tell {
                 id: id.to_string(),
                 body: None,
                 own: None,
-                stored: w.held.is_some(),
+                stored: false,
                 publish: true,
             }),
         };
     };
     let t = held.resource_type.as_str();
+    let Some(raw) = raw else {
+        // Nothing sent: only what the description says the update sets.
+        let mut data = held.data.clone();
+        transitions::apply(rt, op, w.call.body.as_ref(), &mut data);
+        let changed = data != held.data;
+        if changed {
+            store_merged(state, rt, session, held, data).await;
+        }
+        return acted_on.map(|id| Tell {
+            id: id.to_string(),
+            body: None,
+            own: None,
+            stored: true,
+            publish: !changed,
+        });
+    };
+    let raw = records::request_record(rt, op, raw);
+    let request = request.map(|r| records::request_record(rt, op, r));
+    if transitions::replaces(rt, op) {
+        // Stored whole by `write_state`: merging onto the copy held before would bring
+        // back what the replace dropped.
+        let own = request.and_then(|r| own_part(rt, t, r));
+        set_own(state, session, &memory_key(t, &held.id, true), own).await;
+        return None;
+    }
     // The path says whose it is: a member saying otherwise is not applied or told.
     let raw = &without_contradictions(rt, plan, w.call, held, raw);
     let request = request.map(|r| without_contradictions(rt, plan, w.call, held, r));
-    let (merged, rest) = apply_update(rt, held, raw);
+    let (mut merged, rest) = apply_update(rt, held, raw);
+    transitions::apply(rt, op, w.call.body.as_ref(), &mut merged);
     let changed = merged != held.data;
     if changed {
-        let resource = StoredResource {
-            data: merged.clone(),
-            ..held.clone()
-        };
-        if state.upsert(session, resource.clone()).await {
-            rt.collections().carry(session, held, &resource);
-        }
+        store_merged(state, rt, session, held, merged.clone()).await;
     }
     let own = request.as_ref().and_then(|r| own_part(rt, t, r));
     // What is left, as it may be kept: every credential has gone by now, since a
@@ -2241,6 +2270,23 @@ async fn update_without_answer(
         stored: true,
         publish: !changed,
     })
+}
+
+/// Stores `data` as `held`'s copy, keeping its place in the collections.
+async fn store_merged(
+    state: &mut StateAccess<'_>,
+    rt: &MockRuntime,
+    session: &SessionKey,
+    held: &StoredResource,
+    data: Value,
+) {
+    let resource = StoredResource {
+        data,
+        ..held.clone()
+    };
+    if state.upsert(session, resource.clone()).await {
+        rt.collections().carry(session, held, &resource);
+    }
 }
 
 /// Whether `data` says it is not `owner`'s, as a write taking it would see (see
