@@ -10,7 +10,9 @@
 //!
 //! 1. optional object and array members the request does not name are left
 //!    out (`append_to_response=videos,credits` keeps `videos` and `credits`,
-//!    and `type=track` keeps `tracks`: a word names a member sharing its stem);
+//!    and `type=track` keeps `tracks`: a word names a member sharing its stem),
+//!    except where a list holds its records ([`Listing`]): the arrays of its items
+//!    and the members holding all of them, which only get the steps below;
 //! 2. arrays get a `maxItems`: top-level lists 5, 3, 2, then 1 item, nested
 //!    arrays 3, 2, then 1;
 //! 3. required object and array members below the top level are left out,
@@ -84,26 +86,47 @@ impl Shaped {
     }
 }
 
+/// Where an answer holds the records it lists, which shaping caps and trims but
+/// never leaves out.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Listing<'a> {
+    /// The operation lists records: its page's item arrays (see [`page_arrays`]) hold them.
+    pub list: bool,
+    /// The tokens of the pointer a world description gives the answer's records at
+    /// (`answer.records`), over what the shape says.
+    pub records: Option<&'a [String]>,
+}
+
 /// `doc` (a schema with its `$defs`) shaped to `budget` completion tokens,
 /// or `None` when its estimated answer already fits (or is too large a
 /// schema graph to estimate). `requested` are the words of the request
 /// (query names and values, body keys); `selected` marks a schema already
 /// narrowed to a selection; `limit` is the page size the request asks for (see
-/// [`requested_limit`]).
+/// [`requested_limit`]); `listing` says where the answer holds its records.
 pub fn shape(
     doc: &Value,
     requested: &HashSet<String>,
     selected: bool,
     budget: u32,
     limit: Option<PageLimit>,
+    listing: Listing<'_>,
 ) -> Option<Shaped> {
     let budget = f64::from(budget);
     if budget <= 0.0 {
         return None;
     }
-    let pages = page_arrays(doc, limit.and_then(|l| l.maximum))?;
+    let mut pages = page_arrays(doc, limit.and_then(|l| l.maximum))?;
+    let described = listing.records.and_then(|tokens| member_array(doc, tokens));
+    let kept: HashSet<String> = match described {
+        Some(at) => {
+            pages.insert(at.clone());
+            HashSet::from([at])
+        }
+        None if listing.list => pages.clone(),
+        None => HashSet::new(),
+    };
     let size = limit.map(|l| l.items);
-    let before = Stats::of(doc, Held::at(size, &pages))?.tokens;
+    let before = Stats::of(doc, Held::at(size, &pages, &kept))?.tokens;
     if before <= budget {
         return None;
     }
@@ -128,7 +151,7 @@ pub fn shape(
                 requested,
                 selected,
                 budget,
-                Held::at(*floor, &pages),
+                Held::at(*floor, &pages, &kept),
                 spare,
             )?;
             let fits = plan.tokens <= budget;
@@ -183,7 +206,7 @@ fn plan(
         stats = Stats::of(&doc, held)?;
     }
     if !selected {
-        let optional = |m: &Member| !m.required && !requested.contains(&m.property);
+        let optional = |m: &Member| !m.required && !m.keeps && !requested.contains(&m.property);
         drop_until(&mut doc, &mut stats, optional, budget, held, None)?;
     }
     for (top, nested) in CAPS {
@@ -323,6 +346,12 @@ struct Member {
     /// What an array item is: its only object member with an identity of its
     /// own (see [`Walk::has_identity`]).
     identity: bool,
+    /// A kept array ([`Held::kept`]) in some occurrence outside any array.
+    kept: bool,
+    /// The kept arrays at or below it, outside any array.
+    holds: HashSet<String>,
+    /// A kept array, or a member holding every kept array: step 1 leaves it in.
+    keeps: bool,
 }
 
 /// How an array schema occurs in the estimated answer.
@@ -342,13 +371,16 @@ struct Held<'a> {
     floor: Option<u64>,
     /// Which arrays outside any array they are; all of them when not given.
     pages: Option<&'a HashSet<String>>,
+    /// Which of them hold the records the answer lists (see [`Listing`]).
+    kept: Option<&'a HashSet<String>>,
 }
 
 impl<'a> Held<'a> {
-    fn at(floor: Option<u64>, pages: &'a HashSet<String>) -> Self {
+    fn at(floor: Option<u64>, pages: &'a HashSet<String>, kept: &'a HashSet<String>) -> Self {
         Self {
             floor,
             pages: Some(pages),
+            kept: Some(kept),
         }
     }
 
@@ -380,12 +412,19 @@ impl Stats {
                 arrays: HashMap::new(),
             },
             as_item: false,
+            path: Vec::new(),
+            kept_seen: HashSet::new(),
         };
         let chars = walk.visit(doc, String::new(), 1.0, 0, false);
         if walk.visits > MAX_VISITS {
             return None;
         }
         walk.stats.tokens = chars / CHARS_PER_TOKEN;
+        let seen = walk.kept_seen;
+        for member in walk.stats.members.values_mut() {
+            member.keeps =
+                member.kept || (!member.holds.is_empty() && seen.is_subset(&member.holds));
+        }
         Some(walk.stats)
     }
 
@@ -430,6 +469,10 @@ struct Walk<'a> {
     /// The node visited next is an array's item, through any `$ref` or
     /// combinator on the way to its object.
     as_item: bool,
+    /// The members (location, property) enclosing the node visited.
+    path: Vec<(String, String)>,
+    /// The kept arrays ([`Held::kept`]) the answer holds outside any array.
+    kept_seen: HashSet<String>,
 }
 
 impl Walk<'_> {
@@ -507,6 +550,14 @@ impl Walk<'_> {
                 let entry = self.stats.arrays.entry(location.clone()).or_default();
                 entry.top |= top;
                 entry.page |= page;
+                if !in_array && self.held.kept.is_some_and(|kept| kept.contains(&location)) {
+                    for key in &self.path {
+                        if let Some(member) = self.stats.members.get_mut(key) {
+                            member.holds.insert(location.clone());
+                        }
+                    }
+                    self.kept_seen.insert(location.clone());
+                }
                 let n = items(obj, self.held.floor.filter(|_| page));
                 let item = obj.get("items").cloned().unwrap_or(Value::Bool(true));
                 self.as_item = true;
@@ -551,19 +602,11 @@ impl Walk<'_> {
         let mut chars = 2.0;
         for (name, schema) in props {
             let child_location = format!("{location}/properties/{}", escape(name));
-            let value = match leaf_type(schema) {
-                Some(t) => scalar(schema.as_object().unwrap_or(&Map::new()), t, Some(name)),
-                None => self.visit(schema, child_location.clone(), mult, depth + 1, in_array),
-            };
-            let each = (name.len() as f64 + 4.0 + value) / CHARS_PER_TOKEN;
-            let page = !in_array
-                && self
-                    .array_location(schema, &child_location)
-                    .is_some_and(|at| self.held.is_page(&at));
-            let member = self
-                .stats
+            let key = (location.to_string(), name.clone());
+            // Recorded before its value is visited, which marks the members enclosing it.
+            self.stats
                 .members
-                .entry((location.to_string(), name.clone()))
+                .entry(key.clone())
                 .or_insert_with(|| Member {
                     property: name.clone(),
                     required: required.contains(name.as_str()),
@@ -571,12 +614,33 @@ impl Walk<'_> {
                     structured: leaf_type(schema).is_none(),
                     ..Member::default()
                 });
-            member.min_depth = member.min_depth.min(depth + 1);
-            member.page |= page;
-            member.identity |= identity == Some(name.as_str());
-            member.tokens += mult * each;
-            member.each = member.each.max(each);
+            let value = match leaf_type(schema) {
+                Some(t) => scalar(schema.as_object().unwrap_or(&Map::new()), t, Some(name)),
+                None => {
+                    self.path.push(key.clone());
+                    let chars =
+                        self.visit(schema, child_location.clone(), mult, depth + 1, in_array);
+                    self.path.pop();
+                    chars
+                }
+            };
+            let each = (name.len() as f64 + 4.0 + value) / CHARS_PER_TOKEN;
+            let array = (!in_array)
+                .then(|| self.array_location(schema, &child_location))
+                .flatten();
+            let page = array.as_ref().is_some_and(|at| self.held.is_page(at));
+            let kept = array
+                .as_ref()
+                .is_some_and(|at| self.held.kept.is_some_and(|kept| kept.contains(at)));
             chars += name.len() as f64 + 4.0 + value;
+            if let Some(member) = self.stats.members.get_mut(&key) {
+                member.min_depth = member.min_depth.min(depth + 1);
+                member.page |= page;
+                member.kept |= kept;
+                member.identity |= identity == Some(name.as_str());
+                member.tokens += mult * each;
+                member.each = member.each.max(each);
+            }
         }
         chars
     }
@@ -914,6 +978,7 @@ fn outer_arrays(doc: &Value) -> Option<Vec<String>> {
     let every = Held {
         floor: None,
         pages: None,
+        kept: None,
     };
     let mut outer: Vec<String> = Stats::of(doc, every)?
         .arrays
@@ -946,6 +1011,7 @@ fn page_arrays(doc: &Value, maximum: Option<u64>) -> Option<HashSet<String>> {
         held: Held {
             floor: None,
             pages: None,
+            kept: None,
         },
         memo: HashMap::new(),
         stack: Vec::new(),
@@ -956,6 +1022,8 @@ fn page_arrays(doc: &Value, maximum: Option<u64>) -> Option<HashSet<String>> {
             arrays: HashMap::new(),
         },
         as_item: false,
+        path: Vec::new(),
+        kept_seen: HashSet::new(),
     };
     let mut heaviest: HashMap<&str, (f64, &String)> = HashMap::new();
     for at in outer.iter().filter(|at| !any_structured || structured(at)) {
@@ -969,6 +1037,46 @@ fn page_arrays(doc: &Value, maximum: Option<u64>) -> Option<HashSet<String>> {
         }
     }
     Some(heaviest.into_values().map(|(_, at)| at.clone()).collect())
+}
+
+/// The location of the array schema the member path `tokens` names in `doc`, through
+/// `$ref`s and combinators.
+fn member_array(doc: &Value, tokens: &[String]) -> Option<String> {
+    let mut location = String::new();
+    for token in tokens {
+        location = property_location(doc, &location, token, 0)?;
+    }
+    for _ in 0..MAX_DEPTH {
+        let obj = doc.pointer(&location)?.as_object()?;
+        match ref_target(obj) {
+            Some(target) => location = target,
+            None => return (schema_type(obj) == Some("array")).then_some(location),
+        }
+    }
+    None
+}
+
+/// The location of the schema of member `name` of the object schema at `location`.
+fn property_location(doc: &Value, location: &str, name: &str, hops: usize) -> Option<String> {
+    let obj = doc
+        .pointer(location)?
+        .as_object()
+        .filter(|_| hops < MAX_DEPTH)?;
+    if let Some(target) = ref_target(obj) {
+        return property_location(doc, &target, name, hops + 1);
+    }
+    if obj
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|p| p.contains_key(name))
+    {
+        return Some(format!("{location}/properties/{}", escape(name)));
+    }
+    ["allOf", "anyOf", "oneOf"].iter().find_map(|key| {
+        let branches = obj.get(*key)?.as_array()?;
+        (0..branches.len())
+            .find_map(|i| property_location(doc, &format!("{location}/{key}/{i}"), name, hops + 1))
+    })
 }
 
 fn escape(key: &str) -> String {
@@ -985,7 +1093,11 @@ mod tests {
     }
 
     fn every(floor: Option<u64>) -> Held<'static> {
-        Held { floor, pages: None }
+        Held {
+            floor,
+            pages: None,
+            kept: None,
+        }
     }
 
     fn words(list: &[&str]) -> HashSet<String> {
@@ -1040,7 +1152,7 @@ mod tests {
     #[test]
     fn a_small_answer_is_left_alone() {
         let doc = json!({"type": "object", "properties": {"id": {"type": "integer"}}});
-        assert!(shape(&doc, &HashSet::new(), false, 100, None).is_none());
+        assert!(shape(&doc, &HashSet::new(), false, 100, None, Listing::default()).is_none());
     }
 
     #[test]
@@ -1054,7 +1166,15 @@ mod tests {
                 "videos": {"type": "array", "items": user()}
             }
         });
-        let shaped = shape(&doc, &words(&["videos"]), false, 300, None).unwrap();
+        let shaped = shape(
+            &doc,
+            &words(&["videos"]),
+            false,
+            300,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
         let props = shaped.schema["properties"].as_object().unwrap();
         assert!(props.contains_key("videos"), "{}", shaped.schema);
         assert!(!props.contains_key("credits"));
@@ -1063,7 +1183,15 @@ mod tests {
 
     #[test]
     fn lists_are_capped_then_deep_required_members_filled() {
-        let shaped = shape(&search(), &HashSet::new(), false, 150, None).unwrap();
+        let shaped = shape(
+            &search(),
+            &HashSet::new(),
+            false,
+            150,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
         assert_eq!(
             shaped.schema["properties"]["items"]["maxItems"], 1,
             "{}",
@@ -1100,7 +1228,15 @@ mod tests {
 
     #[test]
     fn a_selection_is_only_capped() {
-        let shaped = shape(&search(), &HashSet::new(), true, 150, None).unwrap();
+        let shaped = shape(
+            &search(),
+            &HashSet::new(),
+            true,
+            150,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
         assert!(!shaped.fills_any());
         assert!(
             shaped.schema["$defs"]["item"]["properties"]
@@ -1113,7 +1249,7 @@ mod tests {
     #[test]
     fn min_items_wins_over_the_cap() {
         let doc = json!({"type": "array", "minItems": 3, "items": user()});
-        let shaped = shape(&doc, &HashSet::new(), false, 10, None).unwrap();
+        let shaped = shape(&doc, &HashSet::new(), false, 10, None, Listing::default()).unwrap();
         assert_eq!(shaped.schema["maxItems"], 3);
     }
 
@@ -1162,7 +1298,15 @@ mod tests {
     #[test]
     fn a_limit_is_kept_when_dropping_deep_optional_members_fits() {
         // Five items with one heavy member each fit; with both they do not.
-        let shaped = shape(&page(), &HashSet::new(), false, 900, at(5)).unwrap();
+        let shaped = shape(
+            &page(),
+            &HashSet::new(),
+            false,
+            900,
+            at(5),
+            Listing::default(),
+        )
+        .unwrap();
         let items = &shaped.schema["properties"]["items"];
         assert_eq!(items["maxItems"], 5, "{}", shaped.schema);
         assert!(items["items"]["properties"].get("extra").is_none());
@@ -1171,7 +1315,15 @@ mod tests {
 
     #[test]
     fn nested_arrays_and_required_members_go_before_the_limit() {
-        let shaped = shape(&page(), &HashSet::new(), false, 120, at(5)).unwrap();
+        let shaped = shape(
+            &page(),
+            &HashSet::new(),
+            false,
+            120,
+            at(5),
+            Listing::default(),
+        )
+        .unwrap();
         let items = &shaped.schema["properties"]["items"];
         assert_eq!(items["maxItems"], 5, "{}", shaped.schema);
         assert!(shaped.fills("/properties/items/items", "owner"));
@@ -1201,13 +1353,29 @@ mod tests {
     #[test]
     fn a_page_outlasts_the_members_of_its_items() {
         for limit in [at(5), None] {
-            let shaped = shape(&pages(), &words(&["tracks"]), false, 100, limit).unwrap();
+            let shaped = shape(
+                &pages(),
+                &words(&["tracks"]),
+                false,
+                100,
+                limit,
+                Listing::default(),
+            )
+            .unwrap();
             let tracks = &shaped.schema["properties"]["tracks"];
             assert!(tracks["properties"].get("items").is_some(), "{tracks}");
             assert!(shaped.fills("/properties/tracks/properties/items/items", "album"));
         }
         // When only the page itself can bring it within budget, it goes.
-        let shaped = shape(&pages(), &words(&["tracks"]), false, 8, at(5)).unwrap();
+        let shaped = shape(
+            &pages(),
+            &words(&["tracks"]),
+            false,
+            8,
+            at(5),
+            Listing::default(),
+        )
+        .unwrap();
         let tracks = &shaped.schema["properties"]["tracks"];
         assert!(tracks["properties"].get("items").is_none(), "{tracks}");
         assert!(shaped.fills("/properties/tracks", "items"));
@@ -1246,7 +1414,15 @@ mod tests {
     #[test]
     fn an_item_keeps_the_member_that_is_its_identity() {
         let budget = 250;
-        let shaped = shape(&playlist(), &HashSet::new(), false, budget, None).unwrap();
+        let shaped = shape(
+            &playlist(),
+            &HashSet::new(),
+            false,
+            budget,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
         let entry = &shaped.schema["$defs"]["entry"]["properties"];
         assert!(entry.get("track").is_some(), "{}", shaped.schema);
         assert!(!shaped.fills("/$defs/entry", "track"));
@@ -1262,7 +1438,15 @@ mod tests {
         // Two members with identities say nothing about which the item is.
         let mut doc = playlist();
         doc["$defs"]["entry"]["properties"]["added_by"] = json!({"$ref": "#/$defs/track"});
-        let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
+        let shaped = shape(
+            &doc,
+            &HashSet::new(),
+            false,
+            budget,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
         assert!(shaped.fills("/$defs/entry", "track") || shaped.fills("/$defs/entry", "added_by"));
     }
 
@@ -1286,12 +1470,20 @@ mod tests {
             }}}
         });
         for budget in [100, 200] {
-            let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
+            let shaped = shape(
+                &doc,
+                &HashSet::new(),
+                false,
+                budget,
+                None,
+                Listing::default(),
+            )
+            .unwrap();
             let estimate = Stats::of(&shaped.schema, every(None)).unwrap().tokens;
             assert!(estimate <= f64::from(budget), "{budget}: {estimate}");
         }
         // At 100 one track alone is over budget.
-        let shaped = shape(&doc, &HashSet::new(), false, 100, None).unwrap();
+        let shaped = shape(&doc, &HashSet::new(), false, 100, None, Listing::default()).unwrap();
         assert!(
             shaped.fills("/properties/items/items", "track"),
             "{}",
@@ -1301,13 +1493,29 @@ mod tests {
 
     #[test]
     fn a_limit_too_large_to_fit_is_capped_as_far_as_it_must_be() {
-        let shaped = shape(&page(), &HashSet::new(), false, 120, at(50)).unwrap();
+        let shaped = shape(
+            &page(),
+            &HashSet::new(),
+            false,
+            120,
+            at(50),
+            Listing::default(),
+        )
+        .unwrap();
         let items = &shaped.schema["properties"]["items"];
         assert_eq!(items["maxItems"], 5, "{}", shaped.schema);
         let estimate = Stats::of(&shaped.schema, every(Some(5))).unwrap().tokens;
         assert!(estimate <= 120.0, "{estimate}");
         // Nothing can bring this one down to its budget: as low as it goes.
-        let shaped = shape(&page(), &HashSet::new(), false, 3, at(50)).unwrap();
+        let shaped = shape(
+            &page(),
+            &HashSet::new(),
+            false,
+            3,
+            at(50),
+            Listing::default(),
+        )
+        .unwrap();
         assert_eq!(shaped.schema["properties"]["items"]["maxItems"], 1);
     }
 
@@ -1331,7 +1539,15 @@ mod tests {
             }}
         });
         let budget = 100;
-        let shaped = shape(&doc, &HashSet::new(), false, budget, None).unwrap();
+        let shaped = shape(
+            &doc,
+            &HashSet::new(),
+            false,
+            budget,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
         let estimate = Stats::of(&shaped.schema, every(None)).unwrap().tokens;
         assert!(estimate <= f64::from(budget), "{estimate}");
     }
@@ -1339,11 +1555,51 @@ mod tests {
     #[test]
     fn a_limit_counts_in_the_estimate() {
         // Fits at the default four items, not at the forty asked for.
-        assert!(shape(&page(), &HashSet::new(), false, 1300, None).is_none());
-        assert!(shape(&page(), &HashSet::new(), false, 1300, at(40)).is_some());
+        assert!(
+            shape(
+                &page(),
+                &HashSet::new(),
+                false,
+                1300,
+                None,
+                Listing::default()
+            )
+            .is_none()
+        );
+        assert!(
+            shape(
+                &page(),
+                &HashSet::new(),
+                false,
+                1300,
+                at(40),
+                Listing::default()
+            )
+            .is_some()
+        );
         // And a smaller limit needs no shaping that the default would.
-        assert!(shape(&page(), &HashSet::new(), false, 400, None).is_some());
-        assert!(shape(&page(), &HashSet::new(), false, 400, at(1)).is_none());
+        assert!(
+            shape(
+                &page(),
+                &HashSet::new(),
+                false,
+                400,
+                None,
+                Listing::default()
+            )
+            .is_some()
+        );
+        assert!(
+            shape(
+                &page(),
+                &HashSet::new(),
+                false,
+                400,
+                at(1),
+                Listing::default()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1422,6 +1678,149 @@ mod tests {
         // A bare list is a page, words or not.
         let words = json!({"type": "array", "items": {"type": "string"}});
         assert_eq!(page_arrays(&words, None).unwrap(), set(&[""]));
+    }
+
+    /// A library's loans page: envelope fields, an optional `facets` object and an
+    /// optional `loans` array of heavy items, each with heavy optional members.
+    fn loans() -> Value {
+        let book = json!({
+            "type": "object",
+            "required": ["isbn"],
+            "properties": {
+                "isbn": {"type": "string"},
+                "title": {"type": "string"},
+                "borrower": user(),
+                "branch": user(),
+                "renewals": {"type": "array", "items": user()}
+            }
+        });
+        json!({
+            "type": "object",
+            "required": ["total"],
+            "properties": {
+                "total": {"type": "integer"},
+                "next_cursor": {"type": "string"},
+                "facets": {"type": "object", "properties": {
+                    "by_branch": user(),
+                    "by_genre": user()
+                }},
+                "loans": {"type": "array", "items": book}
+            }
+        })
+    }
+
+    fn list() -> Listing<'static> {
+        Listing {
+            list: true,
+            records: None,
+        }
+    }
+
+    #[test]
+    fn a_list_keeps_its_optional_page_array_capped() {
+        for budget in [30, 300] {
+            let shaped = shape(&loans(), &HashSet::new(), false, budget, None, list()).unwrap();
+            let props = &shaped.schema["properties"];
+            let loans = &props["loans"];
+            assert!(loans.is_object(), "{budget}: {}", shaped.schema);
+            // Capped when its items' own optional members going is not enough.
+            let capped = loans["maxItems"].as_u64();
+            assert!(capped.is_none_or(|n| n >= 1), "{loans}");
+            assert_eq!(capped.is_some(), budget == 30, "{loans}");
+            assert!(
+                loans["items"]["properties"].get("isbn").is_some(),
+                "{loans}"
+            );
+            // Other optional members still go before the page is touched.
+            assert!(props.get("facets").is_none(), "{}", shaped.schema);
+        }
+        // A detail's optional arrays go as they did.
+        let shaped = shape(
+            &loans(),
+            &HashSet::new(),
+            false,
+            150,
+            None,
+            Listing::default(),
+        )
+        .unwrap();
+        assert!(
+            shaped.schema["properties"].get("loans").is_none(),
+            "{}",
+            shaped.schema
+        );
+    }
+
+    #[test]
+    fn a_list_keeps_the_optional_envelope_its_page_is_in() {
+        let mut doc = json!({"type": "object", "properties": {
+            "data": {"$ref": "#/$defs/page"}, "notice": user()
+        }});
+        doc["$defs"] = json!({"page": loans()});
+        let shaped = shape(&doc, &HashSet::new(), false, 150, None, list()).unwrap();
+        let page = &shaped.schema["$defs"]["page"];
+        assert!(
+            shaped.schema["properties"].get("data").is_some(),
+            "{}",
+            shaped.schema
+        );
+        assert!(page["properties"].get("loans").is_some(), "{page}");
+        assert!(shaped.schema["properties"].get("notice").is_none());
+    }
+
+    #[test]
+    fn each_page_of_a_list_with_several_is_kept() {
+        // A catalog search answering a page of books and one of films.
+        let category = json!({"type": "object", "properties": {
+            "total": {"type": "integer"},
+            "items": {"type": "array", "items": {"type": "object", "properties": {
+                "title": {"type": "string"}, "creator": user(), "publisher": user()
+            }}}
+        }});
+        let doc = json!({"type": "object", "properties": {
+            "books": category.clone(), "films": category
+        }});
+        let shaped = shape(&doc, &words(&["books"]), false, 60, None, list()).unwrap();
+        let books = &shaped.schema["properties"]["books"]["properties"];
+        assert!(books.get("items").is_some(), "{}", shaped.schema);
+        // The page of what the request does not name may go whole.
+        assert!(
+            shaped.schema["properties"].get("films").is_none(),
+            "{}",
+            shaped.schema
+        );
+    }
+
+    #[test]
+    fn the_described_records_are_kept_over_a_heavier_array() {
+        // `result.entries` holds the records; `result.related` is heavier.
+        let doc = json!({"type": "object", "properties": {
+            "result": {"type": "object", "properties": {
+                "entries": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["isbn"],
+                    "properties": {"isbn": {"type": "string"}, "borrower": user()}
+                }},
+                "related": {"type": "array", "items": {"type": "object", "properties": {
+                    "a": user(), "b": user()
+                }}}
+            }}
+        }});
+        let records = ["result".to_string(), "entries".to_string()];
+        for list in [false, true] {
+            let listing = Listing {
+                list,
+                records: Some(&records),
+            };
+            let shaped = shape(&doc, &HashSet::new(), false, 150, None, listing).unwrap();
+            let result = &shaped.schema["properties"]["result"]["properties"];
+            assert!(result.get("entries").is_some(), "{}", shaped.schema);
+            assert!(result.get("related").is_none(), "{}", shaped.schema);
+        }
+        // Without it, the heavier array is taken for the page.
+        let shaped = shape(&doc, &HashSet::new(), false, 150, None, list()).unwrap();
+        let result = &shaped.schema["properties"]["result"]["properties"];
+        assert!(result.get("entries").is_none(), "{}", shaped.schema);
     }
 
     #[test]

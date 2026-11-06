@@ -179,6 +179,7 @@ async fn generate(
                     same_values: &[],
                     changes_by_effects: false,
                     update_guard: None,
+                    answer_records: None,
                 },
             }),
             None => unknown.push(part.key.clone()),

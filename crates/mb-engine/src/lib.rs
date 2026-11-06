@@ -197,6 +197,9 @@ pub struct GenerationContext<'a> {
     /// Lets an update's LLM answer settle on the stored target (see [`UpdateGuard`]).
     /// With none it does not.
     pub update_guard: Option<&'a dyn UpdateGuard>,
+    /// Where the mock's world description says a successful answer holds its records
+    /// (`answer.records`): shaping to the output budget never leaves them out.
+    pub answer_records: Option<&'a mb_mcm::world::Pointer>,
 }
 
 /// What only the runtime knows of an update's stored target, for the answer to settle
@@ -583,13 +586,14 @@ struct Target<'a> {
 }
 
 /// (`<source digest>/<operation id>`, status, narrowed schema digest,
-/// requested member names).
+/// requested member names, page limit, the tokens of the described records' pointer).
 type ShapeKey = (
     String,
     u16,
     Option<u64>,
     Vec<String>,
     Option<budget::PageLimit>,
+    Option<Vec<String>>,
 );
 
 /// A schema's member names, by their stem (see [`budget::stem`]).
@@ -935,7 +939,14 @@ impl Engine {
                 fake
             }
             Some(provider) => {
-                let shaped = self.shaped(bundle, op, status, schema, narrowed.is_some(), call);
+                let shaped = self.shaped(
+                    bundle,
+                    op,
+                    status,
+                    schema,
+                    (narrowed.is_some(), ctx.answer_records),
+                    call,
+                );
                 let written = shaped.as_ref().map_or(schema, |s| &s.schema);
                 let mut messages = tracing::info_span!("mb.prompt").in_scope(|| {
                     build_messages(
@@ -2158,14 +2169,16 @@ impl Engine {
     }
 
     /// `schema` (a response of `op` with `status`) shaped to the output
-    /// budget for `call`, or `None` when its answer fits as it is.
+    /// budget for `call`, or `None` when its answer fits as it is. `selected` marks a
+    /// schema narrowed to a selection; `records` is where the world description says a
+    /// successful answer holds its records.
     fn shaped(
         &self,
         bundle: &Bundle,
         op: &Operation,
         status: u16,
         schema: &Value,
-        selected: bool,
+        (selected, records): (bool, Option<&mb_mcm::world::Pointer>),
         call: &OperationCall,
     ) -> Option<Arc<budget::Shaped>> {
         if self.config.output_budget == 0 {
@@ -2208,13 +2221,31 @@ impl Engine {
             .collect();
         let requested: Vec<String> = requested.into_iter().cloned().collect();
         let limit = budget::requested_limit(op.input.query.as_ref(), doc, call);
-        let key = (id, status, selection, requested, limit);
+        // A successful answer's records are a list's items, or where the world says.
+        let success = (200..300).contains(&status);
+        let records = records
+            .filter(|_| success)
+            .map(mb_mcm::world::Pointer::tokens);
+        let key = (id, status, selection, requested, limit, records);
         if let Some(hit) = self.shapes.get(&key) {
             return hit.clone();
         }
         let words: HashSet<String> = key.3.iter().cloned().collect();
+        let listing = budget::Listing {
+            list: success && mb_mcm::world::OpKind::of(op) == Some(mb_mcm::world::OpKind::List),
+            records: key.5.as_deref(),
+        };
         let shaped = tracing::info_span!("mb.shape")
-            .in_scope(|| budget::shape(doc(), &words, selected, self.config.output_budget, limit))
+            .in_scope(|| {
+                budget::shape(
+                    doc(),
+                    &words,
+                    selected,
+                    self.config.output_budget,
+                    limit,
+                    listing,
+                )
+            })
             .map(Arc::new);
         // Every key counts against the bound: narrowed schemas vary per
         // query, requested words per call, and digests per upload.
@@ -4654,7 +4685,7 @@ mod tests {
         let call = OperationCall::default();
         for i in 0..MAX_SHAPES + 100 {
             bundle.source_digest = format!("digest-{i}");
-            engine.shaped(&bundle, &op, 200, &schema, false, &call);
+            engine.shaped(&bundle, &op, 200, &schema, (false, None), &call);
         }
         assert!(engine.shapes.len() <= MAX_SHAPES, "{}", engine.shapes.len());
         assert!(
@@ -4664,8 +4695,47 @@ mod tests {
         );
         // Still a memo: the same key is answered from it.
         let before = engine.shapes.len();
-        engine.shaped(&bundle, &op, 200, &schema, false, &call);
+        engine.shaped(&bundle, &op, 200, &schema, (false, None), &call);
         assert_eq!(engine.shapes.len(), before);
+    }
+
+    /// A list operation's answer keeps the optional array its items are in, and any
+    /// answer keeps the one the world description says holds its records; a read's
+    /// optional array still goes first.
+    #[test]
+    fn shaping_keeps_a_lists_items() {
+        let engine = Engine::new(
+            None,
+            EngineConfig {
+                output_budget: 40,
+                ..EngineConfig::default()
+            },
+        );
+        let bundle = orders();
+        let heavy = json!({"type": "object", "properties": {
+            "a": {"type": "string"}, "b": {"type": "string"}, "c": {"type": "string"},
+            "d": {"type": "string"}, "e": {"type": "string"}, "f": {"type": "string"}
+        }});
+        let schema = json!({"type": "object", "required": ["count"], "properties": {
+            "count": {"type": "integer"},
+            "orders": {"type": "array", "items": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}, "detail": heavy}
+            }}
+        }});
+        let call = OperationCall::default();
+        let kept = |id: &str, records: Option<&mb_mcm::world::Pointer>| {
+            let op = bundle.operation(id).unwrap();
+            let shaped = engine
+                .shaped(&bundle, op, 200, &schema, (false, records), &call)
+                .unwrap();
+            shaped.schema["properties"].get("orders").is_some()
+        };
+        assert!(kept("listOrders", None));
+        assert!(!kept("getOrder", None));
+        let records = mb_mcm::world::Pointer::parse("/orders").unwrap();
+        assert!(kept("getOrder", Some(&records)));
     }
 
     /// The per-member fallback keeps each member that leaves the object
