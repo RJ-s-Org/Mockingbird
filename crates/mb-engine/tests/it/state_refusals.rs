@@ -404,3 +404,53 @@ async fn a_body_the_facts_fill_asks_no_model() {
     assert_eq!(out.body.unwrap()["errors"][0]["status"], "422");
     assert!(provider.requests().is_empty());
 }
+
+/// `POST /aliases` refusing with `422` described as `description`, whose body is
+/// `error` (YAML).
+fn refusing_described(description: &str, error: &str) -> Bundle {
+    let src = format!(
+        r##"
+openapi: 3.1.0
+info: {{title: Aliases, version: "1"}}
+paths:
+  /aliases:
+    post:
+      operationId: createAlias
+      requestBody: {{content: {{application/json: {{schema: {{type: object, properties: {{alias: {{type: string}}}}}}}}}}}}
+      responses:
+        "201": {{description: created, content: {{application/json: {{schema: {{type: object, properties: {{id: {{type: string}}}}}}}}}}}}
+        "422": {{description: "{description}", content: {{application/json: {{schema: {error}}}}}}}
+"##
+    );
+    compile(src.as_bytes()).unwrap()
+}
+
+/// A text member the contract gives a value for (its example, in a schema no other
+/// status uses, or the value the response's description names for it) is no free text:
+/// the model writes no body, and the member keeps the contract's value.
+#[tokio::test]
+async fn a_text_member_the_contract_names_is_not_written() {
+    let item = |title: &str| {
+        format!(
+            "{{type: object, properties: {{errors: {{type: array, minItems: 1, items: {{type: object, required: [title], properties: {{title: {title}, detail: {{type: string}}, source: {{type: object, properties: {{pointer: {{type: string}}}}}}}}}}}}}}}}"
+        )
+    };
+    for bundle in [
+        refusing_with(&item("{type: string, examples: [Conflict]}")),
+        refusing_described("Refused: `title` is `Conflict`.", &item("{type: string}")),
+    ] {
+        let op = bundle.operation("createAlias").unwrap();
+        let (provider, engine) = scripted(vec![]);
+        let out = engine
+            .refuse_held(&bundle, op, &call(), 422, ErrorCause::Taken, &taken())
+            .await
+            .unwrap();
+        let body = out.body.unwrap();
+        assert_eq!(body["errors"][0]["title"], "Conflict", "{body}");
+        assert_eq!(
+            body["errors"][0]["detail"], "alias 'welcome-1' is already in use",
+            "{body}"
+        );
+        assert!(provider.requests().is_empty());
+    }
+}

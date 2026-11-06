@@ -52,6 +52,8 @@
 //!   over it. A body that fails is asked for once more (2 asks in all); when the
 //!   second fails too, the write failed: the faker's body stands.
 
+use std::collections::HashSet;
+
 use mb_mcm::{Bundle, Operation};
 use serde_json::{Map, Value};
 
@@ -372,8 +374,10 @@ pub fn writes_code(schema: &Value, defs: &Map<String, Value>) -> bool {
 
 /// Whether a string member, declared by `parts`, holds the HTTP status as text: every
 /// value the contract shows for it (`example`, `examples`, `default`, `enum`) is a
-/// 3-digit code, or, showing none, its `pattern` takes `status` and no word. A member
-/// whose values are words (`"fail"`, `"error"`) is the API's own. Its name says nothing.
+/// 3-digit code, or, showing none, its `pattern` takes 3-digit codes only: `status`,
+/// but neither a shorter nor a longer number (`^[0-9]+$` is a numeric code's, a hex
+/// pattern a request id's) nor a word. A member whose values are words (`"fail"`,
+/// `"error"`) is the API's own. Its name says nothing.
 fn holds_status_text(parts: &[&Value], status: u16) -> bool {
     if !types(parts).contains(&"string") {
         return false;
@@ -384,11 +388,18 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
         return shown.all(code);
     }
     let text = status.to_string();
+    let shorter = (status / 10).to_string();
+    let longer = format!("{text}0");
     parts
         .iter()
         .filter_map(|b| b.get("pattern").and_then(Value::as_str))
         .any(|pattern| {
-            regex::Regex::new(pattern).is_ok_and(|re| re.is_match(&text) && !re.is_match("error"))
+            regex::Regex::new(pattern).is_ok_and(|re| {
+                re.is_match(&text)
+                    && ![shorter.as_str(), longer.as_str(), "error"]
+                        .iter()
+                        .any(|other| re.is_match(other))
+            })
         })
 }
 
@@ -397,14 +408,26 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
 /// or `format`, that is not its object's message-like member (the first of
 /// [`MESSAGE_FIELDS`] it declares), nor one naming the violated field
 /// ([`with_reasons`]' path-like, parameter and pointer members), nor one holding the
-/// HTTP status as text ([`with_status_text`]). JSON:API's `title` beside its
-/// `detail` is one: the faker's word there says nothing.
+/// HTTP status as text ([`with_status_text`]), nor one at a dotted path of `named`,
+/// those the contract names a value for ([`crate::contract_values::named_paths`]).
+/// JSON:API's `title` beside its `detail` is one: the faker's word there says nothing.
 #[must_use]
-pub fn writes_text(schema: &Value, defs: &Map<String, Value>, status: u16) -> bool {
-    fn walk(schema: &Value, defs: &Map<String, Value>, status: u16, depth: usize) -> bool {
+pub fn writes_text(
+    schema: &Value,
+    defs: &Map<String, Value>,
+    status: u16,
+    named: &HashSet<String>,
+) -> bool {
+    struct Ctx<'a> {
+        defs: &'a Map<String, Value>,
+        status: u16,
+        named: &'a HashSet<String>,
+    }
+    fn walk(ctx: &Ctx<'_>, schema: &Value, dotted: &str, depth: usize) -> bool {
         if depth > MAX_DEPTH {
             return false;
         }
+        let defs = ctx.defs;
         let parts = branches(schema, defs);
         let members: Vec<(&String, &Value)> = parts
             .iter()
@@ -420,6 +443,10 @@ pub fn writes_text(schema: &Value, defs: &Map<String, Value>, status: u16) -> bo
                 })
                 .map(|(name, _)| name.as_str())
         });
+        let path = |name: &str| match dotted {
+            "" => name.to_string(),
+            _ => format!("{dotted}.{name}"),
+        };
         let free = |name: &str, prop: &Value| {
             let prop_parts = branches(prop, defs);
             types(&prop_parts).contains(&"string")
@@ -428,17 +455,27 @@ pub fn writes_text(schema: &Value, defs: &Map<String, Value>, status: u16) -> bo
                 && !prop_parts.iter().any(|b| {
                     b.get("const").is_some() || b.get("enum").is_some() || b.get("format").is_some()
                 })
-                && !holds_status_text(&prop_parts, status)
+                && !holds_status_text(&prop_parts, ctx.status)
+                && !ctx.named.contains(&path(name))
         };
         members
             .iter()
-            .any(|(name, prop)| free(name, prop) || walk(prop, defs, status, depth + 1))
+            .any(|(name, prop)| free(name, prop) || walk(ctx, prop, &path(name), depth + 1))
             || parts
                 .iter()
                 .filter_map(|b| b.get("items"))
-                .any(|items| walk(items, defs, status, depth + 1))
+                .any(|items| walk(ctx, items, dotted, depth + 1))
     }
-    walk(schema, defs, status, 0)
+    walk(
+        &Ctx {
+            defs,
+            status,
+            named,
+        },
+        schema,
+        "",
+        0,
+    )
 }
 
 /// `body`, an error body declared by `schema` (its definitions in `defs`), with each
@@ -1505,7 +1542,7 @@ impl Engine {
         };
         let mut usage = Usage::default();
         let written = self
-            .written_error(bundle, op, (status, cause), call, &mut usage)
+            .written_error(bundle, op, (status, cause, repeated), call, &mut usage)
             .await;
         let only_empty = written.is_some();
         let mut response =
@@ -1582,20 +1619,23 @@ impl Engine {
     /// When it cannot, answering that error asks no LLM: a caller admits nothing for it.
     #[must_use]
     pub fn error_writable(&self, bundle: &Bundle, op: &Operation, status: u16) -> bool {
-        self.writable(bundle, op, status, ErrorCause::Invalid)
+        self.writable(bundle, op, status, (ErrorCause::Invalid, &[]))
             .is_some()
     }
 
     /// What [`Self::written_error`] writes with for `cause`: as [`Self::error_writable`]
     /// says, and, for a refusal decided from state ([`ErrorCause::Taken`],
     /// [`ErrorCause::Stale`], [`ErrorCause::Missing`]), also when the schema has a free
-    /// text member nothing but the faker would fill ([`writes_text`]).
+    /// text member nothing but the faker would fill ([`writes_text`]): none the contract
+    /// names a value for ([`crate::contract_values`]; `repeated` names the request
+    /// members whose repeated value the refusal is for, if any), which the model's text
+    /// would replace.
     fn writable<'a>(
         &'a self,
         bundle: &Bundle,
         op: &'a Operation,
         status: u16,
-        cause: ErrorCause,
+        (cause, repeated): (ErrorCause, &[String]),
     ) -> Option<Writable<'a>> {
         let provider = self.provider.as_deref()?;
         let variant = op.output_for_status(status)?;
@@ -1609,10 +1649,26 @@ impl Engine {
             cause,
             ErrorCause::Taken | ErrorCause::Stale | ErrorCause::Missing
         );
-        if !writes_code(schema, &bundle.defs)
-            && !(from_state && writes_text(schema, &bundle.defs, status))
-        {
-            return None;
+        if !writes_code(schema, &bundle.defs) {
+            if !from_state {
+                return None;
+            }
+            let request = crate::guards::request_members(bundle, op);
+            let named = crate::contract_values::named_paths(
+                bundle,
+                (schema, status),
+                crate::contract_values::Prose {
+                    description: variant.description.as_deref(),
+                    info: bundle.description.as_deref(),
+                    repeated,
+                    resource: op.resource_type.as_deref(),
+                    request: &request,
+                    only_empty: true,
+                },
+            );
+            if !writes_text(schema, &bundle.defs, status, &named) {
+                return None;
+            }
         }
         let validator = self.validator(bundle, op, status, schema).ok()?;
         if crate::guards::items_envelope(provider.capabilities(), validator.schema()) {
@@ -1649,7 +1705,7 @@ impl Engine {
         &self,
         bundle: &Bundle,
         op: &Operation,
-        (status, cause): (u16, ErrorCause),
+        (status, cause, repeated): (u16, ErrorCause, &[String]),
         call: &OperationCall,
         usage: &mut Usage,
     ) -> Option<GeneratedResponse> {
@@ -1658,7 +1714,7 @@ impl Engine {
             variant,
             schema,
             validator,
-        } = self.writable(bundle, op, status, cause)?;
+        } = self.writable(bundle, op, status, (cause, repeated))?;
         let key = error_key(bundle, op, status, cause);
         let cell = self.error_cell(&key);
         let body = cell
@@ -1834,11 +1890,12 @@ mod tests {
             }
             json!({"type": "object", "properties": {"errors": {"type": "array", "items": {"type": "object", "properties": props}}}})
         };
-        assert!(!writes_text(&item(json!({})), &defs, 422));
+        assert!(!writes_text(&item(json!({})), &defs, 422, &HashSet::new()));
         assert!(writes_text(
             &item(json!({"title": {"type": "string"}})),
             &defs,
-            422
+            422,
+            &HashSet::new()
         ));
         for filled in [
             json!({"kind": {"type": "string", "enum": ["a", "b"]}}),
@@ -1846,14 +1903,17 @@ mod tests {
             json!({"field": {"type": "string"}}),
             json!({"count": {"type": "integer"}}),
         ] {
-            assert!(!writes_text(&item(filled.clone()), &defs, 422), "{filled}");
+            assert!(
+                !writes_text(&item(filled.clone()), &defs, 422, &HashSet::new()),
+                "{filled}"
+            );
         }
         // A status shown as words is the API's own text: the faker says nothing there.
         let worded = json!({"type": "object", "properties": {
             "status": {"type": "string", "examples": ["fail", "error"]},
             "message": {"type": "string"}
         }});
-        assert!(writes_text(&worded, &defs, 422));
+        assert!(writes_text(&worded, &defs, 422, &HashSet::new()));
     }
 
     #[test]
@@ -1869,9 +1929,40 @@ mod tests {
         assert!(!held(
             json!({"type": "string", "examples": ["fail", "error"]})
         ));
+        assert!(held(
+            json!({"type": "string", "pattern": "^[1-5][0-9]{2}$"})
+        ));
         assert!(!held(json!({"type": "string", "pattern": "^.*$"})));
+        // A numeric code's or a request id's pattern takes the status, and other
+        // lengths: it is no status.
+        for pattern in ["^[0-9]+$", "^[0-9a-f]+$", "[0-9]", "[0-9]{3}"] {
+            assert!(
+                !held(json!({"type": "string", "pattern": pattern})),
+                "{pattern}"
+            );
+        }
         assert!(!held(json!({"type": "string"})));
         assert!(!held(json!({"type": "integer", "examples": [422]})));
+    }
+
+    #[test]
+    fn a_numeric_code_or_hex_id_is_no_status_text() {
+        let schema = json!({"type": "object", "properties": {
+            "code": {"type": "string", "pattern": "^[0-9]+$"},
+            "requestId": {"type": "string", "pattern": "^[0-9a-f]+$"},
+            "errors": {"type": "array", "items": {"type": "object", "properties": {
+                "code": {"type": "string", "pattern": "^[0-9]+$"},
+                "id": {"type": "string", "pattern": "^[0-9a-f]+$"}
+            }}}
+        }});
+        let validator = SchemaValidator::new(&schema).unwrap();
+        let body = json!({
+            "code": "1001",
+            "requestId": "9f3a",
+            "errors": [{"code": "7", "id": "beef"}]
+        });
+        let out = with_status_text(&validator, (&schema, &Map::new()), body.clone(), 422);
+        assert_eq!(out, body);
     }
 
     #[test]
