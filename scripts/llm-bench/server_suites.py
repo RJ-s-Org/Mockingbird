@@ -490,7 +490,10 @@ def request(url, method="GET", headers=None, json_body=None, form=None, data=Non
     for k, v in headers.items():
         try:
             str(v).encode("latin-1")
+            sendable = not re.search(r"[\r\n]", str(v))
         except UnicodeEncodeError:
+            sendable = False
+        if not sendable:
             return 0.0, 0, {}, None, f"header {k} cannot be sent: {str(v)[:80]!r}".encode()
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     started = time.monotonic()

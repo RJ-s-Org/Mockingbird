@@ -2035,8 +2035,11 @@ class UnsendableHeaderTest(unittest.TestCase):
         self.assertIsNone(body)
         self.assertIn(b"If-Match", raw)
 
-    def test_the_journey_goes_on_and_scores_the_check(self):
-        sink = []
+    def test_a_line_break_in_a_header_fails_the_call_without_raising(self):
+        status = server_suites.request("http://127.0.0.1:1/", headers={"If-Match": "W/\"1\"\r\nX: y"})[1]
+        self.assertEqual(status, 0)
+
+    def test_journey_call_records_the_failed_call(self):
         srv = argparse.Namespace(data="http://127.0.0.1:1")
         j = server_suites.Journey.__new__(server_suites.Journey)
         j.srv, j.name, j.headers = srv, "x", {"If-Match": "\uff02a\uff02"}
