@@ -2318,7 +2318,9 @@ impl mb_engine::UpdateGuard for SettleGuard<'_> {
 /// would show another owner. An answer with the read's schema settles all the
 /// request names; one of another schema (an acknowledgement `{id, name}`) only what it
 /// declares, or all where it is a union or a map: a request member it leaves out reaches
-/// the record by an effect alone, and only with the value the request sent. A `readOnly` member may go on:
+/// the record by an effect alone, and only with the value the request sent. So does one
+/// the request wraps one object down (`{incident: {status}}`), which no answer settles. A
+/// `readOnly` member may go on:
 /// a client cannot set it, and an effect is the server saying what followed. The check on
 /// identity comes before this, as for any effect.
 pub(super) fn own_effect_members(
@@ -2340,6 +2342,13 @@ pub(super) fn own_effect_members(
         query: &call.query,
         record: read_schema(rt, t),
         answer: (!whole).then(|| output.and_then(|o| o.schema.as_ref())),
+        replaces: matches!(
+            plan.op.binding,
+            Binding::Http {
+                method: mb_mcm::HttpMethod::Put,
+                ..
+            }
+        ),
     };
     let declaring = !level.union && !level.properties.is_empty();
     let declared = |key: &str| level.properties.iter().find_map(|p| p.get(key));
@@ -2384,14 +2393,16 @@ struct Request<'a> {
     /// The answer's schema where it is not the read's, which settles all the request
     /// names: `None` for that, `Some(None)` for an answer of no schema.
     answer: Option<Option<&'a Value>>,
+    /// The update is a `PUT`: each top-level member it names replaces the held one.
+    replaces: bool,
 }
 
 impl<'a> Request<'a> {
     /// What the request sent for the record's member at `path`: in its body at that
     /// path, or one object down where the body wraps the record in a member the record
     /// does not declare (`{data: {attributes: …}}` for `attributes`), and in its query
-    /// for a top-level member.
-    fn sent(&self, path: &[&str]) -> Option<&'a Value> {
+    /// for a top-level member. The flag says it was found wrapped.
+    fn sent(&self, path: &[&str]) -> Option<(&'a Value, bool)> {
         let at = |root: &'a Value| -> Option<&'a Value> {
             path.iter()
                 .try_fold(root, |value, key| value.as_object()?.get(*key))
@@ -2409,16 +2420,26 @@ impl<'a> Request<'a> {
                 .filter(|(key, v)| v.is_object() && record.member(key).is_none())
                 .find_map(|(_, v)| at(v))
         };
-        body.and_then(at).or_else(wrapped).or_else(|| match path {
+        let query = || match path {
             [key] => self.query.get(*key),
             _ => None,
-        })
+        };
+        body.and_then(at)
+            .map(|v| (v, false))
+            .or_else(|| wrapped().map(|v| (v, true)))
+            .or_else(|| query().map(|v| (v, false)))
     }
 
     /// Whether the answer settles the request's member at `path`: one with the read's
     /// schema settles all it names, another what it declares along `path`, or all
-    /// below a union or a map.
-    fn answers(&self, path: &[&str]) -> bool {
+    /// below a union or a map. A member the request sent `wrapped` it does not: the
+    /// engine settles an answer, and applies the request onto it, by the request's
+    /// members at the record's own paths alone, so what a wrapper holds reaches the
+    /// record by an effect or not at all.
+    fn answers(&self, path: &[&str], wrapped: bool) -> bool {
+        if wrapped {
+            return false;
+        }
         let Some(mut schema) = self.answer else {
             return true;
         };
@@ -2439,13 +2460,19 @@ impl<'a> Request<'a> {
     /// a member the request sent is the answer's where the answer settles it, and
     /// takes the effect only where the effect agrees with what the request sent. An
     /// object the request sent as one is told member by member, at any depth, so a
-    /// member written one object down is held to the request's member there. `None`
-    /// when nothing is left.
+    /// member written one object down is held to the request's member there, but only
+    /// where the record's object merges member by member ([`Self::merges`]): what is
+    /// left of an object replaced whole (a map, `metadata: {plan, locale}`) would
+    /// replace it, the request's own keys gone, so such an object is told whole.
+    /// `None` when nothing is left.
     fn unsettled(&self, path: &[&str], value: &Value) -> Option<Value> {
-        let Some(given) = self.sent(path) else {
+        let Some((given, wrapped)) = self.sent(path) else {
             return Some(value.clone());
         };
-        if let (Value::Object(_), Value::Object(members)) = (given, value) {
+        let answered = self.answers(path, wrapped);
+        if let (Value::Object(_), Value::Object(members)) = (given, value)
+            && self.merges(path, answered)
+        {
             let kept: Map<String, Value> = members
                 .iter()
                 .filter_map(|(key, inner)| {
@@ -2456,7 +2483,44 @@ impl<'a> Request<'a> {
                 .collect();
             return (!kept.is_empty()).then_some(Value::Object(kept));
         }
-        (!self.answers(path) && same_value(given, value)).then(|| value.clone())
+        let replaced = self.replaces && path.len() == 1;
+        (!answered && agrees(given, value, replaced)).then(|| value.clone())
+    }
+
+    /// Whether an effect's object at `path` merges into the record's member by member,
+    /// both on the store (see [`merge_at`]) and as the request went on the answer
+    /// (`answered`): the record's place there declares members and is no union, and it
+    /// is not a top-level member a `PUT` the answer settles replaced whole.
+    fn merges(&self, path: &[&str], answered: bool) -> bool {
+        if self.replaces && answered && path.len() == 1 {
+            return false;
+        }
+        let mut schema = self.record;
+        for key in path {
+            let Some(inner) = Level::of(self.bundle, schema).named(key) else {
+                return false;
+            };
+            schema = Some(inner);
+        }
+        let level = Level::of(self.bundle, schema);
+        !level.union && !level.properties.is_empty()
+    }
+}
+
+/// Whether `value`, what an effect set, says what `given`, what a request sent, did:
+/// one value (see [`same_value`]), or, for an object that does not `replace` the held
+/// one, an object holding each member the request sent as it sent it, where a `null`
+/// the request sent is a member the effect leaves out or clears.
+fn agrees(given: &Value, value: &Value, replace: bool) -> bool {
+    match (given, value) {
+        (Value::Object(sent), Value::Object(set)) if !replace => {
+            sent.iter().all(|(key, inner)| match (inner, set.get(key)) {
+                (Value::Null, None | Some(Value::Null)) => true,
+                (_, Some(was)) => agrees(inner, was, false),
+                (_, None) => false,
+            })
+        }
+        _ => same_value(given, value),
     }
 }
 

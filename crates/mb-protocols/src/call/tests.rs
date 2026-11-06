@@ -1418,3 +1418,6 @@ async fn path_read_timing() {
         println!("{n} issues stored: read by number, scan {scan:?}, alias {aliased:?}");
     }
 }
+
+#[path = "nested_write_tests.rs"]
+mod nested_writes;
