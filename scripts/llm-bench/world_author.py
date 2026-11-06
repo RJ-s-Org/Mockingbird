@@ -737,7 +737,12 @@ def apply_world(api, mock, world, entry=None):
         rec["runtime"] = answer.get("runtime")
         if rec["runtime"] in ("mounted", None):
             return rec
-    raise RuntimeError(f"PUT world of {mock} ({world}): the mock does not serve it (runtime {rec['runtime']})")
+        if rec["runtime"] != "pending":
+            # not_served (the version is not active) or unknown (a control node): writing
+            # again cannot change it.
+            raise RuntimeError(f"PUT world of {mock} ({world}): the mock does not serve it "
+                               f"(runtime {rec['runtime']})")
+    raise RuntimeError(f"PUT world of {mock} ({world}): still pending after {WORLD_WRITE_ATTEMPTS} writes")
 
 
 # ---------------------------------------------------------------- CLI

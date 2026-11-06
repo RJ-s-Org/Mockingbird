@@ -287,8 +287,13 @@ class FakeAdmin(BaseHTTPRequestHandler):
         runtime = "mounted"
         if "/mocks/stuck/" in self.path or ("/mocks/slow/" in self.path and n == 1):
             runtime = "pending"
-        self.answer(201, {"version": 1, "revision": n, "applied": body, "runtime": runtime, "refused": [
-            {"path": "/operations/x", "code": "unresolved", "message": "m"}]})
+        if "/mocks/inactive/" in self.path:
+            runtime = "not_served"
+        answer = {"version": 1, "revision": n, "applied": body, "runtime": runtime}
+        if "/mocks/old/" in self.path:
+            del answer["runtime"]
+        self.answer(201, dict(answer, refused=[
+            {"path": "/operations/x", "code": "unresolved", "message": "m"}]))
 
 
 class ApplyTest(unittest.TestCase):
@@ -348,6 +353,15 @@ class ApplyTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             world_author.apply_world(self.api, "stuck", "agent", {"document": {"version": 1}})
         self.assertEqual(len(FakeAdmin.puts), world_author.WORLD_WRITE_ATTEMPTS)
+
+    def test_a_version_the_mock_does_not_serve_fails_at_once(self):
+        with self.assertRaises(RuntimeError):
+            world_author.apply_world(self.api, "inactive", "agent", {"document": {"version": 1}})
+        self.assertEqual(len(FakeAdmin.puts), 1)
+
+    def test_a_server_without_the_runtime_field_is_taken_at_its_word(self):
+        rec = world_author.apply_world(self.api, "old", "agent", {"document": {"version": 1}})
+        self.assertEqual((rec["runtime"], rec["revision"], len(FakeAdmin.puts)), (None, 1, 1))
 
     def test_apply_worlds_records_each_mock(self):
         out = tempfile.mkdtemp()
