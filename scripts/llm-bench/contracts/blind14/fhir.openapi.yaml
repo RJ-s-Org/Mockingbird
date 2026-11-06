@@ -1,0 +1,368 @@
+openapi: 3.0.3
+info:
+  title: HL7 FHIR R4 RESTful API (Patient and Observation)
+  version: "4.0.1"
+  description: |
+    A subset of the FHIR R4 RESTful API, written from the published specification
+    (hl7.org/fhir/R4: http.html, search.html, bundle.html, patient.html,
+    observation.html). Resources are JSON with `resourceType`, sent and answered as
+    `application/fhir+json`. This server keeps versions and tracks deletions.
+
+    create: `POST /{type}` answers 201 Created with a `Location` header
+    `[base]/{type}/{id}/_history/{vid}` and an `ETag` header `W/"{vid}"`. The server
+    assigns `id` and `meta.versionId` (1 for a new resource) and `meta.lastUpdated`.
+    `Prefer: return=representation` asks for the full resource in the body;
+    `return=minimal` for none. A conditional create sends `If-None-Exist` holding a
+    search query (such as `identifier=system|value`): with no match the create goes on
+    as above; with one match the server ignores the post and answers 200 OK; with more
+    than one it answers 412 Precondition Failed.
+
+    read: `GET /{type}/{id}` answers the current version with an `ETag`; an unknown id
+    answers 404 and a deleted resource 410 Gone. vread: `GET /{type}/{id}/_history/{vid}`
+    answers that version. history: `GET /{type}/{id}/_history` answers a Bundle of
+    `type` `history` holding the versions.
+
+    update: `PUT /{type}/{id}` with the whole resource (its `id` must equal the URL's,
+    else 400) answers 200 OK when it updated the resource (201 when it created it), and
+    the version moves on. With `If-Match: W/"{vid}"` the update is version-aware: when
+    the version is not the current one the server answers 412 Precondition Failed and
+    does not update.
+
+    delete: `DELETE /{type}/{id}` answers 200 OK with a payload, 204 No Content without
+    one, or 202 Accepted. Afterwards a read of the resource answers 410 Gone.
+
+    search: `GET /{type}?...` answers a Bundle of `type` `searchset`; each `entry` holds
+    `fullUrl`, `resource` and `search.mode` (`match`). Parameters on one search are
+    combined with AND. `_count` sets the page size; the Bundle's `link` names `self` and,
+    when there are more results, `next`; clients follow the server's links as given.
+    `total` counts the matches. Patient searches take `identifier` (`system|value`, or
+    `system|` for any value in that system), `family`, `given`, `name`, `birthdate`,
+    `gender` and `_id`; Observation searches take `subject` (`Patient/{id}`), `patient`,
+    `code` and `status`.
+    A string parameter (`family`, `given`, `name`) matches a field whose value equals the
+    text or starts with it, after both are normalized for case and accents; the
+    `:exact` modifier asks for an exact, case-sensitive match instead. A token parameter
+    (`identifier`, `gender`, `code`) matches exactly.
+
+    Errors: 400 (the resource did not parse or failed basic validation, such as a code
+    outside a required value set), 404, 405, 409, 410, 412 and 422 (it broke a profile or
+    business rule) carry an OperationOutcome whose `issue` items have a `severity`, a
+    `code` and `diagnostics`.
+servers:
+  - url: https://fhir.example/baseR4
+tags:
+  - name: Patient
+  - name: Observation
+paths:
+  /Patient:
+    get:
+      tags: [Patient]
+      operationId: patient_search
+      summary: Search patients
+      parameters:
+        - {name: identifier, in: query, description: "`system|value`, or `system|` for any value in the system.", schema: {type: string}}
+        - {name: family, in: query, description: "Matches a family name that equals or starts with the text, ignoring case and accents.", schema: {type: string}}
+        - {name: given, in: query, schema: {type: string}}
+        - {name: name, in: query, schema: {type: string}}
+        - {name: gender, in: query, schema: {type: string, enum: [male, female, other, unknown]}}
+        - {name: birthdate, in: query, schema: {type: string}}
+        - {name: _id, in: query, schema: {type: string}}
+        - $ref: "#/components/parameters/count"
+      responses:
+        "200": {$ref: "#/components/responses/Bundle"}
+        "400": {$ref: "#/components/responses/Outcome"}
+    post:
+      tags: [Patient]
+      operationId: patient_create
+      summary: Create a patient
+      parameters:
+        - $ref: "#/components/parameters/prefer"
+        - {name: If-None-Exist, in: header, description: "A search query; one match answers 200 and creates nothing, more than one 412.", schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/fhir+json:
+            schema: {$ref: "#/components/schemas/Patient"}
+      responses:
+        "201": {$ref: "#/components/responses/Created"}
+        "200":
+          description: A conditional create matched one patient and created nothing.
+          content:
+            application/fhir+json:
+              schema: {$ref: "#/components/schemas/Patient"}
+        "400": {$ref: "#/components/responses/Outcome"}
+        "412": {$ref: "#/components/responses/Outcome"}
+        "422": {$ref: "#/components/responses/Outcome"}
+  /Patient/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Patient]
+      operationId: patient_read
+      summary: Read a patient
+      responses:
+        "200":
+          description: The current version.
+          headers:
+            ETag: {schema: {type: string, example: W/"1"}}
+          content:
+            application/fhir+json:
+              schema: {$ref: "#/components/schemas/Patient"}
+        "404": {$ref: "#/components/responses/Outcome"}
+        "410": {$ref: "#/components/responses/Outcome"}
+    put:
+      tags: [Patient]
+      operationId: patient_update
+      summary: Replace a patient
+      parameters:
+        - $ref: "#/components/parameters/prefer"
+        - {name: If-Match, in: header, description: "`W/\"{vid}\"`: update only that version, else 412.", schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/fhir+json:
+            schema: {$ref: "#/components/schemas/Patient"}
+      responses:
+        "200":
+          description: Updated; the version moved on.
+          headers:
+            ETag: {schema: {type: string}}
+          content:
+            application/fhir+json:
+              schema: {$ref: "#/components/schemas/Patient"}
+        "201": {$ref: "#/components/responses/Created"}
+        "400": {$ref: "#/components/responses/Outcome"}
+        "412": {$ref: "#/components/responses/Outcome"}
+        "422": {$ref: "#/components/responses/Outcome"}
+    delete:
+      tags: [Patient]
+      operationId: patient_delete
+      summary: Delete a patient
+      responses:
+        "200":
+          description: Deleted, with an OperationOutcome.
+          content:
+            application/fhir+json:
+              schema: {$ref: "#/components/schemas/OperationOutcome"}
+        "202": {description: Accepted.}
+        "204": {description: Deleted.}
+        "409": {$ref: "#/components/responses/Outcome"}
+  /Patient/{id}/_history:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Patient]
+      operationId: patient_history
+      summary: A patient's versions
+      responses:
+        "200": {$ref: "#/components/responses/Bundle"}
+        "404": {$ref: "#/components/responses/Outcome"}
+  /Patient/{id}/_history/{vid}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+      - {name: vid, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Patient]
+      operationId: patient_vread
+      summary: One version of a patient
+      responses:
+        "200":
+          description: That version.
+          content:
+            application/fhir+json:
+              schema: {$ref: "#/components/schemas/Patient"}
+        "404": {$ref: "#/components/responses/Outcome"}
+  /Observation:
+    get:
+      tags: [Observation]
+      operationId: observation_search
+      summary: Search observations
+      parameters:
+        - {name: subject, in: query, description: "`Patient/{id}`.", schema: {type: string}}
+        - {name: patient, in: query, schema: {type: string}}
+        - {name: code, in: query, description: "`system|code` or `code`.", schema: {type: string}}
+        - {name: status, in: query, schema: {type: string}}
+        - $ref: "#/components/parameters/count"
+      responses:
+        "200": {$ref: "#/components/responses/Bundle"}
+        "400": {$ref: "#/components/responses/Outcome"}
+    post:
+      tags: [Observation]
+      operationId: observation_create
+      summary: Create an observation
+      parameters:
+        - $ref: "#/components/parameters/prefer"
+      requestBody:
+        required: true
+        content:
+          application/fhir+json:
+            schema: {$ref: "#/components/schemas/Observation"}
+      responses:
+        "201": {$ref: "#/components/responses/Created"}
+        "400": {$ref: "#/components/responses/Outcome"}
+        "422": {$ref: "#/components/responses/Outcome"}
+  /Observation/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Observation]
+      operationId: observation_read
+      summary: Read an observation
+      responses:
+        "200":
+          description: The observation.
+          content:
+            application/fhir+json:
+              schema: {$ref: "#/components/schemas/Observation"}
+        "404": {$ref: "#/components/responses/Outcome"}
+        "410": {$ref: "#/components/responses/Outcome"}
+components:
+  parameters:
+    id: {name: id, in: path, required: true, schema: {type: string, pattern: "^[A-Za-z0-9\\-\\.]{1,64}$"}}
+    count: {name: _count, in: query, description: The page size., schema: {type: integer, minimum: 0}}
+    prefer: {name: Prefer, in: header, schema: {type: string, enum: [return=minimal, return=representation, return=OperationOutcome]}}
+  responses:
+    Created:
+      description: Created.
+      headers:
+        Location: {description: "`[base]/{type}/{id}/_history/{vid}`.", schema: {type: string}}
+        ETag: {description: "`W/\"{vid}\"`.", schema: {type: string}}
+      content:
+        application/fhir+json:
+          schema:
+            type: object
+            description: The resource, when Prefer asks for it.
+            properties:
+              resourceType: {type: string}
+              id: {type: string}
+              meta: {$ref: "#/components/schemas/Meta"}
+    Bundle:
+      description: A Bundle.
+      content:
+        application/fhir+json:
+          schema: {$ref: "#/components/schemas/Bundle"}
+    Outcome:
+      description: An OperationOutcome.
+      content:
+        application/fhir+json:
+          schema: {$ref: "#/components/schemas/OperationOutcome"}
+  schemas:
+    Meta:
+      type: object
+      properties:
+        versionId: {type: string}
+        lastUpdated: {type: string, format: date-time}
+        tag: {type: array, items: {$ref: "#/components/schemas/Coding"}}
+    Coding:
+      type: object
+      properties:
+        system: {type: string}
+        code: {type: string}
+        display: {type: string}
+    Identifier:
+      type: object
+      properties:
+        use: {type: string, enum: [usual, official, temp, secondary, old]}
+        system: {type: string}
+        value: {type: string}
+    HumanName:
+      type: object
+      properties:
+        use: {type: string, enum: [usual, official, temp, nickname, anonymous, old, maiden]}
+        family: {type: string}
+        given: {type: array, items: {type: string}}
+    Reference:
+      type: object
+      properties:
+        reference: {type: string, example: Patient/123}
+        display: {type: string}
+    Patient:
+      type: object
+      required: [resourceType]
+      properties:
+        resourceType: {type: string, enum: [Patient]}
+        id: {type: string}
+        meta: {$ref: "#/components/schemas/Meta"}
+        identifier: {type: array, items: {$ref: "#/components/schemas/Identifier"}}
+        active: {type: boolean}
+        name: {type: array, items: {$ref: "#/components/schemas/HumanName"}}
+        telecom:
+          type: array
+          items:
+            type: object
+            properties:
+              system: {type: string, enum: [phone, fax, email, pager, url, sms, other]}
+              value: {type: string}
+              use: {type: string}
+        gender: {type: string, enum: [male, female, other, unknown], description: A required value set.}
+        birthDate: {type: string, format: date}
+    Observation:
+      type: object
+      required: [resourceType, status, code]
+      properties:
+        resourceType: {type: string, enum: [Observation]}
+        id: {type: string}
+        meta: {$ref: "#/components/schemas/Meta"}
+        status: {type: string, enum: [registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown]}
+        code:
+          type: object
+          properties:
+            coding: {type: array, items: {$ref: "#/components/schemas/Coding"}}
+            text: {type: string}
+        subject: {$ref: "#/components/schemas/Reference"}
+        effectiveDateTime: {type: string, format: date-time}
+        valueQuantity:
+          type: object
+          properties:
+            value: {type: number}
+            unit: {type: string}
+            system: {type: string}
+            code: {type: string}
+    Bundle:
+      type: object
+      required: [resourceType, type]
+      properties:
+        resourceType: {type: string, enum: [Bundle]}
+        type: {type: string, enum: [searchset, history, transaction, transaction-response, batch, batch-response, document, message, collection]}
+        total: {type: integer}
+        link:
+          type: array
+          items:
+            type: object
+            properties:
+              relation: {type: string, example: next}
+              url: {type: string}
+        entry:
+          type: array
+          items:
+            type: object
+            properties:
+              fullUrl: {type: string}
+              resource: {type: object, additionalProperties: true}
+              search:
+                type: object
+                properties:
+                  mode: {type: string, enum: [match, include, outcome]}
+              request:
+                type: object
+                properties:
+                  method: {type: string}
+                  url: {type: string}
+              response:
+                type: object
+                properties:
+                  status: {type: string}
+                  etag: {type: string}
+    OperationOutcome:
+      type: object
+      required: [resourceType, issue]
+      properties:
+        resourceType: {type: string, enum: [OperationOutcome]}
+        issue:
+          type: array
+          items:
+            type: object
+            properties:
+              severity: {type: string, enum: [fatal, error, warning, information]}
+              code: {type: string}
+              diagnostics: {type: string}
