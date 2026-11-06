@@ -30,6 +30,9 @@
 //! that the request names too, goes as a marked id does. A create storing a record with
 //! that value clears its marker, so a record made again with the same email stays.
 //!
+//! A described soft delete (see [`lifecycle`]) keeps the record in its deleted state,
+//! so it leaves no marker: what is stored answers.
+//!
 //! An LLM and `consistency: on` only: offline answers, and those with consistency
 //! off, are as they were. Of GraphQL, only a root delete by id marks, and only a root
 //! read by id honours the marker ([`marks_by_id`]): GraphQL stores what its answers
@@ -225,6 +228,13 @@ pub(super) async fn mark(
     held: Option<&StoredResource>,
 ) {
     let rt = state.rt;
+    // A soft-deleted record is kept, in its deleted state: it is no deleted marker.
+    if let Some(gone) = lifecycle::exclusion(rt, t)
+        && let Some(kept) = state.get(session, t, id).await
+        && gone.excludes(&kept.data)
+    {
+        return;
+    }
     let parent = scope(op, call);
     let named = target_id(op, call).unwrap_or_else(|| id.to_string());
     let mut keys = vec![marker_key(t, parent.as_deref(), &named)];

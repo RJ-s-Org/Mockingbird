@@ -13,6 +13,10 @@
 //! - `order` sorts the kept items; unset, the order is the model's, then the store's.
 //! - `paging` replaces the page parameter, page size and token place detection; unset,
 //!   they are found as before.
+//! - A soft delete of the list's item type ([`lifecycle::Exclusion`]) leaves a
+//!   soft-deleted item out, unless the request sends its `listed_with` parameter. It is
+//!   a key of its own: a list whose type has one has a [`ListQuery`] even when its
+//!   operation describes nothing else, and every other key then falls back as unset.
 //!
 //! Filter semantics: `eq` compares the query text with the member by value (`"3"` is
 //! `3`, `"true"` is `true`), and an array parameter is any of its values; `contains`
@@ -54,8 +58,12 @@ pub(super) struct ListQuery {
     /// Whether the description sets a scope (the request may not carry it).
     #[allow(dead_code, reason = "read by the lists-from-state task")]
     scope_described: bool,
-    /// The request parameters a described filter, scope or paging names.
+    /// The request parameters a described filter, scope or paging names, and the
+    /// soft delete's `listed_with` parameter.
     params: Vec<String>,
+    /// What leaves a soft-deleted record of the list's item type out, unless the
+    /// request asks for deleted ones (then `None`).
+    pub(super) lifecycle: Option<lifecycle::Exclusion>,
 }
 
 /// A described filter, with the values the request gives it.
@@ -133,7 +141,6 @@ impl PageAsk {
 impl ListQuery {
     /// Whether the description sets any of `filters` (non-empty), `scope`, `order` or
     /// `paging` for the list.
-    #[allow(dead_code, reason = "read by the lists-from-state task")]
     pub(super) fn describes_query(&self) -> bool {
         !self.filters.is_empty()
             || self.scope_described
@@ -235,15 +242,31 @@ fn request_value(call: &OperationCall, param: &str) -> Option<Value> {
 }
 
 /// What the effective world describes of list `op`'s query, with `call`'s values;
-/// `None` when it describes none of `paging`, `filters`, `scope` or `order` for it.
+/// `None` when it describes none of `paging`, `filters`, `scope` or `order` for it and
+/// its item type has no soft delete. A query of a soft delete alone sets no other key,
+/// so every heuristic runs as without it.
 pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Option<ListQuery> {
-    let d = rt.described().op(&op.id)?;
-    if d.paging.is_none() && d.filters.is_empty() && d.scope.is_none() && d.order.is_none() {
+    let gone = op
+        .resource_type
+        .as_deref()
+        .and_then(|t| lifecycle::exclusion(rt, t));
+    let none = mb_mcm::world::OpDesc::default();
+    let d = rt.described().op(&op.id).unwrap_or(&none);
+    if d.paging.is_none()
+        && d.filters.is_empty()
+        && d.scope.is_none()
+        && d.order.is_none()
+        && gone.is_none()
+    {
         return None;
     }
     let bundle = rt.bundle();
     let item = item_schema(bundle, op);
     let mut params = Vec::new();
+    if let Some((param, _)) = gone.as_ref().and_then(|g| g.unless.as_ref()) {
+        params.push(param.clone());
+    }
+    let lifecycle = gone.filter(|g| !g.lifted_by(&call.query));
     let filters = d
         .filters
         .iter()
@@ -324,6 +347,7 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         page,
         scope_described: d.scope.is_some(),
         params,
+        lifecycle,
     })
 }
 
@@ -458,14 +482,20 @@ fn in_scope(q: &ListQuery, item: &Value) -> bool {
     })
 }
 
-/// Whether `item` matches the described keys of `q`: its filters (when non-empty) and
-/// its scope.
+/// Whether `item` is soft-deleted and the request does not ask for deleted records.
+fn soft_deleted(q: &ListQuery, item: &Value) -> bool {
+    q.lifecycle.as_ref().is_some_and(|gone| gone.excludes(item))
+}
+
+/// Whether `item` matches the described keys of `q`: its filters (when non-empty), its
+/// scope, and its soft delete.
 pub(super) fn matches(q: &ListQuery, item: &Value) -> bool {
-    q.filters.iter().all(|f| holds(f, item)) && in_scope(q, item)
+    q.filters.iter().all(|f| holds(f, item)) && in_scope(q, item) && !soft_deleted(q, item)
 }
 
 /// Whether a list keeps `item`: with described filters, by them; else by `heuristic`,
-/// the path's own filter test; and by the described scope, when set.
+/// the path's own filter test; and by the described scope, when set. A soft-deleted
+/// item is left out either way, unless the request asks for deleted ones.
 pub(super) fn keeps(
     q: Option<&ListQuery>,
     item: &Value,
@@ -473,7 +503,9 @@ pub(super) fn keeps(
 ) -> bool {
     match q {
         None => heuristic(item),
-        Some(q) if q.filters.is_empty() => heuristic(item) && in_scope(q, item),
+        Some(q) if q.filters.is_empty() => {
+            heuristic(item) && in_scope(q, item) && !soft_deleted(q, item)
+        }
         Some(q) => matches(q, item),
     }
 }

@@ -82,6 +82,8 @@ pub(super) async fn described_conflict(
         .as_ref()
         .and_then(|p| Some((p.member.as_deref()?, p.path_param.as_deref()?)));
     let in_collection = collection_of(op, call).is_some();
+    // A soft-deleted record's values are free again.
+    let gone = super::lifecycle::exclusion(rt, t);
     let mut listed: Option<Vec<StoredResource>> = None;
     for set in &desc.unique {
         let sent = |m: &str| mb_mcm::member_at(request, m).filter(|v| !v.is_null());
@@ -125,6 +127,7 @@ pub(super) async fn described_conflict(
         };
         let taken = records.iter().find(|r| {
             Some(r.id.as_str()) != target_id
+                && gone.as_ref().is_none_or(|g| !g.excludes(&r.data))
                 && held.is_none_or(|h| h.id != r.id)
                 && values
                     .iter()
