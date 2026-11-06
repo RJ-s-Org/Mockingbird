@@ -11,7 +11,8 @@ key-before.json (credit numbers only). `pilot` runs a small engine slice per
 model behind the proxy and projects the full run's cost. `full` starts the
 proxy and, per model, runs the engine workload (`mb-evals run --manifest`)
 and then the server suites (`server_suites.py`), cheapest model first, with
-the budget checked before every model. Touch `<out>/ABORT` (or Ctrl-C) to
+the budget and the model's pinned OpenRouter endpoints (provider_health.py) checked
+before every model. Touch `<out>/ABORT` (or Ctrl-C) to
 stop: no new model starts and running children are terminated.
 
 Child processes never see the real key: mb-evals gets
@@ -41,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import proxy as bench_proxy  # noqa: E402  (load_provider_pins; proxy.py runs nothing on import)
+import provider_health  # noqa: E402
 OPENROUTER_API = "https://openrouter.ai/api/v1"
 DEFAULT_OUT = os.path.join("docs", "benchmarks", "2026-10-29")
 DEFAULT_MANIFEST = os.path.join("docs", "benchmarks", "workloads.json")
@@ -83,6 +85,10 @@ def slug(model: str) -> str:
 
 def log(msg: str) -> None:
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def log_err(msg: str) -> None:
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
 
 def rel(p: str) -> str:
@@ -470,6 +476,15 @@ def run_server_suites(
                 cmd += ["--" + flag.replace("_", "-"), str(value)]
         if getattr(args, "refresh_world", False):
             cmd += ["--refresh"]
+    # The suites check the pin again when they start, as this run would.
+    pins = getattr(args, "provider_pins", DEFAULT_PROVIDER_PINS)
+    cmd += ["--provider-pins", abspath(pins) if pins else ""]
+    if getattr(args, "openrouter_api", OPENROUTER_API) != OPENROUTER_API:
+        cmd += ["--openrouter-api", args.openrouter_api]
+    if getattr(args, "allow_degraded_provider", False):
+        cmd.append("--allow-degraded-provider")
+    if provider_check_off(args):
+        cmd.append("--no-provider-check")
     rcs = []
     suites = [s.strip() for s in (args.suites or "").split(",") if s.strip()] or [None]
     for suite in suites:
@@ -477,6 +492,22 @@ def run_server_suites(
         rcs.append(kids.run(c, child_env({"OPENROUTER_API_KEY": DUMMY_KEY}),
                             os.path.join(outdir, "server_suites.log")))
     return next((rc for rc in rcs if rc != 0), 0)
+
+
+def provider_check_off(args: argparse.Namespace) -> bool:
+    # A fake upstream (--upstream, tests) is not what OpenRouter's endpoint list describes.
+    return bool(getattr(args, "no_provider_check", False) or getattr(args, "upstream", None))
+
+
+def provider_gate(args: argparse.Namespace, out: str, model: str) -> Optional[str]:
+    """Checks the model's pinned OpenRouter endpoints (provider_health.py) and records them
+    in <out>/providers-status.json. Returns why the model must not start, else None."""
+    if provider_check_off(args):
+        return None
+    pins_path = getattr(args, "provider_pins", DEFAULT_PROVIDER_PINS)
+    pins = bench_proxy.load_provider_pins(abspath(pins_path) if pins_path else None)
+    return provider_health.gate(model, pins, out, getattr(args, "openrouter_api", OPENROUTER_API),
+                                bool(getattr(args, "allow_degraded_provider", False)), log_err)
 
 
 def engine_ok(rc: int) -> bool:
@@ -801,6 +832,12 @@ def full(args: argparse.Namespace) -> int:
         log(f"{m}: {status}, spent ${spent:.4f} (total ${st.get('spent_usd', 0):.4f}); "
             f"providers: {provider_mix(providers)}")
 
+    def refuse(m: str, why: str) -> None:
+        setm(m, status="refused", refuse_reason=why)
+        with lock:
+            state.setdefault("refused", []).append(m)
+        log(f"refuse {m}: a pinned provider is degraded (see {rel(os.path.join(out, provider_health.STATUS_FILE))})")
+
     def skip_rest(queue: List[str], why: str) -> None:
         for m in queue:
             setm(m, status="skipped", skip_reason=why)
@@ -833,6 +870,10 @@ def full(args: argparse.Namespace) -> int:
                     skip_rest(queue, why)
                     break
                 queue.pop(0)
+                why = provider_gate(args, out, m)
+                if why:
+                    refuse(m, why)
+                    continue
                 with lock:
                     running[m] = proj[m][0]
                 futures[ex.submit(work, m)] = m
@@ -855,6 +896,10 @@ def full(args: argparse.Namespace) -> int:
                 skip_rest(queue, why)
                 break
             queue.pop(0)
+            why = provider_gate(args, out, m)
+            if why:
+                refuse(m, why)
+                continue
             with lock:
                 running[m] = proj[m][0]
             work(m)
@@ -882,9 +927,9 @@ def full(args: argparse.Namespace) -> int:
             fetch_key(args.openrouter_api, os.path.join(out, "key-after.json"))
         except SystemExit as e:
             log(f"key-after failed: {e}")
-    log(f"done: spent ${state.get('spent_usd') or 0:.4f}, skipped {state['skipped'] or 'none'}; "
-        f"state in {rel(state_path)}")
-    return 0
+    log(f"done: spent ${state.get('spent_usd') or 0:.4f}, skipped {state['skipped'] or 'none'}, "
+        f"refused {state.get('refused') or 'none'}; state in {rel(state_path)}")
+    return provider_health.EXIT_PROVIDER_DEGRADED if state.get("refused") else 0
 
 
 # --------------------------------------------------------------------------
@@ -940,6 +985,7 @@ def main() -> int:
     p.add_argument("--server-jobs", type=int, default=1,
                    help="server_suites.py --jobs: journey/consistency/SSE units in flight per model (default 1)")
     p.add_argument("--skip-server", action="store_true", help="engine workload only")
+    provider_health.add_args(p)
     p.add_argument("--world", choices=("none", "derived", "agent"), default="none",
                    help="server_suites.py --world: the world description the mocks run with (default none)")
     p.add_argument("--author", choices=("claude", "stub"),

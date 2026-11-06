@@ -649,7 +649,9 @@ def run_suites(model: str, suites: List[str], proxy_base: str, out: str, args: a
                repeat: int) -> int:
     cmd = [sys.executable, os.path.join(HERE, "server_suites.py"), "--model", model, "--proxy-base", proxy_base,
            "--out", out, "--repeat", str(repeat), "--binary", args.binary, "--tag-journeys",
-           "--jobs", str(args.jobs), "--suites-parallel"]
+           "--jobs", str(args.jobs), "--suites-parallel",
+           # Recorded answers: the live endpoint list says nothing about them.
+           "--no-provider-check"]
     for s in suites:
         cmd += ["--suite", s]
     log = open(os.path.join(out, "server_suites.log"), "w")

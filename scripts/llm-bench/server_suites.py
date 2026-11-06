@@ -17,6 +17,9 @@ Every check appends one JSON line to `<out>/server.jsonl`:
 `{model, suite, case, rep, ok, latency_ms, ttfe_ms?, source, detail, run_id}`.
 A faker answer forced by the bench proxy's own budget stops the run and marks it
 invalid in `<out>/invalid.jsonl` (exit 3); see the README's Budget section.
+Before any suite, the model's pinned OpenRouter endpoints are checked (provider_health.py):
+a degraded one refuses the run (exit 4) unless `--allow-degraded-provider`; the status is
+recorded in `<out>/providers-status.json`. See the README's Provider pins section.
 Server logs go to `<out>/server-logs/<slug>~<suite>.log`.
 
 Suites (contracts are in-repo, so the bench is reproducible):
@@ -154,6 +157,7 @@ from xml.etree import ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import proxy as bench_proxy  # noqa: E402  (budget_exhausted; proxy.py runs nothing on import)
+import provider_health  # noqa: E402
 import world_author  # noqa: E402
 from world_author import WORLDS  # noqa: E402
 
@@ -8643,6 +8647,11 @@ def main():
     p.add_argument("--tag-journeys", action="store_true",
                    help="for replay.py: each mock's LLM calls carry x-bench-journey, each journey rep is "
                         "marked at the proxy, a journey's reps run one after another, and fallbacks are seeded")
+    p.add_argument("--provider-pins", default=bench_proxy.DEFAULT_PROVIDER_PINS,
+                   help="providers.json whose pins the proxy sends: checked before the run (default: the bench's; "
+                        "'' for none)")
+    p.add_argument("--openrouter-api", default=provider_health.OPENROUTER_API, help=argparse.SUPPRESS)
+    provider_health.add_args(p)
     world_author.add_author_args(p)
     args = p.parse_args()
     if args.jobs < 1:
@@ -8653,6 +8662,12 @@ def main():
     if not os.path.exists(args.binary):
         sys.exit(f"{args.binary} not found: cargo build --release -p mockingbird-cli")
     os.makedirs(args.out, exist_ok=True)
+    if not args.no_provider_check:
+        # Before anything spends: a degraded pinned endpoint would be scored as the model's failures.
+        pins = bench_proxy.load_provider_pins(args.provider_pins or None)
+        if provider_health.gate(args.model, pins, args.out, args.openrouter_api, args.allow_degraded_provider,
+                                provider_health.stderr_log):
+            sys.exit(provider_health.EXIT_PROVIDER_DEGRADED)
     world_author.resolve_paths(args)
     args.authored = {}
     if args.journey:
