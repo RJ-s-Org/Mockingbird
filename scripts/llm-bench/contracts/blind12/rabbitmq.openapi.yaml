@@ -11,11 +11,13 @@ info:
     exchange by its virtual host and its name, both in the path
     (`/api/queues/{vhost}/{name}`; the default virtual host `/` is written `%2F`).
     Declaring is idempotent: `PUT` of a virtual host, a queue or an exchange creates it
-    and answers 201, and a `PUT` of one that already exists with the same properties
-    changes nothing and answers 204. A queue or exchange that exists with other
+    and answers 201 Created (the reference's example). A `PUT` of one that already
+    exists with the same properties changes nothing and succeeds (the server answers
+    204, which the reference does not show). A queue or exchange that exists with other
     properties (`durable`, `auto_delete` or `arguments` such as `x-max-length`) is not
-    changed: the declaration is refused with 400 and a `reason` that names the
-    inequivalent property (`PRECONDITION_FAILED - inequivalent arg ...`).
+    changed and the declaration is refused (as AMQP refuses an inequivalent
+    re-declaration; the server answers 400 with a `reason` such as
+    `PRECONDITION_FAILED - inequivalent arg ...`, which the reference does not document).
 
     A binding routes an exchange's messages to a queue:
     `POST /api/bindings/{vhost}/e/{exchange}/q/{queue}` with a `routing_key` (and
@@ -50,21 +52,24 @@ info:
 
     `DELETE /api/queues/{vhost}/{name}` deletes a queue (204). With `if-empty=true` it is
     deleted only when it holds no messages, and with `if-unused=true` only when it has
-    no consumers; otherwise it is kept and the request answers 400 with a `reason`
-    (`PRECONDITION_FAILED - queue ... not empty`). `DELETE .../contents` purges a queue
+    no consumers: the reference says these prevent the delete from succeeding, so the
+    queue is kept and the request does not succeed (the server answers 400 with a
+    `reason` such as `PRECONDITION_FAILED - queue ... not empty`, which the reference
+    does not document). `DELETE .../contents` purges a queue
     (204): its ready messages are removed. A deleted object then answers 404.
 
     `GET /api/queues/{vhost}` lists the virtual host's queues as a bare array; the order
     is not promised unless `sort` names a field to sort by (`sort=name`, with
-    `sort_reverse=true` for descending). With `page` (from 1) it answers one page instead:
-    `{items, page, page_size, page_count, item_count, filtered_count, total_count}`.
+    `sort_reverse=true` for descending). With `page` (from 1) it answers one page instead,
+    an object whose `items` are that page's queues and whose `page` is the page number.
     `page_size` is 1 to 500 (default 100); `name` keeps only the queues whose name holds
-    it (with `use_regex=true` it is a regular expression); `total_count`
-    counts every queue, `filtered_count` the queues the filter kept, `item_count` this
-    page's, and `page_count` the pages of the filtered queues.
+    it (with `use_regex=true` it is a regular expression). The reference lists only
+    these request parameters; the server also answers `page_size`, `page_count`,
+    `item_count`, `filtered_count` and `total_count`, which the reference does not
+    document.
 
-    Errors answer `{error, reason}`: 400 `bad_request`, 401 `not_authorised`, 404
-    `Object Not Found` and 405 `method_not_allowed`.
+    Errors answer `{error, reason}` (the server's error bodies; the reference does not
+    document them).
 servers:
   - url: http://localhost:15672
 security:
@@ -183,7 +188,7 @@ paths:
       tags: [Queues]
       operationId: declareQueue
       summary: Declare a queue
-      description: "201 when created, 204 when it exists with the same properties, 400 when it exists with other ones."
+      description: "201 when created; a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
       requestBody:
         content:
           application/json:
@@ -208,7 +213,7 @@ paths:
       responses:
         "204": {description: Deleted.}
         "400":
-          description: "Kept: a condition asked for does not hold (`PRECONDITION_FAILED - queue ... not empty`)."
+          description: "Kept: a condition asked for does not hold, so the delete does not succeed (the server answers 400, `PRECONDITION_FAILED - queue ... not empty`)."
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
@@ -275,7 +280,7 @@ paths:
       tags: [Exchanges]
       operationId: declareExchange
       summary: Declare an exchange
-      description: "201 when created, 204 when it exists with the same properties, 400 when it exists with other ones."
+      description: "201 when created; a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
       requestBody:
         required: true
         content:

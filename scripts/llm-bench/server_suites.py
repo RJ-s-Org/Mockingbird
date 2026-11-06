@@ -7528,13 +7528,13 @@ BLIND12_CHECKS = {
     ],
     "rabbitmq": [
         "a created virtual host answers 201 and reads by name", "a declared queue answers 201 and reads its arguments",
-        "declaring the queue again the same way answers 204",
-        "a declaration with other arguments is refused with 400 and changes nothing",
+        "declaring the queue again the same way succeeds and changes nothing",
+        "a declaration with other arguments is refused and changes nothing",
         "a binding answers 201 with a Location", "the binding is listed with its routing key and properties_key",
         "a message a binding matches is routed", "a message no binding matches is not routed",
         "ack_requeue_true answers the oldest message and the count after it",
         "a requeued message is got again redelivered and acked away",
-        "page 1 of a name filter answers one queue and the counts", "page 2 reaches the other queue the filter kept",
+        "page 1 of a name filter answers one queue", "page 2 reaches the other queue the filter kept",
         "if-empty keeps a queue that holds messages", "a purged queue deletes and is then not found",
     ],
     "netbox": [
@@ -7565,7 +7565,7 @@ BLIND12_CHECKS = {
         "a scheduled letter keeps its send_date and is expected after it",
         "a repeated Idempotency-Key answers the same letter",
         "a metadata filter lists the run's letters newest first", "scheduled true lists only the scheduled letter",
-        "a scheduled letter is cancelled with deleted true", "a cancelled letter reads as deleted",
+        "a scheduled letter is cancelled with deleted true", "a cancelled letter is no longer listed as scheduled",
         "a letter with an unknown use_type is refused with 422",
     ],
 }
@@ -7761,12 +7761,16 @@ def rabbitmq_steps(j):
             and read.get("durable") is True and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
             status_code=status, read={k: read.get(k) for k in ("name", "vhost", "durable", "arguments")})
     status, _ = declare(created, **{"x-max-length": 1000})
-    j.check("declaring the queue again the same way answers 204", status == 204, status_code=status)
+    read = queue(created)
+    # The reference shows only 201 for a PUT that creates, so a repeat is judged by a 2xx
+    # and by the queue it leaves, not by a particular code.
+    j.check("declaring the queue again the same way succeeds and changes nothing",
+            200 <= status < 300 and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
+            status_code=status, arguments=read.get("arguments"))
     status, refused = declare(created, **{"x-max-length": 10})
     read = queue(created)
-    j.check("a declaration with other arguments is refused with 400 and changes nothing",
-            status == 400 and eq(refused.get("error"), "bad_request") and "x-max-length" in str(refused.get("reason"))
-            and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
+    j.check("a declaration with other arguments is refused and changes nothing",
+            400 <= status < 500 and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
             status_code=status, error=refused, arguments=read.get("arguments"))
     declare(shipped)
     declare("audit")
@@ -7774,16 +7778,18 @@ def rabbitmq_steps(j):
     j.call("POST", between, body={"routing_key": "order.created"})
     bound = j.last["status"]
     location = str(j.answer_headers.get("Location") or "")
-    j.check("a binding answers 201 with a Location", bound == 201 and f"/e/events/q/{created}/" in location,
+    j.check("a binding answers 201 with a Location",
+            bound == 201 and f"/e/events/q/{created}/" in location and location.endswith("/order.created"),
             status_code=bound, location=location)
     answer = j.call("GET", between)
     rows = dicts(answer if isinstance(answer, list) else [])
     one = head(rows)
-    key = given(one.get("properties_key"), None)
+    # A binding with no arguments has its routing key as its properties_key. The Location
+    # is judged by the check before, so a missing one is not this check's miss too.
     j.check("the binding is listed with its routing key and properties_key",
             len(rows) == 1 and eq(one.get("source"), "events") and eq(one.get("destination"), created)
-            and eq(one.get("routing_key"), "order.created") and key is not None and location.endswith(f"/{key}"),
-            bindings=rows, location=location)
+            and eq(one.get("routing_key"), "order.created") and eq(one.get("properties_key"), "order.created"),
+            bindings=rows)
     first, second = f"order {tag}-1 created", f"order {tag}-2 created"
     status, routed = publish("order.created", first)
     j.check("a message a binding matches is routed", status == 200 and routed is True, status_code=status, routed=routed)
@@ -7808,9 +7814,10 @@ def rabbitmq_steps(j):
     # orders.shipped. One check judges page 1 and the next page 2, so a short first page is
     # one miss.
     names, answer = page(page=1, page_size=1, name="orders", sort="name")
-    j.check("page 1 of a name filter answers one queue and the counts",
-            names == [created] and eq(answer.get("item_count"), 1) and eq(answer.get("filtered_count"), 2)
-            and eq(answer.get("total_count"), 3) and eq(answer.get("page_count"), 2) and eq(answer.get("page"), 1),
+    # The reference names the paging parameters but not the page's count fields, so only
+    # the queue listed and the page number are judged.
+    j.check("page 1 of a name filter answers one queue",
+            names == [created] and eq(answer.get("page"), 1),
             listed=names, counts={k: answer.get(k) for k in ("page", "page_size", "page_count", "item_count",
                                                               "filtered_count", "total_count")})
     names, answer = page(page=2, page_size=1, name="orders", sort="name")
@@ -7821,8 +7828,10 @@ def rabbitmq_steps(j):
     kept = obj(j.call("DELETE", f"{queues}/audit", query={"if-empty": "true"}))
     refused = j.last["status"]
     read = queue("audit")
+    # The reference says only that if-empty prevents the delete from succeeding, so any
+    # answer that is not a success passes, with the queue still there.
     j.check("if-empty keeps a queue that holds messages",
-            refused == 400 and eq(kept.get("error"), "bad_request") and j.last["status"] == 200
+            not 200 <= refused < 300 and j.last["status"] == 200
             and eq(read.get("name"), "audit"),
             status_code=refused, error=kept, read_status=j.last["status"])
     j.call("DELETE", f"{queues}/audit/contents")
@@ -7907,8 +7916,9 @@ def netbox_steps(j):
             j.last["status"] == 201 and [p.get("address") for p in pair] == [ip(2), ip(3)]
             and [p.get("description") for p in pair] == [f"Web 1 {tag}", f"Web 2 {tag}"],
             allocated=[{k: p.get(k) for k in ("id", "address", "description")} for p in pair])
-    web2 = own(pair[1].get("id") if len(pair) == 2 else None)
-    web2_at = pair[1].get("address") if len(pair) == 2 else ip(3)
+    allocated = len(pair) == 2 and is_int(pair[1].get("id")) and isinstance(pair[1].get("address"), str)
+    web2 = pair[1]["id"] if allocated else None
+    web2_at = pair[1]["address"] if allocated else None
     # The checks after this one go by the addresses the allocations answered, so a wrong
     # allocation is one miss, not several.
     usable = [ip(n) for n in range(1, 7)]
@@ -7931,6 +7941,16 @@ def netbox_steps(j):
         extra = obj(j.call("POST", "/api/ipam/ip-addresses/", body={"address": x, "vrf": vrf, "status": "active"}))
         if j.last["status"] == 201 and eq(extra.get("address"), x):
             held = [y for y in usable if y in held + [x]]
+            if web2 is None and is_int(extra.get("id")):
+                # The list allocation answered no second address: the later checks act on
+                # one that exists, so that miss is not counted again.
+                web2, web2_at = extra["id"], x
+    if web2 is None:
+        # Else any address of the prefix other than the gateway.
+        rows, _ = addresses(parent=prefix)
+        other = [r for r in rows if is_int(r.get("id")) and r.get("id") != gateway.get("id")
+                 and isinstance(r.get("address"), str)]
+        web2, web2_at = (other[-1]["id"], other[-1]["address"]) if other else (own(None), ip(3))
     rows, answer = addresses(parent=prefix, limit=2)
     j.check("limit 2 answers two addresses, the count and a next page",
             len(held) > 2 and [r.get("address") for r in rows] == held[:2] and eq(answer.get("count"), len(held))
@@ -7945,7 +7965,7 @@ def netbox_steps(j):
     read = obj(j.call("GET", f"/api/ipam/ip-addresses/{web2}/"))
     j.check("a patch changes the status and keeps the address",
             status_of(changed) == "reserved" and status_of(read) == "reserved" and eq(read.get("address"), web2_at)
-            and eq(read.get("description"), f"Web 2 {tag}") and eq(vrf_of(read), vrf),
+            and (not allocated or eq(read.get("description"), f"Web 2 {tag}")) and eq(vrf_of(read), vrf),
             answered=status_of(changed), read={k: read.get(k) for k in ("address", "status", "description")})
     # The address the read shows reserved, so a patch that did not hold is that check's
     # miss; the answer must still be a list page, so an empty answer is no pass.
@@ -8049,14 +8069,17 @@ def harvest_steps(j):
             and read.get("is_running") is False,
             status_code=status, answered={k: stopped.get(k) for k in ("is_running", "timer_started_at")},
             read=read.get("is_running"))
-    started = obj(j.call("PATCH", f"/v2/time_entries/{e2}/restart"))
+    # Restarting a running entry answers 422, so when the stop did not hold the restart is
+    # judged on e3, which was logged with hours and so is stopped (it is deleted below).
+    again = e2 if read.get("is_running") is False else e3
+    started = obj(j.call("PATCH", f"/v2/time_entries/{again}/restart"))
     status = j.last["status"]
-    read = entry(e2)
+    read = entry(again)
     j.check("restart runs the entry again",
             status == 200 and started.get("is_running") is True and instant(started.get("timer_started_at")) is not None
             and read.get("is_running") is True,
             status_code=status, answered={k: started.get(k) for k in ("is_running", "timer_started_at")},
-            read=read.get("is_running"))
+            read=read.get("is_running"), entry=again)
     changed = obj(j.call("PATCH", f"/v2/time_entries/{e1}", body={"notes": f"Wireframes, second pass {tag}"}))
     read = entry(e1)
     j.check("a patch changes the notes and keeps the hours",
@@ -8199,9 +8222,15 @@ def lob_steps(j):
     j.check("a scheduled letter is cancelled with deleted true",
             j.last["status"] == 200 and eq(cancelled.get("id"), l2) and cancelled.get("deleted") is True,
             answer=cancelled)
-    read = obj(j.call("GET", f"/v1/letters/{l2}"))
-    j.check("a cancelled letter reads as deleted", eq(read.get("id"), l2) and read.get("deleted") is True,
-            letter={k: read.get(k) for k in ("id", "deleted")})
+    # A cancel removes the letter from production. It is judged only after a cancel that
+    # answered deleted true, so a cancel that did not happen is the check before's miss.
+    if eq(cancelled.get("id"), l2) and cancelled.get("deleted") is True:
+        rows, _ = listed("/v1/letters", scheduled="true")
+        rows = [r for r in rows if r not in extra]
+        j.check("a cancelled letter is no longer listed as scheduled", l2 not in rows, listed=rows)
+    else:
+        j.check("a cancelled letter is no longer listed as scheduled", False,
+                reason="the cancel did not answer deleted true", answer=cancelled)
     # use_type is marketing or operational; a missing one is allowed only with an account
     # default, so an unknown value is what is always refused.
     bad = obj(j.call("POST", "/v1/letters", body={"to": a2, "from": sender, "file": html, "color": False,

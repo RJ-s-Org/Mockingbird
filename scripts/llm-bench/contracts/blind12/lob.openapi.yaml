@@ -39,9 +39,9 @@ info:
     only those where they are equal.
 
     `DELETE /v1/letters/{id}` cancels a letter whose `send_date` has not passed (a
-    cancelled letter is not charged) and answers `{"id": "ltr_...", "deleted": true}`;
-    the letter then reads with `deleted: true`, a field answered only on a deleted
-    object.
+    cancelled letter is not charged) and answers `{"id": "ltr_...", "deleted": true}`
+    (`deleted` is only returned when the resource was deleted). A cancel completely
+    removes the letter from production, so it is no longer listed with `scheduled=true`.
 
     A `POST /v1/letters` with an `Idempotency-Key` header (at most 256 characters) is
     safe to retry: a second request with the same key within 24 hours creates nothing
@@ -183,7 +183,7 @@ paths:
       summary: Read a letter
       responses:
         "200":
-          description: The letter; a cancelled one answers deleted true.
+          description: The letter.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Letter"}
@@ -350,4 +350,4 @@ components:
         send_date: {type: string, format: date-time}
         date_created: {type: string, format: date-time}
         date_modified: {type: string, format: date-time}
-        deleted: {type: boolean, description: Only on a cancelled letter.}
+        deleted: {type: boolean, description: Only returned when the letter was cancelled.}
