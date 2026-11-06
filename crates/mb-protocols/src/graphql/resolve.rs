@@ -603,7 +603,8 @@ async fn store_answer(
 /// The write a 2xx update or delete makes on the stored record its `id`
 /// argument names (see [`super::state::by_id`]), whether or not its
 /// payload selects it: an update merges its input's members of the record
-/// over it, after what the answer held, and a delete removes it. Answers
+/// over it, after what the answer held, and a delete removes it, or moves it
+/// to its type's described soft-delete state (see [`call::delete_resource`]). Answers
 /// from state or the cache wrote already.
 async fn write_by_id(
     rt: &MockRuntime,

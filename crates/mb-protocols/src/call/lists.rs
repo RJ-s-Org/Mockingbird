@@ -662,7 +662,10 @@ pub(super) fn narrow(
                     kept = counted;
                 }
                 *body = kept;
-            } else if (removed > 0 || reordered) && q.is_some() {
+            } else if (removed > 0 || reordered)
+                && q.as_ref()
+                    .is_some_and(list_query::ListQuery::describes_query)
+            {
                 tracing::info!(
                     operation = %op.id,
                     "a described list narrowing does not fit the answer's schema; the generated list is served"

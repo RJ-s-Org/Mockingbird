@@ -835,6 +835,13 @@ async fn nothing_held(
     {
         return none;
     }
+    // A status the description gives a missing record, in the body its response
+    // declares.
+    if let Some(code) = lifecycle::not_found(rt, op)
+        && let Some(refusal) = plan.engine.refuse_from_state(&rt.bundle, op, call, code)
+    {
+        return refusal;
+    }
     // The engine the provider policy chose for the call writes a declared body's code.
     plan.engine.not_found(&rt.bundle, op, call, detail).await
 }
@@ -1165,6 +1172,19 @@ pub(crate) async fn complete(
                 if let Some(id) = own.and_then(id_string) {
                     target_id = Some(id);
                 }
+            }
+            // A created record shows the described initial state it is stored in.
+            if op.kind == OperationKind::Command(Effect::Create)
+                && !unstored
+                && (200..300).contains(&generated.status)
+                && let Some(body) = generated.body.as_mut()
+                && entities::entity_fits(rt, t, body)
+            {
+                let request = call
+                    .body
+                    .as_ref()
+                    .map(|b| records::request_record(rt, op, b));
+                lifecycle::initial(rt, t, body, request);
             }
             // What the description says an update or action sets on its target shows
             // in the answer's record too.
