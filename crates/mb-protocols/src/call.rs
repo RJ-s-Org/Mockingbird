@@ -1770,6 +1770,8 @@ pub(crate) async fn complete(
                 .filter(|_| op.kind == OperationKind::Command(Effect::Update) && !op.is_action());
             let shown = shown_types(rt, target.as_ref(), &related, &created_since);
             resolve_effect_types(&mut state, session, rt, &shown, &mut generated.effects).await;
+            let shown_records = shown_records(target.as_ref(), &related, &created_since);
+            resolve_effect_ids(&mut state, session, &shown_records, &mut generated.effects).await;
             write_memory::effects_on_target(&earlier, target.as_ref(), &mut generated.effects);
             if let Some(t) =
                 resource_type.filter(|_| op.kind == OperationKind::Command(Effect::Create))
@@ -1805,7 +1807,7 @@ pub(crate) async fn complete(
                 rt,
                 &generated.effects,
                 own,
-                (plan, call),
+                (plan, call, generated.status),
             )
             .await;
             generated.effect_outcomes.extend(outcomes);
@@ -2011,7 +2013,7 @@ async fn apply_effects(
     rt: &MockRuntime,
     effects: &[ResourceEffect],
     own: Option<(&str, &str)>,
-    source: (&CallPlan<'_>, &OperationCall),
+    source: (&CallPlan<'_>, &OperationCall, u16),
 ) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::with_capacity(effects.len());
     for effect in effects {
@@ -2198,6 +2200,59 @@ async fn resolve_effect_types(
             );
             effect.resource_type = t.to_string();
         }
+    }
+}
+
+/// The records a prompt showed (see [`shown_types`]), in the order it showed them.
+fn shown_records<'a>(
+    target: Option<&'a StoredResource>,
+    related: &'a [StoredResource],
+    created_since: &'a [StoredResource],
+) -> Vec<&'a StoredResource> {
+    let max = mb_engine::prompt::MAX_RELATED;
+    target
+        .into_iter()
+        .chain(related.iter().take(max))
+        .chain(created_since.iter().take(max))
+        .collect()
+}
+
+/// Gives each effect whose id holds no record of its type, written with punctuation
+/// around it (`:722754` for `722754`), the id of the `shown` record of its type that the
+/// id names with that punctuation trimmed. With none, the effect is left as it came,
+/// and is rejected.
+async fn resolve_effect_ids(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    shown: &[&StoredResource],
+    effects: &mut [ResourceEffect],
+) {
+    for effect in effects.iter_mut() {
+        let trimmed = effect.id.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.is_empty() || trimmed == effect.id {
+            continue;
+        }
+        // A type and an id name one record, however often the prompt showed it.
+        if !shown
+            .iter()
+            .any(|r| r.resource_type == effect.resource_type && r.id == trimmed)
+        {
+            continue;
+        }
+        let id = trimmed.to_string();
+        if state
+            .get(session, &effect.resource_type, &effect.id)
+            .await
+            .is_some()
+        {
+            continue;
+        }
+        tracing::debug!(
+            written = %log_capped(&effect.id),
+            id = %log_capped(&id),
+            "effect id trimmed to a shown record's"
+        );
+        effect.id = id;
     }
 }
 
@@ -2875,11 +2930,11 @@ async fn apply_effect(
     session: &SessionKey,
     rt: &MockRuntime,
     effect: &ResourceEffect,
-    own: Option<(&CallPlan<'_>, &OperationCall)>,
+    own: Option<(&CallPlan<'_>, &OperationCall, u16)>,
 ) -> Result<(Value, Map<String, Value>), &'static str> {
     let t = effect.resource_type.as_str();
     let index = rt.index();
-    let set = mended_set(rt, t, &effect.set);
+    let set = write_memory::rehomed_members(rt, t, mended_set(rt, t, &effect.set));
     let identity = index.identity_fields(t);
     // A key held in an object member (`metadata.name`) is set by naming it there.
     let sets_nested = |k: &str, v: &Value| {
@@ -2912,8 +2967,8 @@ async fn apply_effect(
     if !set.is_empty() && set.values().all(|v| unredacted(v).is_none()) {
         return Err("it sets only what was redacted");
     }
-    let requested = if let Some((plan, call)) = own {
-        let set = write_memory::own_effect_members(rt, plan, call, &held, &requested);
+    let requested = if let Some((plan, call, status)) = own {
+        let set = write_memory::own_effect_members(rt, plan, call, &held, &requested, status);
         if set.is_empty() {
             return Err("it sets no member an effect on this update's target may");
         }
@@ -2956,7 +3011,7 @@ async fn apply_effect(
     if !entity_fits(rt, t, &stored.data) {
         return Err("the merged resource breaks its schema");
     }
-    if let Some((plan, call)) = own
+    if let Some((plan, call, _)) = own
         && !write_memory::keeps_owner(rt, plan, call, &held, &stored.data)
     {
         return Err("the merged resource is no longer its owner's");
