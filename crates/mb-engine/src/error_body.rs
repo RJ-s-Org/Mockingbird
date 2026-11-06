@@ -427,9 +427,9 @@ type Change = (String, Value);
 /// item of an array of error objects (the last one in the items past them), with its
 /// reason in that item's message-like member. Outside such an array, the first
 /// violation names the field and the message-like member keeps every reason. A map
-/// of reasons ([`reasons_map`]) is keyed by the violated fields, and an array of
+/// of reasons (`reasons_map`) is keyed by the violated fields, and an array of
 /// objects naming no field says the reasons in their message-like member
-/// ([`message_items`]). Each change is kept only while the body
+/// (`message_items`). Each change is kept only while the body
 /// still validates; a body not valid to begin with is left as it is.
 #[must_use]
 pub fn with_reasons(
