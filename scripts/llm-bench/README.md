@@ -377,7 +377,7 @@ python3 scripts/llm-bench/replay.py pack-dump $OUT/exchanges.jsonl $OUT/server/<
   --rep 0 [--source "paid run 2026-11-06 via OpenRouter"]
 ```
 
-It writes one recording per journeys suite (and world tier) of that model with results in `server.jsonl`, for the rep given. It refuses as `pack` does (the ledger defaults to `calls.jsonl` next to the dump, where `run.py` puts it), and also when a dumped call has no tag (a dump from before tagging, or a run with `--no-tag-journeys`). Calibrate before committing: the recording has none of `record`'s calibration, so replay it with `gate` a few times on the run's binary, then `expect` or drop what flips.
+It writes one recording per journeys suite (`JOURNEY_SUITES`, and world tier) of that model with results in `server.jsonl`, for the rep given; the calls of the run's other suites are in the dump too, and it skips them and names them on stderr. It refuses as `pack` does (the ledger defaults to `calls.jsonl` next to the dump, where `run.py` puts it), and also when a dumped call has no tag (a dump from before tagging, or a run with `--no-tag-journeys`). Calibrate before committing: the recording has none of `record`'s calibration, so replay it with `gate` a few times on the run's binary, then `expect` or drop what flips.
 
 ## Testing without spend
 

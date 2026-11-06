@@ -476,7 +476,7 @@ class DumpTest(unittest.TestCase):
             conn.close()
 
     def test_a_tagged_dump_packs_into_a_recording_that_replays(self):
-        label = "m__x~journeys_x"
+        label = "m__x~journeys_heldout"
         tagged = {replay.JOURNEY_HEADER: "jira"}
         schema = {"type": "json_schema", "json_schema": {"name": "issue", "schema": {
             "type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}}
@@ -499,7 +499,7 @@ class DumpTest(unittest.TestCase):
         server = os.path.join(self.dir, "server.jsonl")
         with open(server, "w") as f:
             for rep, ok in ((0, True), (1, False)):
-                f.write(json.dumps({"model": "m/x", "suite": "journeys_x", "case": "jira.x", "rep": rep, "ok": ok})
+                f.write(json.dumps({"model": "m/x", "suite": "journeys_heldout", "case": "jira.x", "rep": rep, "ok": ok})
                         + "\n")
             # Another suite of the run with no row for this model: not packed.
             f.write(json.dumps({"model": "other/y", "suite": "journeys_y", "case": "a.b", "rep": 1, "ok": True})
@@ -520,7 +520,7 @@ class DumpTest(unittest.TestCase):
                               "--rep", "1", "--dest", os.path.join(self.dir, "cli")],
                              capture_output=True, text=True, timeout=60)
         self.assertEqual(cli.returncode, 0, cli.stderr)
-        self.assertEqual(os.listdir(os.path.join(self.dir, "cli")), ["m__x~journeys_x.json.gz"])
+        self.assertEqual(os.listdir(os.path.join(self.dir, "cli")), ["m__x~journeys_heldout.json.gz"])
         with open(self.dump, "a") as f:
             f.write(json.dumps({"label": label, "status": 200, "content": "{}"}) + "\n")
         with self.assertRaises(replay.PackRefused) as e:
@@ -530,15 +530,48 @@ class DumpTest(unittest.TestCase):
 
     def test_a_failed_call_in_the_ledger_beside_the_dump_refuses(self):
         with open(self.dump, "w") as f:
-            f.write(json.dumps(dict(call("jira", "createIssue", 0, "{}"), label="m__x~journeys_x")) + "\n")
+            f.write(json.dumps(dict(call("jira", "createIssue", 0, "{}"), label="m__x~journeys_heldout")) + "\n")
         with open(os.path.join(self.dir, "calls.jsonl"), "a") as f:
-            f.write(json.dumps({"label": "m__x~journeys_x", "status": 502, "error_kind": "stream_error"}) + "\n")
+            f.write(json.dumps({"label": "m__x~journeys_heldout", "status": 502, "error_kind": "stream_error"}) + "\n")
         server = os.path.join(self.dir, "server.jsonl")
         with open(server, "w") as f:
-            f.write(json.dumps({"model": "m/x", "suite": "journeys_x", "case": "jira.x", "rep": 0, "ok": True}) + "\n")
+            f.write(json.dumps({"model": "m/x", "suite": "journeys_heldout", "case": "jira.x", "rep": 0, "ok": True}) + "\n")
         with self.assertRaises(replay.PackRefused) as e:
             replay.pack_dump(self.dump, server, os.path.join(self.dir, "out"), "test")
         self.assertIn("ledger", str(e.exception))
+
+    def test_a_dump_packs_only_its_journeys_suites(self):
+        # A run's dump holds every suite of the run, each tagged: only journeys suites pack.
+        labels = ("m__x~journeys_heldout", "m__x~consistency", "m__x~journeys_heldout@agent", "m__x~stateful@agent")
+        with open(self.dump, "w") as f:
+            for label in labels:
+                f.write(json.dumps(dict(call("jira", "createIssue", 0, "{}"), label=label)) + "\n")
+        server = os.path.join(self.dir, "server.jsonl")
+        with open(server, "w") as f:
+            for suite, world in (("journeys_heldout", None), ("consistency", None), ("journeys_heldout", "agent"),
+                                 ("stateful", "agent")):
+                row = {"model": "m/x", "suite": suite, "case": "jira.x", "rep": 0, "ok": True}
+                if world:
+                    row["world"] = world
+                f.write(json.dumps(row) + "\n")
+        out = os.path.join(self.dir, "out")
+        skipped = []
+        written = replay.pack_dump(self.dump, server, out, "test", skipped=skipped)
+        self.assertEqual(sorted(os.path.basename(p) for p in written),
+                         ["m__x~journeys_heldout.json.gz", "m__x~journeys_heldout@agent.json.gz"])
+        self.assertEqual(sorted(os.listdir(out)), sorted(os.path.basename(p) for p in written))
+        self.assertEqual(skipped, ["m__x~consistency", "m__x~stateful@agent"])
+        cli = subprocess.run([sys.executable, os.path.join(HERE, "replay.py"), "pack-dump", self.dump, server,
+                              "--dest", os.path.join(self.dir, "cli")], capture_output=True, text=True, timeout=60)
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        self.assertNotIn("consistency", "".join(os.listdir(os.path.join(self.dir, "cli"))))
+        self.assertIn("skipped m__x~consistency", cli.stderr)
+        self.assertIn("skipped m__x~stateful@agent", cli.stderr)
+        # A dump with no journeys suite writes nothing.
+        with open(self.dump, "w") as f:
+            f.write(json.dumps(dict(call("jira", "createIssue", 0, "{}"), label="m__x~consistency")) + "\n")
+        self.assertEqual(replay.pack_dump(self.dump, server, os.path.join(self.dir, "none"), "test"), [])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "none")))
 
 
 class DefaultTaggingTest(unittest.TestCase):

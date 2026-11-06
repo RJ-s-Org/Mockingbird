@@ -428,10 +428,12 @@ def pack_calls(raw: List[Dict[str, Any]], server_jsonl: str, dest: str, source: 
 
 
 def pack_dump(dump_path: str, server_jsonl: str, dest: str, source: str, rep: int = 0,
-              ledger: Optional[str] = None) -> List[str]:
+              ledger: Optional[str] = None, skipped: Optional[List[str]] = None) -> List[str]:
     """Recordings from a run's `proxy.py --dump` (exchanges.jsonl), which holds each
-    call's journey tag since journeys are tagged by default: one per label that has
-    results in `server_jsonl` (the run's model, a journeys suite). The ledger
+    call's journey tag since journeys are tagged by default: one per label of a
+    journeys suite (JOURNEY_SUITES) that has results in `server_jsonl` (the run's
+    model). A run's dump holds every suite of the run, tagged too, so the labels of
+    any other suite are left out, and appended to `skipped` when given. The ledger
     (default: calls.jsonl next to the dump) and a BUDGET_TRIPPED there refuse it as
     `pack` does, and so does a dumped call without a tag (a run before tagging, or
     one with --no-tag-journeys). Nothing is written when it is refused."""
@@ -439,7 +441,15 @@ def pack_dump(dump_path: str, server_jsonl: str, dest: str, source: str, rep: in
         beside = os.path.join(os.path.dirname(os.path.abspath(dump_path)), "calls.jsonl")
         ledger = beside if os.path.exists(beside) else None
     problems = pack_problems(dump_path, server_jsonl, ledger)
-    rows = read_jsonl(dump_path)
+    rows = []
+    others = set()
+    for c in read_jsonl(dump_path):
+        if split_label(c.get("label") or "")[1] in JOURNEY_SUITES:
+            rows.append(c)
+        else:
+            others.add(c.get("label") or "")
+    if skipped is not None:
+        skipped.extend(sorted(others))
     untagged = sum(1 for c in rows if c.get("journey") is None or c.get("n") is None or not c.get("label"))
     if untagged:
         problems.append(f"dump: {untagged} call(s) without a journey tag (a dump from before tagging, "
@@ -1026,14 +1036,17 @@ def main() -> int:
         args.world = args.world or ["none"]
         return cmd_gate(args)
     if args.cmd == "pack-dump":
+        skipped: List[str] = []
         try:
             written = pack_dump(args.dump, args.server, args.dest, args.source or f"proxy dump ({os.path.basename(args.dump)})",
-                                args.rep, ledger=args.ledger)
+                                args.rep, ledger=args.ledger, skipped=skipped)
         except PackRefused as e:
             print("pack-dump: refusing to pack this run, nothing written:", file=sys.stderr)
             for p in e.problems:
                 print(f"  - {p}", file=sys.stderr)
             return 1
+        for label in skipped:
+            print(f"pack-dump: skipped {label or '(no label)'}: not a journeys suite", file=sys.stderr)
         if not written:
             print("pack-dump: no journeys suite of the dump has results in that server.jsonl", file=sys.stderr)
             return 1
