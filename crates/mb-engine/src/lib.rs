@@ -1348,6 +1348,29 @@ impl Engine {
         })
     }
 
+    /// The violations (see [`SchemaValidator::violations`]) of `stored` against the
+    /// schema [`Engine::serve_stored`] checks it by: `op`'s success variant's, or the
+    /// narrowed `response_schema` when given. Empty when `stored` would be served;
+    /// `None` when there is no schema to check against or it does not compile.
+    #[must_use]
+    pub fn stored_violations(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        stored: &Value,
+        response_schema: Option<&Value>,
+    ) -> Option<Vec<(String, String)>> {
+        let variant = op.success_output()?;
+        let schema = variant.schema.as_ref()?;
+        let validator = match response_schema {
+            Some(narrowed) => self.schema_validator(bundle, narrowed).ok()?,
+            None => self
+                .validator(bundle, op, success_status(variant.status), schema)
+                .ok()?,
+        };
+        Some(validator.violations(stored))
+    }
+
     /// Stored `record` as `op` answers it: in the envelope or the one-item array its
     /// identity says the answer holds it in, else as it is. An envelope also gets the
     /// other members its schema (the narrowed `response_schema` when given) requires,

@@ -19,7 +19,7 @@ use mb_mcm::world::{ChangeDesc, OpKind};
 use mb_mcm::{Effect, Operation, OperationKind};
 use serde_json::Value;
 
-use super::entities::entity_fits;
+use super::entities::{added_violation, entity_fits};
 use super::id_string;
 use super::write_memory::read_schema;
 use crate::MockRuntime;
@@ -36,9 +36,10 @@ pub(super) fn sets_members(rt: &MockRuntime, op: &Operation) -> bool {
 /// sets: its `transition` members (a state is written as the member's type declares
 /// it), then its `changes` (the `request` body at a `from_request` pointer, or a fixed
 /// `value`). A value that does not fit its member's schema is dropped, and so is the
-/// whole set when it breaks a record that fit the type (a record already not fitting,
-/// stored in an earlier, incomplete shape, takes it). Answers the members it set, in
-/// that order.
+/// whole set when it adds a violation of the type's schema to the record (see
+/// [`added_violation`]): it breaks a record that fit, or a record already not fitting
+/// (stored in an earlier, incomplete shape) gets a violation it did not have. Answers
+/// the members it set, in that order.
 pub(super) fn apply(
     rt: &MockRuntime,
     op: &Operation,
@@ -92,13 +93,18 @@ pub(super) fn apply(
             ),
         }
     }
-    // A record that did not fit before (stored in an earlier, incomplete shape) takes
-    // a change that leaves it no worse; a fitting one refuses a change that breaks it.
-    if !set.is_empty() && !entity_fits(rt, t, record) && entity_fits(rt, t, &before) {
+    // A fitting record refuses a change that breaks it; one that did not fit before
+    // (stored in an earlier, incomplete shape) takes a change that adds no violation.
+    if set.is_empty() {
+        return set;
+    }
+    if let Some((path, keyword)) = added_violation(rt, t, &before, record) {
         tracing::info!(
             mock = %rt.name,
             operation = %op.id,
-            "the record a described transition or change leaves breaks its schema: none is set"
+            path = %path,
+            keyword = %keyword,
+            "the record a described transition or change leaves has a violation it did not: none is set"
         );
         *record = before;
         return Vec::new();
@@ -229,6 +235,28 @@ components:
         let mut record = json!({"id": "i1", "name": "a"});
         assert_eq!(apply(&rt, &op, None, &mut record), vec!["starred"]);
         assert_eq!(record, json!({"id": "i1", "name": "a", "starred": true}));
+    }
+
+    #[test]
+    fn a_change_adding_a_violation_to_a_record_that_already_breaks_its_schema_is_refused() {
+        // Stored in an earlier shape (no `created`) with four members: a fifth passes
+        // the read's `maxProperties`, a violation the record did not have.
+        let rt = runtime(json!({"starred": {"value": true}}));
+        let op = star(&rt);
+        let held = json!({"id": "i1", "name": "a", "rank": 1, "note": "x"});
+        let mut record = held.clone();
+        assert!(apply(&rt, &op, None, &mut record).is_empty());
+        assert_eq!(record, held);
+    }
+
+    #[test]
+    fn a_wrong_typed_change_on_a_record_that_already_breaks_its_schema_is_refused() {
+        let rt = runtime(json!({"starred": {"value": "yes"}}));
+        let op = star(&rt);
+        let held = json!({"id": "i1", "name": "a"});
+        let mut record = held.clone();
+        assert!(apply(&rt, &op, None, &mut record).is_empty());
+        assert_eq!(record, held);
     }
 
     #[test]

@@ -837,6 +837,19 @@ impl SchemaValidator {
         out
     }
 
+    /// The violations of `instance` (of the first 100 found), each as the JSON pointer
+    /// of the member it is about (see [`Self::validate_located`]) and the keyword it
+    /// breaks: what to compare two values' violations by, never quoting a value. Empty
+    /// when `instance` is valid. `format` is an annotation here, as in
+    /// [`Self::is_valid`].
+    pub fn violations(&self, instance: &Value) -> Vec<(String, String)> {
+        self.inner
+            .iter_errors(instance)
+            .take(MAX_SCANNED)
+            .map(|e| (violated_pointer(&e), e.kind().keyword().to_owned()))
+            .collect()
+    }
+
     /// Returns up to 10 violations formatted as `"<instance path>:
     /// <keyword>: <message>"`, shallowest first (of the first 100 found): a
     /// wrong shape near the root is what a repair must fix first. A failed
