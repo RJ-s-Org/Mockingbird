@@ -30,13 +30,19 @@
 //!   stands, with the same facts (a failed write is asked for again after a minute).
 //! - Since a written body serves every later call, it is checked before it is kept
 //!   (`body_flaw`): it validates against the declared error schema; each code-like
-//!   string is a short token (at most `64` characters, no unit of two or more
-//!   characters repeated back to back 3 times, no whitespace run, line break, tab or
-//!   edge space), unless it is a token the API description or the response's
-//!   description names in backticks (`` `invalid_parameters` ``); and no string is
-//!   longer than `2048` characters, nor, past `40` characters, more than `50` percent
-//!   one unit repeated. A body that fails is asked for once more (2 asks in all); when
-//!   the second fails too, the write failed: the faker's body stands.
+//!   string is a short token (at most `64` characters, no unit repeated back to back
+//!   3 times, no whitespace run, line break, tab or edge space), unless it is a token
+//!   the API description or the response's description names in backticks
+//!   (`` `invalid_parameters` ``); and no string is longer than `2048` characters,
+//!   nor, past `40` characters, more than `50` percent one unit repeated. Only a
+//!   word-like unit counts: at least 3 characters, with a letter, and no repeat of a
+//!   shorter unit itself; so a zero-filled id (`req_000…`), a run of one character, a
+//!   hex code (`0xABABAB`) or a quoted `hahaha` is kept, and `invalid_parameters!`
+//!   repeated is not. Nor does a repeat count that the call which triggers the write
+//!   carries (a path, query or header value, or a body value): quoting the request is
+//!   no loop. The guard sees the model's body alone, before the call's facts are laid
+//!   over it. A body that fails is asked for once more (2 asks in all); when the
+//!   second fails too, the write failed: the faker's body stands.
 
 use mb_mcm::{Bundle, Operation};
 use serde_json::{Map, Value};
@@ -1057,6 +1063,10 @@ pub(crate) const REPEAT_FLOOR: usize = 40;
 pub(crate) const MAX_REPEAT_SHARE: usize = 50;
 /// How many times a unit is repeated back to back to count as a repeat.
 const MIN_REPEATS: usize = 3;
+/// The shortest unit (in characters) whose repeats count ([`counted_unit`]).
+const MIN_REPEAT_UNIT: usize = 3;
+/// How deep the request's values are walked for its echoes ([`request_echoes`]).
+const MAX_ECHO_DEPTH: usize = 8;
 /// The longest unit (in characters) looked for repeated.
 const MAX_REPEAT_UNIT: usize = 256;
 
@@ -1067,14 +1077,15 @@ pub(crate) enum Flaw {
     Invalid,
     /// A code-like value is longer than [`MAX_CODE_LEN`].
     LongCode,
-    /// A code-like value repeats a unit of two or more characters back to back.
+    /// A code-like value repeats a word-like unit ([`counted_unit`]) back to back.
     RepeatedCode,
     /// A code-like value has a whitespace run, a line break or a tab, or starts or
     /// ends with whitespace.
     SpacedCode,
     /// A string member is longer than [`MAX_ERROR_STRING_LEN`].
     LongString,
-    /// One unit repeated back to back covers most of a string member.
+    /// One word-like unit ([`counted_unit`]) repeated back to back covers most of a
+    /// string member.
     RepeatedString,
 }
 
@@ -1108,44 +1119,101 @@ fn backticked<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<String> {
         .collect()
 }
 
+/// Whether repeats of `unit` count as degenerate: it is at least
+/// [`MIN_REPEAT_UNIT`] characters, holds a letter, and is no repeat of a shorter unit
+/// itself (`haha`). A run of one character (`000…`, `aaa…`, `...`), of a unit with no
+/// letter (`0000-`), or of a two-character unit (`AB` in `0xABABAB`, `ha` in
+/// `hahaha`) never counts: zero-filled ids, placeholders, hex codes and quoted input
+/// read that way. A degenerate loop repeats a word or more (`invalid_parameters!`).
+fn counted_unit(unit: &[char]) -> bool {
+    let n = unit.len();
+    let primitive = (1..n)
+        .filter(|d| n.is_multiple_of(*d))
+        .all(|d| unit.chunks(d).any(|c| c != &unit[..d]));
+    n >= MIN_REPEAT_UNIT && unit.iter().any(|c| c.is_alphabetic()) && primitive
+}
+
 /// The most characters of `chars` one unit covers repeated back to back at least
-/// [`MIN_REPEATS`] times (the last time without a separator that ends the unit), over the units (of at most [`MAX_REPEAT_UNIT`] characters)
-/// `unit` accepts.
-fn repeated_span(chars: &[char], unit: impl Fn(&[char]) -> bool) -> usize {
+/// [`MIN_REPEATS`] times (the last time without a separator that ends the unit),
+/// over the units (of at most [`MAX_REPEAT_UNIT`] characters) whose repeats count
+/// ([`counted_unit`]) and whose run of whole repeats no string of the request holds
+/// (`echoes`: the model quoting the call is no loop).
+fn repeated_span(chars: &[char], echoes: &[String]) -> usize {
     let n = chars.len();
     let mut best = 0;
     for period in 1..=MAX_REPEAT_UNIT.min((n + 1) / MIN_REPEATS) {
         let mut start = 0;
         let mut run = 0;
-        for i in 0..n - period {
-            if chars[i] == chars[i + period] {
+        // Each maximal run is judged once, where it ends.
+        for i in 0..=n - period {
+            if i < n - period && chars[i] == chars[i + period] {
                 if run == 0 {
                     start = i;
                 }
                 run += 1;
-                let span = run + period;
+                continue;
+            }
+            let span = run + period;
+            if run > 0 && span > best {
                 let found = &chars[start..start + period];
                 // A unit ending in a separator (`not_found_`) repeats as often when
                 // its last separator is left off (`not_found_not_found_not_found`).
                 let separated = found.last().is_some_and(|c| !c.is_alphanumeric());
                 let repeats =
                     span >= MIN_REPEATS * period || (separated && span + 1 >= MIN_REPEATS * period);
-                if repeats && span > best && unit(found) {
+                if repeats && counted_unit(found) && !echoed(found, span, echoes) {
                     best = span;
                 }
-            } else {
-                run = 0;
             }
+            run = 0;
         }
     }
     best
 }
 
-/// Why a code-like `value` is no code, if it is not: too long, a unit of two or more
-/// characters (with a letter, of two or more distinct characters: `E000` is a code)
-/// repeated back to back, or spaced oddly. A token the contract's prose names
-/// (`tokens`) always passes.
-fn code_flaw(value: &str, tokens: &[String]) -> Option<Flaw> {
+/// Whether a string the request carries (`echoes`) holds the run of `unit`'s whole
+/// repeats within `span` characters.
+fn echoed(unit: &[char], span: usize, echoes: &[String]) -> bool {
+    if echoes.is_empty() {
+        return false;
+    }
+    let run: String = unit.iter().collect::<String>().repeat(span / unit.len());
+    echoes.iter().any(|e| e.contains(&run))
+}
+
+/// The strings the request carries, an error body repeating which is an echo, not a
+/// loop ([`repeated_span`]): its path and query parameters, its headers (the protocol
+/// adapter keeps only the non-sensitive ones) and its body's values, numbers written
+/// out.
+fn request_echoes(call: &OperationCall) -> Vec<String> {
+    fn walk(value: &Value, depth: usize, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) => out.push(text.clone()),
+            Value::Number(n) => out.push(n.to_string()),
+            Value::Array(items) if depth < MAX_ECHO_DEPTH => {
+                items.iter().for_each(|v| walk(v, depth + 1, out));
+            }
+            Value::Object(members) if depth < MAX_ECHO_DEPTH => {
+                members.values().for_each(|v| walk(v, depth + 1, out));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for map in [&call.path_params, &call.query, &call.headers] {
+        map.values().for_each(|v| walk(v, 0, &mut out));
+    }
+    if let Some(body) = &call.body {
+        walk(body, 0, &mut out);
+    }
+    out
+}
+
+/// Why a code-like `value` is no code, if it is not: too long, a word-like unit
+/// ([`counted_unit`]) repeated back to back that the request does not hold
+/// (`echoes`), or spaced oddly. A token the contract's prose names (`tokens`) always
+/// passes.
+fn code_flaw(value: &str, tokens: &[String], echoes: &[String]) -> Option<Flaw> {
     if tokens.iter().any(|t| t == value) {
         return None;
     }
@@ -1162,16 +1230,14 @@ fn code_flaw(value: &str, tokens: &[String]) -> Option<Flaw> {
     if spaced {
         return Some(Flaw::SpacedCode);
     }
-    let unit = |u: &[char]| {
-        u.len() >= 2 && u.iter().any(|c| c.is_alphabetic()) && u.iter().any(|c| *c != u[0])
-    };
-    (repeated_span(&chars, unit) > 0).then_some(Flaw::RepeatedCode)
+    (repeated_span(&chars, echoes) > 0).then_some(Flaw::RepeatedCode)
 }
 
 /// Why a string member of a written error body is degenerate, if it is: longer than
 /// [`MAX_ERROR_STRING_LEN`], or (past [`REPEAT_FLOOR`]) more than
-/// [`MAX_REPEAT_SHARE`] percent one unit repeated.
-fn string_flaw(value: &str) -> Option<Flaw> {
+/// [`MAX_REPEAT_SHARE`] percent one word-like unit repeated that the request does not
+/// hold (`echoes`, see [`repeated_span`]).
+fn string_flaw(value: &str, echoes: &[String]) -> Option<Flaw> {
     let chars: Vec<char> = value.chars().collect();
     if chars.len() > MAX_ERROR_STRING_LEN {
         return Some(Flaw::LongString);
@@ -1179,7 +1245,7 @@ fn string_flaw(value: &str) -> Option<Flaw> {
     if chars.len() < REPEAT_FLOOR {
         return None;
     }
-    (repeated_span(&chars, |_| true) * 100 > chars.len() * MAX_REPEAT_SHARE)
+    (repeated_span(&chars, echoes) * 100 > chars.len() * MAX_REPEAT_SHARE)
         .then_some(Flaw::RepeatedString)
 }
 
@@ -1187,23 +1253,25 @@ fn string_flaw(value: &str) -> Option<Flaw> {
 /// (see the module's documentation): it fails `validator`, a code-like member
 /// ([`open_code`]) is no short token ([`code_flaw`]; one of `tokens`, the backticked
 /// spans of the contract's prose, always passes), or a string member is degenerate
-/// ([`string_flaw`]).
+/// ([`string_flaw`]). A repeat the request holds (`echoes`, [`request_echoes`]) is no
+/// flaw.
 pub(crate) fn body_flaw(
     body: &Value,
     schema: &Value,
     defs: &Map<String, Value>,
     validator: &SchemaValidator,
-    tokens: &[String],
+    (tokens, echoes): (&[String], &[String]),
 ) -> Option<Flaw> {
     fn walk(
         value: &Value,
         schema: Option<&Value>,
         defs: &Map<String, Value>,
-        tokens: &[String],
+        (tokens, echoes): (&[String], &[String]),
         depth: usize,
     ) -> Option<Flaw> {
+        let known = (tokens, echoes);
         match value {
-            Value::String(text) => string_flaw(text),
+            Value::String(text) => string_flaw(text, echoes),
             Value::Array(items) => {
                 let item_schema = if depth > MAX_DEPTH {
                     None
@@ -1212,7 +1280,7 @@ pub(crate) fn body_flaw(
                 };
                 items
                     .iter()
-                    .find_map(|item| walk(item, item_schema, defs, tokens, depth + 1))
+                    .find_map(|item| walk(item, item_schema, defs, known, depth + 1))
             }
             Value::Object(members) => members.iter().find_map(|(name, member)| {
                 let prop = if depth > MAX_DEPTH {
@@ -1222,11 +1290,11 @@ pub(crate) fn body_flaw(
                 };
                 let code = match member {
                     Value::String(text) if prop.is_some_and(|p| open_code(name, p, defs)) => {
-                        code_flaw(text, tokens)
+                        code_flaw(text, tokens, echoes)
                     }
                     _ => None,
                 };
-                code.or_else(|| walk(member, prop, defs, tokens, depth + 1))
+                code.or_else(|| walk(member, prop, defs, known, depth + 1))
             }),
             _ => None,
         }
@@ -1234,7 +1302,7 @@ pub(crate) fn body_flaw(
     if !validator.is_valid(body) {
         return Some(Flaw::Invalid);
     }
-    walk(body, Some(schema), defs, tokens, 0)
+    walk(body, Some(schema), defs, (tokens, echoes), 0)
 }
 
 /// What the engine writes an error body with (see [`Engine::error_writable`]).
@@ -1486,6 +1554,13 @@ impl Engine {
                         .into_iter()
                         .flatten(),
                 );
+                // The model is shown the operation alone, never this call's values,
+                // so a body repeating one is a coincidence or the contract's example;
+                // still, a repeat the call that triggers the write carries is an
+                // echo, not a loop. The facts laid over the body later
+                // ([`set_message`], [`with_reasons`]) are the call's own and are
+                // never checked: the guard sees the model's body alone.
+                let echoes = request_echoes(call);
                 // A degenerate answer is asked for once more, and never kept: past a
                 // second, the faker's body stands, as for a failed write.
                 for attempt in 1..=WRITE_ASKS {
@@ -1501,7 +1576,7 @@ impl Engine {
                         .await;
                     match answer {
                         Ok(answer) => {
-                            match body_flaw(&answer.value, schema, &bundle.defs, &validator, &tokens) {
+                            match body_flaw(&answer.value, schema, &bundle.defs, &validator, (&tokens, &echoes)) {
                                 None => return Kept::now(Some(answer.value)),
                                 Some(flaw) => tracing::info!(
                                     operation = %op.id,
@@ -2065,6 +2140,10 @@ mod tests {
     }
 
     fn flaw_of(body: &Value, tokens: &[&str]) -> Option<Flaw> {
+        flaw_echoing(body, tokens, &[])
+    }
+
+    fn flaw_echoing(body: &Value, tokens: &[&str], echoes: &[&str]) -> Option<Flaw> {
         let schema = json!({
             "type": "object",
             "required": ["code"],
@@ -2080,7 +2159,8 @@ mod tests {
         });
         let validator = SchemaValidator::new(&schema).unwrap();
         let tokens: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
-        body_flaw(body, &schema, &Map::new(), &validator, &tokens)
+        let echoes: Vec<String> = echoes.iter().map(|t| (*t).to_owned()).collect();
+        body_flaw(body, &schema, &Map::new(), &validator, (&tokens, &echoes))
     }
 
     #[test]
@@ -2117,7 +2197,12 @@ mod tests {
     fn a_repeating_code_is_not_kept() {
         let looped = "invalid_parameters!".repeat(200);
         assert_eq!(flaw_of(&json!({"code": looped}), &[]), Some(Flaw::LongCode));
-        for code in ["ERR_ERR_ERR", "abababab", "not_found_not_found_not_found"] {
+        for code in [
+            "ERR_ERR_ERR",
+            "abcabcabc",
+            "not_found_not_found_not_found",
+            "invalid_parametersinvalid_parametersinvalid_parameters",
+        ] {
             assert_eq!(
                 flaw_of(&json!({"code": code}), &[]),
                 Some(Flaw::RepeatedCode),
@@ -2125,7 +2210,26 @@ mod tests {
             );
         }
         // Named by the contract, it is its code.
-        assert_eq!(flaw_of(&json!({"code": "abababab"}), &["abababab"]), None);
+        assert_eq!(flaw_of(&json!({"code": "abcabcabc"}), &["abcabcabc"]), None);
+    }
+
+    #[test]
+    fn a_code_repeating_a_short_or_letterless_unit_is_kept() {
+        for code in [
+            "0xABABAB", "tototo_x", "abababab", "E000000", "1-1-1-1", "ERR__x",
+        ] {
+            assert_eq!(flaw_of(&json!({"code": code}), &[]), None, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_code_the_request_carries_is_kept() {
+        let code = "zipzipzip";
+        assert_eq!(
+            flaw_of(&json!({"code": code}), &[]),
+            Some(Flaw::RepeatedCode)
+        );
+        assert_eq!(flaw_echoing(&json!({"code": code}), &[], &[code]), None);
     }
 
     #[test]
@@ -2159,13 +2263,73 @@ mod tests {
             flaw_of(&json!({"code": "x", "message": looped}), &[]),
             Some(Flaw::RepeatedString)
         );
-        let dots = format!("Invalid{}", ".".repeat(60));
+        let long_loop = "invalid_parameters!".repeat(200);
         assert_eq!(
-            flaw_of(&json!({"code": "x", "errors": [{"detail": dots}]}), &[]),
+            flaw_of(&json!({"code": "x", "message": long_loop}), &[]),
+            Some(Flaw::LongString)
+        );
+        let looped = "invalid_parameters!".repeat(100);
+        assert_eq!(
+            flaw_of(&json!({"code": "x", "errors": [{"detail": looped}]}), &[]),
+            Some(Flaw::RepeatedString)
+        );
+        let word = format!("Unknown value '{}' for kind", "zorblax".repeat(8));
+        assert_eq!(
+            flaw_echoing(
+                &json!({"code": "x", "message": word}),
+                &[],
+                &["zorbla", "other"]
+            ),
             Some(Flaw::RepeatedString)
         );
         // Short strings are not judged.
         assert_eq!(flaw_of(&json!({"code": "x", "message": "aaaa"}), &[]), None);
+    }
+
+    #[test]
+    fn zero_filled_ids_and_runs_of_one_character_are_kept() {
+        let zeros = format!("req_{}", "0".repeat(44));
+        let nil = "00000000-0000-0000-0000-000000000000-00000000";
+        let dots = format!("Invalid{}", ".".repeat(60));
+        let quoted = format!("The name '{}' is too long", "a".repeat(34));
+        let laugh = format!("The comment '{}' is not allowed here", "ha".repeat(20));
+        for text in [zeros.as_str(), nil, &dots, &quoted, &laugh] {
+            assert_eq!(
+                flaw_of(
+                    &json!({"code": "x", "message": text, "errors": [{"detail": text}]}),
+                    &[]
+                ),
+                None,
+                "{text}"
+            );
+        }
+        assert_eq!(
+            flaw_of(&json!({"code": "x", "request_id": zeros}), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_string_quoting_the_request_is_kept() {
+        let value = "zorblax".repeat(8);
+        let message = format!("Unknown value '{value}' for kind");
+        let body = json!({"code": "x", "message": message});
+        assert_eq!(flaw_of(&body, &[]), Some(Flaw::RepeatedString));
+        assert_eq!(flaw_echoing(&body, &[], &[&value]), None);
+    }
+
+    #[test]
+    fn the_request_echoes_are_its_strings_and_numbers() {
+        let call = OperationCall {
+            operation_id: "op".into(),
+            path_params: Map::from_iter([("id".to_owned(), json!("p1"))]),
+            query: Map::from_iter([("tag".to_owned(), json!(["q1", "q2"]))]),
+            headers: Map::from_iter([("x-trace".to_owned(), json!("h1"))]),
+            body: Some(json!({"name": "b1", "nested": {"n": 7, "on": true}})),
+        };
+        let mut echoes = request_echoes(&call);
+        echoes.sort();
+        assert_eq!(echoes, ["7", "b1", "h1", "p1", "q1", "q2"]);
     }
 
     #[test]
