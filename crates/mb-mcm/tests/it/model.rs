@@ -37,6 +37,7 @@ fn op(id: &str, kind: OperationKind, outputs: Vec<OutputVariant>) -> Operation {
             headers: None,
             body: None,
             body_required: false,
+            bodies: Vec::new(),
         },
         outputs,
         resource_type: Some("orders".into()),
@@ -813,4 +814,32 @@ fn write_nouns_read_a_write_verb_at_a_word_boundary() {
     ] {
         assert_eq!(nouns(name), vec![], "{name}");
     }
+}
+
+/// A bundle stored before request bodies kept every media type loads with
+/// none and serializes as it did; one with variants keeps them through a
+/// round trip.
+#[test]
+fn bundle_without_body_variants_loads_and_round_trips() {
+    let mut bundle: Bundle = serde_json::from_str(P2_ORDERS).unwrap();
+    assert!(bundle.operations.iter().all(|o| o.input.bodies.is_empty()));
+    assert_eq!(serde_json::to_string(&bundle).unwrap(), P2_ORDERS);
+    bundle.operations[1].input.bodies = vec![
+        BodyVariant {
+            media_type: "application/json".into(),
+            schema: json!({"$ref": "#/$defs/Order"}),
+        },
+        BodyVariant {
+            media_type: "application/json; domain-model=x.semanticpatch".into(),
+            schema: json!({"type": "object", "required": ["instructions"]}),
+        },
+    ];
+    let text = serde_json::to_string(&bundle).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v["operations"][1]["input"]["bodies"][1]["media_type"],
+        "application/json; domain-model=x.semanticpatch"
+    );
+    let back: Bundle = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, bundle);
 }

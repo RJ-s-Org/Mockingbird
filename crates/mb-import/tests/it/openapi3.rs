@@ -1,7 +1,7 @@
 #![cfg(test)]
 use mb_import::{ImportError, compile};
 use mb_mcm::{Bundle, Effect, Identity, OperationKind, StatusSelector};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Every name an API-key scheme declares is kept on the bundle: one no requirement
 /// references, and one in a requirement dropped for being ANDed with a scheme the mock
@@ -3469,5 +3469,93 @@ paths:
     assert!(
         warnings[0].message.contains("does not declare"),
         "{warnings:?}"
+    );
+}
+
+#[test]
+fn every_request_media_type_keeps_its_body_schema() {
+    let src = oas(r#"
+  /flags/{key}:
+    patch:
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: array, items: {type: object}}
+          application/json; domain-model=x.semanticpatch:
+            schema:
+              type: object
+              required: [instructions]
+              properties: {instructions: {type: array}}
+      responses: {"200": {description: OK}}
+  /one:
+    post:
+      requestBody:
+        content: {application/json: {schema: {type: object}}}
+      responses: {"200": {description: OK}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let input = &b.operation("patch_flags_key").unwrap().input;
+    // The default stays the plain JSON entry.
+    assert_eq!(
+        input.body,
+        Some(json!({"type": "array", "items": {"type": "object"}}))
+    );
+    let bodies: Vec<(&str, &Value)> = input
+        .bodies
+        .iter()
+        .map(|v| (v.media_type.as_str(), &v.schema))
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            (
+                "application/json",
+                &json!({"type": "array", "items": {"type": "object"}})
+            ),
+            (
+                "application/json; domain-model=x.semanticpatch",
+                &json!({"type": "object", "required": ["instructions"],
+                        "properties": {"instructions": {"type": "array"}}})
+            ),
+        ]
+    );
+    // A single media type needs no variants: the body says it all.
+    assert!(b.operation("post_one").unwrap().input.bodies.is_empty());
+}
+
+/// A `$ref` in a request body media type other than the default is checked
+/// like the default's: a missing component is stubbed, with a warning that
+/// names the media type.
+#[test]
+fn dangling_ref_in_a_non_default_request_media_type_is_checked() {
+    let src = oas(r#"
+  /flags/{key}:
+    patch:
+      operationId: patchFlag
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: array}
+          application/json; domain-model=x.semanticpatch:
+            schema: {$ref: '#/components/schemas/Missing'}
+      responses: {"200": {description: OK}}
+"#);
+    let (b, warnings) = mb_import::compile_with_warnings(src.as_bytes()).unwrap();
+    let input = &b.operation("patchFlag").unwrap().input;
+    assert_eq!(input.bodies[1].schema, json!({"$ref": "#/$defs/Missing"}));
+    assert_eq!(b.defs["Missing"], json!(true));
+    let dangling: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "dangling_ref")
+        .collect();
+    assert_eq!(dangling.len(), 1, "{warnings:?}");
+    let message = &dangling[0].message;
+    assert!(message.contains("operation patchFlag"), "{message}");
+    assert!(
+        message.contains("application/json; domain-model=x.semanticpatch"),
+        "{message}"
     );
 }

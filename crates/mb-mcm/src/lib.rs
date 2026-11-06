@@ -577,6 +577,23 @@ pub struct InputSchemas {
     /// required `formData` parameter).
     #[serde(default)]
     pub body_required: bool,
+    /// Every request body the contract declares, by media type, when it
+    /// declares more than one (an OpenAPI 3 `requestBody.content` with
+    /// several entries); empty otherwise. `body` is the default among them:
+    /// the one a request whose `Content-Type` matches none is held to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bodies: Vec<BodyVariant>,
+}
+
+/// One declared request body media type and its schema.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct BodyVariant {
+    /// The media type as declared, parameters included
+    /// (`application/json; domain-model=x.semanticpatch`).
+    pub media_type: String,
+    /// The body schema for requests sent as this media type.
+    pub schema: Value,
 }
 
 /// The status an output variant answers.

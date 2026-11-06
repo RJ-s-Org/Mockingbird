@@ -2150,3 +2150,189 @@ async fn serves_under_the_runtime_base_paths() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// A PATCH accepting a JSON Patch array as `application/json` and an
+/// instructions object under a media type parameter.
+const MEDIA_VARIANTS: &str = r#"
+openapi: 3.0.3
+info: {title: Flags, version: "1"}
+paths:
+  /flags/{key}:
+    patch:
+      operationId: patchFlag
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                required: [op, path]
+                properties: {op: {type: string}, path: {type: string}, value: {}}
+          application/json; domain-model=x.semanticpatch:
+            schema:
+              type: object
+              required: [instructions]
+              properties:
+                instructions: {type: array, items: {type: object}}
+                comment: {type: string}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, properties: {key: {type: string}}}
+  /notes:
+    post:
+      operationId: createNote
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {text: {type: string}}}
+          application/json; version=2:
+            schema:
+              type: object
+              properties:
+                text: {type: string}
+                tone: {type: string, default: variant-two-default}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {type: object, properties: {id: {type: string}}}
+"#;
+
+fn send_typed(method: &str, uri: &str, content_type: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_request_body_is_validated_against_the_media_type_it_is_sent_as() {
+    let h = offline_contract(MEDIA_VARIANTS);
+    let semantic = json!({"instructions": [{"kind": "turnFlagOn"}]});
+    let patch = json!([{"op": "replace", "path": "/on", "value": true}]);
+    let status = |resp: Response| resp.status();
+
+    // The semantic patch, sent with its media type parameter, passes.
+    let resp = send(
+        &h,
+        send_typed(
+            "PATCH",
+            "/flags/a",
+            "application/json; domain-model=x.semanticpatch",
+            &semantic,
+        ),
+    )
+    .await;
+    assert_ne!(status(resp), StatusCode::BAD_REQUEST);
+
+    // The same object as plain JSON is checked against the array schema.
+    let resp = send(
+        &h,
+        send_typed("PATCH", "/flags/a", "application/json", &semantic),
+    )
+    .await;
+    assert_eq!(status(resp), StatusCode::BAD_REQUEST);
+
+    // A charset parameter does not leave the plain entry.
+    let resp = send(
+        &h,
+        send_typed(
+            "PATCH",
+            "/flags/a",
+            "application/json; charset=utf-8",
+            &patch,
+        ),
+    )
+    .await;
+    assert_ne!(status(resp), StatusCode::BAD_REQUEST);
+
+    // Type and parameter names match whatever their case and spacing.
+    let resp = send(
+        &h,
+        send_typed(
+            "PATCH",
+            "/flags/a",
+            "Application/JSON ;Domain-Model=x.semanticpatch",
+            &semantic,
+        ),
+    )
+    .await;
+    assert_ne!(status(resp), StatusCode::BAD_REQUEST);
+    let resp = send(
+        &h,
+        send_typed(
+            "PATCH",
+            "/flags/a",
+            "Application/JSON ;Domain-Model=x.semanticpatch",
+            &patch,
+        ),
+    )
+    .await;
+    assert_eq!(status(resp), StatusCode::BAD_REQUEST);
+
+    // A parameter value no entry declares falls back to the bare type.
+    let resp = send(
+        &h,
+        send_typed(
+            "PATCH",
+            "/flags/a",
+            "application/json; domain-model=other",
+            &patch,
+        ),
+    )
+    .await;
+    assert_ne!(status(resp), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn generation_is_given_the_request_shape_of_the_media_type_sent() {
+    let h = contract_harness(
+        MEDIA_VARIANTS,
+        vec![json!({"id": "n1"}), json!({"id": "n2"})],
+    );
+    let resp = send(
+        &h,
+        send_typed(
+            "POST",
+            "/notes",
+            "application/json; version=2",
+            &json!({"text": "hi"}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &h,
+        send_typed("POST", "/notes", "application/json", &json!({"text": "hi"})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let prompts: Vec<String> = h
+        .provider
+        .as_ref()
+        .unwrap()
+        .requests()
+        .iter()
+        .map(|r| {
+            r.messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect();
+    assert!(
+        prompts[0].contains("variant-two-default"),
+        "the version=2 call is answered for its own request schema"
+    );
+    assert!(!prompts[1].contains("variant-two-default"));
+}
