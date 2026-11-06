@@ -12,6 +12,9 @@ on:
       - crates/mb-protocols/**
       - crates/mb-engine/**
       - crates/mb-import/**
+      - crates/mb-state/**
+      - crates/mb-store/**
+      - crates/mb-llm/**
       - scripts/llm-bench/**
       - .github/workflows/replay-gate.yml
   pull_request:
@@ -19,6 +22,9 @@ on:
       - crates/mb-protocols/**
       - crates/mb-engine/**
       - crates/mb-import/**
+      - crates/mb-state/**
+      - crates/mb-store/**
+      - crates/mb-llm/**
       - scripts/llm-bench/**
       - .github/workflows/replay-gate.yml
   workflow_dispatch:

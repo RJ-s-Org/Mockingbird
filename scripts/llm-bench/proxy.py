@@ -1201,7 +1201,7 @@ def main() -> int:
     ap.add_argument("--replay", action="append",
                     help="answer every call from these recordings (files or directories; repeatable): "
                          "no upstream, no key, no network")
-    ap.add_argument("--replay-log", help="with --replay: append each call's match (exact/key/nearest/none)")
+    ap.add_argument("--replay-log", help="with --replay: append each call's match (exact/key/reused/nearest/none) and the recorded call it used")
     ap.add_argument("--upstream", default=OPENROUTER_URL, help=argparse.SUPPRESS)
     args = ap.parse_args()
     if not args.ledger and not args.replay:

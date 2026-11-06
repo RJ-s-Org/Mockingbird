@@ -18,16 +18,25 @@ same as when the check passed.
     # The gate: free, offline, a few minutes
     python3 scripts/llm-bench/replay.py gate --binary target/release/mockingbird
 
+    # A PR that changes a paid recording's check on purpose, until the next paid run
+    python3 scripts/llm-bench/replay.py expect scripts/llm-bench/recordings/<slug>~<suite>.json.gz \\
+        '<journey>.<check>'
+
     # Check that no recording holds a credential
     python3 scripts/llm-bench/replay.py scan
 
 Matching, per call (`proxy.py --replay`), in this order:
   exact    the prompt hash (messages and response_format, with timestamps blanked) of
-           a recorded call of the same label;
+           a recorded call of the same label not yet used;
   key      the same (journey, rep, operation, n-th call of that operation in the journey);
+  reused   the prompt hash of a recorded call already used (the journey asks it more
+           often than when recorded): that answer again;
   nearest  the recorded call of the same operation (same journey first) closest in order;
   none     no recorded call of that operation: answered 503 with REPLAY_UNMATCHED.
-Every non-exact match is counted in the replay log. The journey comes from the
+Every match is in the replay log. A journey is dirty when one of its calls matched
+`reused`, `nearest` or `none`, when it called an operation a different number of times
+than when recorded, or when one of its recorded calls went unused: a check that changes
+in a dirty journey is drift, never a regression. The journey comes from the
 `x-bench-journey` header that `server_suites.py --tag-journeys` gives each mock's LLM
 profile; the rep from the mark it posts to the proxy before each journey.
 
@@ -418,7 +427,10 @@ class Replayer(Tags):
                 rec["used"].add(id(hit))
                 return "key", hit
             if same:
-                return "exact", same[-1]
+                # Every recorded call with this prompt was already used: the journey
+                # asks it more often than when recorded, so the answer is a reuse and
+                # the journey is not held to the recording.
+                return "reused", same[-1]
         ops = [c for c in rec["calls"] if c["op"] == tag["op"]]
         if not ops:
             return "none", None
@@ -452,7 +464,8 @@ class Replayer(Tags):
                    "error": call.get("error"), "match": match}
         if self.log_path:
             line = {k: tag[k] for k in ("label", "journey", "rep", "op", "n")}
-            line.update(match=out["match"], status=out["status"])
+            line.update(match=out["match"], status=out["status"],
+                        used=None if call is None else [call["journey"], call["rep"], call["op"], call["n"]])
             with self.log_lock:
                 with open(self.log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(line, ensure_ascii=False) + "\n")
@@ -466,57 +479,111 @@ def journey_of(case: str) -> str:
     return case.split(".", 1)[0]
 
 
+MATCHES = ("exact", "reused", "key", "nearest", "none")
+
+
+def dirty_journeys(recording: Dict[str, Any], calls: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """The journeys the replay cannot hold to the recording, each with why: a call
+    matched only by nearness, not at all, or by reusing an answer already given
+    (`reused`); an operation called a different number of times than when recorded;
+    or a recorded call the replay never used. Any of these means the journey asked
+    something other than what was recorded, so a check that changes is drift."""
+    rep = recording.get("rep", 0)
+    label = recording["label"]
+    mine = [c for c in calls if c.get("label") == label and c.get("rep", 0) == rep]
+    recorded = [c for c in recording.get("calls") or [] if c.get("rep", 0) == rep]
+    why: Dict[str, List[str]] = {}
+
+    def add(journey: Any, reason: str) -> None:
+        reasons = why.setdefault(str(journey), [])
+        if reason not in reasons:
+            reasons.append(reason)
+
+    for c in mine:
+        if c.get("match") in ("reused", "nearest", "none"):
+            add(c.get("journey"), f"{c.get('op')} #{c.get('n')} matched {c.get('match')}")
+    was: Dict[Tuple[str, str], int] = {}
+    for c in recorded:
+        was[(c["journey"], c["op"])] = was.get((c["journey"], c["op"]), 0) + 1
+    now: Dict[Tuple[str, str], int] = {}
+    for c in mine:
+        k = (str(c.get("journey")), str(c.get("op")))
+        now[k] = now.get(k, 0) + 1
+    for journey, op in sorted(set(was) | set(now)):
+        if was.get((journey, op), 0) != now.get((journey, op), 0):
+            add(journey, f"{op} called {now.get((journey, op), 0)} time(s), recorded {was.get((journey, op), 0)}")
+    used = {tuple(c["used"]) for c in mine if isinstance(c.get("used"), list)}
+    for c in recorded:
+        if (c["journey"], c["rep"], c["op"], c["n"]) not in used:
+            add(c["journey"], f"recorded {c['op']} #{c['n']} never used")
+    return {j: why[j] for j in sorted(why)}
+
+
 def compare(recording: Dict[str, Any], rows: List[Dict[str, Any]], calls: List[Dict[str, Any]]) -> Dict[str, Any]:
     """The gate's verdict on one (model, suite): `regressions` (a check the recording
-    passed now fails, and every LLM call of its journey matched exactly or by key),
-    `masked` (the same, but some call of the journey matched only by nearness or not
-    at all: prompt drift, reported only), `improvements`, `missing` (recorded checks
-    the replay did not report) and the call match counts."""
+    passed now fails, and its journey is clean: every LLM call matched exactly or by
+    key, each operation was called as often as when recorded, and every recorded call
+    was used), `masked` (the same in a dirty journey: prompt drift, reported only),
+    `improvements`, `missing` (recorded checks the replay did not report), `dirty`
+    (journey -> why) and the call match counts."""
     label = recording["label"]
     now = {r["case"]: bool(r["ok"]) for r in rows if r.get("rep", 0) == 0 and r.get("case") != "suite_error"}
     errors = [r for r in rows if r.get("case") == "suite_error"]
     mine = [c for c in calls if c.get("label") == label]
-    counts = {m: sum(1 for c in mine if c.get("match") == m) for m in ("exact", "key", "nearest", "none")}
-    dirty = {c.get("journey") for c in mine if c.get("match") in ("nearest", "none")}
+    counts = {m: sum(1 for c in mine if c.get("match") == m) for m in MATCHES}
+    why = dirty_journeys(recording, calls)
     unstable = set(recording.get("unstable") or [])
+    expected = set(recording.get("expected_change") or [])
     out: Dict[str, Any] = {"label": label, "suite": recording["suite"], "model": recording["model"],
                            "checks": len(recording["results"]), "unstable": len(unstable), "flaky": [],
                            "recorded_ok": sum(recording["results"].values()),
                            "replay_ok": sum(1 for c, ok in now.items() if ok and c in recording["results"]),
                            "regressions": [], "masked": [], "improvements": [], "missing": [],
-                           "calls": counts, "suite_error": [e.get("detail") for e in errors]}
+                           "calls": counts, "dirty": why, "suite_error": [e.get("detail") for e in errors],
+                           "expected": sorted(c for c in expected if c in recording["results"])}
     for case, was in sorted(recording["results"].items()):
-        if case in unstable:
+        if case in unstable or case in expected:
             continue
         if case not in now:
             out["missing"].append(case)
             if was:
-                (out["masked"] if journey_of(case) in dirty else out["regressions"]).append(case)
+                (out["masked"] if journey_of(case) in why else out["regressions"]).append(case)
             continue
         if was and not now[case]:
-            (out["masked"] if journey_of(case) in dirty else out["regressions"]).append(case)
+            (out["masked"] if journey_of(case) in why else out["regressions"]).append(case)
         elif not was and now[case]:
             out["improvements"].append(case)
     return out
 
 
+def brief(reasons: List[str], most: int = 4) -> str:
+    more = len(reasons) - most
+    return "; ".join(reasons[:most]) + (f"; and {more} more" if more > 0 else "")
+
+
 def render(reports: List[Dict[str, Any]]) -> str:
     head = ("suite", "checks", "recorded ok", "replay ok", "regressed", "drift-masked", "improved", "unstable",
-            "calls exact/key/nearest/none")
+            "dirty journeys", "calls " + "/".join(MATCHES))
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in reports:
         c = r["calls"]
         lines.append("| " + " | ".join(str(x) for x in (
             r["suite"], r["checks"], r["recorded_ok"], r["replay_ok"], len(r["regressions"]), len(r["masked"]),
-            len(r["improvements"]), r["unstable"], f"{c['exact']}/{c['key']}/{c['nearest']}/{c['none']}")) + " |")
+            len(r["improvements"]), r["unstable"], len(r.get("dirty") or {}),
+            "/".join(str(c.get(m, 0)) for m in MATCHES))) + " |")
     for r in reports:
         for name, title in (("regressions", "REGRESSED (passed in the recording, fails now, answers matched)"),
-                            ("masked", "failed after prompt drift (not counted)"),
+                            ("masked", "failed in a dirty journey (prompt drift, not counted)"),
                             ("flaky", "regressed once but not on a re-run (not counted)"),
-                            ("improvements", "improved"), ("suite_error", "SUITE ERROR")):
-            if r[name]:
+                            ("improvements", "improved"),
+                            ("expected", "expected to change, not compared until re-recorded"),
+                            ("suite_error", "SUITE ERROR")):
+            if r.get(name):
                 lines.append(f"\n{r['suite']}: {title}:")
                 lines += [f"  - {x}" for x in r[name]]
+        if r.get("dirty"):
+            lines.append(f"\n{r['suite']}: dirty journeys (a changed check there is drift, not a regression):")
+            lines += [f"  - {j}: {brief(why)}" for j, why in r["dirty"].items()]
     return "\n".join(lines)
 
 
@@ -679,20 +746,42 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def calibrate(paths: List[str], args: argparse.Namespace, runs: int) -> None:
+def calibrate(paths: List[str], args: argparse.Namespace, runs: int) -> Dict[str, Dict[str, List[str]]]:
     """Replays fresh recordings `runs` times on the binary that made them, and marks as
     `unstable` every check whose result is not the recorded one in each run: the
-    engine decides it by chance (an id it makes up), so the gate cannot hold it."""
+    engine decides it by chance (an id it makes up), so the gate cannot hold it.
+
+    A journey that is dirty here, on the very binary that recorded it, would mask its
+    checks in every gate run, so each one is kept in the recording's `baseline_dirty`
+    and returned (label -> journey -> why) for `record` to report."""
     docs = [read_recording(p) for p in paths]
     unstable: Dict[str, set] = {d["label"]: set() for d in docs}
+    dirty: Dict[str, Dict[str, List[str]]] = {d["label"]: {} for d in docs}
     for _ in range(runs):
         for r in verdicts(docs, *replay_once(docs, paths, args)):
             d = next(x for x in docs if x["label"] == r["label"])
             now = set(r["regressions"]) | set(r["masked"]) | set(r["improvements"]) | set(r["missing"])
             unstable[r["label"]] |= {c for c in now if c in d["results"]}
+            for journey, why in (r.get("dirty") or {}).items():
+                seen = dirty[r["label"]].setdefault(journey, [])
+                seen += [w for w in why if w not in seen]
     for path, d in zip(paths, docs):
         d["unstable"] = sorted(unstable[d["label"]])
+        d["baseline_dirty"] = sorted(dirty[d["label"]])
         write_recording(path, d)
+    return {label: why for label, why in dirty.items() if why}
+
+
+def render_baseline_dirty(dirty: Dict[str, Dict[str, List[str]]]) -> str:
+    """What `record` prints about the journeys calibration found dirty on the binary
+    that recorded them: the gate can never hold their checks."""
+    if not dirty:
+        return "baseline: every journey replays clean on the recording binary"
+    lines = ["baseline: journeys dirty on the recording binary (the gate masks their checks; "
+             "see README#replay-gate):"]
+    for label, journeys in sorted(dirty.items()):
+        lines += [f"  - {label} / {j}: {brief(why)}" for j, why in journeys.items()]
+    return "\n".join(lines)
 
 
 def cmd_record(args: argparse.Namespace) -> int:
@@ -741,13 +830,15 @@ def cmd_record(args: argparse.Namespace) -> int:
             for p in e.problems:
                 print(f"  - {p}", file=sys.stderr)
             return 1
-        if args.calibrate:
-            calibrate(written, args, args.calibrate)
+        dirty = calibrate(written, args, args.calibrate) if args.calibrate else {}
         for p in written:
             doc = read_recording(p)
             print(f"{os.path.relpath(p, REPO)}: {len(doc['calls'])} calls, "
                   f"{sum(doc['results'].values())}/{len(doc['results'])} checks ok, "
-                  f"{len(doc.get('unstable') or [])} unstable")
+                  f"{len(doc.get('unstable') or [])} unstable, "
+                  f"{len(doc.get('baseline_dirty') or [])} journey(s) dirty at baseline")
+        if args.calibrate:
+            print(render_baseline_dirty(dirty))
         problems = scan(written)
         for p in problems:
             print(p, file=sys.stderr)
@@ -759,6 +850,21 @@ def cmd_record(args: argparse.Namespace) -> int:
             print(f"kept {work}", file=sys.stderr)
         else:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def cmd_expect(args: argparse.Namespace) -> int:
+    """Marks checks of one recording as expected to change: the gate stops comparing
+    them until the recording is made again (a new recording starts with none). For a
+    pull request that changes what a check of a paid recording returns on purpose."""
+    doc = read_recording(args.recording)
+    unknown = [c for c in args.check if c not in doc["results"]]
+    if unknown:
+        print(f"expect: not checks of {doc['label']}: {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    doc["expected_change"] = sorted(set(doc.get("expected_change") or []) | set(args.check))
+    write_recording(args.recording, doc)
+    print(f"{doc['label']}: {len(doc['expected_change'])} check(s) expected to change")
+    return 0
 
 
 def main() -> int:
@@ -795,6 +901,9 @@ def main() -> int:
     p.add_argument("--rep", type=int, default=0)
     p.add_argument("--ledger", help="the proxy's calls.jsonl: its failed calls and a BUDGET_TRIPPED next to it "
                    "refuse the pack too")
+    e = sub.add_parser("expect", help="mark checks of a recording as expected to change until it is re-recorded")
+    e.add_argument("recording", help="the recording (recordings/<model slug>~<suite>.json.gz)")
+    e.add_argument("check", nargs="+", help="the checks, as `<journey>.<check>`")
     s = sub.add_parser("scan", help="fail when a recording holds an Authorization header or an sk-or- string")
     s.add_argument("paths", nargs="*")
     args = ap.parse_args()
@@ -803,6 +912,8 @@ def main() -> int:
         return cmd_gate(args)
     if args.cmd == "record":
         return cmd_record(args)
+    if args.cmd == "expect":
+        return cmd_expect(args)
     if args.cmd == "pack":
         try:
             written = pack(args.raw, args.server, args.dest, args.source, args.rep, ledger=args.ledger)

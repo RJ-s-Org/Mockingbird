@@ -50,11 +50,11 @@ npm run check:api     # the generated Admin API client matches the server
 npm run e2e           # Playwright; run `npx playwright install chromium` once
 ```
 
-A change to `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import` or `scripts/llm-bench`
-also runs the replay gate (the `Replay gate` workflow, and `scripts/gate.sh`): the journeys suites
-against recorded LLM answers, offline, with no key and no spend, in a few seconds after the
-release build. It fails when a check the recording passed now fails although every LLM call of its
-journey was answered from the recording.
+A change to `crates/mb-protocols`, `crates/mb-engine`, `crates/mb-import`, `crates/mb-state`,
+`crates/mb-store`, `crates/mb-llm` or `scripts/llm-bench` also runs the replay gate (the `Replay
+gate` workflow, and `scripts/gate.sh`): the journeys suites against recorded LLM answers, offline,
+with no key and no spend, in a few seconds after the release build. It fails when a check the recording passed now fails although every LLM call of its
+journey was answered from the recording, as often as when recorded.
 
 ```sh
 cargo build --release -p mockingbird-cli
@@ -63,7 +63,10 @@ python3 scripts/llm-bench/replay.py gate     # prints a table per suite; exit 1 
 
 A change that alters a recorded result on purpose re-records the free seed in the same pull request
 (`python3 scripts/llm-bench/replay.py record --fake`); see
-[the bench README](scripts/llm-bench/README.md#replay-gate).
+[the bench README](scripts/llm-bench/README.md#replay-gate). When it legitimately changes a check
+of a paid recording, mark that check expected to change
+(`python3 scripts/llm-bench/replay.py expect <recording> '<journey>.<check>'`, committed with the
+change and named in the pull request), and the next paid run re-records it.
 
 [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`) is the
 recommended runner: it runs each test in its own process, test binaries in parallel,
