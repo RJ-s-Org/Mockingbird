@@ -269,6 +269,10 @@ def read_revisions(api, mock):
     return out
 
 
+# Writes of one description tried before a suite fails on a mock that does not serve it.
+WORLD_WRITE_ATTEMPTS = 3
+
+
 def put_world(api, mock, document, author):
     """(status, answer) of a PUT of the whole overlay."""
     return admin_call(api, "PUT", world_path(mock), body=document, query={"author": author})
@@ -718,15 +722,22 @@ def apply_world(api, mock, world, entry=None):
             # The agent wrote nothing: the mock keeps its heuristic description.
             rec["status"] = "nothing_authored"
             return rec
-    status, answer = put_world(api, mock, document, author)
-    rec["status"] = status
-    if 200 <= status < 300 and isinstance(answer, dict):
+    # A write counts only once the running mock serves it (`runtime: mounted`): calls
+    # sent before that would measure the previous description. `pending` (the rebuild
+    # did not land within the server's wait) is the harness's problem, not a result, so
+    # the write is sent again; a server older than the `runtime` field answers none.
+    for _ in range(WORLD_WRITE_ATTEMPTS):
+        status, answer = put_world(api, mock, document, author)
+        rec["status"] = status
+        if not (200 <= status < 300 and isinstance(answer, dict)):
+            rec["problem"] = answer
+            raise RuntimeError(f"PUT world of {mock} ({world}): HTTP {status} {json.dumps(answer)[:400]}")
         rec["revision"] = answer.get("revision")
         rec["refused"] = answer.get("refused") or []
-    else:
-        rec["problem"] = answer
-        raise RuntimeError(f"PUT world of {mock} ({world}): HTTP {status} {json.dumps(answer)[:400]}")
-    return rec
+        rec["runtime"] = answer.get("runtime")
+        if rec["runtime"] in ("mounted", None):
+            return rec
+    raise RuntimeError(f"PUT world of {mock} ({world}): the mock does not serve it (runtime {rec['runtime']})")
 
 
 # ---------------------------------------------------------------- CLI
