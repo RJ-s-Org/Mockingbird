@@ -56,7 +56,6 @@ pub(super) struct ListQuery {
     /// How the list pages.
     pub(super) page: Option<PageAsk>,
     /// Whether the description sets a scope (the request may not carry it).
-    #[allow(dead_code, reason = "read by the lists-from-state task")]
     scope_described: bool,
     /// The request parameters a described filter, scope or paging names, and the
     /// soft delete's `listed_with` parameter.
@@ -122,7 +121,6 @@ impl PageAsk {
     }
 
     /// The offset of the first item the request asks for, for a page of `size`.
-    #[allow(dead_code, reason = "read by the lists-from-state task")]
     fn start(&self, size: usize) -> Option<usize> {
         let Some(text) = &self.position else {
             return Some(0);
@@ -541,7 +539,6 @@ pub(super) fn sort(q: &ListQuery, items: &mut [Value]) {
 /// The page of `items` (matched and ordered) the request asks for, and the position
 /// of the next one (an offset) when more follow. Without a described page size, every
 /// item, and no next.
-#[allow(dead_code, reason = "read by the lists-from-state task")]
 pub(super) fn page<'a>(q: &ListQuery, items: &'a [Value]) -> (&'a [Value], Option<String>) {
     let Some(page) = &q.page else {
         return (items, None);

@@ -1589,7 +1589,7 @@ pub(super) fn no_next_header(
 
 /// Whether `token` is a value the header `name` of `op`'s success answer declares (any
 /// text when it declares no schema for it).
-fn header_fits(rt: &MockRuntime, op: &Operation, name: &str, token: &str) -> bool {
+pub(super) fn header_fits(rt: &MockRuntime, op: &Operation, name: &str, token: &str) -> bool {
     let Some(variant) = op.success_output() else {
         return false;
     };

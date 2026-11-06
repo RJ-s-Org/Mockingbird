@@ -660,6 +660,19 @@ pub(crate) async fn prepare<'a>(
         return Prepared::Answered(Box::new(served));
     }
 
+    // A described list of a collection the session listed before: from its records.
+    if target.is_none()
+        && let Some(served) = state_lists::answer(&mut state, plan, call)
+            .instrument(state_span())
+            .await
+    {
+        cursors::after_answer(&mut state, plan, &served)
+            .instrument(state_span())
+            .await;
+        state.touch(session).instrument(state_span()).await;
+        return Prepared::Answered(Box::new(served));
+    }
+
     let is_query = matches!(op.kind, OperationKind::Query);
     let cache = rt
         .state
@@ -945,6 +958,8 @@ pub(crate) async fn complete(
         _ => None,
     };
     let state_call = record_call.as_ref().unwrap_or(call);
+    // What a kept page cut of a list left out, which the list's mark holds too.
+    let mut listed_rest: Vec<String> = Vec::new();
     async {
         // What the list's query asks for, before its items are seeded or cached. An
         // answer holding one record (`/users/me` answering `{user}`) is no list.
@@ -986,6 +1001,16 @@ pub(crate) async fn complete(
             };
             let kept = match cut {
                 Some(cut) => {
+                    let field = item_identity(
+                        rt.bundle(),
+                        op,
+                        generated.body.as_ref().unwrap_or(&Value::Null),
+                    );
+                    listed_rest = cut
+                        .rest
+                        .iter()
+                        .filter_map(|item| mb_mcm::member_at(item, &field).and_then(id_string))
+                        .collect();
                     pages::mint(&mut state, (plan, call), resource_type, cut, &mut generated).await
                 }
                 None => false,
@@ -993,6 +1018,7 @@ pub(crate) async fn complete(
             // A first page kept nothing: no run of an earlier one serves its next pages,
             // and a token of the model's it keeps leads on to nothing the mock served.
             if !kept {
+                listed_rest.clear();
                 pages::no_next_header(rt, (op, call), &mut generated.headers);
                 runs::forget(&mut state, (plan, call)).await;
                 if followed.is_none()
@@ -1261,6 +1287,12 @@ pub(crate) async fn complete(
                     },
                 )
                 .await;
+                // A described list's collection is listed now: later lists of it are
+                // answered from state.
+                if origin == WriteOrigin::Seeded {
+                    let rest = std::mem::take(&mut listed_rest);
+                    state_lists::mark_listed(&mut state, (plan, call), t, &generated, rest).await;
+                }
                 // A create or update that found no record of its type to store: the
                 // description leaves where its record is open. A type with no identity
                 // is marked `no_identity` already, which says why; with no world
