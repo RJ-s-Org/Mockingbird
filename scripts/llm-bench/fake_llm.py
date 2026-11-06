@@ -262,6 +262,8 @@ class PatternParser:
             self.i += m.end() - 1
             lo = int(m.group(1))
             hi = lo if m.group(2) is None else (int(m.group(3)) if m.group(3) else None)
+            if lo > MAX_PATTERN_LEN:
+                raise Unsupported("repeat count above the length cap")
         else:
             return atom
         self.i += 1
@@ -272,57 +274,124 @@ class PatternParser:
         return ("rep", atom, lo, hi)
 
 
-def generate(node, seed, spread, out):
-    """Appends one string of `node` to `out`: the first branch of an alternation,
-    each repeat `spread` times clamped to its bounds, and a set's character picked
-    by `seed` and the position, so ids of different fields differ."""
+# Cost bounds: a generated value is at most MAX_PATTERN_LEN characters (or maxLength),
+# a fixed repeat count above it is unsupported, and one pattern_value visits at most
+# MAX_PATTERN_STEPS nodes over all its attempts, so any pattern answers in a few ms.
+# The bounds count work, not time, so the answer stays deterministic under load.
+MAX_PATTERN_LEN = 4096
+MAX_PATTERN_STEPS = 50_000
+
+
+class TooLong(Exception):
+    """The value being generated passed its length cap."""
+
+
+class OutOfSteps(Exception):
+    """pattern_value spent its step budget."""
+
+
+class Budget:
+    def __init__(self, steps):
+        self.steps = steps
+
+    def spend(self):
+        self.steps -= 1
+        if self.steps < 0:
+            raise OutOfSteps()
+
+
+def generate(node, seed, spread, out, cap, budget, branch=0):
+    """Appends one string of `node` to `out`: branch `branch` of an alternation (its
+    last branch when it has fewer), each repeat `spread` times clamped to its bounds,
+    and a set's character picked by `seed` and the position, so ids of different
+    fields differ. Raises TooLong past `cap` characters and OutOfSteps when `budget`
+    is spent."""
+    budget.spend()
     kind = node[0]
-    if kind == "lit":
-        out.append(node[1])
-    elif kind == "set":
-        chars = node[1]
-        out.append(chars[(seed + len(out)) % len(chars)])
+    if kind in ("lit", "set"):
+        if len(out) >= cap:
+            raise TooLong()
+        if kind == "lit":
+            out.append(node[1])
+        else:
+            chars = node[1]
+            out.append(chars[(seed + len(out)) % len(chars)])
     elif kind == "seq":
         for item in node[1]:
-            generate(item, seed, spread, out)
+            generate(item, seed, spread, out, cap, budget, branch)
     elif kind == "alt":
-        generate(node[1][0], seed, spread, out)
+        branches = node[1]
+        generate(branches[min(branch, len(branches) - 1)], seed, spread, out, cap, budget, branch)
     elif kind == "rep":
         _, inner, lo, hi = node
         count = max(lo, spread if hi is None else min(hi, spread))
         for _ in range(count):
-            generate(inner, seed, spread, out)
+            generate(inner, seed, spread, out, cap, budget, branch)
+
+
+def widest_alt(node):
+    """The most branches of any alternation in `node`."""
+    kind = node[0]
+    if kind == "alt":
+        return max(len(node[1]), *(widest_alt(b) for b in node[1]))
+    if kind == "seq":
+        return max([1, *(widest_alt(n) for n in node[1])])
+    if kind == "rep":
+        return widest_alt(node[1])
+    return 1
+
+
+def forced_repeats(node):
+    """The most times any one node must repeat (the product of the minimum counts
+    of the repeats around it). Above MAX_PATTERN_LEN, no value fits the cap, and
+    `re` itself may loop that many times over an empty group, so it is not run."""
+    kind = node[0]
+    if kind == "rep":
+        return max(1, node[2]) * forced_repeats(node[1])
+    if kind in ("seq", "alt"):
+        return max([1, *(forced_repeats(n) for n in node[1])])
+    return 1
 
 
 def pattern_value(pattern, seed, min_len, max_len, plain):
     """A value matching `pattern` (JSON Schema: unanchored search) and the length
     bounds, deterministic in `seed`; `plain` when it already matches or when no
-    generated value does."""
+    generated value does within the cost bounds. Alternations take their first
+    branch, then later ones when no spread of the first fits the length bounds."""
     try:
+        tree = PatternParser(pattern).parse()
+        if forced_repeats(tree) > MAX_PATTERN_LEN:
+            raise Unsupported("repeats above the length cap")
+        width = widest_alt(tree)
         compiled = re.compile(pattern)
-    except (re.error, RecursionError):
+    except (Unsupported, re.error, RecursionError):
         return plain
 
     def fits(s):
-        return (compiled.search(s) is not None and len(s) >= min_len
-                and (max_len is None or len(s) <= max_len))
+        return (len(s) >= min_len and (max_len is None or len(s) <= max_len)
+                and compiled.search(s) is not None)
 
-    if fits(plain):
+    if len(plain) <= MAX_PATTERN_LEN and fits(plain):
         return plain
+    cap = MAX_PATTERN_LEN if max_len is None else min(max_len, MAX_PATTERN_LEN)
+    if min_len > cap:
+        return plain
+    budget = Budget(MAX_PATTERN_STEPS)
     try:
-        tree = PatternParser(pattern).parse()
-    except (Unsupported, RecursionError):
+        for branch in range(width):
+            for i, spread in enumerate([3, *range(1, max(64, min_len + 1) + 1)]):
+                out = []
+                try:
+                    generate(tree, seed, spread, out, cap, budget, branch)
+                except TooLong:
+                    if i == 0:
+                        continue  # the default spread; smaller ones come next
+                    break  # spreads now ascend, and a larger one is never shorter
+                s = "".join(out)
+                if fits(s):
+                    return s
+    except (OutOfSteps, RecursionError):
         return plain
-    limit = max(64, min_len + 1)
-    for spread in [3, *range(1, limit + 1)]:
-        out = []
-        try:
-            generate(tree, seed, spread, out)
-        except RecursionError:
-            return plain
-        s = "".join(out)
-        if fits(s):
-            return s
     return plain
 
 

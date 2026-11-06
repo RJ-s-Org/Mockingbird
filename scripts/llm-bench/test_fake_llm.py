@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -81,6 +82,75 @@ class PatternValueTests(unittest.TestCase):
         self.assertEqual(value({"type": "string"}), "val1")
         self.assertEqual(value({"type": "string", "minLength": 6}), "val1xx")
         self.assertEqual(value({"type": "string", "format": "email", "pattern": "^x$"}), "user@example.com")
+
+
+    def test_pinned_values(self):
+        # Fixed expected values, so determinism is checked against a known answer and
+        # not only against a second call in the same process.
+        self.assertEqual(value({"type": "string", "pattern": "^[0-9]+$"}), "123")
+        self.assertEqual(value({"type": "string", "pattern": "^inv_[a-z0-9]+$"}), "inv_fgh")
+        schema = {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "invoice_id": {"type": "string", "pattern": "^[0-9]+$"},
+        }}
+        self.assertEqual(value(schema), {"name": "val2", "invoice_id": "345"})
+
+    def test_alternation_tries_later_branches_for_length(self):
+        got = value({"type": "string", "pattern": "^(a|bbbbb)$", "minLength": 5})
+        self.assertEqual(got, "bbbbb")
+        got = value({"type": "string", "pattern": "^(?:long_[0-9]+|id)$", "maxLength": 2})
+        self.assertEqual(got, "id")
+
+    def test_short_spread_tried_when_the_default_is_too_long(self):
+        got = value({"type": "string", "pattern": r"^(\d+)+$", "maxLength": 2})
+        self.assertRegex(got, r"^\d{1,2}$")
+
+    def test_first_branch_still_preferred(self):
+        self.assertEqual(value({"type": "string", "pattern": "^(draft|sent|paid)$"}), "draft")
+
+
+class CostBoundTests(unittest.TestCase):
+    """Adversarial patterns: each returns quickly, with the plain value when no bounded value fits."""
+
+    BOUND_S = 0.25  # the target is ~50 ms; the slack is for a loaded machine
+
+    def timed(self, schema):
+        start = time.perf_counter()
+        got = value(schema)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, self.BOUND_S, f"{schema} took {elapsed:.3f} s")
+        return got
+
+    def test_nested_repeats_with_max_length_zero(self):
+        got = self.timed({"type": "string", "pattern": r"^(((\d+)+)+)+$", "maxLength": 0})
+        self.assertEqual(got, "")
+
+    def test_nested_repeats_unbounded(self):
+        got = self.timed({"type": "string", "pattern": r"^(((\d+)+)+)+$"})
+        self.assertRegex(got, r"^\d+$")
+        self.assertLessEqual(len(got), fake_llm.MAX_PATTERN_LEN)
+
+    def test_huge_fixed_count_is_unsupported(self):
+        got = self.timed({"type": "string", "pattern": r"\d{100000000}"})
+        self.assertEqual(got, "val1")
+        # A huge upper bound alone is fine: the value uses the lower one.
+        got = self.timed({"type": "string", "pattern": r"^x{5,100000000}$"})
+        self.assertEqual(got, "xxxxx")
+
+    def test_nested_fixed_counts_under_the_cap(self):
+        for pattern in [r"^((x{4000}){4000}){4000}$", r"^(((){4000}){4000}){4000}y$", r"^((a|b){4000}){4000}$"]:
+            with self.subTest(pattern=pattern):
+                got = self.timed({"type": "string", "pattern": pattern})
+                self.assertLessEqual(len(got), fake_llm.MAX_PATTERN_LEN)
+
+    def test_wide_alternation_with_impossible_length(self):
+        branches = "|".join(f"(?:b{i}[0-9]+)+" for i in range(200))
+        got = self.timed({"type": "string", "pattern": f"^({branches})$", "minLength": 3000, "maxLength": 3001})
+        self.assertTrue(got == "val1" + "x" * 2996 or re.search(f"^({branches})$", got))
+
+    def test_large_min_length_is_bounded(self):
+        got = self.timed({"type": "string", "pattern": r"^[0-9]+$", "minLength": 100000})
+        self.assertEqual(len(got), 100000)  # the plain value, padded as today
 
 
 if __name__ == "__main__":
