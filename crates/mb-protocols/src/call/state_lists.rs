@@ -28,6 +28,10 @@
 //! of a cursor, next-URL or header-cursor paging is a [`pages`] token, kept with the
 //! rest; a page number or offset is answered from state again, and its next position
 //! is written at the described `response` member or `response_header` when it fits.
+//! Every page counts the list alike: the one integer member beside the list that the
+//! schema declares and names as its count ([`deleted::count_member`]), required or
+//! not, holds what the query keeps before the page is cut, where the answer validates
+//! so; a token's later pages keep the first page's envelope, so its count too.
 //!
 //! At most [`MAX_SCAN`] records are read, and a mark holds at most that many ids: a
 //! collection past the cap is generated again, so a list from state never drops a
@@ -257,6 +261,26 @@ fn with_items(envelope: &Value, path: &[String], items: Vec<Value>) -> Option<Va
     }
 }
 
+/// `body` with `total` at the member counting its list at `path` (see
+/// [`deleted::count_member`]), declared by `schema`, the answer's; `None` when the
+/// answer is the list, or nothing beside it counts it.
+fn with_count(
+    bundle: &mb_mcm::Bundle,
+    schema: &Value,
+    body: &Value,
+    path: &[String],
+    total: usize,
+) -> Option<Value> {
+    let (list, parents) = path.split_last()?;
+    let mut envelope = schema.clone();
+    for name in parents {
+        envelope = property_schema(bundle, &envelope, name)?;
+    }
+    let member = deleted::count_member(bundle, &envelope, list)?;
+    let at: Vec<String> = parents.iter().cloned().chain([member]).collect();
+    pages::placed(body, &at, Some(Value::from(total)))
+}
+
 /// The answer to list `call` from the session's records (see the module's doc), tagged
 /// `State`; `None` when it is not one to answer so, the collection was not listed this
 /// session, or the answer does not validate: the list is then generated.
@@ -354,6 +378,8 @@ pub(super) async fn answer(
     // Each item's derived members, from one listing per child type.
     derived::fill_page(state, session, t, &mut items, Some(&items_schema)).await;
     list_query::sort(&q, &mut items);
+    // What the query keeps, before the page is cut: the list's count on every page.
+    let total = items.len();
     let mut next: Option<usize> = None;
     let mut cut = None;
     let page: Vec<Value> = match q.page.as_ref() {
@@ -390,6 +416,11 @@ pub(super) async fn answer(
     };
     let mut body = with_items(&envelope, &path, page)?;
     let valid = |candidate: &Value| plan.engine.serve_stored(bundle, op, candidate, None);
+    if let Some(counted) =
+        with_count(bundle, schema, &body, &path, total).filter(|c| valid(c).is_some())
+    {
+        body = counted;
+    }
     let mut header = None;
     if let (Some(next), Some(ask)) = (next, q.page.as_ref()) {
         if let Some(member) = &ask.response {

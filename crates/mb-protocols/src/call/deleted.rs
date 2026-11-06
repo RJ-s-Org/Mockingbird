@@ -517,36 +517,64 @@ fn list_count<'a>(
     list: &str,
     was: usize,
 ) -> Option<(&'a str, u64)> {
-    let old = members;
-    let plain = |name: &str| name.to_ascii_lowercase().replace('_', "");
-    let own = [
-        format!("{}count", plain(list)),
-        format!("total{}", plain(list)),
-    ];
     let schema = op.success_output().and_then(|o| o.schema.as_ref());
-    let (parts, _) = schema_parts(rt.bundle(), schema);
-    let declares_integer = |name: &str| {
-        parts
-            .iter()
-            .find_map(|p| p.get("properties")?.get(name))
-            .is_some_and(|member| {
-                let (parts, _) = schema_parts(rt.bundle(), Some(member));
-                parts.iter().any(|p| match p.get("type") {
-                    Some(Value::String(t)) => t == "integer",
-                    Some(Value::Array(types)) => types.iter().any(|t| t == "integer"),
-                    _ => false,
-                })
-            })
-    };
-    let mut counts = old.iter().filter(|(name, value)| {
-        let name_plain = plain(name);
-        (COUNT_NAMES.contains(&name_plain.as_str()) || own.contains(&name_plain))
+    let mut counts = members.iter().filter(|(name, value)| {
+        counts_list(name, list)
             && value.as_u64().is_some_and(|n| n >= was as u64)
-            && declares_integer(name)
+            && declares_integer(rt.bundle(), schema, name)
     });
     let (name, value) = counts.next()?;
     if counts.next().is_some() {
         return None;
     }
     Some((name.as_str(), value.as_u64()?))
+}
+
+/// The member of object schema `envelope` that counts its list member `list`, from what
+/// it declares, whatever an answer holds: the one property beside the list declared an
+/// integer and named as a count of it (`total`, `<list>_count`, `total_<list>`).
+pub(super) fn count_member(
+    bundle: &mb_mcm::Bundle,
+    envelope: &Value,
+    list: &str,
+) -> Option<String> {
+    let (parts, _) = schema_parts(bundle, Some(envelope));
+    let mut names: Vec<&String> = parts
+        .iter()
+        .filter_map(|p| p.get("properties")?.as_object())
+        .flat_map(Map::keys)
+        .filter(|name| *name != list && counts_list(name, list))
+        .filter(|name| declares_integer(bundle, Some(envelope), name))
+        .collect();
+    names.sort();
+    names.dedup();
+    let [name] = names.as_slice() else {
+        return None;
+    };
+    Some((*name).clone())
+}
+
+/// Whether member `name` is named as a count of list member `list`.
+fn counts_list(name: &str, list: &str) -> bool {
+    let plain = |name: &str| name.to_ascii_lowercase().replace('_', "");
+    let name = plain(name);
+    COUNT_NAMES.contains(&name.as_str())
+        || name == format!("{}count", plain(list))
+        || name == format!("total{}", plain(list))
+}
+
+/// Whether object schema `schema` declares its member `name` an integer.
+fn declares_integer(bundle: &mb_mcm::Bundle, schema: Option<&Value>, name: &str) -> bool {
+    let (parts, _) = schema_parts(bundle, schema);
+    parts
+        .iter()
+        .find_map(|p| p.get("properties")?.get(name))
+        .is_some_and(|member| {
+            let (parts, _) = schema_parts(bundle, Some(member));
+            parts.iter().any(|p| match p.get("type") {
+                Some(Value::String(t)) => t == "integer",
+                Some(Value::Array(types)) => types.iter().any(|t| t == "integer"),
+                _ => false,
+            })
+        })
 }
