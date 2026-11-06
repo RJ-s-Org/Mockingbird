@@ -128,8 +128,14 @@ pub(super) async fn parents_by_name(
         }
         let owner = owner_of_param(op, call, field);
         let names = name_fields(field);
-        let Some(parent) = by_path_fields(state, session, &t, &names, &id, owner.as_ref()).await
-        else {
+        let parent = match by_path_fields(state, session, &t, &names, &id, owner.as_ref()).await {
+            Some(parent) => Some(parent),
+            None => {
+                let tried = (names.as_slice(), id.as_str());
+                records::by_extra_fields(state, session, &t, tried, owner.as_ref()).await
+            }
+        };
+        let Some(parent) = parent else {
             continue;
         };
         let is_target =
@@ -201,7 +207,7 @@ pub(super) async fn follow(
             if target.is_some_and(|r| r.resource_type == t && r.id == id) {
                 break;
             }
-            if let Some(hit) = state.get(session, t, &id).await {
+            if let Some(hit) = records::held_by_key(state, session, t, &id).await {
                 let is_target =
                     target.is_some_and(|r| r.resource_type == hit.resource_type && r.id == hit.id);
                 if !is_target && !holds(out, &hit) {

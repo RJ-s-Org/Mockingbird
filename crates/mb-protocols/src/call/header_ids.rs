@@ -8,13 +8,13 @@
 //! A create whose answer holds its id serves that id in the same header.
 
 use mb_engine::consistency::property_schema;
-use mb_engine::headers::{IdentityHeaderKind, identity_header};
+use mb_engine::headers::IdentityHeaderKind;
 use mb_engine::{Faker, GeneratedResponse, OperationCall, SchemaValidator};
 use mb_mcm::{Binding, Operation};
 use mb_state::SessionKey;
 use serde_json::{Map, Value, json};
 
-use super::{StateAccess, id_string, request_values, type_members};
+use super::{StateAccess, id_string, records, request_values, type_members};
 use crate::MockRuntime;
 
 /// How many ids are drawn before giving up on one the session does not hold.
@@ -56,7 +56,7 @@ pub(super) async fn mint(
     {
         return None;
     }
-    let header = identity_header(op, generated.status)?;
+    let header = records::identity_header(rt, op, generated.status)?;
     let Binding::Http { path, .. } = &op.binding else {
         return None;
     };
@@ -83,8 +83,19 @@ pub(super) async fn mint(
         ) else {
             continue;
         };
-        let Some(text) = id_string(&id) else {
-            continue;
+        // A type whose identity has a pattern holds the id in that form, which the
+        // header and the record must still hold.
+        let drawn = id_string(&id).map(|text| (records::in_pattern(rt, t, &text), text));
+        let (id, text) = match drawn {
+            Some((Some(formed), _)) => {
+                let held = Value::String(formed.clone());
+                if !checks.header_holds(&formed) || !checks.identity_holds(&held) {
+                    continue;
+                }
+                (held, formed)
+            }
+            Some((None, text)) => (id, text),
+            None => continue,
         };
         if location && !url_safe(&text) {
             continue;
@@ -120,7 +131,7 @@ fn serve_answered(
     page_url: Option<&str>,
     text: &str,
 ) {
-    let Some(header) = identity_header(op, generated.status) else {
+    let Some(header) = records::identity_header(rt, op, generated.status) else {
         return;
     };
     let Binding::Http { path, .. } = &op.binding else {

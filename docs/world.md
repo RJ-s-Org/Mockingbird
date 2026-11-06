@@ -97,7 +97,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 
 | Key | Shape | Meaning |
 | --- | --- | --- |
-| `identity` | `{member, pattern?, alternates?}` | The member holding the id; `pattern` (one `{id}`) when the id is embedded in a name; `alternates`, other members a path value may name the record by (an alias next to the id), `[]` for none. `member` may be left out of an overlay that sets only `pattern` or `alternates` on a type that already has one; elsewhere that identity is refused. |
+| `identity` | `{member, pattern?, alternates?}` | The member holding the id; `pattern` (one `{id}`) when the id is embedded in a name; `alternates`, other members a path value may name the record by (an alias next to the id), `[]` for none. Described alternates are tried after the members the runtime guesses from a path parameter's name or description (`templateIdOrAlias`); they add to that guess but cannot remove it. `member` may be left out of an overlay that sets only `pattern` or `alternates` on a type that already has one; elsewhere that identity is refused. |
 | `parent` | `{type, member?, path_param?, pattern?}` | The parent record and where it is named. |
 | `lifecycle` | `{member, states?, initial?, soft_delete?}` | The status member and its states; `soft_delete: {state, listed_with?: {param, value}}` for a delete that only moves the record to a state, and the list parameter that still shows it. |
 | `unique` | `[{members, scope?, conflict?}]` | Member sets that must be unique, optionally within a member's scope, with the declared conflict status. |

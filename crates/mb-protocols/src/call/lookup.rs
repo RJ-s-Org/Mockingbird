@@ -18,8 +18,7 @@ pub(super) async fn read_context(
     let owner = owner.as_ref();
     let rt = state.rt;
     let target = match (op.resource_type.as_deref(), target_id) {
-        (Some(t), Some(id)) => match state
-            .get(session, t, id)
+        (Some(t), Some(id)) => match records::held_by_key(state, session, t, id)
             .await
             .filter(|hit| owner.is_none_or(|o| key_fits(rt, session, hit, o)))
             // Where the path names another member than the key (`/issues/{number}`),
@@ -49,25 +48,35 @@ pub(super) async fn read_context(
                     .filter(|_| delete && rt.consistency && !param_is_id)
                     .map(String::as_str)
                     .collect();
+                let then: Vec<&str> = match identity.and_then(|i| i.path_field.as_deref()) {
+                    Some(field) => vec![field],
+                    None if rt.consistency
+                        && param.is_some()
+                        && (delete || identity.is_some())
+                        && identity.is_none_or(|i| !path_names_identity(i)) =>
+                    {
+                        name_fields(param.as_deref().unwrap_or_default())
+                    }
+                    None => Vec::new(),
+                };
                 let found = match by_path_fields(state, session, t, &read_fields, id, owner).await {
                     Some(hit) => Some(hit),
-                    None => match identity.and_then(|i| i.path_field.as_deref()) {
-                        Some(field) => by_path_fields(state, session, t, &[field], id, owner).await,
-                        None if rt.consistency
-                            && param.is_some()
-                            && (delete || identity.is_some())
-                            && identity.is_none_or(|i| !path_names_identity(i)) =>
-                        {
-                            let names = name_fields(param.as_deref().unwrap_or_default());
-                            by_path_fields(state, session, t, &names, id, owner).await
-                        }
-                        None => None,
-                    },
+                    None => by_path_fields(state, session, t, &then, id, owner).await,
                 };
                 match found {
                     Some(hit) => Some(hit),
                     None if rt.consistency => {
-                        by_alternate_member(state, session, (op, t), id, owner).await
+                        match by_alternate_member(state, session, (op, t), id, owner).await {
+                            Some(hit) => Some(hit),
+                            // The members the description adds (a changed identity
+                            // member, described alternates): one more scan.
+                            None => {
+                                let tried: Vec<&str> =
+                                    read_fields.iter().chain(&then).copied().collect();
+                                records::by_extra_fields(state, session, t, (&tried, id), owner)
+                                    .await
+                            }
+                        }
                     }
                     None => None,
                 }
@@ -107,13 +116,22 @@ pub(super) async fn any_owner_holds(
     value: &str,
     param: &str,
 ) -> bool {
-    if state.get(session, t, value).await.is_some() {
+    if records::held_by_key(state, session, t, value)
+        .await
+        .is_some()
+    {
         return true;
     }
     let rt = state.rt;
     let mut fields = name_fields(param);
     fields.extend(rt.index().path_fields(t).iter().map(String::as_str));
-    by_path_fields(state, session, t, &fields, value, None)
+    if by_path_fields(state, session, t, &fields, value, None)
+        .await
+        .is_some()
+    {
+        return true;
+    }
+    records::by_extra_fields(state, session, t, (&fields, value), None)
         .await
         .is_some()
 }

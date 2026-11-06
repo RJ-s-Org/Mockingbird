@@ -241,3 +241,70 @@ components:
     assert_eq!(identity.and_then(|i| i.member.as_deref()), Some("odata.id"));
     assert!(validate(&world, &b).refused.is_empty());
 }
+
+/// Tier 0 restates the header a create names its id in where the detector finds one,
+/// and no `identity.alternates`: the runtime's alternate members are read from a path
+/// parameter (`templateIdOrAlias`), not from the type.
+#[test]
+fn tier0_emits_identity_header_where_the_detector_finds_one() {
+    let b = mb_import::compile(
+        br##"
+openapi: 3.0.0
+info: {title: Desk, version: "1"}
+paths:
+  /conversations:
+    post:
+      operationId: createConversation
+      requestBody: {content: {application/json: {schema: {type: object, properties: {subject: {type: string}}}}}}
+      responses:
+        "201":
+          description: created
+          headers:
+            Resource-ID: {schema: {type: string}}
+  /conversations/{conversationId}:
+    get:
+      operationId: getConversation
+      parameters: [{name: conversationId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Conversation"}}}}}
+  /pings:
+    post:
+      operationId: createPing
+      responses:
+        "201":
+          description: created
+          headers:
+            X-Request-Id: {schema: {type: string}}
+  /templates/{templateIdOrAlias}:
+    get:
+      operationId: getTemplate
+      parameters: [{name: templateIdOrAlias, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+components:
+  schemas:
+    Conversation: {type: object, properties: {id: {type: string}, subject: {type: string}}}
+    Template: {type: object, properties: {TemplateId: {type: string}, Alias: {type: string}}}
+"##,
+    )
+    .unwrap();
+    let world = tier0(&b);
+    let header = |op: &str| {
+        world
+            .operations
+            .get(op)
+            .and_then(|d| d.answer.as_ref())
+            .and_then(|a| a.identity_header.as_ref())
+            .and_then(|h| h.name().map(str::to_owned))
+    };
+    assert_eq!(header("createConversation").as_deref(), Some("Resource-ID"));
+    // A request id names the call, not a record.
+    assert_eq!(header("createPing"), None);
+    assert!(
+        world
+            .types
+            .values()
+            .filter_map(|t| t.identity.as_ref())
+            .all(|i| i.alternates.is_none())
+    );
+    assert!(validate(&world, &b).refused.is_empty());
+    assert!(mb_mcm::world::apply(&b, &world, &world) == b);
+}

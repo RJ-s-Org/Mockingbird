@@ -29,10 +29,32 @@ pub(super) struct WriteRequest<'a> {
     pub(super) header_id: Option<Value>,
 }
 
+/// What [`write_state`] did with an answer: how many records it located and handed to
+/// the store (whatever the store then answered), and whether a create or update found
+/// no record of its type in the answer or the request (the `no_record` world gap).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct WriteOutcome {
+    pub(super) stored: usize,
+    pub(super) no_record: bool,
+}
+
+impl WriteOutcome {
+    /// One record located and handed to the store.
+    const ONE: Self = Self {
+        stored: 1,
+        no_record: false,
+    };
+    /// No record of the type found where one was written.
+    const NO_RECORD: Self = Self {
+        stored: 0,
+        no_record: true,
+    };
+}
+
 /// Writes a 2xx answer to state: a call's create, update or delete, or
 /// (`Seeded`) every identified item of a list answer that the session does
 /// not hold yet.
-pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) {
+pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>) -> WriteOutcome {
     let WriteRequest {
         session,
         op,
@@ -49,7 +71,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
     let rt = state.rt;
     if origin == WriteOrigin::Seeded {
         let Some(items) = generated.body.as_ref().and_then(list_items) else {
-            return;
+            return WriteOutcome::default();
         };
         let field = item_identity(
             state.rt.bundle(),
@@ -79,6 +101,10 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             });
         }
         // The list's items read back in its order.
+        let outcome = WriteOutcome {
+            stored: seeded.len(),
+            no_record: false,
+        };
         let stored = state.insert_seeded_all(session, seeded.clone()).await;
         for (stored, inserted) in seeded.into_iter().zip(stored) {
             let Some(collection) = collection.clone() else {
@@ -95,7 +121,32 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 rt.collections().remember(session, &held, collection);
             }
         }
-        return;
+        return outcome;
+    }
+    let is_create = op.kind == OperationKind::Command(Effect::Create);
+    // A create takes its record from where the request holds it (`request.record`).
+    let request_body = match request_body {
+        Some(body) if is_create => Some(records::request_record(rt, op, body)),
+        other => other,
+    };
+    // A create the description says makes several records, or a long-running one.
+    if is_create {
+        let made = records::created(rt, op, request_body, generated.body.as_ref());
+        if !made.is_empty() {
+            let field = records::identity_member(rt, op, resource_type);
+            let mut outcome = WriteOutcome::default();
+            for data in made {
+                let Some(id) = mb_mcm::member_at(&data, field).and_then(id_string) else {
+                    continue;
+                };
+                outcome.stored += 1;
+                let place = (collection.clone(), query, was_held);
+                store_one(state, session, (op, resource_type), (id, data), place).await;
+            }
+            if outcome.stored > 0 {
+                return outcome;
+            }
+        }
     }
     let data = generated.body.clone().or_else(|| request_body.cloned());
     // A create that named its record in a header: the request is the record, under the
@@ -103,14 +154,18 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
     let header_id = header_id.and_then(|value| Some((id_string(&value)?, value)));
     let (id, data) = match op.kind {
         OperationKind::Command(Effect::Create) if header_id.is_some() => {
-            let Some((id, value)) = header_id else { return };
+            let Some((id, value)) = header_id else {
+                return WriteOutcome::NO_RECORD;
+            };
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
             let record = header_ids::record(rt, resource_type, request_body, field, value);
             (id, Some(record))
         }
         OperationKind::Command(Effect::Create) => {
             let field = op.identity.as_ref().map_or("id", |i| i.field.as_str());
-            let Some(data) = data else { return };
+            let Some(data) = data else {
+                return WriteOutcome::NO_RECORD;
+            };
             match mb_mcm::member_at(&data, field).and_then(id_string) {
                 Some(id) => (id, Some(data)),
                 // An envelope the contract does not say holds the record: the one
@@ -120,15 +175,15 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                 // session deleted, and as no record this create made.
                 None => {
                     let (Some(answer), Some(sent)) = (generated.body.as_ref(), request_body) else {
-                        return;
+                        return WriteOutcome::NO_RECORD;
                     };
                     let want = Holding::Sent(sent);
                     let on = (op, generated.status);
                     let Some(data) = fitting_member(rt, on, resource_type, answer, want) else {
-                        return;
+                        return WriteOutcome::NO_RECORD;
                     };
                     let Some(id) = mb_mcm::member_at(&data, field).and_then(id_string) else {
-                        return;
+                        return WriteOutcome::NO_RECORD;
                     };
                     let resource = StoredResource {
                         resource_type: resource_type.into(),
@@ -141,13 +196,13 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                     {
                         rt.collections().remember(session, &stored, collection);
                     }
-                    return;
+                    return WriteOutcome::ONE;
                 }
             }
         }
         OperationKind::Command(Effect::Update) => {
             let (Some(id), Some(data)) = (target_id, data) else {
-                return;
+                return WriteOutcome::default();
             };
             // An answer of another schema adds nothing of its own to the held record.
             let data = match &generated.body {
@@ -165,7 +220,7 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
                     let on = (op, generated.status);
                     match fitting_member(rt, on, resource_type, &data, want) {
                         Some(record) => record,
-                        None => return,
+                        None => return WriteOutcome::NO_RECORD,
                     }
                 }
                 _ => data,
@@ -173,46 +228,18 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             (id, Some(data))
         }
         OperationKind::Command(Effect::Delete) => {
-            let Some(id) = target_id else { return };
+            let Some(id) = target_id else {
+                return WriteOutcome::default();
+            };
             (id, None)
         }
-        _ => return,
+        _ => return WriteOutcome::default(),
     };
     match data {
         Some(data) => {
-            let resource = StoredResource {
-                resource_type: resource_type.into(),
-                id,
-                data,
-            };
-            let stored = resource.clone();
-            // A route naming no collection keeps the one it had.
-            let held = match &collection {
-                None if rt.collections().has(session, &stored) => {
-                    state.get(session, resource_type, &stored.id).await
-                }
-                _ => None,
-            };
-            if state.upsert(session, resource).await {
-                if state.tracks_deleted && !was_held {
-                    let scope = collection.as_ref().map(|c| c.path.as_str());
-                    deleted::clear(state, session, resource_type, scope, &stored).await;
-                }
-                let created = op.kind == OperationKind::Command(Effect::Create);
-                match (collection, held) {
-                    (Some(collection), _) => {
-                        rt.collections()
-                            .record(session, &stored, collection, created);
-                    }
-                    (None, Some(held)) => rt.collections().carry(session, &held, &stored),
-                    (None, None) if created => rt.collections().place_top_level(session, &stored),
-                    (None, None) => {}
-                }
-                match query {
-                    Some(query) if created => rt.collections().note_scope(session, &stored, query),
-                    _ => rt.collections().refresh_scope(session, &stored),
-                }
-            }
+            let place = (collection, query, was_held);
+            store_one(state, session, (op, resource_type), (id, data), place).await;
+            WriteOutcome::ONE
         }
         None => {
             let gone = state.get(session, resource_type, &id).await;
@@ -220,6 +247,54 @@ pub(super) async fn write_state(state: &mut StateAccess<'_>, w: WriteRequest<'_>
             if let Some(gone) = gone {
                 rt.collections().forget(session, &gone);
             }
+            WriteOutcome::default()
+        }
+    }
+}
+
+/// Stores the record `data` a create or update wrote under `id`, keeping its place: the
+/// collection the route names (`collection`), else the one it had; a create's query
+/// scope (`query`); and, for a record the session did not hold (`was_held` false), no
+/// mark that the session deleted it.
+async fn store_one(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    (op, resource_type): (&Operation, &str),
+    (id, data): (String, Value),
+    (collection, query, was_held): (Option<Collection>, Option<&Map<String, Value>>, bool),
+) {
+    let rt = state.rt;
+    let resource = StoredResource {
+        resource_type: resource_type.into(),
+        id,
+        data,
+    };
+    let stored = resource.clone();
+    // A route naming no collection keeps the one it had.
+    let held = match &collection {
+        None if rt.collections().has(session, &stored) => {
+            state.get(session, resource_type, &stored.id).await
+        }
+        _ => None,
+    };
+    if state.upsert(session, resource).await {
+        if state.tracks_deleted && !was_held {
+            let scope = collection.as_ref().map(|c| c.path.as_str());
+            deleted::clear(state, session, resource_type, scope, &stored).await;
+        }
+        let created = op.kind == OperationKind::Command(Effect::Create);
+        match (collection, held) {
+            (Some(collection), _) => {
+                rt.collections()
+                    .record(session, &stored, collection, created);
+            }
+            (None, Some(held)) => rt.collections().carry(session, &held, &stored),
+            (None, None) if created => rt.collections().place_top_level(session, &stored),
+            (None, None) => {}
+        }
+        match query {
+            Some(query) if created => rt.collections().note_scope(session, &stored, query),
+            _ => rt.collections().refresh_scope(session, &stored),
         }
     }
 }

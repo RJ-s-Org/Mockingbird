@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use mb_mcm::world::{OpDesc, OpKind, TypeDesc, World};
+use mb_mcm::world::{IdentityHeader, OpDesc, OpKind, TypeDesc, World};
 use mb_mcm::{Bundle, OperationKind};
 use serde_json::Value;
 
@@ -38,6 +38,12 @@ pub(crate) struct Described {
     changed_members: HashMap<String, String>,
     /// The schema of each type's lifecycle member, where the record schema declares it.
     lifecycle_members: HashMap<String, Value>,
+    /// The identity header of each create whose effective `answer.identity_header`
+    /// differs from tier 0's.
+    changed_headers: HashMap<String, IdentityHeader>,
+    /// The `identity.alternates` of each type whose effective list differs from tier
+    /// 0's.
+    alternates: HashMap<String, Vec<String>>,
 }
 
 impl Described {
@@ -68,12 +74,42 @@ impl Described {
                 Some((t.clone(), schema))
             })
             .collect();
+        let header = |w: &World, op: &str| {
+            w.operations
+                .get(op)
+                .and_then(|d| d.answer.as_ref())
+                .and_then(|a| a.identity_header.clone())
+        };
+        let changed_headers = world
+            .operations
+            .keys()
+            .filter_map(|op| {
+                let h = header(world, op)?;
+                (header(base, op).as_ref() != Some(&h)).then(|| (op.clone(), h))
+            })
+            .collect();
+        let alternates_of = |w: &World, t: &str| {
+            w.types
+                .get(t)
+                .and_then(|d| d.identity.as_ref())
+                .and_then(|i| i.alternates.clone())
+        };
+        let alternates = world
+            .types
+            .keys()
+            .filter_map(|t| {
+                let a = alternates_of(world, t)?;
+                (alternates_of(base, t).as_ref() != Some(&a)).then(|| (t.clone(), a))
+            })
+            .collect();
         Self {
             world: Some(Arc::new(world.clone())),
             revision,
             gaps: static_gaps(bundle, world),
             changed_members,
             lifecycle_members,
+            changed_headers,
+            alternates,
         }
     }
 
@@ -87,9 +123,25 @@ impl Described {
         self.revision
     }
 
+    /// The identity header the description gives create `op_id` when it differs from
+    /// tier 0's (the detector's): a header name, or [`IdentityHeader::Off`].
+    pub(crate) fn changed_identity_header(&self, op_id: &str) -> Option<&IdentityHeader> {
+        self.changed_headers.get(op_id)
+    }
+
+    /// The alternate members the description gives type `t` when they differ from tier
+    /// 0's (which emits none): `[]` included.
+    pub(crate) fn described_alternates(&self, t: &str) -> Option<&[String]> {
+        self.alternates.get(t).map(Vec::as_slice)
+    }
+
+    /// The effective identity pattern of type `t` (`folders/{id}`), when it has one.
+    pub(crate) fn identity_pattern(&self, t: &str) -> Option<&str> {
+        self.type_desc(t)?.identity.as_ref()?.pattern.as_deref()
+    }
+
     /// The effective identity member of type `t` when it differs from tier 0's (a
     /// type tier 0 gives no member counts as different).
-    #[allow(dead_code, reason = "read by the identity task")]
     pub(crate) fn changed_identity_member(&self, t: &str) -> Option<&str> {
         self.changed_members.get(t).map(String::as_str)
     }
