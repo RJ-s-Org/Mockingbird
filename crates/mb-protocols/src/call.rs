@@ -317,6 +317,11 @@ pub(crate) async fn generate_pending(
         same_values: &pending.same_values,
         changes_by_effects: write_memory::by_effects(&pending.earlier, pending.target.as_ref()),
         update_guard: guard.as_ref().map(|g| g as &dyn mb_engine::UpdateGuard),
+        answer_records: rt
+            .described()
+            .op(&plan.op.id)
+            .and_then(|d| d.answer.as_ref())
+            .and_then(|a| a.records.as_ref()),
     };
     let generated = plan.engine.generate(&rt.bundle, plan.op, call, ctx).await?;
     if generated.source == Source::Fallback {

@@ -651,6 +651,7 @@ fn stream_user_message(
         same_values: &[],
         changes_by_effects: false,
         update_guard: None,
+        answer_records: None,
     };
     let mut s = user_message(call, &unary, false, None, false, false, notes);
     if !ctx.request_stream.is_empty() {

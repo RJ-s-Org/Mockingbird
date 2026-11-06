@@ -54,6 +54,7 @@ fn ctx() -> GenerationContext<'static> {
         same_values: &[],
         changes_by_effects: false,
         update_guard: None,
+        answer_records: None,
     }
 }
 
@@ -313,6 +314,7 @@ async fn prompt_contains_request_and_state_as_data() {
                     same_values: &[],
                     changes_by_effects: false,
                     update_guard: None,
+                    answer_records: None,
                 },
             )
             .await
@@ -563,6 +565,7 @@ async fn update_answer_under_a_member_keeps_its_new_values() {
     let context = GenerationContext {
         target: Some(&target),
         update_guard: Some(&guard),
+        answer_records: None,
         ..ctx()
     };
     let out = engine.generate(&bundle, op, &c, context).await.unwrap();
@@ -606,6 +609,7 @@ async fn update_answer_keeps_a_nested_member_the_request_names_in_part() {
     let context = GenerationContext {
         target: Some(&target),
         update_guard: Some(&guard),
+        answer_records: None,
         ..ctx()
     };
     let out = engine.generate(&bundle, op, &c, context).await.unwrap();
@@ -749,6 +753,7 @@ async fn updated_task(op: &str, request: Value, answer: Value) -> Value {
     let context = GenerationContext {
         target: Some(&target),
         update_guard: Some(&guard),
+        answer_records: None,
         ..ctx()
     };
     let out = engine
@@ -910,6 +915,7 @@ async fn update_answer_keeps_the_branch_it_took() {
     let context = GenerationContext {
         target: Some(&target),
         update_guard: Some(&guard),
+        answer_records: None,
         ..ctx()
     };
     let out = engine.generate(&bundle, op, &c, context).await.unwrap();
@@ -5346,6 +5352,7 @@ async fn a_settling_update_is_told_the_rule() {
         let ctx = GenerationContext {
             target: target.as_ref(),
             update_guard: guarded.then_some(&Settles as &dyn mb_engine::UpdateGuard),
+            answer_records: None,
             ..GenerationContext::default()
         };
         engine

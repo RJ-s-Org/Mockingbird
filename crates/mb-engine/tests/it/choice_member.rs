@@ -141,6 +141,7 @@ async fn patched_with(
     let context = GenerationContext {
         target: Some(&target),
         update_guard: Some(&guard),
+        answer_records: None,
         ..GenerationContext::default()
     };
     let events = Events::default();
