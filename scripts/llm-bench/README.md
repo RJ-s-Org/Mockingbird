@@ -56,6 +56,7 @@ All results go to `--out`, which defaults to `docs/benchmarks/2026-10-29`. Relat
 | `pilot/` | The pilot's own ledger (`calls.jsonl`), slice manifest, `pilot.json` and per-model mb-evals output. |
 | `proxy.log` | The proxy's log, which never contains the key. |
 | `BUDGET_TRIPPED` | Exists once the budget has been hit. |
+| `invalid.jsonl` | Written by `server_suites.py` (in its `--out`, so `server/<slug>/` under `run.py`): one line per suite run that the bench's own budget stopped. See [Budget](#budget). |
 
 The model slug is the model id with `/` replaced by `__`. Proxy labels have the form `<slug>~<workload>`. The workload is `engine` for the full run, `pilot` for the pilot, and the suite name for the server suites.
 
@@ -72,7 +73,7 @@ python3 scripts/llm-bench/server_suites.py --model <id> --proxy-base http://127.
   --repeat 3 --suite journeys_blind6 --suite journeys_blind7 --suites-parallel --jobs 4
 ```
 
-`run.py full --server-jobs N` passes `--jobs N` on. The number of calls in flight per model is about (number of suites running) × `--jobs`, and the proxy reserves a budget estimate for each call in flight, so leave `--budget-usd` some headroom. A journeys suite of 5 journeys × 3 reps has 15 units, so `--jobs 4` makes it about 3–4× faster, and `--jobs 15` makes it as fast as its slowest journey. The server allows 64 LLM generations at once (`limits.max_concurrent_generations`); a call that waits past its LLM timeout is answered by the faker, so keep the total well under that.
+`run.py full --server-jobs N` passes `--jobs N` on. The number of calls in flight per model is about (number of suites running) × `--jobs`, and the proxy reserves a budget estimate for each call in flight, so leave `--budget-usd` some headroom (`server_suites.py` warns at start when it is short; see [Budget](#budget)). A journeys suite of 5 journeys × 3 reps has 15 units, so `--jobs 4` makes it about 3–4× faster, and `--jobs 15` makes it as fast as its slowest journey. The server allows 64 LLM generations at once (`limits.max_concurrent_generations`); a call that waits past its LLM timeout is answered by the faker, so keep the total well under that.
 
 ## Comparing two commits (A/B)
 
@@ -92,13 +93,19 @@ Then run `server_suites.py ... --binary <out>/bin/mb-<sha>` for each build, with
 
 ## Budget
 
-The proxy stops spending. Before each call it reserves an estimate of the call's cost: prompt characters / 3 × input price, plus `max_tokens` (default 4096) × output price. It refuses the call with 402 when the following would reach `--budget-usd` (default 9.0):
+The proxy stops spending. Before each call it reserves an estimate of the call's cost and holds it while the call is in flight. It refuses the call with 402 (`bench budget exhausted`) when the following would reach `--budget-usd` (default 9.0):
 
     ledger spend + prior-ledger spend + in-flight reservations + this call's estimate
+
+The estimate starts as the worst case: prompt characters / 3 × input price, plus `max_tokens` (default 4096; Mockingbird's server profiles send 16,384) × output price. Real calls cost far less than that, so with many calls in flight the reservations alone can reach the cap while real spend is well under it. Once the ledger (`--ledger`, including rows from an earlier start) has 20 successful calls of a model (any `@variant`), that model's calls reserve the 90th-percentile measured cost per call × 1.5 instead, at least the call's prompt part and never more than the worst case. `GET /reserve?model=<id>&max_tokens=<n>` reports what such a call reserves now, and whether it is the measured or worst-case figure. With measured reservations a burst of unusually long answers can end slightly over the cap: the in-flight calls are charged what they cost.
 
 A refusal records `error_kind: budget` and creates `BUDGET_TRIPPED`. After that the proxy refuses every call, including after a restart. To reset, delete the file and raise the budget on purpose.
 
 The budget covers the pilot and the full run together. `run.py` passes the other phase's ledger to the proxy as `--prior-ledger`, and a `BUDGET_TRIPPED` next to a prior ledger counts as a trip too.
+
+Mockingbird answers a refused call with its faker, which says nothing about the model. So as soon as `server_suites.py` sees an answer whose fallback reason is the proxy's 402 (`x-mockingbird-fallback-reason` matching `proxy.budget_exhausted`, or an import job failing on it), it stops the run: every unit stops at its next call, the refused answer and any later check write no row, each suite prints `<suite>: INVALID: bench budget exhausted (spent $X of $Y cap)`, and the process exits 3. Each stopped suite run appends a line to `<out>/invalid.jsonl` with its `run_id`, model, suite, world, rows written, spend, cap and the first refusal. Every `server.jsonl` row carries the `run_id` of the process that wrote it; `aggregate.py` leaves the rows of every run in `invalid.jsonl` out of all scores, lists the runs in `results.json` (`invalid_runs`) and at the top of `tables.md`, and prints them on stderr. Re-run the suite with more budget; the new run's rows have a new `run_id`.
+
+At start `server_suites.py` asks the proxy what one of its calls reserves and warns when the budget left (cap − spend − other calls' reservations) is under 2 × (calls in flight × that reservation). Calls in flight are `--jobs`, times the number of suites with `--suites-parallel`. Other bench processes sharing the proxy (several tiers at once) also reserve, so leave room for them too.
 
 On SIGTERM or Ctrl-C the proxy stops accepting calls and waits (up to its 120 s upstream timeout) for in-flight calls to reach the ledger, so a restart counts their cost. `run.py` starts it in its own session and stops it after the children. A kill -9 still loses the in-flight calls' records.
 

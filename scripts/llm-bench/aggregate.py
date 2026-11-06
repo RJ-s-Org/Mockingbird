@@ -216,6 +216,7 @@ class Inputs:
         self.server = self._server()
         self.world_authoring = self._world_rows("world-authoring.jsonl")
         self.world_applied = self._world_rows("world-applied.jsonl")
+        self.invalid_runs = self._world_rows("invalid.jsonl")
         self.judge_rows = self._jsonl("judge.jsonl", judge_path)
         # judge_prep.py merge --recheck writes the reversed-order re-judge here.
         recheck = self._jsonl("judge-recheck.jsonl",
@@ -714,6 +715,18 @@ def import_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def drop_invalid_runs(rows: List[Dict[str, Any]], invalid: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """Server rows minus those of runs server_suites.py marked invalid in
+    invalid.jsonl (the bench proxy's own budget ran out mid-run, so some answers were
+    the faker's and say nothing about the model). A record names its run by `run_id`;
+    one without (none are written so) names (model, suite, world)."""
+    ids = {str(r["run_id"]) for r in invalid if r.get("run_id")}
+    keys = {(r.get("model"), r.get("suite"), str(r.get("world") or "none")) for r in invalid if not r.get("run_id")}
+    kept = [r for r in rows
+            if str(r.get("run_id")) not in ids and (row_model(r), r.get("suite"), world_of(r)) not in keys]
+    return kept, len(rows) - len(kept)
+
+
 HARNESS_REJECT_MARKERS = ("X-Mockingbird-Session must be",)
 
 
@@ -1185,7 +1198,7 @@ def analyse(out: str, judge_path: str, key_path: str, seed_arg: Optional[str], b
                 add(entry.get("id"))
 
     samples = inputs.samples or []
-    server_rows = inputs.server or []
+    server_rows, invalid_excluded = drop_invalid_runs(inputs.server or [], inputs.invalid_runs)
     ledger = [r for r in (inputs.calls or []) if not is_judge_ledger_row(r)]
     samples_by_model: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     unattributed_samples = 0
@@ -1333,6 +1346,7 @@ def analyse(out: str, judge_path: str, key_path: str, seed_arg: Optional[str], b
         "leaderboard": leaderboard,
         "models": models,
         "spend": spend,
+        "invalid_runs": {"runs": inputs.invalid_runs, "rows_excluded": invalid_excluded},
         "keyword_categories": kw_categories,
         **({"world": world} if world else {}),
     }
@@ -1509,6 +1523,17 @@ def write_tables(path: str, results: Dict[str, Any]) -> None:
         lines.append("")
         lines.append(f"Baseline note: {results['baseline']['baseline_note']}")
     lines.append("")
+    invalid = results.get("invalid_runs") or {}
+    if invalid.get("runs"):
+        lines.append(f"**INVALID runs excluded:** {len(invalid['runs'])} server suite run(s) hit the bench's own "
+                     f"budget and were stopped; their {invalid.get('rows_excluded', 0)} row(s) are left out of "
+                     "every table below (`invalid.jsonl`).")
+        lines.append("")
+        lines += md_table(["model", "suite", "world", "reason", "rows", "spent", "cap", "run"],
+                          [[r.get("model"), r.get("suite"), r.get("world") or "none", r.get("reason"),
+                            fmt(r.get("rows_written"), "int"), fmt(r.get("spent_usd"), "num", 4),
+                            fmt(r.get("budget_usd"), "num", 2), r.get("run_id")] for r in invalid["runs"]])
+        lines.append("")
     lines.append("Conventions: `—` means null (missing input or zero denominator). Every table has an n "
                  "column or states its n. N = engine samples per model; n in the latency table = "
                  "successful calls; judge_n = judge items incl. auto-scored ones (rubric 1.5).")
@@ -1824,6 +1849,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     write_csv(os.path.join(out, "results.csv"), results)
     write_tables(os.path.join(out, "tables.md"), results)
 
+    invalid = results["invalid_runs"]
+    for r in invalid["runs"]:
+        print(f"aggregate: INVALID run excluded: {r.get('model')} / {r.get('suite')} ({r.get('reason')}, "
+              f"run {r.get('run_id')})", file=sys.stderr)
+    if invalid["runs"]:
+        print(f"aggregate: {invalid['rows_excluded']} row(s) of invalid runs left out of the scores", file=sys.stderr)
     print(f"aggregated {len(results['models'])} models -> {out}/results.json, results.csv, tables.md",
           file=sys.stderr)
     return 0

@@ -43,6 +43,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import replay  # noqa: E402
+import re  # noqa: E402
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 UPSTREAM_TIMEOUT_S = 120.0
@@ -53,6 +54,22 @@ DEFAULT_MAX_TOKENS = 4096
 # high, so an unknown model reserves too much rather than too little.
 FALLBACK_PRICES = (1.0e-5, 4.0e-5)
 EXCERPT_CHARS = 300
+# The message of the proxy's 402 once the budget is reached. server_suites.py
+# imports it (through `budget_exhausted`) to tell a faker answer the bench's own
+# budget forced from a model failure; define it nowhere else.
+BUDGET_EXHAUSTED_MESSAGE = "bench budget exhausted"
+# Mockingbird reports a refused LLM call as `LLM returned HTTP 402: <body>`; the
+# body is the proxy's own refusal, so its message is matched exactly.
+BUDGET_EXHAUSTED_REASON = re.compile(
+    r'LLM returned HTTP 402\b[^"]*\{\s*"error"\s*:\s*\{\s*"message"\s*:\s*"'
+    + re.escape(BUDGET_EXHAUSTED_MESSAGE) + '"'
+)
+# In-flight reservations follow measured cost once a model has this many
+# successful calls in the ledger: the MEASURED_PERCENTILE cost of its calls times
+# MEASURED_SAFETY (never above the worst case). Before that, the worst case.
+MEASURED_MIN_CALLS = 20
+MEASURED_PERCENTILE = 0.9
+MEASURED_SAFETY = 1.5
 REASONING_REJECT_STATUSES = (400, 404, 422)
 RESPONSE_FORMAT_REJECT_STATUSES = (400, 422)
 RESPONSE_FORMAT_MARKERS = (
@@ -101,6 +118,23 @@ def redact_bytes(data: bytes) -> bytes:
 def excerpt(text: str) -> str:
     text = " ".join(redact(str(text)).split())
     return text[:EXCERPT_CHARS]
+
+
+def budget_refusal() -> Dict[str, Any]:
+    """The body of the proxy's 402 once the budget is reached."""
+    return {"error": {"message": BUDGET_EXHAUSTED_MESSAGE, "code": 402}}
+
+
+def budget_exhausted(reason: Optional[str]) -> bool:
+    """Whether a Mockingbird fallback reason (`x-mockingbird-fallback-reason`, or an
+    import job's error) is the bench proxy refusing the call on its budget."""
+    return bool(reason) and BUDGET_EXHAUSTED_REASON.search(str(reason)) is not None
+
+
+def percentile(sorted_xs: List[float], p: float) -> float:
+    """The nearest-rank `p` percentile (0..1] of a sorted, non-empty list."""
+    k = max(0, min(len(sorted_xs) - 1, int(-(-p * len(sorted_xs) // 1)) - 1))
+    return sorted_xs[k]
 
 
 def as_float(v: Any) -> Optional[float]:
@@ -254,6 +288,7 @@ class Ledger:
         self.in_flight = 0
         self.calls = 0
         self.per_label: Dict[str, Dict[str, Any]] = {}
+        self.model_costs: Dict[str, List[float]] = {}  # successful calls' cost, by base model id
         os.makedirs(self.dir, exist_ok=True)
         prior_tripped = False
         for p in prior:
@@ -296,6 +331,10 @@ class Ledger:
         cost = as_float(rec.get("cost_usd")) or 0.0
         self.spent += cost
         self.calls += 1
+        if rec.get("status") == 200 and not is_error(rec) and cost > 0:
+            model = rec.get("model_requested") or str(rec.get("model_slug") or "").replace("__", "/")
+            if model:
+                self.model_costs.setdefault(base_model(str(model)), []).append(cost)
         label = rec.get("label") or "?"
         s = self.per_label.setdefault(
             label, {"calls": 0, "cost_usd": 0.0, "errors": 0, "client_closed": 0, "prompt_tokens": 0,
@@ -315,6 +354,20 @@ class Ledger:
 
     def total_spent(self) -> float:
         return self.spent + self.prior_spent
+
+    def measured_reserve(self, model: str) -> Optional[Tuple[float, int]]:
+        """(reservation, calls measured) from this ledger's successful calls of `model`
+        (any variant), or None while it has fewer than MEASURED_MIN_CALLS."""
+        with self.lock:
+            costs = sorted(self.model_costs.get(base_model(model), ()))
+        if len(costs) < MEASURED_MIN_CALLS:
+            return None
+        return percentile(costs, MEASURED_PERCENTILE) * MEASURED_SAFETY, len(costs)
+
+    def measured_mean(self, model: str) -> Optional[float]:
+        with self.lock:
+            costs = self.model_costs.get(base_model(model)) or []
+            return sum(costs) / len(costs) if costs else None
 
     def _write_trip(self, why: str) -> None:
         try:
@@ -587,11 +640,32 @@ class Proxy:
     def pin(self, model: str) -> Optional[Dict[str, Any]]:
         return self.pins.get(model) or self.pins.get(base_model(model))
 
-    def estimate(self, model: str, body: Dict[str, Any]) -> float:
+    def worst_case(self, model: str, body: Dict[str, Any]) -> Tuple[float, float]:
+        """(prompt part, whole worst case): prompt characters / 3 x input price, plus
+        `max_tokens` x output price."""
         p_in, p_out = self.price(model)
         chars = len(json.dumps(body.get("messages", []), ensure_ascii=False))
         max_tokens = as_int(body.get("max_tokens")) or as_int(body.get("max_completion_tokens")) or DEFAULT_MAX_TOKENS
-        return chars / 3.0 * p_in + max_tokens * p_out
+        prompt = chars / 3.0 * p_in
+        return prompt, prompt + max_tokens * p_out
+
+    def estimate(self, model: str, body: Dict[str, Any]) -> float:
+        """What a call reserves while in flight: the worst case until the ledger has
+        MEASURED_MIN_CALLS successful calls of the model, then its measured
+        high-percentile cost times a safety factor (at least this call's prompt part,
+        never more than the worst case)."""
+        return self.reservation(model, body)[0]
+
+    def reservation(self, model: str, body: Dict[str, Any]) -> Tuple[float, str, int]:
+        """(reservation, basis `worst_case` or `measured`, calls measured)."""
+        prompt, worst = self.worst_case(model, body)
+        measured = self.ledger.measured_reserve(model)
+        if measured is None:
+            return worst, "worst_case", 0
+        reserve, n = measured
+        if reserve >= worst:
+            return worst, "worst_case", n
+        return max(prompt, reserve), "measured", n
 
     def post(self, body: Dict[str, Any], out: "Outcome") -> Any:
         """Opens an upstream request; returns the response (any status).
@@ -659,10 +733,33 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/stats":
             self.send_json(200, self.proxy.ledger.stats())
+        elif path == "/reserve":
+            self.reserve_info()
         elif path in ("/healthz", "/readyz"):
             self.send_json(200, {"ok": True})
         else:
             self.send_json(404, {"error": {"message": f"no route for GET {path}"}})
+
+    def reserve_info(self) -> None:
+        """`GET /reserve?model=<id>&max_tokens=<n>`: what a call of that model with an
+        empty prompt reserves now, with the budget, spend and other reservations, so a
+        client that knows its concurrency can warn before it starts."""
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        model = (q.get("model") or [""])[0]
+        if not model:
+            self.send_json(400, {"error": {"message": "model is required"}})
+            return
+        body: Dict[str, Any] = {"messages": []}
+        max_tokens = as_int((q.get("max_tokens") or [None])[0])
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        reserve, basis, n = self.proxy.reservation(model, body)
+        st = self.proxy.ledger.stats()
+        self.send_json(200, {"model": model, "reserve_usd": reserve, "basis": basis, "measured_calls": n,
+                             "measured_mean_usd": self.proxy.ledger.measured_mean(model),
+                             "budget_usd": st["budget_usd"], "spent_usd": st["spent_usd"],
+                             "reserved_usd": st["reserved_usd"], "in_flight": st["in_flight"],
+                             "tripped": st["tripped"]})
 
     def do_POST(self) -> None:
         received = time.monotonic()
@@ -784,9 +881,9 @@ class Handler(BaseHTTPRequestHandler):
         self.last_outcome = None
         estimate = px.estimate(model, body)
         if not px.ledger.reserve(estimate):
-            rec.update(status=402, error_kind="budget", error_excerpt="bench budget exhausted", total_ms=0.0)
+            rec.update(status=402, error_kind="budget", error_excerpt=BUDGET_EXHAUSTED_MESSAGE, total_ms=0.0)
             px.ledger.settle(estimate, rec, reserved=False)
-            self.send_json(402, {"error": {"message": "bench budget exhausted", "code": 402}})
+            self.send_json(402, budget_refusal())
             return
         try:
             self.forward(px, model, body, client_stream, rec, received)
