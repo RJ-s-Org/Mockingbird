@@ -1314,3 +1314,77 @@ fn block<'a>(prompt: &'a str, tag: &str) -> Option<&'a str> {
     let end = prompt.find(&format!("</{tag}>"))?;
     Some(&prompt[start..end])
 }
+
+/// Things keyed by `id`, one delete answering an empty object whose schema declares no
+/// members and another answering the deleted record.
+const EMPTY_DELETE: &str = r##"
+openapi: 3.0.0
+info: {title: Things, version: "1"}
+paths:
+  /things:
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+  /things/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getThing
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}, "404": {description: missing}}
+    delete:
+      operationId: deleteThing
+      responses: {"200": {description: gone, content: {application/json: {schema: {type: object, example: {}}}}}}
+  /records/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    delete:
+      operationId: deleteRecord
+      responses: {"200": {description: gone, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties: {id: {type: string}, name: {type: string}}
+"##;
+
+fn empty_delete_world() -> Value {
+    json!({
+        "types": {"things": {"identity": {"member": "id"}}},
+        "operations": {
+            "createThing": {"kind": "create", "type": "things"},
+            "getThing": {"kind": "read", "type": "things", "target": {"path_param": "id"}},
+            "deleteThing": {"kind": "delete", "type": "things", "target": {"path_param": "id"}},
+            "deleteRecord": {"kind": "delete", "type": "things", "target": {"path_param": "id"}}
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_delete_answer_declaring_no_members_gets_no_forced_identity() {
+    let h = support::described(
+        EMPTY_DELETE,
+        empty_delete_world(),
+        vec![json!({"id": "t1", "name": "a"}), json!({})],
+    );
+    let (status, _, body) = h
+        .send("POST", "/things", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let (status, _, body) = h.send("DELETE", &format!("/things/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({}));
+    let (status, _, body) = h.send("GET", &format!("/things/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn a_delete_answering_the_record_still_gets_its_identity() {
+    let h = support::described(
+        EMPTY_DELETE,
+        empty_delete_world(),
+        vec![json!({"id": "other", "name": "a"})],
+    );
+    let (status, _, body) = h.send("DELETE", "/records/t1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], json!("t1"), "{body}");
+}
