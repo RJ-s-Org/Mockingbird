@@ -258,7 +258,9 @@ class CacheTest(unittest.TestCase):
 
 class FakeAdmin(BaseHTTPRequestHandler):
     """The world endpoints of the Admin API: GET answers a tier-0 view, PUT records
-    the document and author and answers a revision; a 'bad' mock answers 422."""
+    the document and author and answers a revision; a 'bad' mock answers 422. `runtime`
+    is "mounted", except that a 'slow' mock answers "pending" on its first write and a
+    'stuck' one on every write."""
     puts = []
 
     def log_message(self, *a):
@@ -281,8 +283,17 @@ class FakeAdmin(BaseHTTPRequestHandler):
         FakeAdmin.puts.append((self.path, body))
         if "/mocks/bad/" in self.path:
             return self.answer(422, {"status": 422, "detail": "invalid", "path": "/types"})
-        self.answer(201, {"version": 1, "revision": 1, "applied": body, "refused": [
-            {"path": "/operations/x", "code": "unresolved", "message": "m"}]})
+        n = sum(1 for p, _ in FakeAdmin.puts if p == self.path)
+        runtime = "mounted"
+        if "/mocks/stuck/" in self.path or ("/mocks/slow/" in self.path and n == 1):
+            runtime = "pending"
+        if "/mocks/inactive/" in self.path:
+            runtime = "not_served"
+        answer = {"version": 1, "revision": n, "applied": body, "runtime": runtime}
+        if "/mocks/old/" in self.path:
+            del answer["runtime"]
+        self.answer(201, dict(answer, refused=[
+            {"path": "/operations/x", "code": "unresolved", "message": "m"}]))
 
 
 class ApplyTest(unittest.TestCase):
@@ -329,6 +340,28 @@ class ApplyTest(unittest.TestCase):
     def test_a_whole_document_refusal_fails_the_suite(self):
         with self.assertRaises(RuntimeError):
             world_author.apply_world(self.api, "bad", "agent", {"document": {"version": 1}})
+
+    def test_a_write_counts_only_once_the_mock_serves_it(self):
+        rec = world_author.apply_world(self.api, "pets", "agent", {"document": {"version": 1}})
+        self.assertEqual((rec["runtime"], rec["revision"], len(FakeAdmin.puts)), ("mounted", 1, 1))
+
+    def test_a_pending_write_is_written_again(self):
+        rec = world_author.apply_world(self.api, "slow", "agent", {"document": {"version": 1}})
+        self.assertEqual((rec["runtime"], rec["revision"], len(FakeAdmin.puts)), ("mounted", 2, 2))
+
+    def test_a_write_the_mock_never_serves_fails_the_suite(self):
+        with self.assertRaises(RuntimeError):
+            world_author.apply_world(self.api, "stuck", "agent", {"document": {"version": 1}})
+        self.assertEqual(len(FakeAdmin.puts), world_author.WORLD_WRITE_ATTEMPTS)
+
+    def test_a_version_the_mock_does_not_serve_fails_at_once(self):
+        with self.assertRaises(RuntimeError):
+            world_author.apply_world(self.api, "inactive", "agent", {"document": {"version": 1}})
+        self.assertEqual(len(FakeAdmin.puts), 1)
+
+    def test_a_server_without_the_runtime_field_is_taken_at_its_word(self):
+        rec = world_author.apply_world(self.api, "old", "agent", {"document": {"version": 1}})
+        self.assertEqual((rec["runtime"], rec["revision"], len(FakeAdmin.puts)), (None, 1, 1))
 
     def test_apply_worlds_records_each_mock(self):
         out = tempfile.mkdtemp()
