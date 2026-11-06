@@ -67,6 +67,8 @@ With `fake_llm` or the faker the executor still produces correct state behaviour
 
 Reuse `Engine::held_answer` / `serve_stored`: the record goes to the answer, using `identity.record` (`RecordAt`) for envelopes, and the list item array via the existing envelope code. Answer members outside the record (envelope metadata such as `request_id`) come from the faker, deterministically per `faker_seed`. They're not checked by journeys, and no LLM is needed.
 
+**A write whose answer isn't the record.** This covers acknowledgements like `{ok, id, rev}`, an id-only answer, and a 202 with a task or job body. The answer is rendered from its own schema: a member that the record has under the same name, or that the identity names, takes the record's value, and the rest comes from the faker. The record is stored at the write, never later. For 202/async answers, the write lands in state when it's accepted, and any task resource reads as done.
+
 If the rendered answer doesn't validate against the response schema, the call falls back to generation, marked `render_failed`. Each such mark is a renderer bug to fix, never a reason to patch the answer.
 
 ### 5. What happens to the reconciliation code
@@ -102,6 +104,7 @@ Each step is one PR under the AGENTS.md shipping rules, with fail-first tests.
 3. **Update, replace and delete.**
 4. **List.** Scope, filters, sort, paging, and the `undescribed_param` fallback.
 5. **Action.** Transitions and changes, plus preconditions.
+5b. **Tier-0 classification for non-REST and RPC shapes.** GraphQL mutations/queries, gRPC and SOAP methods, and RPC-style `POST /things.create` routes get `kind`, `type` and `target` from structure. That covers the input/output type pairing, and the verb in the operation name, which tier 0 already parses (`write_nouns`). Without this, the executor never sees them: 185 lost checks in the all-model taxonomy. This runs in parallel with steps 2–5 and touches only `crates/mb-mcm/src/world/tier0.rs` and the importers.
 6. **Cleanup.** Delete the code paths the bench shows are now dead.
 
 Steps 2–5 depend only on step 1 and touch separate executor functions, so they run in parallel worktrees once step 1 merges.
