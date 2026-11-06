@@ -9117,8 +9117,8 @@ def bamboohr_steps(j):
     updated = j.last["status"]
     read = person(ana)
     j.check("an update changes only the fields sent",
-            updated == 200 and eq(read.get("jobTitle"), "Lead Engineer") and all(isinstance(v, str) for v in before.values())
-            and all(eq(read.get(k), v) for k, v in before.items()),
+            updated == 200 and eq(read.get("jobTitle"), "Lead Engineer")
+            and all(isinstance(v, str) and eq(read.get(k), v) for k, v in before.items()),
             status_code=updated, before=before, read=read)
     # No check judges the second create by itself.
     ben = employee_id(hire("Ben", "Okafor", emails["ben"], "Analyst"),
@@ -9221,9 +9221,11 @@ def docusign_steps(j):
     def create(status, subject):
         return obj(j.call("POST", envelopes, body={
             "status": status, "emailSubject": subject,
-            "documents": [{"documentId": "1", "name": f"{subject}.txt", "fileExtension": "txt", "documentBase64": text}],
+            "documents": [{"documentId": "1", "name": f"{subject}.txt", "fileExtension": "txt",
+                           "documentBase64": text}],
             "recipients": {"signers": [signer]},
-            "customFields": {"textCustomFields": [{"name": "run", "value": run, "show": "true", "required": "false"}]}}))
+            "customFields": {"textCustomFields": [{"name": "run", "value": run, "show": "true",
+                                                   "required": "false"}]}}))
 
     def listed(**query):
         # status=any keeps every status, drafts too, unless a check asks for one.

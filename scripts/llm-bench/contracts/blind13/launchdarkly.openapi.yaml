@@ -7,6 +7,7 @@ info:
     (launchdarkly.com/docs/api, the Feature flags pages). Requests send an access token
     in the `Authorization` header (no scheme). Bodies are JSON.
 
+    This account's project `default` has two environments, `production` and `test`.
     Flags belong to a project and are addressed by their key:
     `/api/v2/flags/{projectKey}/{featureFlagKey}`. A flag is created with `name` and
     `key` (unique; the key used in code), and optionally `description`, `tags`,
