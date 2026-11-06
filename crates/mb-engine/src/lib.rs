@@ -33,6 +33,7 @@
 //! ```
 #![warn(missing_debug_implementations, missing_docs)]
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -358,8 +359,10 @@ pub struct GeneratedResponse {
     pub headers: Vec<(String, String)>,
     /// What the mock's world description leaves open about this answer's operation
     /// (`no_identity`, `no_target`, `no_record`), for the request log: filled by the
-    /// caller, like [`GeneratedResponse::effect_outcomes`]. Empty from the engine. A
-    /// gap never changes the answer.
+    /// caller, like [`GeneratedResponse::effect_outcomes`]. The engine adds only what
+    /// an update's request left unsettled: a scalar sent for an object member that no
+    /// one member admits (`ambiguous_choice`), or that one does but whose object cannot
+    /// be told whole (`unapplied_choice`). A gap never changes the answer.
     pub world_gaps: Vec<String>,
 }
 
@@ -2882,7 +2885,15 @@ fn reflect(
                     (Some(target), Some(guard)) => {
                         let named = named_inputs(call);
                         let named = named.as_deref();
-                        let body = settled_update(validator, guard, body, target, named, &op.id);
+                        let body = settled_update(
+                            validator,
+                            guard,
+                            body,
+                            target,
+                            named,
+                            &op.id,
+                            &mut response.world_gaps,
+                        );
                         // The query's members as it says them, then the body's over them.
                         let body = if call.query.is_empty() {
                             body
@@ -3417,6 +3428,8 @@ fn merged_member(
 /// value, nor does an owner: an answer that moves the resource leaves the copy as it
 /// was, and what it adds goes, unless the schema needs it. Each top-level member that fits
 /// (see [`overlay`]), and one that does not keeps what a faker's answer would.
+/// What it could not settle goes to `gaps` by kind ([`AMBIGUOUS_CHOICE`],
+/// [`UNAPPLIED_CHOICE`]), each once.
 fn settled_update(
     validator: &SchemaValidator,
     guard: &dyn UpdateGuard,
@@ -3424,10 +3437,22 @@ fn settled_update(
     target: &StoredResource,
     request: Option<&Value>,
     operation: &str,
+    gaps: &mut Vec<String>,
 ) -> Value {
     let root = validator.schema();
-    let at = Settling { root, operation };
+    let found = RefCell::new(Vec::new());
+    let at = Settling {
+        validator,
+        root,
+        operation,
+        gaps: &found,
+    };
     let settled = settled_members(at, Some(root), &answer, &target.data, request, true);
+    for kind in found.into_inner() {
+        if !gaps.iter().any(|g| g == kind) {
+            gaps.push(kind.to_owned());
+        }
+    }
     let settled = guard.keep_identity(settled);
     if !guard.keeps_owner(&settled) {
         return overlay(
@@ -3468,7 +3493,8 @@ fn without_other_owners(
 /// which is taken whole or not at all. A named array takes the request's value, as a cap
 /// or an empty answer could have cut the answer's. A null is only the request's to write.
 /// A scalar the request sends for a member held as an object goes to the one member of
-/// that object that admits it ([`chosen_member`]).
+/// that object that admits it ([`chosen_member`]), unless the member's schema also takes
+/// a scalar, which the scalar is then a branch of.
 fn settled_members(
     at: Settling<'_>,
     schema: Option<&Value>,
@@ -3506,22 +3532,27 @@ fn settled_members(
             out.insert(k.clone(), Value::Null);
         } else if v.is_null() || (held.is_array() && !named.is_array()) {
             continue;
-        } else if let (Value::Object(held), Value::Object(answered), false) =
-            (held, v, named.is_object() || named.is_array())
-        {
+        } else if let (Value::Object(held), Value::Object(answered), false) = (
+            held,
+            v,
+            named.is_object() || named.is_array() || takes_scalar(root, inner),
+        ) {
             // A scalar sent for an object, as a value-of-choice member `{value, label}`
             // takes its value. Only an object (or array) sent goes member by member below.
-            match chosen_member(root, inner, held, answered, named) {
+            match chosen_member(at, inner, held, answered, named) {
                 Ok(member) => {
                     out.insert(k.clone(), member);
                 }
-                Err(reason) => tracing::info!(
-                    operation = %at.operation,
-                    member = %k,
-                    reason,
-                    world_gap = ?[k.as_str()],
-                    "a scalar sent for an object member names no one member of it; the stored object stands"
-                ),
+                Err((kind, reason)) => {
+                    tracing::info!(
+                        operation = %at.operation,
+                        member = %k,
+                        reason,
+                        world_gap = kind,
+                        "a scalar sent for an object member was not applied; the stored object stands"
+                    );
+                    at.gaps.borrow_mut().push(kind);
+                }
             }
         } else if held.is_object() && v.is_object() && !union && !is_union(root, inner) {
             let member = settled_members(at, inner, v, held, Some(named), false);
@@ -3533,28 +3564,40 @@ fn settled_members(
     Value::Object(out)
 }
 
-/// What [`settled_members`] reads at every level: the schema's root, and the operation
-/// it logs a gap under.
+/// What [`settled_members`] reads at every level: the response's validator and schema
+/// root, the operation it logs a gap under, and where it puts the gaps' kinds.
 #[derive(Clone, Copy)]
 struct Settling<'a> {
+    validator: &'a SchemaValidator,
     root: &'a Value,
     operation: &'a str,
+    gaps: &'a RefCell<Vec<&'static str>>,
 }
+
+/// A request's scalar for an object member that no one member of the object admits
+/// (none, or several).
+const AMBIGUOUS_CHOICE: &str = "ambiguous_choice";
+
+/// A request's scalar for an object member that one member admits, but the object it
+/// makes cannot be told whole: a required member the old value decided, which the
+/// schema pairs with no value for the new one, or an object the schema refuses.
+const UNAPPLIED_CHOICE: &str = "unapplied_choice";
 
 /// The object a request's scalar `sent` makes of `held`, a member the stored copy holds
 /// as an object of schema `schema`, `answered` being the answer's: the one scalar member
 /// that admits `sent` takes it. A member admits it by its schema's `enum`, `const` or
 /// examples, and failing any such, a member with none of them whose answered value is
 /// `sent`. The answered object stands when that member there is `sent`, as the answer
-/// applied the change; else `held` with the member set. No member, or more than one,
-/// is the reason returned, and `held` stands.
+/// applied the change. Else `held` takes it ([`moved_choice`]). No member, or more than
+/// one, is the gap returned with its reason, and `held` stands.
 fn chosen_member(
-    root: &Value,
+    at: Settling<'_>,
     schema: Option<&Value>,
     held: &Map<String, Value>,
     answered: &Map<String, Value>,
     sent: &Value,
-) -> Result<Value, &'static str> {
+) -> Result<Value, (&'static str, &'static str)> {
+    let root = at.root;
     let scalar = |v: Option<&Value>| v.is_none_or(|v| !v.is_object() && !v.is_array());
     let keys = held
         .keys()
@@ -3574,15 +3617,174 @@ fn chosen_member(
     }
     let key = match (declared.as_slice(), echoed.as_slice()) {
         ([key], _) | ([], [key]) => *key,
-        ([], []) => return Err("no member of the object admits the value"),
-        _ => return Err("several members of the object admit the value"),
+        ([], []) => return Err((AMBIGUOUS_CHOICE, "no member of the object admits the value")),
+        _ => {
+            return Err((
+                AMBIGUOUS_CHOICE,
+                "several members of the object admit the value",
+            ));
+        }
     };
     if answered.get(key) == Some(sent) {
         return Ok(Value::Object(answered.clone()));
     }
-    let mut out = held.clone();
-    out.insert(key.clone(), sent.clone());
-    Ok(Value::Object(out))
+    if held.get(key) == Some(sent) {
+        return Ok(Value::Object(held.clone()));
+    }
+    let schema = schema.ok_or((UNAPPLIED_CHOICE, "the object has no schema"))?;
+    moved_choice(at, schema, held, key, sent)
+}
+
+/// `held` with its member `key` moved to `sent`, an answer that did not apply the
+/// move: the other members the old value decided cannot be trusted. Each takes the value
+/// the schema pairs with `sent` ([`paired_with`]); one it pairs none with goes when
+/// optional, and when required the move is not made. The object is kept only when it is
+/// valid against `schema`.
+fn moved_choice(
+    at: Settling<'_>,
+    schema: &Value,
+    held: &Map<String, Value>,
+    key: &str,
+    sent: &Value,
+) -> Result<Value, (&'static str, &'static str)> {
+    let root = at.root;
+    let paired = paired_with(root, schema, key, sent);
+    let required = required_members(root, schema, 0);
+    let mut out = Map::new();
+    for member in held.keys() {
+        if member == key {
+            out.insert(member.clone(), sent.clone());
+        } else if let Some(value) = paired.as_ref().and_then(|p| p.get(member)) {
+            out.insert(member.clone(), value.clone());
+        } else if required.iter().any(|r| r == member) {
+            return Err((
+                UNAPPLIED_CHOICE,
+                "a required member of the object pairs with no value for the new choice",
+            ));
+        }
+    }
+    for (member, value) in paired.iter().flatten() {
+        out.entry(member.clone()).or_insert_with(|| value.clone());
+    }
+    let out = Value::Object(out);
+    if at.validator.is_valid_at(schema, &out) {
+        Ok(out)
+    } else {
+        Err((
+            UNAPPLIED_CHOICE,
+            "the object the new choice makes is not valid",
+        ))
+    }
+}
+
+/// The members the object schema `node` pairs with `key` being `sent`: the one object
+/// its `enum` lists with `key` at `sent`, the `const`s of the one `oneOf` or `anyOf`
+/// branch whose `key` is the `const` `sent`, or the one example with `key` at `sent`,
+/// in that order. `None` when no source pairs one object, or one names several.
+fn paired_with(root: &Value, node: &Value, key: &str, sent: &Value) -> Option<Map<String, Value>> {
+    let node = resolved(root, node, 0);
+    let one = |found: Vec<Map<String, Value>>| match found.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    };
+    let objects = |list: Option<&Value>| -> Vec<Map<String, Value>> {
+        let mut found: Vec<Map<String, Value>> = Vec::new();
+        for object in list.and_then(Value::as_array).into_iter().flatten() {
+            if let Some(object) = object.as_object().filter(|o| o.get(key) == Some(sent))
+                && !found.contains(object)
+            {
+                found.push(object.clone());
+            }
+        }
+        found
+    };
+    let listed = objects(node.get("enum"));
+    if !listed.is_empty() {
+        return one(listed);
+    }
+    let mut branches = Vec::new();
+    for union in ["oneOf", "anyOf"] {
+        for branch in node
+            .get(union)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let branch = resolved(root, branch, 0);
+            let consts: Map<String, Value> = branch
+                .get("properties")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, v)| Some((k.clone(), resolved(root, v, 0).get("const")?.clone())))
+                .collect();
+            if consts.get(key) == Some(sent) {
+                branches.push(consts);
+            }
+        }
+    }
+    if !branches.is_empty() {
+        return one(branches);
+    }
+    let mut examples = objects(node.get("examples"));
+    if let Some(example) = node.get("example").and_then(Value::as_object)
+        && example.get(key) == Some(sent)
+        && !examples.contains(example)
+    {
+        examples.push(example.clone());
+    }
+    one(examples)
+}
+
+/// The members the object schema `node` requires, by its `$ref`s and `allOf`s.
+fn required_members(root: &Value, node: &Value, depth: usize) -> Vec<String> {
+    if depth > 8 {
+        return Vec::new();
+    }
+    let node = resolved(root, node, 0);
+    let mut out: Vec<String> = node
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    for part in node
+        .get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        out.extend(required_members(root, part, depth + 1));
+    }
+    out
+}
+
+/// Whether a member's schema takes a scalar beside an object: a `type` naming one, or a
+/// `oneOf` or `anyOf` branch that does. A scalar sent for it switches branch.
+fn takes_scalar(root: &Value, schema: Option<&Value>) -> bool {
+    fn scalar_type(node: &Value) -> bool {
+        let named = |t: &Value| {
+            t.as_str()
+                .is_some_and(|t| !matches!(t, "object" | "array" | "null"))
+        };
+        match node.get("type") {
+            Some(Value::Array(types)) => types.iter().any(named),
+            Some(t) => named(t),
+            None => false,
+        }
+    }
+    let Some(node) = schema.map(|node| resolved(root, node, 0)) else {
+        return false;
+    };
+    scalar_type(node)
+        || ["oneOf", "anyOf"].iter().any(|union| {
+            node.get(*union)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|branch| scalar_type(resolved(root, branch, 0)))
+        })
 }
 
 /// `node` past its `$ref`s.
@@ -4384,6 +4586,54 @@ paths:
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A member's single `example` admits only what it says, as importers that keep
+    /// the keyword hand it over, and pairs the members of an object example.
+    #[test]
+    fn a_single_example_admits_its_value_and_pairs_its_object() {
+        let member = json!({"type": "string", "example": "reserved"});
+        assert_eq!(admits(&member, &json!("reserved")), Some(true));
+        assert_eq!(admits(&member, &json!("active")), None);
+        let object =
+            json!({"type": "object", "example": {"value": "reserved", "label": "Reserved"}});
+        let paired = paired_with(&object, &object, "value", &json!("reserved"));
+        assert_eq!(
+            paired.map(Value::Object),
+            Some(json!({"value": "reserved", "label": "Reserved"}))
+        );
+        assert_eq!(
+            paired_with(&object, &object, "value", &json!("active")),
+            None
+        );
+    }
+
+    /// Two examples pairing different objects with the same value pair none.
+    #[test]
+    fn examples_that_disagree_pair_nothing() {
+        let object = json!({"examples": [
+            {"value": "reserved", "label": "Reserved"},
+            {"value": "reserved", "label": "Held"},
+        ]});
+        assert_eq!(
+            paired_with(&object, &object, "value", &json!("reserved")),
+            None
+        );
+    }
+
+    /// A union with a scalar branch takes a scalar; one of objects only does not.
+    #[test]
+    fn a_union_takes_a_scalar_only_with_a_scalar_branch() {
+        let root = json!({"$defs": {"S": {"type": "object"}}});
+        let mixed = json!({"oneOf": [{"type": "string"}, {"$ref": "#/$defs/S"}]});
+        let objects = json!({"oneOf": [{"$ref": "#/$defs/S"}, {"type": "object"}]});
+        assert!(takes_scalar(&root, Some(&mixed)));
+        assert!(!takes_scalar(&root, Some(&objects)));
+        assert!(takes_scalar(
+            &root,
+            Some(&json!({"type": ["object", "string"]}))
+        ));
+        assert!(!takes_scalar(&root, None));
+    }
 
     fn orders() -> Bundle {
         let path = concat!(

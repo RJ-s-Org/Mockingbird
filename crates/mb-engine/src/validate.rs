@@ -713,6 +713,13 @@ impl SchemaValidator {
         node
     }
 
+    /// Whether `instance` is valid against `node`, a schema inside the root, with
+    /// the root's `$defs`. False when that schema does not compile on its own.
+    pub(crate) fn is_valid_at(&self, node: &Value, instance: &Value) -> bool {
+        jsonschema::draft202012::new(&self.with_root_defs(node))
+            .is_ok_and(|validator| validator.is_valid(instance))
+    }
+
     /// `instance` with its corrupted member names mended against this schema
     /// (see [`crate::mend_member_names`]); how many it mended.
     pub fn mend_member_names(&self, instance: &mut Value) -> usize {
