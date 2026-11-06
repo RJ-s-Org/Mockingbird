@@ -9,7 +9,7 @@
 
 use crate::{Bundle, Effect, Identity, Operation, OperationKind, RecordAt};
 
-use super::{OpDesc, OpKind, Pointer, World};
+use super::{OpDesc, OpKind, Pointer, TargetDesc, World};
 
 /// The record location a world description's record pointer names: the three
 /// forms the bundle has (`/m` → [`RecordAt::Member`], `/0` → [`RecordAt::Item`],
@@ -50,8 +50,10 @@ fn changed<'a, T: PartialEq>(world: Option<&'a T>, base: Option<&T>) -> Option<&
 /// - `target`: the identity's `path_param` and `input_field`, both written
 ///   from `world`'s target where it differs from `base`'s, a member it leaves
 ///   out cleared (an authored `{member}` drops the `path_param` tier 0 took);
-///   a set `kind: create` that `world` gives no target clears both, as
-///   [`overlay`](super::overlay) drops the lower tier's target then;
+///   a set `kind: create` that `world` gives no target clears the
+///   `path_param` its route does not name the new record by (a `POST`'s), as
+///   [`effective`](super::effective) drops it then, and keeps a `PUT`'s whose
+///   last path segment it is;
 /// - `answer.record`: the identity's `record`, the root pointer `""` as `None`
 ///   (the answer is the record);
 /// - a type's `identity.member`: the identity `field` of each operation of the
@@ -127,11 +129,19 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
     let wt = w.target.as_ref();
     let bt = b.target.as_ref();
     // A target is written whole where `world` sets one that differs from `base`'s,
-    // or drops `base`'s by making the operation a create (see [`overlay`]).
+    // or drops `base`'s by making the operation a create whose route does not name
+    // the new record by `base`'s path parameter (see [`effective`]).
     let made_create = kind == Some(OpKind::Create);
     let retarget = match wt {
         Some(t) => (Some(t) != bt).then_some(Some(t)),
-        None => (made_create && bt.is_some()).then_some(None),
+        None => {
+            let names_record = |t: &TargetDesc| {
+                t.path_param
+                    .as_deref()
+                    .is_some_and(|p| op.route_names_record(p))
+            };
+            (made_create && bt.is_some_and(|t| !names_record(t))).then_some(None)
+        }
     };
     let path_param = retarget.and_then(|t| t?.path_param.as_ref());
     let input_field = retarget.and_then(|t| t?.member.as_ref());
@@ -179,7 +189,7 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{RefusalCode, TargetDesc, effective, tier0, validate};
+    use crate::world::{RefusalCode, effective, tier0, validate};
     use crate::{Binding, HttpMethod, InputSchemas, OutputVariant, Protocol, StatusSelector};
     use serde_json::{Map, Value, json};
 
@@ -754,6 +764,67 @@ mod tests {
                 "key": {"type": "string"}, "name": {"type": "string"}
             }}}),
         )
+    }
+
+    /// Buckets stored by `PUT /buckets/{name}` (tier 0: an update by `name`),
+    /// and a `POST /parents/{parentKey}:things` action keyed by its parent.
+    fn put_and_post_routes() -> Bundle {
+        let thing = reference("Thing");
+        bundle(
+            vec![
+                typed(
+                    op("putBucket", "PUT", "/buckets/{name}", thing.clone()),
+                    "buckets",
+                    Some(by("name", "name")),
+                ),
+                typed(
+                    op("addThing", "POST", "/parents/{parentKey}:things", thing),
+                    "things",
+                    Some(by("parentKey", "key")),
+                ),
+            ],
+            json!({"Thing": {"type": "object", "properties": {
+                "name": {"type": "string"}, "key": {"type": "string"}
+            }}}),
+        )
+    }
+
+    #[test]
+    fn a_put_made_a_create_keeps_the_path_param_naming_the_record() {
+        // RFC 9110: a PUT's target URI is the resource itself.
+        let b = put_and_post_routes();
+        let base = tier0(&b);
+        let doc = world(json!({"operations": {"putBucket": {"kind": "create"}}}));
+        let (effective, refused) = effective(&b, &base, &doc);
+        assert_eq!(refused, vec![]);
+        assert_eq!(
+            effective.operations["putBucket"].target,
+            base.operations["putBucket"].target
+        );
+        let op = apply(&b, &base, &effective)
+            .operation("putBucket")
+            .cloned()
+            .unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.identity, Some(by("name", "name")));
+    }
+
+    #[test]
+    fn a_post_made_a_create_drops_the_parents_path_param() {
+        // A POST's path parameter names where the record goes, not the record.
+        let b = put_and_post_routes();
+        let base = tier0(&b);
+        assert!(base.operations["addThing"].target.is_some());
+        let doc = world(json!({"operations": {"addThing": {"kind": "create"}}}));
+        let (effective, refused) = effective(&b, &base, &doc);
+        assert_eq!(refused, vec![]);
+        assert_eq!(effective.operations["addThing"].target, None);
+        let op = apply(&b, &base, &effective)
+            .operation("addThing")
+            .cloned()
+            .unwrap();
+        assert_eq!(op.kind, OperationKind::Command(Effect::Create));
+        assert_eq!(op.identity, Some(identity("key")));
     }
 
     #[test]

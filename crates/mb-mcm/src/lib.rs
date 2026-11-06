@@ -1384,6 +1384,24 @@ impl Operation {
         !last.contains(&format!("{{{param}}}"))
     }
 
+    /// Whether path parameter `param` names the record this operation writes
+    /// itself: an HTTP `PUT` (whose target URI is the resource it stores, RFC
+    /// 9110 section 9.3.4) whose route's last segment is that parameter
+    /// (`PUT /buckets/{name}`). A `POST`'s path parameter names the collection
+    /// or parent it posts to (section 9.3.3), so it never does.
+    #[must_use]
+    pub fn route_names_record(&self, param: &str) -> bool {
+        let Binding::Http {
+            method: HttpMethod::Put,
+            path,
+        } = &self.binding
+        else {
+            return false;
+        };
+        let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or_default();
+        last.matches('{').count() == 1 && last.contains(&format!("{{{param}}}"))
+    }
+
     /// The schema of one response stream item (the single response, for
     /// client streaming): the success output's schema, for streaming kinds.
     #[must_use]

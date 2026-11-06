@@ -114,8 +114,10 @@ const NOT_GENERATED_SOURCE: &str = "not_generated";
 /// identity's path parameter, else its input field in the request body,
 /// else, for HTTP updates and deletes whose identity names no path
 /// parameter, the last path parameter. A create whose identity names both
-/// takes the input field first: the record it makes is named by what it
-/// sends, and a path parameter beside it names where it goes (a parent).
+/// takes the input field first, unless its route names the record by that
+/// path parameter (a `PUT` to the record's own URI, see
+/// [`Operation::route_names_record`]): a `POST`'s path parameter names where
+/// the record goes (its collection or parent), not the record it makes.
 pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> {
     let identity = op.identity.as_ref();
     let path_param = identity.and_then(|i| i.path_param.as_deref());
@@ -126,6 +128,7 @@ pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> 
             .and_then(id_string)
     };
     if op.kind == OperationKind::Command(Effect::Create)
+        && !path_param.is_some_and(|p| op.route_names_record(p))
         && let Some(id) = from_body()
     {
         return Some(id);

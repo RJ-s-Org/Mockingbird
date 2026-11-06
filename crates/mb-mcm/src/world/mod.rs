@@ -709,10 +709,11 @@ impl fmt::Display for Pointer {
 /// field too, so `answer: {identity_header: ..}` keeps the lower tier's
 /// `answer.record`. An operation's `target` replaces `base`'s whole: a member
 /// `top` leaves out is not inherited, so `target: {member: ..}` drops the
-/// lower tier's `path_param`; and a `top` that makes an operation a create
-/// without naming a target drops `base`'s. Other sub-objects, vectors and maps
-/// replace whole (`identity.alternates` among them); unknown keys merge key by
-/// key.
+/// lower tier's `path_param` (a `top` that makes an operation a create
+/// without naming a target keeps `base`'s here; [`effective`] then drops what
+/// the route does not name the new record by). Other sub-objects, vectors and
+/// maps replace whole (`identity.alternates` among them); unknown keys merge
+/// key by key.
 pub fn overlay(base: &World, top: &World) -> World {
     let mut out = base.clone();
     for (name, t) in &top.types {
@@ -796,10 +797,8 @@ fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
 fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     // A target names the record whole: a lower tier's path parameter kept next to
     // an authored member would name another record (a create under a parent keyed
-    // by the parent). And a kind made a create inherits no target: what a lower
-    // tier took for the target of another kind names no new record.
-    let made_create = t.kind == Some(OpKind::Create) && b.kind != Some(OpKind::Create);
-    if t.target.is_some() || made_create {
+    // by the parent).
+    if t.target.is_some() {
         b.target.clone_from(&t.target);
     }
     set(&mut b.kind, &t.kind);
@@ -1027,22 +1026,21 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_changed_to_create_drops_the_base_target() {
-        // What a heuristic took for an action's target names no new record.
+    fn overlay_keeps_the_base_target_of_a_kind_changed_to_create() {
+        // Whether the route names the new record is the bundle's to say: the
+        // overlay keeps the base target, and `effective` decides.
         let base: World = serde_json::from_value(json!({"operations": {"o": {
             "kind": "action", "target": {"path_param": "parentKey"}
         }}}))
         .unwrap();
-        let create: World =
-            serde_json::from_value(json!({"operations": {"o": {"kind": "create"}}})).unwrap();
-        assert_eq!(overlay(&base, &create).operations["o"].target, None);
-        // Another kind keeps the base target: a read or an update names the same record.
-        let update: World =
-            serde_json::from_value(json!({"operations": {"o": {"kind": "update"}}})).unwrap();
-        assert_eq!(
-            overlay(&base, &update).operations["o"].target,
-            base.operations["o"].target
-        );
+        for kind in ["create", "update"] {
+            let top: World =
+                serde_json::from_value(json!({"operations": {"o": {"kind": kind}}})).unwrap();
+            assert_eq!(
+                overlay(&base, &top).operations["o"].target,
+                base.operations["o"].target
+            );
+        }
     }
 
     #[test]

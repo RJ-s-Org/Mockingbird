@@ -3,7 +3,7 @@ use futures::StreamExt;
 use mb_engine::StreamItem;
 use mb_engine::{Engine, EngineConfig, ScenarioSpec};
 use mb_import::compile;
-use mb_mcm::{Bundle, Identity, Protocol};
+use mb_mcm::{Binding, Bundle, HttpMethod, Identity, Protocol};
 use mb_state::{MemoryStore, StateStore};
 use serde_json::json;
 use std::sync::Arc;
@@ -601,6 +601,13 @@ fn a_create_prefers_its_request_member_to_a_path_parameter() {
     };
     assert_eq!(target_id(&op, &no_member), Some("p1".into()));
     op.kind = OperationKind::Command(Effect::Update);
+    assert_eq!(target_id(&op, &call), Some("p1".into()));
+    // A PUT create whose route ends in the parameter is stored at that URI.
+    op.kind = OperationKind::Command(Effect::Create);
+    op.binding = Binding::Http {
+        method: HttpMethod::Put,
+        path: "/parents/{parentKey}".into(),
+    };
     assert_eq!(target_id(&op, &call), Some("p1".into()));
 }
 
