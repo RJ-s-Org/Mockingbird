@@ -7,7 +7,7 @@ description: Review and write a Mockingbird mock's world description - how its c
 
 Every contract version has a **world description**: a small structured statement of how the API behaves as a world. Mockingbird's heuristics write one automatically (author `heuristic`). You improve it from the contract and its documentation, and Mockingbird validates every entry against the contract before it applies. A description is optional: a mock works without your entries, but a missing identity or record pointer cascades into lost records later.
 
-The format is the JSON Schema `get_world_schema` answers (`mockingbird world schema` on the CLI). Every key is optional; an absent key falls back to the heuristics.
+The format is the JSON Schema `get_world_schema` answers (`mockingbird world schema` on the CLI). Every key is optional; an absent key falls back to the heuristics. The mock answers from every entry that validates: lists filter, order and page as described, soft deletes keep the record, unique sets and concurrency tokens refuse before any LLM call, an idempotency header replays the first answer, and derived counts and sums are computed from the stored records. So write only what the documentation states: a wrong entry changes answers.
 
 ## The loop
 
@@ -25,8 +25,9 @@ The format is the JSON Schema `get_world_schema` answers (`mockingbird world sch
    - `invalid`: the entry is malformed (a pattern without exactly one `{id}`, a state not among the states, a `from_request` pointer that does not parse, or a pointer that does not reach into the schema).
 
    Some mistakes refuse the whole write instead, and the server stores nothing: the tool call fails with a problem answer. A document over 256 KiB answers 413 (`too_large`; describe structure, never data). A document nested deeper than 32, of the wrong shape (a string where an object belongs, an unknown `kind`), or with a `request` or `answer` pointer that does not parse answers 422 (`invalid`), and its `path` names the first entry at fault. Fix that entry and send the write again.
-4. **Check it on the mock.** `call_mock` a create, then read the record back by the id the answer gave (and list it). If the read is a 404 or the list misses it, the identity, target or record pointers are still wrong: look at `get_world` again.
-5. **Never put values from traffic or credentials in a description.** It holds member names, parameter names, pointers, states and statuses from the contract. No ids, tokens, keys, customer data or recorded bodies.
+4. **Check it on the mock.** A write applies at once: the mock reloads with the new revision and keeps the records it stored. `call_mock` a create, then read the record back by the id the answer gave (and list it). If the read is a 404 or the list misses it, the identity, target or record pointers are still wrong: look at `get_world` again.
+5. **Let the request log say what to describe next.** Each recorded call of an operation the description leaves open carries `request.world_gap` (read it with `get_request`, or `list_requests` with `include_bodies`): `no_identity` (a write to a type with no identity), `no_target`, or `no_record` (also when a create or update found no record to store in its answer). When a call answered wrongly, start from its `world_gap`, read that part of the contract and its documentation, and write the entry. A gap never changes an answer; it only marks what the mock is still guessing.
+6. **Never put values from traffic or credentials in a description.** It holds member names, parameter names, pointers, states and statuses from the contract. No ids, tokens, keys, customer data or recorded bodies.
 
 Each write adds a numbered revision attached to the contract version; it applies at once and never recompiles the contract. `list_world_revisions {mock}` lists them, `get_world_revision {mock, revision}` reads one with its document, `diff_world {mock, from, to}` shows which pointers changed, and `restore_world_revision {mock, revision}` adds a new revision holding an older one's document. All of them take `version` (default: the active contract version); pass it whenever you work on a version that is not active.
 
@@ -38,7 +39,7 @@ A new contract version starts from the previous version's newest overlay. Entrie
 
 Types (`types.<resource type>`):
 - `identity: {member, pattern?}`: the member holding the record's id; `pattern` when the id is embedded in a name (`folders/{id}`).
-- `identity.alternates: [member]`: other members a path value may name the record by (an alias next to the id); `[]` removes a wrongly guessed one. Setting only `alternates` keeps the heuristic member.
+- `identity.alternates: [member]`: other members a path value may name the record by (an alias next to the id). They are tried after the members the runtime guesses from the path parameter's name, so they add to that guess and cannot remove it. Setting only `alternates` keeps the heuristic member.
 - `parent: {type, member?, path_param?, pattern?}`: the record's parent and where it is named.
 - `lifecycle: {member, states?, initial?, soft_delete?: {state, listed_with?: {param, value}}}`: the status member, and the state a delete only moves the record to, with the list parameter that still shows such records.
 - `unique: [{members, scope?, conflict?}]`: member sets the docs say are unique, within a member's scope, with the declared conflict status.
