@@ -95,7 +95,6 @@ impl Described {
     }
 
     /// How the description says operation `op_id` acts.
-    #[allow(dead_code, reason = "read by the later world-runtime tasks")]
     pub(crate) fn op(&self, op_id: &str) -> Option<&OpDesc> {
         self.world.as_ref()?.operations.get(op_id)
     }

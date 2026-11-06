@@ -14,6 +14,10 @@
 //! ([`mb_state::INTERNAL_TYPE`]): sessions, TTLs and resets clear it. An operation with
 //! no such pair, or a call carrying none of its parameters, pays no read. HTTP-bound
 //! operations with an LLM and consistency on only (see [`write_memory::applies`]).
+//!
+//! A list whose world describes a cursor paging pairs its described `request`
+//! parameter with its described `response` member too ([`pairs`]), whatever they are
+//! named.
 
 use mb_state::INTERNAL_TYPE;
 use sha2::{Digest, Sha256};
@@ -44,6 +48,24 @@ fn text(value: Option<&Value>) -> Option<&str> {
         .filter(|text| !text.trim().is_empty())
 }
 
+/// The cursor parameters of `op` paired with the answer member each comes from: the
+/// hidden ones the prompt pairs, then the described cursor paging's.
+fn pairs(rt: &MockRuntime, op: &Operation) -> Vec<(String, Vec<String>)> {
+    let mut out = mb_engine::prompt::hidden_cursor_pairs(rt.bundle(), op);
+    let paging = rt.described().op(&op.id).and_then(|d| d.paging.as_ref());
+    if let Some(paging) = paging
+        && matches!(paging.style, mb_mcm::world::PagingStyle::Cursor)
+        && let (Some(param), Some(response)) = (&paging.request, &paging.response)
+        && !out.iter().any(|(p, _)| p == param)
+    {
+        out.push((
+            param.clone(),
+            response.split('.').map(str::to_string).collect(),
+        ));
+    }
+    out
+}
+
 async fn read(state: &mut StateAccess<'_>, session: &SessionKey) -> Vec<Value> {
     let doc = state.get(session, INTERNAL_TYPE, KEY).await;
     doc.and_then(|doc| doc.data.get("values")?.as_array().cloned())
@@ -65,7 +87,7 @@ pub(super) async fn after_answer(
     let Some(body) = generated.body.as_ref() else {
         return;
     };
-    let pairs = mb_engine::prompt::hidden_cursor_pairs(rt.bundle(), op);
+    let pairs = pairs(rt, op);
     let fresh: Vec<String> = pairs
         .iter()
         .filter_map(|(param, path)| {
@@ -114,7 +136,7 @@ pub(super) async fn recall(
     if !write_memory::applies(rt, plan) {
         return Vec::new();
     }
-    let carried: Vec<(String, String)> = mb_engine::prompt::hidden_cursor_pairs(rt.bundle(), op)
+    let carried: Vec<(String, String)> = pairs(rt, op)
         .into_iter()
         .filter_map(|(param, _)| {
             let value = text(call.query.get(&param))?;

@@ -72,6 +72,9 @@ enum Style {
     Number,
     /// The index of the first item, from 0: `offset=1` starts at the second.
     Offset,
+    /// A page number from 0, as a described paging whose parameter's `minimum` is 0
+    /// says: `page=1` starts after one page.
+    NumberFromZero,
 }
 
 impl Style {
@@ -79,7 +82,7 @@ impl Style {
     fn first(self) -> usize {
         match self {
             Self::Number => 1,
-            Self::Offset => 0,
+            Self::Offset | Self::NumberFromZero => 0,
         }
     }
 
@@ -87,6 +90,7 @@ impl Style {
         match self {
             Self::Number => "number",
             Self::Offset => "offset",
+            Self::NumberFromZero => "number_from_zero",
         }
     }
 
@@ -94,6 +98,7 @@ impl Style {
         match name {
             "number" => Some(Self::Number),
             "offset" => Some(Self::Offset),
+            "number_from_zero" => Some(Self::NumberFromZero),
             _ => None,
         }
     }
@@ -237,9 +242,38 @@ fn family_position(name: &str, size_param: &str) -> bool {
             .all(|w| POSITION_WORDS.contains(&w.to_lowercase().as_str()))
 }
 
+/// The query parameter of list `op` that says where a page starts for request `call`,
+/// beside page size `size_param`: the described paging's page or offset parameter when
+/// the world describes the list's paging (none for a cursor), else as the contract
+/// confirms it ([`confirmed_position`]).
+fn position(
+    rt: &MockRuntime,
+    (op, call): (&Operation, &OperationCall),
+    size_param: &str,
+) -> Option<Position> {
+    let Some(ask) = list_query::of(rt, op, call).and_then(|q| q.page) else {
+        return confirmed_position(rt.bundle(), op, size_param);
+    };
+    let style = match ask.style {
+        mb_mcm::world::PagingStyle::Page if ask.from_zero => Style::NumberFromZero,
+        mb_mcm::world::PagingStyle::Page => Style::Number,
+        mb_mcm::world::PagingStyle::Offset => Style::Offset,
+        _ => return None,
+    };
+    let param = ask.request?;
+    let echo = answer_lists(rt.bundle(), op)
+        .and_then(|(list, _)| list)
+        .and_then(|list| echo_of(rt.bundle(), op, &list, &param));
+    Some(Position { param, style, echo })
+}
+
 /// The query parameter of `op` that says where a page starts, beside page size
 /// `size_param`, as the contract confirms it (see the module's doc).
-fn position(bundle: &mb_mcm::Bundle, op: &Operation, size_param: &str) -> Option<Position> {
+fn confirmed_position(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    size_param: &str,
+) -> Option<Position> {
     let query = op.input.query.as_ref()?;
     let declared = query.get("properties")?.as_object()?;
     let (list, item_parts) = answer_lists(bundle, op)?;
@@ -332,7 +366,7 @@ impl Paging {
         };
         let confirmed = sizes
             .iter()
-            .filter_map(|size| position(bundle, op, size).map(|found| found.param))
+            .filter_map(|size| confirmed_position(bundle, op, size).map(|found| found.param))
             .collect();
         Paging { sizes, confirmed }
     }
@@ -402,11 +436,11 @@ fn numbers_ask_nothing(
 /// offset beside page size `size_param`: it carries the parameter at its first value, or
 /// not at all.
 pub(super) fn starts(
-    bundle: &mb_mcm::Bundle,
+    rt: &MockRuntime,
     (op, call): (&Operation, &OperationCall),
     size_param: &str,
 ) -> bool {
-    position(bundle, op, size_param).is_some_and(|p| match call.query.get(&p.param) {
+    position(rt, (op, call), size_param).is_some_and(|p| match call.query.get(&p.param) {
         None => true,
         Some(value) => whole(value) == Some(p.style.first()),
     })
@@ -518,29 +552,21 @@ pub(super) async fn forget(
     state: &mut StateAccess<'_>,
     (plan, call): (&CallPlan<'_>, &OperationCall),
 ) {
-    let bundle = state.rt.bundle();
+    let rt = state.rt;
     let op = plan.op;
-    let Some(schema) = op.success_output().and_then(|o| o.schema.as_ref()) else {
+    let Some((size_param, _)) = list_query::requested_page(rt, op, call) else {
         return;
     };
-    let doc = std::cell::OnceCell::new();
-    let Some((size_param, _)) = mb_engine::budget::requested_page(
-        op.input.query.as_ref(),
-        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
-        call,
-    ) else {
+    let Some(position) = position(rt, (op, call), &size_param) else {
         return;
     };
-    let Some(position) = position(bundle, op, size_param) else {
-        return;
-    };
-    if !starts(bundle, (op, call), size_param) {
+    if !starts(rt, (op, call), &size_param) {
         return;
     }
     let id = key(
         op,
         &path_of(call),
-        &bound_query(call, &position.param, size_param),
+        &bound_query(call, &position.param, &size_param),
     );
     state.delete(&plan.session, INTERNAL_TYPE, &id).await;
 }
@@ -558,8 +584,8 @@ pub(super) fn first_page(
 ) -> Option<(Value, StoredResource)> {
     let bundle = rt.bundle();
     let op = plan.op;
-    let position = position(bundle, op, size_param)?;
-    if !starts(bundle, (op, call), size_param)
+    let position = position(rt, (op, call), size_param)?;
+    if !starts(rt, (op, call), size_param)
         || !numbers_ask_nothing(bundle, op, call, [&position.param, size_param])
     {
         return None;
@@ -612,14 +638,11 @@ pub(super) async fn serve(
     let rt = state.rt;
     let bundle = rt.bundle();
     let op = plan.op;
-    let schema = op.success_output()?.schema.as_ref()?;
-    let doc = std::cell::OnceCell::new();
-    let (size_param, limit) = mb_engine::budget::requested_page(
-        op.input.query.as_ref(),
-        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
-        call,
-    )?;
-    let position = position(bundle, op, size_param)?;
+    let (size_param, limit) = list_query::requested_page(rt, op, call)?;
+    let size_param = size_param.as_str();
+    // A described paging serves a page past the run's end as an empty page.
+    let described = list_query::of(rt, op, call).is_some_and(|q| q.page.is_some());
+    let position = position(rt, (op, call), size_param)?;
     let at = whole(call.query.get(&position.param)?)?;
     if !numbers_ask_nothing(bundle, op, call, [&position.param, size_param]) {
         return None;
@@ -627,6 +650,7 @@ pub(super) async fn serve(
     let size = usize::try_from(limit.items).ok()?;
     let start = match position.style {
         Style::Number => at.checked_sub(1)?.checked_mul(size)?,
+        Style::NumberFromZero => at.checked_mul(size)?,
         Style::Offset => at,
     };
     if start == 0 {
@@ -669,13 +693,15 @@ pub(super) async fn serve(
             live.push(item);
         }
     }
-    // Past the items the run knows, the page is the model's.
-    if start >= live.len() {
+    // Past the items the run knows, the page is the model's; for a described paging
+    // over a run that holds every record, an empty page.
+    if start >= live.len() && !(described && !run.truncated) {
         return None;
     }
     let more = live.len() > wanted;
     let end = wanted.min(live.len());
-    let mut body = with_items(&run.page, live.get(start..end)?.to_vec())?;
+    let page = live.get(start.min(end)..end)?.to_vec();
+    let mut body = with_items(&run.page, page)?;
     // What the session wrote since, and the request's filters, as on a first page.
     lists::overlay_stored(state, (plan, call), t, &mut body).await;
     let _ = lists::narrow(rt, plan, call, &mut body);

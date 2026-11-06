@@ -146,6 +146,9 @@ pub(super) struct Slot {
     /// first page's call reached ([`CallPlan::page_url`]): the next page's is it with the
     /// call's query and the token under `param`.
     url: Option<String>,
+    /// For a token carried in a response header (a described `response_header`), the
+    /// header's name; `path` is then empty and the body holds no token.
+    header: Option<String>,
 }
 
 impl Slot {
@@ -551,6 +554,7 @@ fn url_slot(
         path: names,
         param: param.to_string(),
         url: Some(page_url.to_string()),
+        header: None,
     })
 }
 
@@ -602,6 +606,9 @@ fn filled(
     (op, call): (&Operation, &OperationCall),
     token: &str,
 ) -> Vec<Value> {
+    if slot.header.is_some() {
+        return vec![body.clone()];
+    }
     let Some(base) = slot.url.as_deref() else {
         return placed(body, &slot.path, Some(Value::String(token.to_string())))
             .into_iter()
@@ -655,6 +662,9 @@ fn filled(
 /// nothing or empty text there. For a URL, no empty text, and when it sits in a link
 /// object of its own (HAL's `_links.next.href`), that object `null` or left out first.
 fn ended(body: &Value, slot: &Slot) -> Vec<Value> {
+    if slot.header.is_some() {
+        return vec![body.clone()];
+    }
     let mut out = Vec::new();
     if slot.url.is_some() && slot.path.len() > 2 {
         let link = &slot.path[..slot.path.len() - 1];
@@ -865,6 +875,7 @@ fn token_slots(
                         path: vec![name.clone()],
                         param,
                         url: None,
+                        header: None,
                     });
                 }
                 continue;
@@ -883,6 +894,7 @@ fn token_slots(
                         path: vec![name.clone(), inner_name.clone()],
                         param,
                         url: None,
+                        header: None,
                     });
                 }
             }
@@ -891,13 +903,57 @@ fn token_slots(
     found
 }
 
-/// The one place answer `body` to `call` has for a token (see the module's doc).
+/// The place the world describes for the next page's token of list `op`: `Some(None)`
+/// when it describes the list's paging with no place (a page number, or no response
+/// member or header), `None` when it does not describe the paging. A described
+/// `response_header` carries the token in that header, a described `response` member
+/// carries it in the body (the next page's URL for a `next_url` paging).
+fn described_slot(
+    rt: &MockRuntime,
+    (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
+) -> Option<Option<Slot>> {
+    let ask = list_query::of(rt, op, call)?.page?;
+    let Some(param) = ask.request.clone().filter(|_| !ask.counts()) else {
+        return Some(None);
+    };
+    if let Some(header) = ask.response_header {
+        return Some(Some(Slot {
+            path: Vec::new(),
+            param,
+            url: None,
+            header: Some(header),
+        }));
+    }
+    let Some(response) = ask.response else {
+        return Some(None);
+    };
+    let url = match ask.style {
+        mb_mcm::world::PagingStyle::NextUrl => match page_url {
+            Some(url) => Some(url.to_string()),
+            None => return Some(None),
+        },
+        _ => None,
+    };
+    Some(Some(Slot {
+        path: response.split('.').map(str::to_string).collect(),
+        param,
+        url,
+        header: None,
+    }))
+}
+
+/// The one place answer `body` to `call` has for a token (see the module's doc): the
+/// described one where the world describes the list's paging ([`described_slot`]).
 pub(super) fn slot(
-    bundle: &mb_mcm::Bundle,
+    rt: &MockRuntime,
     (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
     body: &Value,
     size_param: &str,
 ) -> Option<Slot> {
+    if let Some(described) = described_slot(rt, (op, call, page_url)) {
+        return described;
+    }
+    let bundle = rt.bundle();
     let list = list_member(body)?;
     let schema = op.success_output()?.schema.as_ref()?;
     let mut held = None;
@@ -910,7 +966,7 @@ pub(super) fn slot(
         Some(first) => found.is_empty().then_some(first),
         // No place for the token itself: a place for the next page's URL, if any, unless
         // the list is paged by number or offset.
-        None if runs::starts(bundle, (op, call), size_param) => None,
+        None if runs::starts(rt, (op, call), size_param) => None,
         None => url_slot(
             bundle,
             (op, call, page_url?),
@@ -927,11 +983,12 @@ pub(super) fn slot(
 /// `pattern` shapes), the one `call` carries a non-empty text value under. `None` when
 /// it carries none or several.
 fn carried_token(
-    bundle: &mb_mcm::Bundle,
+    rt: &MockRuntime,
     (op, call): (&Operation, &OperationCall),
     body: &Value,
     size_param: &str,
 ) -> Option<(String, String)> {
+    let bundle = rt.bundle();
     let list = list_member(body)?;
     let schema = op.success_output()?.schema.as_ref()?;
     let mut held = None;
@@ -941,7 +998,7 @@ fn carried_token(
     let slots = token_slots(bundle, (schema, list), body, &params, &[]);
     let paired: Vec<String> = match slots.as_slice() {
         [one] => vec![one.param.clone()],
-        [] if !runs::starts(bundle, (op, call), size_param) => {
+        [] if !runs::starts(rt, (op, call), size_param) => {
             let mut urls = Vec::new();
             next_urls(bundle, schema, list, &mut Vec::new(), &mut urls);
             if urls.len() == 1 {
@@ -1072,6 +1129,7 @@ impl Followed {
             "slot": self.slot.path,
             "param": self.slot.param,
             "url": self.slot.url,
+            "header": self.slot.header,
             "size_param": self.size_param,
             "ids": self.ids,
         })
@@ -1093,6 +1151,7 @@ impl Followed {
                     .collect::<Option<_>>()?,
                 param: text("param")?,
                 url: text("url"),
+                header: text("header"),
             },
             size_param: text("size_param")?,
             ids: value
@@ -1119,15 +1178,8 @@ fn followed_key(op: &Operation, call: &OperationCall, param: &str) -> String {
 }
 
 /// The page size parameter of a list read `call` of `op`, as the cut's are found.
-fn size_param_of(bundle: &mb_mcm::Bundle, op: &Operation, call: &OperationCall) -> Option<String> {
-    let schema = op.success_output()?.schema.as_ref()?;
-    let doc = std::cell::OnceCell::new();
-    mb_engine::budget::requested_page(
-        op.input.query.as_ref(),
-        || doc.get_or_init(|| bundle.with_reachable_defs(schema)),
-        call,
-    )
-    .map(|(name, _)| name.to_string())
+fn size_param_of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Option<String> {
+    list_query::requested_page(rt, op, call).map(|(name, _)| name)
 }
 
 /// The [`Followed`] note of the model's token `call` carries, whose page the model
@@ -1144,8 +1196,8 @@ pub(super) async fn followed(
 ) -> Option<Followed> {
     let rt = state.rt;
     let op = plan.op;
-    let size_param = size_param_of(rt.bundle(), op, call)?;
-    let (param, token) = carried_token(rt.bundle(), (op, call), body, &size_param)?;
+    let size_param = size_param_of(rt, op, call)?;
+    let (param, token) = carried_token(rt, (op, call), body, &size_param)?;
     let key = followed_key(op, call, &param);
     let doc = state.get(&plan.session, INTERNAL_TYPE, &key).await?;
     let followed = Followed::of(&doc.data)?;
@@ -1167,15 +1219,10 @@ pub(super) async fn forget_followed(
 ) {
     let rt = state.rt;
     let op = plan.op;
-    let Some(size_param) = size_param_of(rt.bundle(), op, call) else {
+    let Some(size_param) = size_param_of(rt, op, call) else {
         return;
     };
-    let Some(slot) = slot(
-        rt.bundle(),
-        (op, call, plan.page_url.as_deref()),
-        body,
-        &size_param,
-    ) else {
+    let Some(slot) = slot(rt, (op, call, plan.page_url.as_deref()), body, &size_param) else {
         return;
     };
     if slot.given(body).is_some() {
@@ -1272,6 +1319,7 @@ impl Cut {
             "slot": self.slot.path,
             "param": self.slot.param,
             "url": self.slot.url,
+            "header": self.slot.header,
             "size": self.size,
             "size_param": self.size_param,
             "page": self.page,
@@ -1300,6 +1348,7 @@ impl Cut {
                     .collect::<Option<_>>()?,
                 param: text(&value, "param")?,
                 url: text(&value, "url"),
+                header: text(&value, "header"),
             },
             size: usize::try_from(value.get("size")?.as_u64()?).ok()?,
             size_param: text(&value, "size_param")?,
@@ -1339,8 +1388,19 @@ pub(super) async fn mint(
     let Some(body) = generated.body.as_ref() else {
         return false;
     };
+    // A described cut no token fits is served as generated, before it was narrowed.
+    let unnarrowed = cut.unnarrowed.clone();
+    let restore = |generated: &mut GeneratedResponse| {
+        if let Some(unnarrowed) = &unnarrowed {
+            tracing::info!(
+                operation = %op.id,
+                "no next-page token of a described list fits the answer's schema; the generated list is served"
+            );
+            generated.body = Some(unnarrowed.clone());
+        }
+    };
     let slot = slot(
-        rt.bundle(),
+        rt,
         (op, call, plan.page_url.as_deref()),
         body,
         &cut.size_param,
@@ -1349,7 +1409,8 @@ pub(super) async fn mint(
     // store holds records for a next page: those come first, and the URL follows them
     // on the last of their pages.
     .filter(|slot| slot.url.is_none() || slot.given(body).is_none() || cut.stored > 0);
-    if slot.is_none() && !runs::starts(rt.bundle(), (op, call), &cut.size_param) {
+    if slot.is_none() && !runs::starts(rt, (op, call), &cut.size_param) {
+        restore(generated);
         return false;
     }
     // What a delete marker covers is no later page's.
@@ -1395,6 +1456,7 @@ pub(super) async fn mint(
             path: slot.path.clone(),
             param: slot.param.clone(),
             url: slot.url.clone(),
+            header: slot.header.clone(),
         };
         (at, then)
     });
@@ -1414,9 +1476,11 @@ pub(super) async fn mint(
             body,
             (cut.size, &cut.size_param),
             (rest, truncated, generated_rest > 0),
-        ),
+        )
+        .map(|(page, document)| (page, document, None)),
     };
-    let Some((page, document)) = kept else {
+    let Some((page, document, header)) = kept else {
+        restore(generated);
         return false;
     };
     // The items left out are the session's, as a list's items are.
@@ -1475,12 +1539,40 @@ pub(super) async fn mint(
     }
     if kept {
         generated.body = Some(page);
+        generated.headers.extend(header);
+    } else {
+        restore(generated);
     }
     kept
 }
 
-/// The first page `body` with a token at `slot` for `rest`, and the cut that serves it;
-/// `None` when no such page validates.
+/// Whether `token` is a value the header `name` of `op`'s success answer declares (any
+/// text when it declares no schema for it).
+fn header_fits(rt: &MockRuntime, op: &Operation, name: &str, token: &str) -> bool {
+    let Some(variant) = op.success_output() else {
+        return false;
+    };
+    let declared = variant
+        .headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, schema)| schema);
+    let Some(schema) = declared else {
+        return true;
+    };
+    let schema = rt.bundle().with_reachable_defs(schema);
+    mb_engine::SchemaValidator::for_output(&schema)
+        .map(|v| v.is_valid_output(&Value::String(token.to_string())))
+        .unwrap_or(false)
+}
+
+/// A first page with its token, the cut that serves it, and the header carrying the
+/// token, for a header slot.
+type Tokened = (Value, StoredResource, Option<(String, String)>);
+
+/// The first page `body` with a token at `slot` for `rest`, the cut that serves it, and
+/// for a header slot the header carrying the token; `None` when no such page (or
+/// header) validates.
 fn tokened(
     rt: &MockRuntime,
     (plan, call): (&CallPlan<'_>, &OperationCall),
@@ -1488,7 +1580,7 @@ fn tokened(
     slot: Slot,
     (size, size_param): (usize, String),
     (rest, stored): (Vec<Value>, bool),
-) -> Option<(Value, StoredResource)> {
+) -> Option<Tokened> {
     let op = plan.op;
     // What the model gave there leads on after stored records, to the model's own next
     // page. A rest of the model's own items only is what its token passed already.
@@ -1500,6 +1592,11 @@ fn tokened(
     });
     let (nonce, place) = new_cut(&plan.session, op);
     let first = token(&nonce, place, 0);
+    let header = match &slot.header {
+        Some(name) if !header_fits(rt, op, name, &first) => return None,
+        Some(name) => Some((name.clone(), first.clone())),
+        None => None,
+    };
     let valid = |candidate: &Value| {
         plan.engine
             .serve_stored(rt.bundle(), op, candidate, None)
@@ -1537,7 +1634,7 @@ fn tokened(
         id: place_key(place),
         data: kept.to_value(),
     };
-    Some((page, document))
+    Some((page, document, header))
 }
 
 /// The next page a token `call` carries serves, with no model call (see the module's
@@ -1599,9 +1696,16 @@ pub(super) async fn serve(
     let valid = |candidate: &Value| plan.engine.serve_stored(rt.bundle(), op, candidate, None);
     let mut served = if next < cut.rest.len() {
         let token = token(&cut.nonce, place, next);
-        filled(&body, &cut.slot, (op, call), &token)
+        let mut served = filled(&body, &cut.slot, (op, call), &token)
             .iter()
-            .find_map(valid)?
+            .find_map(valid)?;
+        if let Some(name) = &cut.slot.header {
+            if !header_fits(rt, op, name, &token) {
+                return None;
+            }
+            served.headers.push((name.clone(), token));
+        }
+        served
     } else if let Some(then) = cut
         .then
         .as_ref()
