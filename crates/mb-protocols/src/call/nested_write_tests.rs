@@ -352,3 +352,156 @@ async fn a_wrapped_request_member_does_not_take_a_contradicting_effect() {
     assert_ne!(stored["status"], "resolved", "{stored}");
     assert_eq!(stored["body"], "Found it", "{stored}");
 }
+
+/// Accounts with a map of free-form labels and a declared address, answered on an
+/// update by an acknowledgement of another schema, which settles none of them.
+const ACCOUNTS: &str = r##"
+openapi: 3.0.0
+info: {title: Accounts, version: "1"}
+paths:
+  /accounts/{id}:
+    get:
+      operationId: getAccount
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}
+    patch:
+      operationId: patchAccount
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                labels: {type: object, additionalProperties: true}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+    put:
+      operationId: replaceAccount
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                address: {$ref: "#/components/schemas/Address"}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}
+components:
+  schemas:
+    Ack:
+      type: object
+      properties:
+        ok: {type: boolean}
+    Address:
+      type: object
+      properties:
+        street: {type: string}
+        city: {type: string}
+        zip: {type: string}
+    Account:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        labels: {type: object, additionalProperties: true}
+        address: {$ref: "#/components/schemas/Address"}
+"##;
+
+/// An acknowledged `PATCH` of one key of a map member, with an effect writing only that
+/// key: the map takes it and keeps the keys it held.
+#[tokio::test]
+async fn an_acknowledged_patch_of_a_map_key_keeps_the_held_keys() {
+    let held = json!({"id": "a1", "labels": {"plan": "team"}});
+    let answer = json!({"response": {"ok": true}, "effects": [
+        {"type": "accounts", "id": "a1", "set": {"labels": {"locale": "de"}}},
+    ]});
+    let edit = json!({"labels": {"locale": "de"}});
+    let stored = after_update(
+        ACCOUNTS,
+        ("accounts", "a1", held),
+        answer,
+        ("PATCH", "/accounts/a1", "application/json", edit),
+    )
+    .await;
+    assert_eq!(
+        stored["labels"],
+        json!({"plan": "team", "locale": "de"}),
+        "{stored}"
+    );
+}
+
+/// The same `PATCH` removing a held key by `null`, with an effect that leaves it out:
+/// the key goes and the others stay.
+#[tokio::test]
+async fn an_acknowledged_patch_removes_a_map_key_sent_as_null() {
+    let held = json!({"id": "a1", "labels": {"plan": "team", "tier": "gold"}});
+    let answer = json!({"response": {"ok": true}, "effects": [
+        {"type": "accounts", "id": "a1", "set": {"labels": {"locale": "de"}}},
+    ]});
+    let edit = json!({"labels": {"locale": "de", "tier": null}});
+    let stored = after_update(
+        ACCOUNTS,
+        ("accounts", "a1", held),
+        answer,
+        ("PATCH", "/accounts/a1", "application/json", edit),
+    )
+    .await;
+    assert_eq!(
+        stored["labels"],
+        json!({"plan": "team", "locale": "de"}),
+        "{stored}"
+    );
+}
+
+/// An acknowledged `PUT` of a declared object, with an effect repeating a member the
+/// request left out: the effect says the object is not the request's, and is not
+/// taken (as for a map), so the left-out member does not go back on it.
+#[tokio::test]
+async fn an_acknowledged_put_does_not_keep_what_it_left_out_by_an_effect() {
+    let held = json!({"id": "a1", "address": {"street": "Main 1", "city": "Oslo", "zip": "0150"}});
+    let answer = json!({"response": {"ok": true}, "effects": [
+        {"type": "accounts", "id": "a1", "set": {"address": {"street": "Elm 2", "city": "Bergen", "zip": "0150"}}},
+    ]});
+    let edit = json!({"address": {"street": "Elm 2", "city": "Bergen"}});
+    let stored = after_update(
+        ACCOUNTS,
+        ("accounts", "a1", held),
+        answer,
+        ("PUT", "/accounts/a1", "application/json", edit),
+    )
+    .await;
+    assert_ne!(
+        stored["address"],
+        json!({"street": "Elm 2", "city": "Bergen", "zip": "0150"}),
+        "{stored}"
+    );
+}
+
+/// The same `PUT` with an effect writing just what the request sent: the object is
+/// the request's, the member it left out gone.
+#[tokio::test]
+async fn an_acknowledged_put_with_an_agreeing_effect_replaces_the_object() {
+    let held = json!({"id": "a1", "address": {"street": "Main 1", "city": "Oslo", "zip": "0150"}});
+    let answer = json!({"response": {"ok": true}, "effects": [
+        {"type": "accounts", "id": "a1", "set": {"address": {"street": "Elm 2", "city": "Bergen"}}},
+    ]});
+    let edit = json!({"address": {"street": "Elm 2", "city": "Bergen"}});
+    let stored = after_update(
+        ACCOUNTS,
+        ("accounts", "a1", held),
+        answer,
+        ("PUT", "/accounts/a1", "application/json", edit),
+    )
+    .await;
+    assert_eq!(
+        stored["address"],
+        json!({"street": "Elm 2", "city": "Bergen"}),
+        "{stored}"
+    );
+}
