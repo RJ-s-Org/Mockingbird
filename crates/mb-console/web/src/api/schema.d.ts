@@ -2397,6 +2397,12 @@ export interface components {
          */
         WorldGapCode: "no_identity" | "no_target" | "no_record" | "skipped_route" | "refused";
         /**
+         * @description Where a world write stands on this node's running mock when the write
+         *     returns.
+         * @enum {string}
+         */
+        WorldMount: "mounted" | "pending" | "not_served" | "unknown";
+        /**
          * @description The problem of a refused world write: a [`Problem`] plus a machine
          *     readable `code` and, when it is about one place, the JSON `path` into
          *     the document.
@@ -2522,6 +2528,12 @@ export interface components {
              * @description The new revision's number.
              */
             revision: number;
+            /**
+             * @description Whether the running mock serves the new revision when the write
+             *     returns: the write waits for the rebuild, at most
+             *     [`WORLD_MOUNT_WAIT`].
+             */
+            runtime: components["schemas"]["WorldMount"];
             /**
              * Format: int64
              * @description The contract version written to.
