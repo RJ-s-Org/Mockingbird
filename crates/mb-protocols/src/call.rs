@@ -42,6 +42,7 @@ mod described;
 mod effects;
 mod entities;
 mod envelopes;
+mod exec;
 mod header_ids;
 mod lifecycle;
 mod list_query;
@@ -278,6 +279,10 @@ pub(crate) async fn generate_pending(
     mut pending: Pending<'_>,
     response_schema: Option<&Value>,
 ) -> Result<GeneratedResponse, EngineError> {
+    // The executor's answer: completed as a generated one is, with no LLM call.
+    if let Some(answer) = pending.executed.take() {
+        return Ok(complete(rt, plan, call, pending, *answer, response_schema).await);
+    }
     let guard = pending
         .target
         .as_ref()
@@ -403,6 +408,16 @@ pub(crate) struct Pending<'a> {
     /// The write is a client's retry of the session's latest (see
     /// [`write_memory::is_retry`]).
     retry: bool,
+    /// The executor's answer ([`exec::Ran::Complete`]), completed in place of a
+    /// generated one.
+    executed: Option<Box<GeneratedResponse>>,
+}
+
+impl Pending<'_> {
+    /// Whether the executor answered the call, so it is completed without generating.
+    pub(crate) fn is_executed(&self) -> bool {
+        self.executed.is_some()
+    }
 }
 
 /// Whether a GraphQL delete that removed record `id` of type `t` here leaves the marker
@@ -609,63 +624,25 @@ pub(crate) async fn prepare<'a>(
             && rt.own_reads().holds(session, stored))
     });
 
-    // Whether a stored answer stands depends on what is remembered; otherwise
-    // what is remembered waits until the cache has had its say.
-    let mut recalled = None;
-    // The held record with the members the description derives from its children; the
-    // record as stored when that answer does not suit the schema.
-    let derived = match &target {
-        Some(stored) if matches!(op.kind, OperationKind::Query) && plain(plan) => {
-            derived::filled(&mut state, session, stored)
-                .instrument(state_span())
-                .await
-        }
-        _ => None,
+    // The state-first executor ([`exec`]): a call the description classifies is
+    // answered from the store; any other, and one it falls back on, goes on below. Whether
+    // a stored answer stands depends on what is remembered; otherwise what is remembered
+    // waits until the cache has had its say.
+    let held = exec::Held {
+        target: target.as_ref(),
+        target_id: target_id.as_deref().filter(|_| !foreign_key),
     };
-    let held = |stored: &StoredResource, kept: Option<&Map<String, Value>>| {
-        derived
-            .as_ref()
-            .and_then(|filled| serve_held(rt, op, filled, kept, response_schema))
-            .or_else(|| serve_held(rt, op, stored, kept, response_schema))
-    };
-    if matches!(op.kind, OperationKind::Query)
-        && plain(plan)
-        && let Some(stored) = &target
-        // What the schema alone tells of the envelope costs no read; what the session's
-        // answers said of it ([`envelopes`]) is read only for an answer that stands.
-        && let (bare, enveloped) = (held(stored, None), envelopes::applies(rt, op))
-        && (bare.is_some() || enveloped)
+    let (recalled, executed) = match exec::run(&mut state, plan, call, held, response_schema).await
     {
-        let mut earlier = write_memory::recall(
-            &mut state,
-            plan,
-            call,
-            target_id.as_deref().filter(|_| !foreign_key),
-            true,
-        )
-        .instrument(state_span())
-        .await;
-        if earlier.forces(rt, plan, call) {
-            earlier.stored_answer = bare.map(Box::new);
-        } else {
-            let kept = match enveloped {
-                true => {
-                    envelopes::recall(&mut state, plan)
-                        .instrument(state_span())
-                        .await
-                }
-                false => None,
-            };
-            let served = kept.and_then(|kept| held(stored, Some(&kept))).or(bare);
-            if let Some(mut served) = served {
-                write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
-                state.touch(session).instrument(state_span()).await;
-                return Prepared::Answered(Box::new(served));
-            }
+        exec::Ran::Answered(served) => {
+            state.touch(session).instrument(state_span()).await;
+            return Prepared::Answered(served);
         }
-        recalled = Some(earlier);
-    }
-    if target.is_none()
+        exec::Ran::Complete(answer) => (None, Some(answer)),
+        exec::Ran::Generate(recalled) => (recalled, None),
+    };
+    if executed.is_none()
+        && target.is_none()
         && let Some(served) = member_read(&mut state, plan, call, response_schema)
             .instrument(state_span())
             .await
@@ -675,7 +652,8 @@ pub(crate) async fn prepare<'a>(
     }
 
     // The next page of a list this session cut, by the token it minted.
-    if target.is_none()
+    if executed.is_none()
+        && target.is_none()
         && let Some(served) = pages::serve(&mut state, plan, call)
             .instrument(state_span())
             .await
@@ -688,7 +666,8 @@ pub(crate) async fn prepare<'a>(
     }
 
     // A described list of a collection the session listed before: from its records.
-    if target.is_none()
+    if executed.is_none()
+        && target.is_none()
         && let Some(served) = state_lists::answer(&mut state, plan, call)
             .instrument(state_span())
             .await
@@ -704,7 +683,7 @@ pub(crate) async fn prepare<'a>(
     let cache = rt
         .state
         .response_cache()
-        .filter(|_| is_query && rt.consistency && plain(plan));
+        .filter(|_| is_query && rt.consistency && plain(plan) && executed.is_none());
     let key = cache.map(|_| {
         format!(
             "{}:{}",
@@ -832,6 +811,7 @@ pub(crate) async fn prepare<'a>(
         same_values,
         tokens,
         retry: false,
+        executed,
     }))
 }
 
