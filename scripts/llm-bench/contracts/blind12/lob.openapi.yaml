@@ -1,0 +1,351 @@
+openapi: 3.0.3
+info:
+  title: Lob Print and Mail API (addresses and letters)
+  version: "1.0"
+  description: |
+    A subset of the Lob API, written from its public reference (docs.lob.com) and the
+    Lob help center's guides to scheduled mailings, cancellation and idempotent
+    requests. Requests authenticate with HTTP Basic: the API key (`test_...` or
+    `live_...`) as the user name and an empty password. Bodies are JSON. A test key
+    creates mail that is never printed or sent.
+
+    Objects have ids with a prefix naming their type (`adr_` for an address, `ltr_` for
+    a letter) and answer their type in `object`. A create (`POST`) answers 200 with the
+    new object; `GET /{id}` reads it. Every object can carry `metadata`: up to 20 string
+    pairs, keys at most 40 characters and values at most 500, set when it is created.
+
+    Lists answer `{object: "list", data, count, next_url, previous_url}`, newest first
+    (by `date_created`). `count` is the number of objects in `data`; `total_count` is
+    added only with `include[]=total_count`. `limit` is 1 to 100 (default 10).
+    `next_url` and `previous_url` are the adjacent pages' URLs, holding an `after` or
+    `before` cursor, or null when there is no such page; a request sends `after` or
+    `before`, never both. `metadata[<key>]=<value>` keeps the objects whose metadata
+    hold that pair, and `date_created[gt|gte|lt|lte]` bounds the creation date.
+
+    `DELETE /v1/addresses/{id}` deletes an address and answers
+    `{"id": "adr_...", "deleted": true}`; it is then no longer listed.
+
+    A letter is created with `to` and `from` (an address id, or an address object made
+    inline), `file` (HTML, a URL or a PDF), `color` and `use_type` (`marketing` or
+    `operational`), all required. It answers `to` and `from` as whole address objects,
+    `send_date`, `expected_delivery_date`, `carrier` (`USPS`), `url` (a signed link to
+    the rendered letter) and `tracking_events`. This account has no cancellation window:
+    a letter created without `send_date` goes to production at once, and its
+    `send_date` is its `date_created`. A `send_date` up to 180 days ahead schedules it;
+    `expected_delivery_date` is then after `send_date`. `scheduled=true` lists only
+    letters whose `send_date` is later than their `date_created`, and `scheduled=false`
+    only those where they are equal.
+
+    `DELETE /v1/letters/{id}` cancels a letter whose `send_date` has not passed (a
+    cancelled letter is not charged) and answers `{"id": "ltr_...", "deleted": true}`;
+    the letter then reads with `deleted: true`, a field answered only on a deleted
+    object.
+
+    A `POST /v1/letters` with an `Idempotency-Key` header (at most 256 characters) is
+    safe to retry: a second request with the same key within 24 hours creates nothing
+    and answers the letter the first one created.
+
+    Errors answer `{error: {message, status_code, code}}`: 401 for a missing or wrong
+    key, 404 `not_found`, 422 for parameters that failed validation (`invalid`,
+    `bad_request`, `not_deletable`) and 429.
+servers:
+  - url: https://api.lob.com
+security:
+  - basicAuth: []
+tags:
+  - name: Addresses
+  - name: Letters
+paths:
+  /v1/addresses:
+    get:
+      tags: [Addresses]
+      operationId: addresses_list
+      summary: List addresses
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/before"
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/include"
+        - $ref: "#/components/parameters/date_created"
+        - $ref: "#/components/parameters/metadata"
+      responses:
+        "200":
+          description: A page of addresses, newest first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/List"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Address"}}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Addresses]
+      operationId: address_create
+      summary: Create an address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AddressEditable"}
+      responses:
+        "200":
+          description: The created address.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Address"}
+        "422": {$ref: "#/components/responses/Error"}
+  /v1/addresses/{adr_id}:
+    parameters:
+      - {name: adr_id, in: path, required: true, schema: {type: string, pattern: '^adr_[a-zA-Z0-9]+$'}}
+    get:
+      tags: [Addresses]
+      operationId: address_retrieve
+      summary: Read an address
+      responses:
+        "200":
+          description: The address.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Address"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Addresses]
+      operationId: address_delete
+      summary: Delete an address
+      responses:
+        "200":
+          description: Deleted; it is no longer listed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Deleted"}
+              example: {id: adr_123456789, deleted: true}
+        "404": {$ref: "#/components/responses/Error"}
+  /v1/letters:
+    get:
+      tags: [Letters]
+      operationId: letters_list
+      summary: List letters
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/before"
+        - $ref: "#/components/parameters/after"
+        - $ref: "#/components/parameters/include"
+        - $ref: "#/components/parameters/date_created"
+        - $ref: "#/components/parameters/metadata"
+        - {name: scheduled, in: query, description: "true: send_date later than date_created; false: they are equal.", schema: {type: boolean}}
+        - {name: send_date, in: query, style: deepObject, explode: true, description: "Bounds on send_date: send_date[gt], [gte], [lt], [lte].", schema: {type: object, additionalProperties: {type: string}}}
+        - {name: mail_type, in: query, schema: {type: string, enum: [usps_first_class, usps_standard]}}
+        - {name: color, in: query, schema: {type: boolean}}
+        - {name: status, in: query, schema: {type: string, enum: [processed, rendered, failed]}}
+      responses:
+        "200":
+          description: A page of letters, newest first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/List"
+                  - type: object
+                    properties:
+                      data: {type: array, items: {$ref: "#/components/schemas/Letter"}}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Letters]
+      operationId: letter_create
+      summary: Create a letter
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: "Retries with the same key within 24 hours answer the first letter and create nothing."
+          schema: {type: string, maxLength: 256}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LetterEditable"}
+      responses:
+        "200":
+          description: The created letter (or the one an earlier request with the same Idempotency-Key created).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Letter"}
+        "422": {$ref: "#/components/responses/Error"}
+  /v1/letters/{ltr_id}:
+    parameters:
+      - {name: ltr_id, in: path, required: true, schema: {type: string, pattern: '^ltr_[a-zA-Z0-9]+$'}}
+    get:
+      tags: [Letters]
+      operationId: letter_retrieve
+      summary: Read a letter
+      responses:
+        "200":
+          description: The letter; a cancelled one answers deleted true.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Letter"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Letters]
+      operationId: letter_cancel
+      summary: Cancel a letter
+      description: Only while its send_date has not passed.
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Deleted"}
+              example: {id: ltr_123456789, deleted: true}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: The API key as the user name; an empty password.
+  parameters:
+    limit:
+      name: limit
+      in: query
+      description: Objects per page (1 to 100; default 10).
+      schema: {type: integer, minimum: 1, maximum: 100, default: 10}
+    before:
+      name: before
+      in: query
+      description: "A cursor from previous_url: the page before. Not with after."
+      schema: {type: string}
+    after:
+      name: after
+      in: query
+      description: "A cursor from next_url: the page after. Not with before."
+      schema: {type: string}
+    include:
+      name: include
+      in: query
+      description: "[\"total_count\"] adds total_count to the list."
+      schema: {type: array, items: {type: string, enum: [total_count]}}
+    date_created:
+      name: date_created
+      in: query
+      style: deepObject
+      explode: true
+      description: "Bounds on date_created: date_created[gt], [gte], [lt], [lte], ISO 8601."
+      schema: {type: object, additionalProperties: {type: string}}
+    metadata:
+      name: metadata
+      in: query
+      style: deepObject
+      explode: true
+      description: "metadata[key]=value: only objects whose metadata hold that pair."
+      schema: {type: object, additionalProperties: {type: string}}
+  responses:
+    Error:
+      description: "`{error: {message, status_code, code}}`."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  message: {type: string}
+                  status_code: {type: integer, example: 422}
+                  code: {type: string, example: invalid}
+  schemas:
+    Metadata:
+      type: object
+      maxProperties: 20
+      additionalProperties: {type: string, maxLength: 500}
+    List:
+      type: object
+      properties:
+        object: {type: string, enum: [list]}
+        data: {type: array, items: {type: object}}
+        count: {type: integer, description: The objects in data.}
+        total_count: {type: integer, description: "Every object the filters keep; only with include[]=total_count."}
+        next_url: {type: string, nullable: true, description: "The next page, with an after cursor; null on the last page."}
+        previous_url: {type: string, nullable: true, description: "The previous page, with a before cursor; null on the first page."}
+    Deleted:
+      type: object
+      properties:
+        id: {type: string}
+        deleted: {type: boolean, enum: [true]}
+    AddressEditable:
+      type: object
+      required: [address_line1, address_city, address_state, address_zip]
+      description: Needs name or company too.
+      properties:
+        name: {type: string, maxLength: 40}
+        company: {type: string, maxLength: 40}
+        description: {type: string, maxLength: 255}
+        address_line1: {type: string, maxLength: 64}
+        address_line2: {type: string, maxLength: 64}
+        address_city: {type: string, maxLength: 200}
+        address_state: {type: string, pattern: '^[a-zA-Z]{2}$'}
+        address_zip: {type: string, pattern: '^\d{5}(-\d{4})?$'}
+        address_country: {type: string, default: US}
+        phone: {type: string}
+        email: {type: string}
+        metadata: {$ref: "#/components/schemas/Metadata"}
+    Address:
+      allOf:
+        - $ref: "#/components/schemas/AddressEditable"
+        - type: object
+          properties:
+            id: {type: string, pattern: '^adr_[a-zA-Z0-9]+$'}
+            object: {type: string, enum: [address]}
+            date_created: {type: string, format: date-time}
+            date_modified: {type: string, format: date-time}
+            deleted: {type: boolean, description: Only on a deleted address.}
+    LetterEditable:
+      type: object
+      required: [to, from, file, color, use_type]
+      properties:
+        description: {type: string, maxLength: 255}
+        to:
+          description: An address id or an address made inline.
+          oneOf:
+            - {type: string, pattern: '^adr_[a-zA-Z0-9]+$'}
+            - $ref: "#/components/schemas/AddressEditable"
+        from:
+          description: An address id or an address made inline.
+          oneOf:
+            - {type: string, pattern: '^adr_[a-zA-Z0-9]+$'}
+            - $ref: "#/components/schemas/AddressEditable"
+        file: {type: string, description: "HTML, a URL to HTML or a PDF, or a template id."}
+        color: {type: boolean}
+        use_type: {type: string, enum: [marketing, operational]}
+        double_sided: {type: boolean, default: true}
+        address_placement: {type: string, enum: [top_first_page, insert_blank_page, bottom_first_page_center, bottom_first_page], default: top_first_page}
+        mail_type: {type: string, enum: [usps_first_class, usps_standard], default: usps_first_class}
+        send_date: {type: string, description: "A date or date-time up to 180 days ahead; schedules the letter."}
+        merge_variables: {type: object, additionalProperties: true}
+        metadata: {$ref: "#/components/schemas/Metadata"}
+    Letter:
+      type: object
+      properties:
+        id: {type: string, pattern: '^ltr_[a-zA-Z0-9]+$'}
+        object: {type: string, enum: [letter]}
+        description: {type: string, nullable: true}
+        metadata: {$ref: "#/components/schemas/Metadata"}
+        to: {$ref: "#/components/schemas/Address"}
+        from: {$ref: "#/components/schemas/Address"}
+        color: {type: boolean}
+        double_sided: {type: boolean}
+        address_placement: {type: string}
+        mail_type: {type: string}
+        use_type: {type: string, enum: [marketing, operational]}
+        url: {type: string, description: "A signed link to the rendered letter, valid 30 days."}
+        carrier: {type: string, enum: [USPS]}
+        tracking_number: {type: string, nullable: true}
+        tracking_events: {type: array, items: {type: object}, description: Oldest first.}
+        thumbnails: {type: array, items: {type: object, properties: {small: {type: string}, medium: {type: string}, large: {type: string}}}}
+        expected_delivery_date: {type: string, format: date}
+        send_date: {type: string, format: date-time}
+        date_created: {type: string, format: date-time}
+        date_modified: {type: string, format: date-time}
+        deleted: {type: boolean, description: Only on a cancelled letter.}

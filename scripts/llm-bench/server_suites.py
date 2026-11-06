@@ -86,6 +86,14 @@ Suites (contracts are in-repo, so the bench is reproducible):
   playback ids), Postmark templates and message streams (aliases, ErrorCode, archive
   and unarchive) and HCP Terraform workspaces (JSON:API, locks, variables). Not in the
   default suites. Same rule; no check gates the rest.
+- journeys_blind12: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind12/`: CouchDB documents (revisions, 409 conflicts,
+  tombstones, _all_docs key ranges, Mango selectors), RabbitMQ management (objects named
+  by virtual host and name, idempotent declarations, bindings, publish and get), NetBox
+  IPAM (DRF lists, choice fields, a VRF's unique addresses, available-ips allocation),
+  Harvest time entries (task assignment rates, running timers, links.next paging) and Lob
+  addresses and letters (metadata filters, after cursors, scheduled letters, cancelling,
+  Idempotency-Key). Not in the default suites. Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -149,7 +157,8 @@ from world_author import WORLDS  # noqa: E402
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
           "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
-          "journeys_blind8", "journeys_blind9", "journeys_blind10", "journeys_blind11")
+          "journeys_blind8", "journeys_blind9", "journeys_blind10", "journeys_blind11",
+          "journeys_blind12")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -7481,6 +7490,697 @@ def run_journeys_blind11(srv, sink, args):
     run_journey_table(BLIND11_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- twelfth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind12/). They were picked for
+# API styles and domains no earlier set has: a document database with client-chosen ids,
+# revisions checked on every write (409 `conflict`), tombstones that read 404 `deleted`,
+# `_all_docs` key ranges with `limit`/`skip`, Mango selectors and database counters of
+# live and deleted documents (CouchDB), a message broker whose objects are named by
+# virtual host and name in the path, idempotent `PUT` declarations (201, then 204, then
+# 400 for other arguments), bindings named by a `properties_key` in a `Location` header,
+# `routed` answers, a queue read from its head with ack modes and `message_count`, and
+# `page`/`page_size` pages with filtered and total counts (RabbitMQ management), Django
+# REST framework lists (`count`/`next`/`previous`/`results`, `limit`/`offset`), choice
+# fields answered as `{value, label}`, field-keyed 400 errors, tags by slug, a VRF that
+# refuses duplicate addresses, and addresses allocated from a prefix's free ones
+# (NetBox), clients, projects and task assignments whose rate becomes a time entry's
+# billable rate, a running timer stopped and restarted, `from`/`to` date ranges and pages
+# reached by following `links.next` (Harvest), and prefixed ids, newest-first lists
+# filtered by `metadata[key]`, `after` cursors in `next_url`, deletes that answer
+# `{id, deleted: true}`, scheduled letters that can be cancelled and an `Idempotency-Key`
+# that answers the first letter again (Lob). No check gates the rest: a journey goes on
+# with an id of its own when a call gave none. A check asserts only what its contract
+# promises a client. Do not edit a check to suit results.
+BLIND12_CHECKS = {
+    "couchdb": [
+        "a created database answers ok", "a taken database name is refused with 412 file_exists",
+        "a PUT document answers its id and a first revision", "the document reads with its _id, _rev and ETag",
+        "a PUT of an existing id without its revision is refused with 409",
+        "an update with the current revision answers the next revision",
+        "a stale revision is refused and changes nothing",
+        "a POST stores a document under an id the server makes",
+        "_all_docs lists every document by id with total_rows", "startkey and endkey bound the ids",
+        "skip and limit answer the row after the first", "a _find selector finds the matching documents",
+        "a deleted document answers a new revision and reads 404 deleted",
+        "the database counts live and deleted documents",
+    ],
+    "rabbitmq": [
+        "a created virtual host answers 201 and reads by name", "a declared queue answers 201 and reads its arguments",
+        "declaring the queue again the same way answers 204",
+        "a declaration with other arguments is refused with 400 and changes nothing",
+        "a binding answers 201 with a Location", "the binding is listed with its routing key and properties_key",
+        "a message a binding matches is routed", "a message no binding matches is not routed",
+        "ack_requeue_true answers the oldest message and the count after it",
+        "a requeued message is got again redelivered and acked away",
+        "page 1 of a name filter answers one queue and the counts", "page 2 reaches the other queue the filter kept",
+        "if-empty keeps a queue that holds messages", "a purged queue deletes and is then not found",
+    ],
+    "netbox": [
+        "a created site answers 201 with its slug and status", "a taken slug is refused naming the field",
+        "a tag filter lists the tagged site", "a created prefix keeps its prefix, VRF and status",
+        "available-ips lists the six usable addresses of the /29",
+        "a POST to available-ips allocates the lowest free address",
+        "a list body allocates one address per item, in order",
+        "an address the VRF holds is refused naming address", "allocated addresses are no longer available",
+        "limit 2 answers two addresses, the count and a next page", "offset 2 reaches the last address",
+        "a patch changes the status and keeps the address", "a status filter lists the reserved address",
+        "a deleted address is not found and is available again",
+    ],
+    "harvest": [
+        "a created client answers 201, active, with its currency", "a project answers its client and how it bills",
+        "the task assignment puts the task on the project at its rate", "an entry with hours is stopped and holds them",
+        "the entry bills at the task assignment's rate", "an entry without hours starts a running timer",
+        "is_running true lists only the running entry", "stop ends the timer", "restart runs the entry again",
+        "a patch changes the notes and keeps the hours", "from and to keep the entries spent in that range",
+        "per_page 1 answers one entry and the page counts", "links.next reaches another entry",
+        "a deleted entry is not found and leaves the list",
+    ],
+    "lob": [
+        "a created address answers its adr_ id and fields", "the address reads back by id",
+        "a metadata filter lists the run's addresses newest first", "limit 1 answers one address and a next_url",
+        "the next_url cursor reaches the older address", "a deleted address answers deleted and leaves the list",
+        "a letter to the address answers its ltr_ id and both addresses",
+        "a scheduled letter keeps its send_date and is expected after it",
+        "a repeated Idempotency-Key answers the same letter",
+        "a metadata filter lists the run's letters newest first", "scheduled true lists only the scheduled letter",
+        "a scheduled letter is cancelled with deleted true", "a cancelled letter reads as deleted",
+        "a letter without a use_type is refused with 422",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND12_CHECKS)
+BLIND12_DIR = "scripts/llm-bench/contracts/blind12"
+# Contracts alone: no persona.
+BLIND12_MOCKS = {name: (f"{BLIND12_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND12_CHECKS}
+HEX = "0123456789abcdef"
+
+
+def basic_auth(user, password):
+    return {"authorization": "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()}
+
+
+def same_text(a, b):
+    """Equal strings, ignoring case (an API may answer an address in capitals)."""
+    return isinstance(a, str) and isinstance(b, str) and a.casefold() == b.casefold()
+
+
+def couchdb_steps(j):
+    # The database is new and named for this run, so its documents are the ones made here.
+    j.headers.update(dict(basic_auth("bench", "bench-placeholder"), accept="application/json"))
+    tag = j.rng.randrange(10**5, 10**6)
+    db = f"/bench-{tag}"
+    customer = f"ana.{tag}@bench.example"
+
+    def revision(rev):
+        """N of a revision `N-<32 hex>`, or None."""
+        return int(rev.split("-", 1)[0]) if matches("[0-9]+-[0-9a-f]{32}", rev) else None
+
+    def own_rev(rev, n):
+        return rev if revision(rev) is not None else f"{n}-{made_up(j, '', 32, HEX)}"
+
+    def written():
+        return j.last["status"] in (201, 202)
+
+    def doc(docid):
+        return obj(j.call("GET", f"{db}/{docid}"))
+
+    def all_docs(**query):
+        # Keys are JSON: a string key is sent in double quotes.
+        query = {k: json.dumps(v) if k in ("startkey", "endkey") else v for k, v in query.items()}
+        answer = obj(j.call("GET", f"{db}/_all_docs", query=query))
+        return ids_of(answer.get("rows")), answer
+
+    made = obj(j.call("PUT", db))
+    j.check("a created database answers ok", written() and made.get("ok") is True, answer=made)
+    taken = obj(j.call("PUT", db))
+    j.check("a taken database name is refused with 412 file_exists",
+            j.last["status"] == 412 and eq(taken.get("error"), "file_exists"), error=taken)
+    first = {"type": "order", "customer": customer, "total": 12.5, "status": "open"}
+    put = obj(j.call("PUT", f"{db}/order-001", body=first))
+    j.check("a PUT document answers its id and a first revision",
+            written() and put.get("ok") is True and eq(put.get("id"), "order-001") and revision(put.get("rev")) == 1,
+            answer=put)
+    rev1 = own_rev(put.get("rev"), 1)
+    read = doc("order-001")
+    etag = str(j.answer_headers.get("ETag") or "")
+    j.check("the document reads with its _id, _rev and ETag",
+            eq(read.get("_id"), "order-001") and eq(read.get("_rev"), rev1) and eq(read.get("customer"), customer)
+            and near(read.get("total"), 12.5, 0.001) and etag.strip('"') == rev1,
+            document=read, etag=etag)
+    again = obj(j.call("PUT", f"{db}/order-001", body=dict(first, status="cancelled")))
+    refused = j.last["status"]
+    kept = doc("order-001")
+    j.check("a PUT of an existing id without its revision is refused with 409",
+            refused == 409 and eq(again.get("error"), "conflict") and eq(kept.get("_rev"), rev1)
+            and eq(kept.get("status"), "open"),
+            status_code=refused, error=again, read={k: kept.get(k) for k in ("_rev", "status")})
+    # The revision the document holds now (rev1 unless the refused PUT was stored), so a
+    # stored conflict is that check's miss only.
+    current = own_rev(kept.get("_rev"), 1)
+    update = obj(j.call("PUT", f"{db}/order-001", body=dict(first, _rev=current, status="paid")))
+    updated = written()
+    read = doc("order-001")
+    j.check("an update with the current revision answers the next revision",
+            updated and revision(update.get("rev")) == revision(current) + 1 and eq(read.get("_rev"), update.get("rev"))
+            and eq(read.get("status"), "paid") and near(read.get("total"), 12.5, 0.001),
+            answer=update, current=current, read={k: read.get(k) for k in ("_rev", "status", "total")})
+    rev2 = own_rev(update.get("rev"), revision(current) + 1)
+    stale = obj(j.call("PUT", f"{db}/order-001", query={"rev": rev1}, body=dict(first, status="refunded")))
+    refused = j.last["status"]
+    kept = doc("order-001")
+    j.check("a stale revision is refused and changes nothing",
+            refused == 409 and eq(stale.get("error"), "conflict") and eq(kept.get("_rev"), rev2)
+            and eq(kept.get("status"), "paid"),
+            status_code=refused, error=stale, read={k: kept.get(k) for k in ("_rev", "status")})
+    posted = obj(j.call("POST", db, body={"type": "note", "text": f"Call {customer} about delivery"}))
+    stored = written()
+    note = given(posted.get("id"), None)
+    read = doc(note) if note else {}
+    j.check("a POST stores a document under an id the server makes",
+            stored and note is not None and posted.get("ok") is True and revision(posted.get("rev")) == 1
+            and eq(read.get("_id"), note) and eq(read.get("type"), "note"),
+            answer=posted, read={k: read.get(k) for k in ("_id", "_rev", "type")})
+    note = note or made_up(j, "", 32, HEX)
+    second = obj(j.call("PUT", f"{db}/order-002", body={"type": "order", "customer": customer, "total": 40,
+                                                         "status": "open"}))
+    rev_b = own_rev(second.get("rev"), 1)
+    rows, listed = all_docs(include_docs="true")
+    revs = {r.get("id"): obj(r.get("value")).get("rev") for r in dicts(listed.get("rows"))}
+    orders = [r for r in rows if r in ("order-001", "order-002")]
+    j.check("_all_docs lists every document by id with total_rows",
+            same_items(rows, ["order-001", "order-002", note]) and orders == ["order-001", "order-002"]
+            and eq(listed.get("total_rows"), 3) and eq(revs.get("order-001"), rev2)
+            and all(isinstance(r.get("doc"), dict) for r in dicts(listed.get("rows"))),
+            listed=rows, total_rows=listed.get("total_rows"), revs=revs)
+    rows, _ = all_docs(startkey="order-", endkey="order-￰")
+    j.check("startkey and endkey bound the ids", rows == ["order-001", "order-002"], listed=rows)
+    rows, listed = all_docs(startkey="order-", endkey="order-￰", skip=1, limit=1)
+    j.check("skip and limit answer the row after the first", rows == ["order-002"] and eq(listed.get("total_rows"), 3),
+            listed=rows, total_rows=listed.get("total_rows"))
+    found = obj(j.call("POST", f"{db}/_find", body={"selector": {"type": "order", "total": {"$gte": 20}}}))
+    docs = dicts(found.get("docs"))
+    j.check("a _find selector finds the matching documents",
+            j.last["status"] == 200 and ids_of(docs, "_id") == ["order-002"] and eq(head(docs).get("status"), "open"),
+            found=ids_of(docs, "_id"))
+    gone = obj(j.call("DELETE", f"{db}/order-002", query={"rev": rev_b}))
+    deleted = j.last["status"] in (200, 202) and gone.get("ok") is True and revision(gone.get("rev")) == 2
+    tomb = doc("order-002")
+    tomb_status = j.last["status"]
+    never = doc(f"order-{tag}")
+    j.check("a deleted document answers a new revision and reads 404 deleted",
+            deleted and tomb_status == 404 and eq(tomb.get("error"), "not_found") and eq(tomb.get("reason"), "deleted")
+            and j.last["status"] == 404 and eq(never.get("reason"), "missing"),
+            answer=gone, deleted_read=tomb, missing_read=never)
+    info = obj(j.call("GET", db))
+    rows, _ = all_docs()
+    j.check("the database counts live and deleted documents",
+            eq(info.get("db_name"), db.lstrip("/")) and eq(info.get("doc_count"), 2) and eq(info.get("doc_del_count"), 1)
+            and same_items(rows, ["order-001", note]),
+            info={k: info.get(k) for k in ("db_name", "doc_count", "doc_del_count")}, listed=rows)
+
+
+def rabbitmq_steps(j):
+    # The virtual host is new and named for this run, so its queues are the ones made here.
+    j.headers.update(dict(basic_auth("bench", "bench-placeholder"), accept="application/json"))
+    tag = j.rng.randrange(10**5, 10**6)
+    vhost = f"bench-{tag}"
+    queues, created, shipped = f"/api/queues/{vhost}", "orders.created", "orders.shipped"
+    between = f"/api/bindings/{vhost}/e/events/q/{created}"
+
+    def queue(name):
+        return obj(j.call("GET", f"{queues}/{name}"))
+
+    def declare(name, **arguments):
+        answer = obj(j.call("PUT", f"{queues}/{name}", body={"durable": True, "auto_delete": False,
+                                                              "arguments": arguments}))
+        return j.last["status"], answer
+
+    def publish(key, payload):
+        answer = obj(j.call("POST", f"/api/exchanges/{vhost}/events/publish", body={
+            "properties": {"content_type": "text/plain"}, "routing_key": key, "payload": payload,
+            "payload_encoding": "string"}))
+        return j.last["status"], answer.get("routed")
+
+    def get(count, ackmode):
+        answer = j.call("POST", f"{queues}/{created}/get", body={"count": count, "ackmode": ackmode,
+                                                                  "encoding": "auto"})
+        return dicts(answer if isinstance(answer, list) else [])
+
+    def page(**query):
+        answer = obj(j.call("GET", queues, query=query))
+        return [q.get("name") for q in dicts(answer.get("items"))], answer
+
+    j.call("PUT", f"/api/vhosts/{vhost}", body={"description": f"Bench run {tag}"})
+    made = j.last["status"]
+    read = obj(j.call("GET", f"/api/vhosts/{vhost}"))
+    j.check("a created virtual host answers 201 and reads by name",
+            made == 201 and eq(read.get("name"), vhost) and eq(read.get("description"), f"Bench run {tag}"),
+            status_code=made, read={k: read.get(k) for k in ("name", "description")})
+    j.call("PUT", f"/api/permissions/{vhost}/bench", body={"configure": ".*", "write": ".*", "read": ".*"})
+    status, _ = declare(created, **{"x-max-length": 1000})
+    read = queue(created)
+    j.check("a declared queue answers 201 and reads its arguments",
+            status == 201 and eq(read.get("name"), created) and eq(read.get("vhost"), vhost)
+            and read.get("durable") is True and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
+            status_code=status, read={k: read.get(k) for k in ("name", "vhost", "durable", "arguments")})
+    status, _ = declare(created, **{"x-max-length": 1000})
+    j.check("declaring the queue again the same way answers 204", status == 204, status_code=status)
+    status, refused = declare(created, **{"x-max-length": 10})
+    read = queue(created)
+    j.check("a declaration with other arguments is refused with 400 and changes nothing",
+            status == 400 and eq(refused.get("error"), "bad_request") and "x-max-length" in str(refused.get("reason"))
+            and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
+            status_code=status, error=refused, arguments=read.get("arguments"))
+    declare(shipped)
+    declare("audit")
+    j.call("PUT", f"/api/exchanges/{vhost}/events", body={"type": "topic", "durable": True})
+    j.call("POST", between, body={"routing_key": "order.created"})
+    bound = j.last["status"]
+    location = str(j.answer_headers.get("Location") or "")
+    j.check("a binding answers 201 with a Location", bound == 201 and f"/e/events/q/{created}/" in location,
+            status_code=bound, location=location)
+    answer = j.call("GET", between)
+    rows = dicts(answer if isinstance(answer, list) else [])
+    one = head(rows)
+    key = given(one.get("properties_key"), None)
+    j.check("the binding is listed with its routing key and properties_key",
+            len(rows) == 1 and eq(one.get("source"), "events") and eq(one.get("destination"), created)
+            and eq(one.get("routing_key"), "order.created") and key is not None and location.endswith(f"/{key}"),
+            bindings=rows, location=location)
+    first, second = f"order {tag}-1 created", f"order {tag}-2 created"
+    status, routed = publish("order.created", first)
+    j.check("a message a binding matches is routed", status == 200 and routed is True, status_code=status, routed=routed)
+    status, routed = publish("invoice.sent", f"invoice {tag} sent")
+    j.check("a message no binding matches is not routed", status == 200 and routed is False,
+            status_code=status, routed=routed)
+    publish("order.created", second)
+    got = get(1, "ack_requeue_true")
+    m = head(got)
+    j.check("ack_requeue_true answers the oldest message and the count after it",
+            len(got) == 1 and eq(m.get("payload"), first) and eq(m.get("routing_key"), "order.created")
+            and eq(m.get("exchange"), "events") and m.get("redelivered") is False and eq(m.get("message_count"), 1),
+            messages=got)
+    again = get(1, "ack_requeue_false")
+    rest = get(5, "ack_requeue_true")
+    j.check("a requeued message is got again redelivered and acked away",
+            len(again) == 1 and eq(head(again).get("payload"), first) and head(again).get("redelivered") is True
+            and [r.get("payload") for r in rest] == [second] and eq(head(rest).get("message_count"), 0),
+            again=again, rest=rest)
+    # Sorted by name: orders.created comes before orders.shipped. One check judges page 1
+    # and the next judges page 2, so a short first page is one miss.
+    names, answer = page(page=1, page_size=1, name="orders")
+    j.check("page 1 of a name filter answers one queue and the counts",
+            names == [created] and eq(answer.get("item_count"), 1) and eq(answer.get("filtered_count"), 2)
+            and eq(answer.get("total_count"), 3) and eq(answer.get("page_count"), 2) and eq(answer.get("page"), 1),
+            listed=names, counts={k: answer.get(k) for k in ("page", "page_size", "page_count", "item_count",
+                                                              "filtered_count", "total_count")})
+    names, answer = page(page=2, page_size=1, name="orders")
+    j.check("page 2 reaches the other queue the filter kept", names == [shipped] and eq(answer.get("page"), 2),
+            listed=names, page=answer.get("page"))
+    kept = obj(j.call("DELETE", f"{queues}/{created}", query={"if-empty": "true"}))
+    refused = j.last["status"]
+    read = queue(created)
+    j.check("if-empty keeps a queue that holds messages",
+            refused == 400 and eq(kept.get("error"), "bad_request") and j.last["status"] == 200
+            and eq(read.get("name"), created),
+            status_code=refused, error=kept, read_status=j.last["status"])
+    j.call("DELETE", f"{queues}/{created}/contents")
+    purged = j.last["status"]
+    j.call("DELETE", f"{queues}/{created}", query={"if-empty": "true"})
+    deleted = j.last["status"]
+    queue(created)
+    j.check("a purged queue deletes and is then not found",
+            purged == 204 and deleted == 204 and j.last["status"] == 404,
+            purge_status=purged, delete_status=deleted, read_status=j.last["status"])
+
+
+def netbox_steps(j):
+    # The site, tag and VRF are named for this run and the prefix is in the run's VRF, so
+    # every list filters on what was made here.
+    j.headers.update({"authorization": "Bearer nbt_bench.bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    a, b = j.rng.randrange(1, 255), j.rng.randrange(0, 256)
+    net = f"10.{a}.{b}"
+    prefix = f"{net}.0/29"
+    slug, label = f"bench-dc-{tag}", f"edge-{tag}"
+
+    def ip(n):
+        return f"{net}.{n}/29"
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**4, 10**6)
+
+    def status_of(thing):
+        return obj(obj(thing).get("status")).get("value")
+
+    def vrf_of(thing):
+        return obj(obj(thing).get("vrf")).get("id")
+
+    def free():
+        answer = j.call("GET", f"/api/ipam/prefixes/{pid}/available-ips/")
+        return [r.get("address") for r in dicts(answer if isinstance(answer, list) else [])]
+
+    def addresses(**query):
+        answer = obj(j.call("GET", "/api/ipam/ip-addresses/", query=dict({"vrf_id": vrf}, **query)))
+        return dicts(answer.get("results")), answer
+
+    site = obj(j.call("POST", "/api/dcim/sites/", body={"name": f"Bench DC {tag}", "slug": slug, "status": "active"}))
+    j.check("a created site answers 201 with its slug and status",
+            j.last["status"] == 201 and is_int(site.get("id")) and eq(site.get("name"), f"Bench DC {tag}")
+            and eq(site.get("slug"), slug) and status_of(site) == "active"
+            and eq(obj(site.get("status")).get("label"), "Active"),
+            site={k: site.get(k) for k in ("id", "name", "slug", "status")})
+    sid = own(site.get("id"))
+    taken = obj(j.call("POST", "/api/dcim/sites/", body={"name": f"Other DC {tag}", "slug": slug}))
+    j.check("a taken slug is refused naming the field", j.last["status"] == 400 and "slug" in taken, error=taken)
+    j.call("POST", "/api/extras/tags/", body={"name": label, "slug": label, "color": "4caf50"})
+    patched = obj(j.call("PATCH", f"/api/dcim/sites/{sid}/", body={"tags": [{"name": label}]}))
+    rows = obj(j.call("GET", "/api/dcim/sites/", query={"tag": label})).get("results")
+    j.check("a tag filter lists the tagged site",
+            [t.get("slug") for t in dicts(patched.get("tags"))] == [label] and ids_of(rows) == [sid],
+            tags=patched.get("tags"), listed=ids_of(rows))
+    vrf = own(obj(j.call("POST", "/api/ipam/vrfs/", body={"name": f"bench-{tag}", "enforce_unique": True})).get("id"))
+    made = obj(j.call("POST", "/api/ipam/prefixes/", body={"prefix": prefix, "vrf": vrf, "status": "active",
+                                                           "description": f"Bench servers {tag}"}))
+    j.check("a created prefix keeps its prefix, VRF and status",
+            j.last["status"] == 201 and is_int(made.get("id")) and eq(made.get("prefix"), prefix)
+            and eq(vrf_of(made), vrf) and status_of(made) == "active" and made.get("is_pool") is False,
+            prefix={k: made.get(k) for k in ("id", "prefix", "vrf", "status", "is_pool")})
+    pid = own(made.get("id"))
+    answer = j.call("GET", f"/api/ipam/prefixes/{pid}/available-ips/")
+    listed = dicts(answer if isinstance(answer, list) else [])
+    j.check("available-ips lists the six usable addresses of the /29",
+            [r.get("address") for r in listed] == [ip(n) for n in range(1, 7)]
+            and all(eq(vrf_of(r), vrf) for r in listed),
+            available=[r.get("address") for r in listed])
+    gateway = obj(j.call("POST", f"/api/ipam/prefixes/{pid}/available-ips/", body={
+        "status": "active", "dns_name": f"gw.{tag}.bench.example", "description": f"Gateway {tag}"}))
+    j.check("a POST to available-ips allocates the lowest free address",
+            j.last["status"] == 201 and is_int(gateway.get("id")) and eq(gateway.get("address"), ip(1))
+            and eq(vrf_of(gateway), vrf) and eq(gateway.get("dns_name"), f"gw.{tag}.bench.example"),
+            address={k: gateway.get(k) for k in ("id", "address", "vrf", "dns_name")})
+    answer = j.call("POST", f"/api/ipam/prefixes/{pid}/available-ips/", body=[
+        {"status": "active", "description": f"Web 1 {tag}"}, {"status": "active", "description": f"Web 2 {tag}"}])
+    pair = dicts(answer if isinstance(answer, list) else [])
+    j.check("a list body allocates one address per item, in order",
+            j.last["status"] == 201 and [p.get("address") for p in pair] == [ip(2), ip(3)]
+            and [p.get("description") for p in pair] == [f"Web 1 {tag}", f"Web 2 {tag}"],
+            allocated=[{k: p.get(k) for k in ("id", "address", "description")} for p in pair])
+    web2 = own(pair[1].get("id") if len(pair) == 2 else None)
+    web2_at = pair[1].get("address") if len(pair) == 2 else ip(3)
+    # The checks after this one go by the addresses the allocations answered, so a wrong
+    # allocation is one miss, not several.
+    usable = [ip(n) for n in range(1, 7)]
+    held = [x for x in usable if x in [gateway.get("address")] + [p.get("address") for p in pair]]
+    dup = obj(j.call("POST", "/api/ipam/ip-addresses/", body={"address": held[0] if held else ip(1), "vrf": vrf,
+                                                               "status": "active"}))
+    j.check("an address the VRF holds is refused naming address", j.last["status"] == 400 and "address" in dup,
+            error=dup)
+    if (j.last["status"] in (200, 201) and is_int(dup.get("id"))
+            and dup.get("id") not in [gateway.get("id")] + ids_of(pair)):
+        # A duplicate that was stored is that check's miss: it is removed so the lists
+        # after it hold only the allocated addresses.
+        j.call("DELETE", f"/api/ipam/ip-addresses/{dup['id']}/")
+    left = free()
+    j.check("allocated addresses are no longer available",
+            bool(held) and left == [x for x in usable if x not in held], available=left, allocated=held)
+    rows, answer = addresses(parent=prefix, limit=2)
+    j.check("limit 2 answers two addresses, the count and a next page",
+            len(held) > 2 and [r.get("address") for r in rows] == held[:2] and eq(answer.get("count"), len(held))
+            and isinstance(answer.get("next"), str) and answer.get("previous") is None,
+            listed=[r.get("address") for r in rows], count=answer.get("count"), next=answer.get("next"))
+    rows, answer = addresses(parent=prefix, limit=2, offset=2)
+    j.check("offset 2 reaches the last address",
+            len(held) > 2 and [r.get("address") for r in rows] == held[2:] and "next" in answer
+            and answer.get("next") is None and isinstance(answer.get("previous"), str),
+            listed=[r.get("address") for r in rows], next=answer.get("next"), previous=answer.get("previous"))
+    changed = obj(j.call("PATCH", f"/api/ipam/ip-addresses/{web2}/", body={"status": "reserved"}))
+    read = obj(j.call("GET", f"/api/ipam/ip-addresses/{web2}/"))
+    j.check("a patch changes the status and keeps the address",
+            status_of(changed) == "reserved" and status_of(read) == "reserved" and eq(read.get("address"), web2_at)
+            and eq(read.get("description"), f"Web 2 {tag}") and eq(vrf_of(read), vrf),
+            answered=status_of(changed), read={k: read.get(k) for k in ("address", "status", "description")})
+    rows, _ = addresses(status="reserved")
+    j.check("a status filter lists the reserved address", ids_of(rows) == [web2], listed=ids_of(rows))
+    j.call("DELETE", f"/api/ipam/ip-addresses/{web2}/")
+    deleted = j.last["status"]
+    j.call("GET", f"/api/ipam/ip-addresses/{web2}/")
+    missing = j.last["status"]
+    left = free()
+    j.check("a deleted address is not found and is available again",
+            deleted == 204 and missing == 404 and web2_at in left
+            and left == [x for x in usable if x not in held or x == web2_at],
+            delete_status=deleted, read_status=missing, available=left)
+
+
+def harvest_steps(j):
+    # The client and project are named for this run, and every list of time entries
+    # filters on the run's project, so the lists hold only the entries made here.
+    j.headers.update(dict(HELDOUT_AUTH, **{"harvest-account-id": "1234567",
+                                          "user-agent": "Mockingbird bench (bench@bench.example)"}))
+    tag = j.rng.randrange(10**5, 10**6)
+    today = datetime.now(timezone.utc).date()
+
+    def day(n):
+        return (today - timedelta(days=n)).isoformat()
+
+    def own(value):
+        return value if is_int(value) else j.rng.randrange(10**6, 10**9)
+
+    def ref(thing, key):
+        return obj(obj(thing).get(key)).get("id")
+
+    def entry(eid):
+        return obj(j.call("GET", f"/v2/time_entries/{eid}"))
+
+    def entries(query):
+        answer = obj(j.call("GET", "/v2/time_entries", query=dict({"project_id": pid}, **query)))
+        return ids_of(answer.get("time_entries")), answer
+
+    def log(spent, **fields):
+        return obj(j.call("POST", "/v2/time_entries", body=dict({"project_id": pid, "task_id": tid,
+                                                                  "spent_date": spent}, **fields)))
+
+    client = obj(j.call("POST", "/v2/clients", body={"name": f"Bench Client {tag}", "currency": "EUR"}))
+    j.check("a created client answers 201, active, with its currency",
+            j.last["status"] == 201 and is_int(client.get("id")) and eq(client.get("name"), f"Bench Client {tag}")
+            and client.get("is_active") is True and eq(client.get("currency"), "EUR"),
+            client={k: client.get(k) for k in ("id", "name", "is_active", "currency")})
+    cid = own(client.get("id"))
+    project = obj(j.call("POST", "/v2/projects", body={"client_id": cid, "name": f"Website {tag}", "code": f"W{tag}",
+                                                       "is_billable": True, "bill_by": "Tasks", "budget_by": "none"}))
+    j.check("a project answers its client and how it bills",
+            j.last["status"] == 201 and is_int(project.get("id")) and eq(ref(project, "client"), cid)
+            and eq(obj(project.get("client")).get("name"), f"Bench Client {tag}") and eq(project.get("bill_by"), "Tasks")
+            and project.get("is_billable") is True,
+            project={k: project.get(k) for k in ("id", "name", "client", "bill_by", "is_billable")})
+    pid = own(project.get("id"))
+    tid = own(obj(j.call("POST", "/v2/tasks", body={"name": f"Design {tag}", "default_hourly_rate": 90,
+                                                    "billable_by_default": True})).get("id"))
+    j.call("POST", f"/v2/projects/{pid}/task_assignments", body={"task_id": tid, "hourly_rate": 120,
+                                                                  "billable": True})
+    assigned = j.last["status"]
+    rows = dicts(obj(j.call("GET", f"/v2/projects/{pid}/task_assignments")).get("task_assignments"))
+    j.check("the task assignment puts the task on the project at its rate",
+            assigned == 201 and len(rows) == 1 and eq(ref(head(rows), "task"), tid)
+            and near(head(rows).get("hourly_rate"), 120, 0.001) and head(rows).get("billable") is True,
+            status_code=assigned, assignments=rows)
+    first = log(day(10), hours=1.5, notes=f"Wireframes {tag}")
+    j.check("an entry with hours is stopped and holds them",
+            j.last["status"] == 201 and is_int(first.get("id")) and first.get("is_running") is False
+            and near(first.get("hours"), 1.5, 0.001) and eq(first.get("spent_date"), day(10))
+            and eq(ref(first, "project"), pid) and eq(ref(first, "task"), tid) and eq(ref(first, "client"), cid),
+            entry={k: first.get(k) for k in ("id", "spent_date", "hours", "is_running", "project", "task", "client")})
+    e1 = own(first.get("id"))
+    read = entry(e1)
+    j.check("the entry bills at the task assignment's rate",
+            read.get("billable") is True and near(read.get("billable_rate"), 120, 0.001),
+            entry={k: read.get(k) for k in ("billable", "billable_rate", "task_assignment")})
+    e3 = own(log(day(3), hours=2.0, notes=f"Mockups {tag}").get("id"))
+    timer = log(day(0), notes=f"Review {tag}")
+    j.check("an entry without hours starts a running timer",
+            j.last["status"] == 201 and is_int(timer.get("id")) and timer.get("is_running") is True
+            and near(timer.get("hours"), 0, 0.001) and instant(timer.get("timer_started_at")) is not None,
+            entry={k: timer.get(k) for k in ("id", "hours", "is_running", "timer_started_at")})
+    e2 = own(timer.get("id"))
+    rows, _ = entries({"is_running": "true"})
+    j.check("is_running true lists only the running entry", rows == [e2], listed=rows)
+    stopped = obj(j.call("PATCH", f"/v2/time_entries/{e2}/stop"))
+    status = j.last["status"]
+    read = entry(e2)
+    j.check("stop ends the timer",
+            status == 200 and stopped.get("is_running") is False and stopped.get("timer_started_at") is None
+            and read.get("is_running") is False,
+            status_code=status, answered={k: stopped.get(k) for k in ("is_running", "timer_started_at")},
+            read=read.get("is_running"))
+    started = obj(j.call("PATCH", f"/v2/time_entries/{e2}/restart"))
+    status = j.last["status"]
+    read = entry(e2)
+    j.check("restart runs the entry again",
+            status == 200 and started.get("is_running") is True and instant(started.get("timer_started_at")) is not None
+            and read.get("is_running") is True,
+            status_code=status, answered={k: started.get(k) for k in ("is_running", "timer_started_at")},
+            read=read.get("is_running"))
+    changed = obj(j.call("PATCH", f"/v2/time_entries/{e1}", body={"notes": f"Wireframes, second pass {tag}"}))
+    read = entry(e1)
+    j.check("a patch changes the notes and keeps the hours",
+            eq(changed.get("notes"), f"Wireframes, second pass {tag}") and eq(read.get("notes"), changed.get("notes"))
+            and near(read.get("hours"), 1.5, 0.001) and eq(read.get("spent_date"), day(10)),
+            read={k: read.get(k) for k in ("notes", "hours", "spent_date")})
+    rows, _ = entries({"from": day(12), "to": day(4)})
+    j.check("from and to keep the entries spent in that range", rows == [e1], listed=rows)
+    # One check judges the first page and the next follows its link, so a short first
+    # page is one miss; with no link the second fails without a call.
+    first_page, answer = entries({"per_page": 1})
+    nxt = obj(answer.get("links")).get("next")
+    j.check("per_page 1 answers one entry and the page counts",
+            len(first_page) == 1 and set(first_page) <= {e1, e2, e3} and eq(answer.get("total_entries"), 3)
+            and eq(answer.get("total_pages"), 3) and eq(answer.get("per_page"), 1) and isinstance(nxt, str),
+            listed=first_page, counts={k: answer.get(k) for k in ("per_page", "total_pages", "total_entries", "page")},
+            next=nxt)
+    if isinstance(nxt, str) and urllib.parse.urlsplit(nxt).query:
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(nxt).query))
+        answer = obj(j.call("GET", "/v2/time_entries", query=query))
+        rows = ids_of(answer.get("time_entries"))
+        j.check("links.next reaches another entry",
+                len(rows) == 1 and set(rows) <= {e1, e2, e3} and rows != first_page, first=first_page, listed=rows,
+                next=nxt)
+    else:
+        j.check("links.next reaches another entry", False, reason="the first page gave no links.next", next=nxt)
+    j.call("DELETE", f"/v2/time_entries/{e3}")
+    deleted = j.last["status"]
+    entry(e3)
+    missing = j.last["status"]
+    rows, _ = entries({})
+    j.check("a deleted entry is not found and leaves the list",
+            deleted == 200 and missing == 404 and same_items(rows, [e1, e2]),
+            delete_status=deleted, read_status=missing, listed=rows)
+
+
+def lob_steps(j):
+    # Every address and letter carries metadata naming this run, and every list filters on
+    # it, so the lists hold only what was made here.
+    j.headers.update(dict(basic_auth("test_bench-placeholder", ""), accept="application/json"))
+    tag = j.rng.randrange(10**5, 10**6)
+    run = f"bench-{tag}"
+    send = (datetime.now(timezone.utc).date() + timedelta(days=5)).isoformat()
+    html = f"<html><body><p>Your appointment reminder {tag}.</p></body></html>"
+    sender = {"name": "Bench Mail Co", "address_line1": "185 Berry St Ste 6100", "address_city": "San Francisco",
+              "address_state": "CA", "address_zip": "94107", "address_country": "US"}
+
+    def own(value, prefix):
+        return value if matches(f"{prefix}[A-Za-z0-9]+", value) else made_up(j, prefix, 16, HEX)
+
+    def listed(path, **query):
+        answer = obj(j.call("GET", path, query=dict({"metadata[run]": run}, **query)))
+        return ids_of(answer.get("data")), answer
+
+    def address(name, line1, city, state, zip_code):
+        return obj(j.call("POST", "/v1/addresses", body={
+            "name": name, "address_line1": line1, "address_city": city, "address_state": state,
+            "address_zip": zip_code, "address_country": "US", "description": f"Bench {tag}",
+            "metadata": {"run": run}}))
+
+    def letter(key=None, **fields):
+        if key:
+            j.headers["idempotency-key"] = key
+        try:
+            return obj(j.call("POST", "/v1/letters", body=dict({
+                "description": f"Reminder {tag}", "to": a2, "from": sender, "file": html, "color": False,
+                "use_type": "operational", "metadata": {"run": run}}, **fields)))
+        finally:
+            j.headers.pop("idempotency-key", None)
+
+    def day_of(value):
+        moment = instant(value) if isinstance(value, str) and "T" in value else None
+        if moment is not None:
+            return moment.date().isoformat()
+        return value[:10] if isinstance(value, str) and matches(r"\d{4}-\d{2}-\d{2}", value[:10]) else None
+
+    made = address("Ana Silva", "210 King St", "San Francisco", "CA", "94107")
+    j.check("a created address answers its adr_ id and fields",
+            j.last["status"] == 200 and matches("adr_[A-Za-z0-9]+", made.get("id")) and eq(made.get("object"), "address")
+            and same_text(made.get("name"), "Ana Silva") and same_text(made.get("address_city"), "San Francisco")
+            and eq(obj(made.get("metadata")).get("run"), run),
+            address={k: made.get(k) for k in ("id", "object", "name", "address_city", "metadata")})
+    a1 = own(made.get("id"), "adr_")
+    read = obj(j.call("GET", f"/v1/addresses/{a1}"))
+    j.check("the address reads back by id",
+            eq(read.get("id"), a1) and same_text(read.get("name"), "Ana Silva")
+            and same_text(read.get("address_line1"), "210 King St") and same_text(read.get("address_zip"), "94107"),
+            address={k: read.get(k) for k in ("id", "name", "address_line1", "address_zip")})
+    a2 = own(address("Ben Okafor", "1 Market St", "San Francisco", "CA", "94105").get("id"), "adr_")
+    rows, _ = listed("/v1/addresses")
+    j.check("a metadata filter lists the run's addresses newest first", rows == [a2, a1], listed=rows)
+    # One check judges the first page and the next follows its cursor, so a short first
+    # page is one miss; with no cursor the second fails without a call.
+    rows, answer = listed("/v1/addresses", limit=1)
+    after = query_value(answer.get("next_url"), "after")
+    j.check("limit 1 answers one address and a next_url",
+            rows == [a2] and eq(answer.get("count"), 1) and isinstance(answer.get("next_url"), str),
+            listed=rows, count=answer.get("count"), next_url=answer.get("next_url"))
+    if after:
+        rows, answer = listed("/v1/addresses", limit=1, after=after)
+        j.check("the next_url cursor reaches the older address", rows == [a1], listed=rows)
+    else:
+        j.check("the next_url cursor reaches the older address", False, reason="the first page gave no after cursor",
+                next_url=answer.get("next_url"))
+    gone = obj(j.call("DELETE", f"/v1/addresses/{a1}"))
+    status = j.last["status"]
+    rows, _ = listed("/v1/addresses")
+    j.check("a deleted address answers deleted and leaves the list",
+            status == 200 and eq(gone.get("id"), a1) and gone.get("deleted") is True and rows == [a2],
+            delete_status=status, answer=gone, listed=rows)
+    first = letter()
+    j.check("a letter to the address answers its ltr_ id and both addresses",
+            j.last["status"] == 200 and matches("ltr_[A-Za-z0-9]+", first.get("id")) and eq(first.get("object"), "letter")
+            and eq(obj(first.get("to")).get("id"), a2) and same_text(obj(first.get("to")).get("name"), "Ben Okafor")
+            and same_text(obj(first.get("from")).get("name"), "Bench Mail Co")
+            and eq(first.get("use_type"), "operational") and first.get("color") is False,
+            letter={k: first.get(k) for k in ("id", "object", "use_type", "color")},
+            to=obj(first.get("to")).get("id"), sender=obj(first.get("from")).get("name"))
+    l1 = own(first.get("id"), "ltr_")
+    key = f"bench-{tag}-reminder"
+    later = letter(key, send_date=send)
+    expected = day_of(later.get("expected_delivery_date"))
+    j.check("a scheduled letter keeps its send_date and is expected after it",
+            j.last["status"] == 200 and matches("ltr_[A-Za-z0-9]+", later.get("id"))
+            and day_of(later.get("send_date")) == send and expected is not None and expected > send,
+            letter={k: later.get(k) for k in ("id", "send_date", "expected_delivery_date")})
+    l2 = own(later.get("id"), "ltr_")
+    again = letter(key, send_date=send)
+    j.check("a repeated Idempotency-Key answers the same letter", j.last["status"] == 200 and eq(again.get("id"), l2),
+            first=l2, again=again.get("id"))
+    # A second letter the repeat made is that check's miss, so the lists leave it out.
+    extra = [] if eq(again.get("id"), l2) else [again.get("id")]
+    rows, _ = listed("/v1/letters")
+    rows = [r for r in rows if r not in extra]
+    j.check("a metadata filter lists the run's letters newest first", rows == [l2, l1], listed=rows)
+    rows, _ = listed("/v1/letters", scheduled="true")
+    rows = [r for r in rows if r not in extra]
+    j.check("scheduled true lists only the scheduled letter", rows == [l2], listed=rows)
+    cancelled = obj(j.call("DELETE", f"/v1/letters/{l2}"))
+    j.check("a scheduled letter is cancelled with deleted true",
+            j.last["status"] == 200 and eq(cancelled.get("id"), l2) and cancelled.get("deleted") is True,
+            answer=cancelled)
+    read = obj(j.call("GET", f"/v1/letters/{l2}"))
+    j.check("a cancelled letter reads as deleted", eq(read.get("id"), l2) and read.get("deleted") is True,
+            letter={k: read.get(k) for k in ("id", "deleted")})
+    bad = obj(j.call("POST", "/v1/letters", body={"to": a2, "from": sender, "file": html, "color": False,
+                                                  "metadata": {"run": run}}))
+    j.check("a letter without a use_type is refused with 422",
+            j.last["status"] == 422 and eq(obj(bad.get("error")).get("status_code"), 422), error=bad)
+
+
+BLIND12_JOURNEYS = {"couchdb": couchdb_steps, "rabbitmq": rabbitmq_steps, "netbox": netbox_steps,
+                    "harvest": harvest_steps, "lob": lob_steps}
+
+
+def run_journeys_blind12(srv, sink, args):
+    run_journey_table(BLIND12_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -7500,6 +8200,7 @@ RUNNERS = {
     "journeys_blind9": (BLIND9_MOCKS, run_journeys_blind9),
     "journeys_blind10": (BLIND10_MOCKS, run_journeys_blind10),
     "journeys_blind11": (BLIND11_MOCKS, run_journeys_blind11),
+    "journeys_blind12": (BLIND12_MOCKS, run_journeys_blind12),
 }
 
 

@@ -1,0 +1,646 @@
+openapi: 3.0.3
+info:
+  title: NetBox REST API (sites, tags, VRFs, prefixes, available IPs and IP addresses)
+  version: "4.4"
+  description: |
+    A subset of the NetBox REST API, written from its public documentation
+    (netboxlabs.com/docs/netbox: integrations/rest-api, reference/filtering and the
+    IPAM models). Requests authenticate with `Authorization: Bearer nbt_<key>.<token>`
+    (or a legacy `Token <token>`). Bodies are JSON. Every URL ends with a slash.
+
+    Objects have integer ids. `POST` to a list endpoint creates an object and answers
+    201 with it; `GET`, `PATCH` (only the fields sent change) and `DELETE` (204, no
+    body) work on `/{id}/`. A missing object answers 404 `{"detail": "Not found."}`.
+    A choice field such as `status` is written as its value (`"active"`) and answered as
+    `{"value": "active", "label": "Active"}`. A related object is written by its id (or
+    by attributes that name exactly one object) and answered nested and brief, as
+    `{id, url, display, name, ...}`. `tags` is written as a list such as
+    `[{"name": "edge"}]` and replaces the object's tags; it answers nested tags.
+
+    A list answers `{count, next, previous, results}`: `count` counts every object the
+    filters keep, `results` holds one page, and `next` and `previous` are the URLs of the
+    adjacent pages, or null. Pages are set by `limit` (default 50, at most 1000) and
+    `offset`. Filters are query parameters: a field's name for an exact value
+    (`status=active`, `slug=...`), a lookup suffix for others (`name__ic` contains,
+    ignoring case; `name__n` is not), `q` for a search, `tag` for a tag's slug, and
+    `vrf_id` or `parent` (a prefix in CIDR notation) for IP addresses. Lists are sorted
+    by the model's ordering (sites by name, prefixes by VRF and prefix, IP addresses by
+    address) unless `ordering` names a field (`-` before it for descending).
+
+    Validation errors answer 400 with a body keyed by field: `{"slug": ["Site with this
+    slug already exists."]}`. Site names and slugs are unique, and so are tag names and
+    slugs. A VRF with `enforce_unique` (the default) refuses a second IP address or
+    prefix equal to one it holds: `{"address": ["Duplicate IP address found in VRF
+    <name>: <address>"]}`.
+
+    `GET /api/ipam/prefixes/{id}/available-ips/` lists the free addresses of a prefix,
+    lowest first, as a bare array of `{family, address, vrf}`; the address carries the
+    prefix's mask (`10.0.0.1/29`). A non-pool IPv4 prefix other than a /31 or /32 leaves
+    out its network and broadcast addresses, so a /29 has six usable addresses. A
+    `POST` there allocates the lowest free addresses: a JSON object creates one IP
+    address in the prefix's VRF and answers it (201); a list creates one per item, in
+    order, and answers the list (201). The allocation is atomic. When fewer addresses are
+    free than asked for, nothing is created and it answers 409 `{"detail": "An
+    insufficient number of IP addresses are available within <prefix> (2 requested, 1
+    available)"}`. An allocated address is no longer listed as available, and a deleted
+    one is available again.
+servers:
+  - url: https://netbox.example.com
+security:
+  - tokenAuth: []
+tags:
+  - name: dcim
+  - name: extras
+  - name: ipam
+paths:
+  /api/dcim/sites/:
+    get:
+      tags: [dcim]
+      operationId: dcim_sites_list
+      summary: List sites
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/ordering"
+        - $ref: "#/components/parameters/q"
+        - $ref: "#/components/parameters/tag"
+        - {name: name, in: query, schema: {type: string}}
+        - {name: name__ic, in: query, description: "Name contains this, ignoring case.", schema: {type: string}}
+        - {name: slug, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {$ref: "#/components/schemas/SiteStatusValue"}}
+      responses:
+        "200":
+          description: A page of sites.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      results: {type: array, items: {$ref: "#/components/schemas/Site"}}
+    post:
+      tags: [dcim]
+      operationId: dcim_sites_create
+      summary: Create a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WritableSite"}
+      responses:
+        "201":
+          description: The created site.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Site"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /api/dcim/sites/{id}/:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [dcim]
+      operationId: dcim_sites_retrieve
+      summary: Read a site
+      responses:
+        "200":
+          description: The site.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Site"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [dcim]
+      operationId: dcim_sites_partial_update
+      summary: Change some fields of a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PatchedWritableSite"}
+      responses:
+        "200":
+          description: The site.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Site"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [dcim]
+      operationId: dcim_sites_destroy
+      summary: Delete a site
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/extras/tags/:
+    get:
+      tags: [extras]
+      operationId: extras_tags_list
+      summary: List tags
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - {name: slug, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: A page of tags.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      results: {type: array, items: {$ref: "#/components/schemas/Tag"}}
+    post:
+      tags: [extras]
+      operationId: extras_tags_create
+      summary: Create a tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name: {type: string, maxLength: 100}
+                slug: {type: string, maxLength: 100, pattern: '^[-a-zA-Z0-9_]+$'}
+                color: {type: string, pattern: '^[0-9a-f]{6}$', default: 9e9e9e}
+                description: {type: string}
+      responses:
+        "201":
+          description: The created tag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Tag"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /api/ipam/vrfs/:
+    post:
+      tags: [ipam]
+      operationId: ipam_vrfs_create
+      summary: Create a VRF
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, maxLength: 100}
+                rd: {type: string, nullable: true, description: Route distinguisher.}
+                enforce_unique: {type: boolean, default: true, description: Refuse duplicate prefixes and IP addresses in this VRF.}
+                description: {type: string}
+      responses:
+        "201":
+          description: The created VRF.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/VRF"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /api/ipam/vrfs/{id}/:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [ipam]
+      operationId: ipam_vrfs_retrieve
+      summary: Read a VRF
+      responses:
+        "200":
+          description: The VRF.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/VRF"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/ipam/prefixes/:
+    get:
+      tags: [ipam]
+      operationId: ipam_prefixes_list
+      summary: List prefixes
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/q"
+        - {name: vrf_id, in: query, schema: {type: integer}}
+        - {name: prefix, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {$ref: "#/components/schemas/PrefixStatusValue"}}
+      responses:
+        "200":
+          description: A page of prefixes.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      results: {type: array, items: {$ref: "#/components/schemas/Prefix"}}
+    post:
+      tags: [ipam]
+      operationId: ipam_prefixes_create
+      summary: Create a prefix
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prefix]
+              properties:
+                prefix: {type: string, example: 10.0.0.0/29}
+                vrf: {type: integer, nullable: true, description: The VRF's id.}
+                status: {$ref: "#/components/schemas/PrefixStatusValue"}
+                is_pool: {type: boolean, default: false, description: "Every address is usable, network and broadcast included."}
+                mark_utilized: {type: boolean, default: false}
+                description: {type: string}
+                tags: {type: array, items: {$ref: "#/components/schemas/TagRef"}}
+      responses:
+        "201":
+          description: The created prefix.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Prefix"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /api/ipam/prefixes/{id}/:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [ipam]
+      operationId: ipam_prefixes_retrieve
+      summary: Read a prefix
+      responses:
+        "200":
+          description: The prefix.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Prefix"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [ipam]
+      operationId: ipam_prefixes_destroy
+      summary: Delete a prefix
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/ipam/prefixes/{id}/available-ips/:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [ipam]
+      operationId: ipam_prefixes_available_ips_list
+      summary: List a prefix's free addresses
+      description: "Lowest first, a bare array; network and broadcast left out of a non-pool IPv4 prefix."
+      parameters:
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: The free addresses.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/AvailableIP"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [ipam]
+      operationId: ipam_prefixes_available_ips_create
+      summary: Allocate a prefix's lowest free addresses
+      description: "An object allocates one address and answers it; a list allocates one per item, in order, and answers the list."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/AllocateIP"
+                - type: array
+                  items: {$ref: "#/components/schemas/AllocateIP"}
+      responses:
+        "201":
+          description: The created IP address, or the list of them.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/IPAddress"
+                  - type: array
+                    items: {$ref: "#/components/schemas/IPAddress"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Fewer addresses are free than asked for; nothing was created.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Detail"}
+  /api/ipam/ip-addresses/:
+    get:
+      tags: [ipam]
+      operationId: ipam_ip_addresses_list
+      summary: List IP addresses
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/ordering"
+        - $ref: "#/components/parameters/q"
+        - $ref: "#/components/parameters/tag"
+        - {name: vrf_id, in: query, schema: {type: integer}}
+        - {name: parent, in: query, description: "Addresses within this prefix (CIDR notation).", schema: {type: string}}
+        - {name: address, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {$ref: "#/components/schemas/IPStatusValue"}}
+        - {name: dns_name, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: A page of IP addresses, sorted by address.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      results: {type: array, items: {$ref: "#/components/schemas/IPAddress"}}
+    post:
+      tags: [ipam]
+      operationId: ipam_ip_addresses_create
+      summary: Create an IP address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/WritableIPAddress"
+                - type: object
+                  required: [address]
+      responses:
+        "201":
+          description: The created IP address.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IPAddress"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /api/ipam/ip-addresses/{id}/:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [ipam]
+      operationId: ipam_ip_addresses_retrieve
+      summary: Read an IP address
+      responses:
+        "200":
+          description: The IP address.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IPAddress"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [ipam]
+      operationId: ipam_ip_addresses_partial_update
+      summary: Change some fields of an IP address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WritableIPAddress"}
+      responses:
+        "200":
+          description: The IP address.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IPAddress"}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    delete:
+      tags: [ipam]
+      operationId: ipam_ip_addresses_destroy
+      summary: Delete an IP address
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  securitySchemes:
+    tokenAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "`Bearer nbt_<key>.<token>`, or the legacy `Token <token>`."
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer}
+    limit:
+      name: limit
+      in: query
+      description: Objects per page (default 50, at most 1000).
+      schema: {type: integer, minimum: 1, default: 50}
+    offset:
+      name: offset
+      in: query
+      description: Objects to skip before the page.
+      schema: {type: integer, minimum: 0, default: 0}
+    ordering:
+      name: ordering
+      in: query
+      description: "A field to sort by; a leading - sorts descending."
+      schema: {type: string}
+    q:
+      name: q
+      in: query
+      description: A search over the object's main fields.
+      schema: {type: string}
+    tag:
+      name: tag
+      in: query
+      description: A tag's slug; only objects with that tag.
+      schema: {type: string}
+  responses:
+    NotFound:
+      description: No such object.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Detail"}
+          example: {detail: Not found.}
+    ValidationError:
+      description: "Errors keyed by field: `{field: [messages]}`."
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              type: array
+              items: {type: string}
+          example: {slug: [Site with this slug already exists.]}
+  schemas:
+    Detail:
+      type: object
+      properties:
+        detail: {type: string}
+    Page:
+      type: object
+      properties:
+        count: {type: integer, description: Every object the filters keep.}
+        next: {type: string, nullable: true, description: "The next page's URL, or null."}
+        previous: {type: string, nullable: true, description: "The previous page's URL, or null."}
+        results: {type: array, items: {type: object}}
+    Choice:
+      type: object
+      properties:
+        value: {type: string}
+        label: {type: string}
+    SiteStatusValue:
+      type: string
+      enum: [planned, staging, active, decommissioning, retired]
+    PrefixStatusValue:
+      type: string
+      enum: [container, active, reserved, deprecated]
+    IPStatusValue:
+      type: string
+      enum: [active, reserved, deprecated, dhcp, slaac]
+    TagRef:
+      type: object
+      description: A tag by name or slug.
+      properties:
+        name: {type: string}
+        slug: {type: string}
+    NestedTag:
+      type: object
+      properties:
+        id: {type: integer}
+        url: {type: string}
+        display: {type: string}
+        name: {type: string}
+        slug: {type: string}
+        color: {type: string}
+    Tag:
+      allOf:
+        - $ref: "#/components/schemas/NestedTag"
+        - type: object
+          properties:
+            description: {type: string}
+            tagged_items: {type: integer}
+            created: {type: string, format: date-time}
+    WritableSite:
+      allOf:
+        - $ref: "#/components/schemas/PatchedWritableSite"
+        - type: object
+          required: [name, slug]
+    PatchedWritableSite:
+      type: object
+      description: Every field optional; only the fields sent change.
+      properties:
+        name: {type: string, maxLength: 100}
+        slug: {type: string, maxLength: 100, pattern: '^[-a-zA-Z0-9_]+$'}
+        status: {$ref: "#/components/schemas/SiteStatusValue"}
+        facility: {type: string}
+        time_zone: {type: string, nullable: true}
+        physical_address: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {$ref: "#/components/schemas/TagRef"}}
+    Site:
+      type: object
+      properties:
+        id: {type: integer}
+        url: {type: string}
+        display: {type: string}
+        name: {type: string}
+        slug: {type: string}
+        status:
+          allOf:
+            - $ref: "#/components/schemas/Choice"
+            - type: object
+              properties:
+                value: {$ref: "#/components/schemas/SiteStatusValue"}
+        facility: {type: string}
+        time_zone: {type: string, nullable: true}
+        physical_address: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {$ref: "#/components/schemas/NestedTag"}}
+        created: {type: string, format: date-time}
+        last_updated: {type: string, format: date-time}
+    NestedVRF:
+      type: object
+      nullable: true
+      properties:
+        id: {type: integer}
+        url: {type: string}
+        display: {type: string}
+        name: {type: string}
+        rd: {type: string, nullable: true}
+    VRF:
+      allOf:
+        - $ref: "#/components/schemas/NestedVRF"
+        - type: object
+          properties:
+            enforce_unique: {type: boolean}
+            description: {type: string}
+            prefix_count: {type: integer}
+            ipaddress_count: {type: integer}
+    Prefix:
+      type: object
+      properties:
+        id: {type: integer}
+        url: {type: string}
+        display: {type: string}
+        family: {type: object, properties: {value: {type: integer, enum: [4, 6]}, label: {type: string, example: IPv4}}}
+        prefix: {type: string, example: 10.0.0.0/29}
+        vrf: {$ref: "#/components/schemas/NestedVRF"}
+        status:
+          allOf:
+            - $ref: "#/components/schemas/Choice"
+            - type: object
+              properties:
+                value: {$ref: "#/components/schemas/PrefixStatusValue"}
+        is_pool: {type: boolean}
+        mark_utilized: {type: boolean}
+        description: {type: string}
+        tags: {type: array, items: {$ref: "#/components/schemas/NestedTag"}}
+        children: {type: integer}
+        _depth: {type: integer}
+    AvailableIP:
+      type: object
+      properties:
+        family: {type: integer, enum: [4, 6]}
+        address: {type: string, example: 10.0.0.1/29, description: "With the prefix's mask."}
+        vrf: {$ref: "#/components/schemas/NestedVRF"}
+    AllocateIP:
+      type: object
+      properties:
+        status: {$ref: "#/components/schemas/IPStatusValue"}
+        dns_name: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {$ref: "#/components/schemas/TagRef"}}
+    WritableIPAddress:
+      type: object
+      properties:
+        address: {type: string, example: 10.0.0.1/29}
+        vrf: {type: integer, nullable: true, description: The VRF's id.}
+        status: {$ref: "#/components/schemas/IPStatusValue"}
+        role: {type: string, nullable: true, enum: [loopback, secondary, anycast, vip, vrrp, hsrp, glbp, carp, null]}
+        dns_name: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {$ref: "#/components/schemas/TagRef"}}
+    IPAddress:
+      type: object
+      properties:
+        id: {type: integer}
+        url: {type: string}
+        display: {type: string}
+        family: {type: object, properties: {value: {type: integer, enum: [4, 6]}, label: {type: string}}}
+        address: {type: string, example: 10.0.0.1/29}
+        vrf: {$ref: "#/components/schemas/NestedVRF"}
+        status:
+          allOf:
+            - $ref: "#/components/schemas/Choice"
+            - type: object
+              properties:
+                value: {$ref: "#/components/schemas/IPStatusValue"}
+        role: {type: object, nullable: true}
+        dns_name: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {$ref: "#/components/schemas/NestedTag"}}
+        created: {type: string, format: date-time}
+        last_updated: {type: string, format: date-time}

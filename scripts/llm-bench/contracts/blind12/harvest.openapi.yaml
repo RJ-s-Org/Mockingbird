@@ -1,0 +1,557 @@
+openapi: 3.0.3
+info:
+  title: Harvest API v2 (clients, projects, tasks, task assignments and time entries)
+  version: v2
+  description: |
+    A subset of the Harvest API v2, written from its public reference
+    (help.getharvest.com/api-v2). Requests carry `Authorization: Bearer <token>`, the
+    account in a `Harvest-Account-Id` header, and a `User-Agent` naming the application
+    and a contact (without one a request answers 400). Bodies and answers are JSON.
+    Dates are `YYYY-MM-DD`; date-times are ISO 8601 in UTC.
+
+    Objects have integer ids. `POST` creates one and answers 201 with it; `GET` reads
+    it; `PATCH` changes only the fields sent and answers 200 with the whole object;
+    `DELETE` answers 200. A missing object answers 404, and a request that fails
+    validation answers 422 with a `message`. Related objects are answered nested and
+    brief: `client {id, name, currency}`, `project {id, name, code}`, `task {id, name}`,
+    `user {id, name}`.
+
+    Work is organised as clients, their projects, and tasks assigned to projects. A
+    project bills by `bill_by`: with `Tasks` the billable rate of time on the project is
+    the `hourly_rate` of the task's assignment to it (`POST
+    /v2/projects/{project_id}/task_assignments`). A time entry records time a user spent
+    on a project's task on a day (`spent_date`), and answers its `client`, `project`,
+    `task`, `task_assignment`, `billable` and `billable_rate` (null when not billable).
+
+    This account tracks time by duration. A time entry created with `hours` is stopped
+    (`is_running` false) and holds those hours. One created without `hours` starts a
+    running timer: `is_running` true, `hours` 0.0 and `timer_started_at` the moment it
+    started. `PATCH /v2/time_entries/{id}/stop` stops a running entry (its time is added
+    to `hours`, `is_running` becomes false and `timer_started_at` null) and
+    `PATCH /v2/time_entries/{id}/restart` starts a stopped one again (`is_running`
+    true, a new `timer_started_at`); stopping an entry that is not running, or
+    restarting one that is, answers 422. Both answer 200 with the entry.
+
+    Lists answer the objects under the plural name (`time_entries`, `clients`,
+    `projects`, `task_assignments`) with `per_page`, `total_pages`, `total_entries`,
+    `page`, `next_page` and `previous_page` (null when there is none), and `links`
+    `{first, next, previous, last}`: the URLs of those pages, `next` null on the last
+    page. `per_page` is 1 to 2000 (default 2000). The next page is reached by following
+    `links.next`, whose query may hold a `cursor` instead of a `page` (with a cursor,
+    `page`, `next_page` and `previous_page` are null except on the first and last page).
+    Time entries are listed by `spent_date`, the latest first, and can be filtered by
+    `user_id`, `client_id`, `project_id`, `task_id`, `is_billed`, `is_running`,
+    `updated_since` and the `spent_date` range `from` to `to` (both included).
+servers:
+  - url: https://api.harvestapp.com
+security:
+  - bearerAuth: []
+tags:
+  - name: Clients
+  - name: Projects
+  - name: Tasks
+  - name: Time Entries
+paths:
+  /v2/clients:
+    get:
+      tags: [Clients]
+      operationId: listClients
+      summary: List clients
+      parameters:
+        - {name: is_active, in: query, schema: {type: boolean}}
+        - {name: updated_since, in: query, schema: {type: string, format: date-time}}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of clients.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Paging"
+                  - type: object
+                    properties:
+                      clients: {type: array, items: {$ref: "#/components/schemas/Client"}}
+    post:
+      tags: [Clients]
+      operationId: createClient
+      summary: Create a client
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                is_active: {type: boolean, default: true}
+                address: {type: string}
+                currency: {type: string, description: "An ISO 4217 code; default the account's currency."}
+      responses:
+        "201":
+          description: The created client.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Client"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/clients/{client_id}:
+    parameters:
+      - {name: client_id, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Clients]
+      operationId: retrieveClient
+      summary: Read a client
+      responses:
+        "200":
+          description: The client.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Client"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Clients]
+      operationId: updateClient
+      summary: Change some fields of a client
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                is_active: {type: boolean}
+                address: {type: string}
+                currency: {type: string}
+      responses:
+        "200":
+          description: The client.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Client"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/projects:
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id, name, is_billable, bill_by, budget_by]
+              properties:
+                client_id: {type: integer}
+                name: {type: string}
+                code: {type: string}
+                is_active: {type: boolean, default: true}
+                is_billable: {type: boolean}
+                is_fixed_fee: {type: boolean, default: false}
+                bill_by: {type: string, enum: [Project, Tasks, People, none]}
+                hourly_rate: {type: number, description: "The rate when bill_by is Project."}
+                budget: {type: number, nullable: true}
+                budget_by: {type: string, enum: [project, project_cost, task, task_fees, person, none]}
+                notes: {type: string}
+                starts_on: {type: string, format: date}
+                ends_on: {type: string, format: date}
+      responses:
+        "201":
+          description: The created project.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/projects/{project_id}:
+    parameters:
+      - {name: project_id, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Projects]
+      operationId: retrieveProject
+      summary: Read a project
+      responses:
+        "200":
+          description: The project.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Project"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/projects/{project_id}/task_assignments:
+    parameters:
+      - {name: project_id, in: path, required: true, schema: {type: integer}}
+    get:
+      tags: [Projects]
+      operationId: listTaskAssignmentsForSpecificProject
+      summary: List a project's task assignments
+      parameters:
+        - {name: is_active, in: query, schema: {type: boolean}}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of the project's task assignments.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Paging"
+                  - type: object
+                    properties:
+                      task_assignments: {type: array, items: {$ref: "#/components/schemas/TaskAssignment"}}
+        "404": {$ref: "#/components/responses/NotFound"}
+    post:
+      tags: [Projects]
+      operationId: createTaskAssignment
+      summary: Assign a task to a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task_id]
+              properties:
+                task_id: {type: integer}
+                is_active: {type: boolean, default: true}
+                billable: {type: boolean}
+                hourly_rate: {type: number, description: "The billable rate of the task's time when the project bills by Tasks."}
+                budget: {type: number, nullable: true}
+      responses:
+        "201":
+          description: The created task assignment.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TaskAssignment"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Create a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                billable_by_default: {type: boolean, default: true}
+                default_hourly_rate: {type: number, default: 0}
+                is_default: {type: boolean, default: false}
+                is_active: {type: boolean, default: true}
+      responses:
+        "201":
+          description: The created task.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Task"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/time_entries:
+    get:
+      tags: [Time Entries]
+      operationId: listTimeEntries
+      summary: List time entries
+      description: "By spent_date, the latest first."
+      parameters:
+        - {name: user_id, in: query, schema: {type: integer}}
+        - {name: client_id, in: query, schema: {type: integer}}
+        - {name: project_id, in: query, schema: {type: integer}}
+        - {name: task_id, in: query, schema: {type: integer}}
+        - {name: is_billed, in: query, schema: {type: boolean}}
+        - {name: is_running, in: query, description: Only running (true) or stopped (false) entries., schema: {type: boolean}}
+        - {name: updated_since, in: query, schema: {type: string, format: date-time}}
+        - {name: from, in: query, description: Only entries with a spent_date on or after this date., schema: {type: string, format: date}}
+        - {name: to, in: query, description: Only entries with a spent_date on or before this date., schema: {type: string, format: date}}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of time entries.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Paging"
+                  - type: object
+                    properties:
+                      time_entries: {type: array, items: {$ref: "#/components/schemas/TimeEntry"}}
+        "422": {$ref: "#/components/responses/Invalid"}
+    post:
+      tags: [Time Entries]
+      operationId: createTimeEntryViaDuration
+      summary: Create a time entry via duration
+      description: "With hours the entry is stopped; without hours it starts a running timer with hours 0.0."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project_id, task_id, spent_date]
+              properties:
+                user_id: {type: integer, description: Default the authenticated user.}
+                project_id: {type: integer}
+                task_id: {type: integer}
+                spent_date: {type: string, format: date}
+                hours: {type: number, description: "The time spent, as a decimal number of hours."}
+                notes: {type: string}
+      responses:
+        "201":
+          description: The created time entry.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TimeEntry"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/time_entries/{time_entry_id}:
+    parameters:
+      - $ref: "#/components/parameters/time_entry_id"
+    get:
+      tags: [Time Entries]
+      operationId: retrieveTimeEntry
+      summary: Read a time entry
+      responses:
+        "200":
+          description: The time entry.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TimeEntry"}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      tags: [Time Entries]
+      operationId: updateTimeEntry
+      summary: Change some fields of a time entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                project_id: {type: integer}
+                task_id: {type: integer}
+                spent_date: {type: string, format: date}
+                hours: {type: number}
+                notes: {type: string}
+      responses:
+        "200":
+          description: The time entry.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TimeEntry"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+    delete:
+      tags: [Time Entries]
+      operationId: deleteTimeEntry
+      summary: Delete a time entry
+      description: "Only when it is not closed and its project and task are not archived."
+      responses:
+        "200": {description: Deleted.}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /v2/time_entries/{time_entry_id}/stop:
+    parameters:
+      - $ref: "#/components/parameters/time_entry_id"
+    patch:
+      tags: [Time Entries]
+      operationId: stopTimeEntry
+      summary: Stop a running time entry
+      responses:
+        "200":
+          description: "The entry, stopped: is_running false and timer_started_at null."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TimeEntry"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+  /v2/time_entries/{time_entry_id}/restart:
+    parameters:
+      - $ref: "#/components/parameters/time_entry_id"
+    patch:
+      tags: [Time Entries]
+      operationId: restartTimeEntry
+      summary: Restart a stopped time entry
+      responses:
+        "200":
+          description: "The entry, running: is_running true and a new timer_started_at."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TimeEntry"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/Invalid"}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    time_entry_id:
+      name: time_entry_id
+      in: path
+      required: true
+      schema: {type: integer}
+    page:
+      name: page
+      in: query
+      description: "The page; follow links instead of setting it."
+      schema: {type: integer, minimum: 1, default: 1}
+    cursor:
+      name: cursor
+      in: query
+      description: "From a links URL; takes precedence over page."
+      schema: {type: string}
+    per_page:
+      name: per_page
+      in: query
+      description: Records per page (1 to 2000; default 2000).
+      schema: {type: integer, minimum: 1, maximum: 2000, default: 2000}
+  responses:
+    NotFound:
+      description: The object does not exist.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: {type: integer, example: 404}
+              error: {type: string, example: Not Found}
+    Invalid:
+      description: "The request failed validation; `message` says why."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message: {type: string}
+  schemas:
+    Paging:
+      type: object
+      properties:
+        per_page: {type: integer}
+        total_pages: {type: integer}
+        total_entries: {type: integer}
+        next_page: {type: integer, nullable: true}
+        previous_page: {type: integer, nullable: true}
+        page: {type: integer, nullable: true}
+        links:
+          type: object
+          properties:
+            first: {type: string}
+            next: {type: string, nullable: true, description: "The next page's URL; null on the last page."}
+            previous: {type: string, nullable: true}
+            last: {type: string}
+    ClientRef:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        currency: {type: string}
+    ProjectRef:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        code: {type: string, nullable: true}
+    TaskRef:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+    UserRef:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+    Client:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        is_active: {type: boolean}
+        address: {type: string, nullable: true}
+        statement_key: {type: string}
+        currency: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Project:
+      type: object
+      properties:
+        id: {type: integer}
+        client: {$ref: "#/components/schemas/ClientRef"}
+        name: {type: string}
+        code: {type: string, nullable: true}
+        is_active: {type: boolean}
+        is_billable: {type: boolean}
+        is_fixed_fee: {type: boolean}
+        bill_by: {type: string, enum: [Project, Tasks, People, none]}
+        hourly_rate: {type: number, nullable: true}
+        budget: {type: number, nullable: true}
+        budget_by: {type: string}
+        notes: {type: string, nullable: true}
+        starts_on: {type: string, format: date, nullable: true}
+        ends_on: {type: string, format: date, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Task:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        billable_by_default: {type: boolean}
+        default_hourly_rate: {type: number}
+        is_default: {type: boolean}
+        is_active: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    TaskAssignment:
+      type: object
+      properties:
+        id: {type: integer}
+        project: {$ref: "#/components/schemas/ProjectRef"}
+        task: {$ref: "#/components/schemas/TaskRef"}
+        is_active: {type: boolean}
+        billable: {type: boolean}
+        hourly_rate: {type: number, nullable: true}
+        budget: {type: number, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    TimeEntry:
+      type: object
+      properties:
+        id: {type: integer}
+        spent_date: {type: string, format: date}
+        user: {$ref: "#/components/schemas/UserRef"}
+        client: {$ref: "#/components/schemas/ClientRef"}
+        project: {$ref: "#/components/schemas/ProjectRef"}
+        task: {$ref: "#/components/schemas/TaskRef"}
+        task_assignment:
+          type: object
+          properties:
+            id: {type: integer}
+            billable: {type: boolean}
+            is_active: {type: boolean}
+            hourly_rate: {type: number, nullable: true}
+        hours: {type: number, description: "Decimal hours; for a running entry, the time before its timer started."}
+        rounded_hours: {type: number}
+        notes: {type: string, nullable: true}
+        is_locked: {type: boolean}
+        is_closed: {type: boolean}
+        is_billed: {type: boolean}
+        is_running: {type: boolean}
+        timer_started_at: {type: string, format: date-time, nullable: true, description: "When the running timer started; null when stopped."}
+        started_time: {type: string, nullable: true}
+        ended_time: {type: string, nullable: true}
+        billable: {type: boolean}
+        budgeted: {type: boolean}
+        billable_rate: {type: number, nullable: true, description: "The rate the time bills at; with bill_by Tasks, the task assignment's hourly_rate."}
+        cost_rate: {type: number, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
