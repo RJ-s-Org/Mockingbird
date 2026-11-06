@@ -546,8 +546,8 @@ pub(super) fn restored(held: Option<&Value>, new: &Value) -> Option<Value> {
 /// [`Place::same_variant`]) or naming another identity (see [`reassigns`]), which
 /// keeps nothing of `held`, redacted or not. In a value object, a `null` its
 /// optional member's schema does not admit removes the member (see
-/// [`Place::null_member`]); on a required member it stays, for the record's own
-/// check to refuse.
+/// [`Place::null_member`]); on a required member it stays, a violation the record
+/// did not have, for which what sets it is refused whole (see [`added_violation`]).
 pub(super) fn merge_at(
     rt: &MockRuntime,
     held: Option<&Value>,
@@ -585,8 +585,8 @@ pub(super) fn merge_at(
     let mut out = held_members.clone();
     for (key, value) in new_members {
         // A null the member's schema does not admit removes an optional member (see
-        // [`Place::null_member`]). On a required one it stays, and the merged record
-        // breaks its schema: what sets it is refused whole.
+        // [`Place::null_member`]). On a required one it stays, a violation the record
+        // did not have: what sets it is refused whole (see [`added_violation`]).
         if value.is_null()
             && nulls.as_ref().map(|p| p.null_member(rt, key)) == Some(NullMember::Removed)
         {
@@ -915,14 +915,16 @@ impl<'a> StubWalk<'a, '_> {
 /// Merges `effect` into the stored resource it names and returns the result and the
 /// members it set, as they now are; `Err` says why not. The resource must exist (an
 /// effect never creates one, and never deletes one), keep its identity and owner and,
-/// merged, still suit its type when it did before (one held in an earlier, incomplete
-/// shape takes it), which must have a schema to check against (see [`entity_fits`]).
-/// Each member goes as its place in the schema says (see [`merge_at`]), a dotted key
-/// may be a path (see [`dotted_as_paths`]), and objects that only name stored records
-/// are filled with them (see [`fill_stubs`]). Member names written with JSON around
-/// them are the declared ones first (see [`mended_set`]). A `null` a member's schema does not admit removes the member when
-/// it is optional and rejects the effect when it is required (see
-/// [`Place::null_member`]). It applies whole or not at all.
+/// merged, have no violation of its type's schema it did not have (see
+/// [`added_violation`]): a record that fit still fits, and one held in an earlier,
+/// incomplete shape gets nothing new wrong. The type must have a schema to check
+/// against. Each member goes as its place in the schema says (see [`merge_at`]), a
+/// dotted key may be a path (see [`dotted_as_paths`]), and objects that only name
+/// stored records are filled with them (see [`fill_stubs`]). Member names written with
+/// JSON around them are the declared ones first (see [`mended_set`]). A `null` a
+/// member's schema does not admit removes the member when it is optional and rejects
+/// the effect when it is required (see [`Place::null_member`]), in a value object too.
+/// It applies whole or not at all.
 pub(super) async fn apply_effect(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -1010,9 +1012,16 @@ pub(super) async fn apply_effect(
     merge_members(rt, t, data, requested);
     // Objects the effect names only by their identity are the records stored under it.
     fill_stubs(state, session, rt, t, &mut stored.data, &keys).await;
-    // Refused only when it breaks a record that fit: one held in an earlier, incomplete
-    // shape takes the effect.
-    if !entity_fits(rt, t, &stored.data) && entity_fits(rt, t, &held.data) {
+    // Refused when it adds a violation: it breaks a record that fit, or gives one held
+    // in an earlier, incomplete shape a violation it did not have.
+    if let Some((path, keyword)) = added_violation(rt, t, &held.data, &stored.data) {
+        tracing::info!(
+            mock = %rt.name,
+            resource_type = %t,
+            path = %path,
+            keyword = %keyword,
+            "an effect leaves its resource with a schema violation it did not have"
+        );
         return Err("the merged resource breaks its schema");
     }
     if let Some((plan, call, _)) = own

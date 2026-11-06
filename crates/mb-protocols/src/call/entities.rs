@@ -341,6 +341,40 @@ pub(super) fn entity_fits(rt: &MockRuntime, t: &str, value: &Value) -> bool {
     entity_fits_from(rt, t, value, None)
 }
 
+/// The first schema violation (the member's JSON pointer and the keyword it breaks,
+/// see [`mb_engine::SchemaValidator::violations`]) that `after`, a change of `before`
+/// (both records of type `t`), has and `before` has not; `None` when the change adds
+/// none. A change that leaves a fitting record fitting adds none; one that breaks a
+/// fitting record adds its first violation. A record that already did not fit (stored
+/// in an earlier, incomplete shape) may keep what it broke but take no new violation:
+/// a value of the wrong type, a `null` on a required member, a value outside an
+/// `enum`. A type with no read to check against adds none.
+pub(super) fn added_violation(
+    rt: &MockRuntime,
+    t: &str,
+    before: &Value,
+    after: &Value,
+) -> Option<(String, String)> {
+    if entity_fits(rt, t, after) {
+        return None;
+    }
+    let (op, shape) = type_check(rt, t)?;
+    let found = |v: &Value| rt.engine.stored_violations(rt.bundle(), op, v, shape);
+    let after = found(after)?;
+    if entity_fits(rt, t, before) {
+        // Whatever it breaks is new; a record that no longer shows its type breaks
+        // no keyword of its own.
+        return Some(
+            after
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| (String::new(), "type".to_owned())),
+        );
+    }
+    let before: HashSet<(String, String)> = found(before)?.into_iter().collect();
+    after.into_iter().find(|v| !before.contains(v))
+}
+
 /// [`entity_fits`] of `value` found at a place of schema `came_from` in an answer:
 /// a member that place declares shows the type as well (Slack's `message`, an
 /// inline object, of a `messages` type whose read is another API's).
@@ -350,22 +384,31 @@ pub(super) fn entity_fits_from(
     value: &Value,
     came_from: Option<&Value>,
 ) -> bool {
-    let index = rt.index();
-    let bundle = rt.bundle();
-    let (read, shape) = match index.detail_reads.get(t) {
-        // A record its read answers in an envelope or an array suits its own schema.
-        Some(i) => (Some(*i), index.record_schemas.get(t)),
-        None => match index.other_shapes.get(t) {
-            Some((i, schema)) => (Some(*i), Some(schema)),
-            None => (None, None),
-        },
-    };
-    let Some(op) = read.and_then(|i| bundle.operations.get(i)) else {
+    let Some((op, shape)) = type_check(rt, t) else {
         return false;
     };
     let schema = shape.or_else(|| op.success_output()?.schema.as_ref());
     shows_its_type(rt, schema, came_from, value)
-        && rt.engine.serve_stored(bundle, op, value, shape).is_some()
+        && rt
+            .engine
+            .serve_stored(rt.bundle(), op, value, shape)
+            .is_some()
+}
+
+/// The read a record of type `t` is checked by (see [`entity_fits`]) and the schema
+/// of the record in its answer when that is not the answer's own: the by-path read,
+/// else the list or singleton read; `None` when the type has neither.
+fn type_check<'r>(rt: &'r MockRuntime, t: &str) -> Option<(&'r Operation, Option<&'r Value>)> {
+    let index = rt.index();
+    let (read, shape) = match index.detail_reads.get(t) {
+        // A record its read answers in an envelope or an array suits its own schema.
+        Some(i) => (*i, index.record_schemas.get(t)),
+        None => {
+            let (i, schema) = index.other_shapes.get(t)?;
+            (*i, Some(schema))
+        }
+    };
+    Some((rt.bundle().operations.get(read)?, shape))
 }
 
 /// Whether `value` holds a member the type's `schema` declares, or one `came_from`
