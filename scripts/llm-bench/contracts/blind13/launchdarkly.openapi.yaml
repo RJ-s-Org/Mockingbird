@@ -1,0 +1,259 @@
+openapi: 3.0.3
+info:
+  title: LaunchDarkly REST API (feature flags)
+  version: "2"
+  description: |
+    A subset of the LaunchDarkly REST API v2, written from its public reference
+    (launchdarkly.com/docs/api, the Feature flags pages). Requests send an access token
+    in the `Authorization` header (no scheme). Bodies are JSON.
+
+    Flags belong to a project and are addressed by their key:
+    `/api/v2/flags/{projectKey}/{featureFlagKey}`. A flag is created with `name` and
+    `key` (unique; the key used in code), and optionally `description`, `tags`,
+    `temporary` and `variations`; the create answers 201 with the flag. The endpoint
+    lists 400 (invalid request), 401 and 409 (status conflict); the reference's example
+    error for an existing key is `"A feature with that key already exists"`. A flag
+    answers `key`, `name`, `kind` (`boolean` or `multivariate`), `_version`,
+    `creationDate` (Unix ms), `variations`, `temporary`, `tags`, `archived` and
+    `_links`. A read takes `env`, which restricts `environments` to the named
+    environments; each environment's configuration holds `on` (whether targeting is on),
+    `archived`, `version` and `lastModified`.
+
+    `PATCH` changes a flag with a JSON patch (the default: an array of
+    `{op, path, value}`, where `test` operations act as preconditions), or with a semantic
+    patch when the request sends
+    `Content-Type: application/json; domain-model=launchdarkly.semanticpatch`: a body
+    `{comment, environmentKey, instructions: [{kind, ...}]}` whose instructions apply
+    together or not at all. Instructions include `turnFlagOn` and `turnFlagOff` (they
+    need `environmentKey`), `archiveFlag`, `restoreFlag`, `deprecateFlag`,
+    `addTags`/`removeTags` (`values`) and `updateName` (`value`). A semantic patch body
+    sent without that content type is read as a JSON patch and answers 400. A body that
+    cannot be understood answers 422.
+
+    `GET /api/v2/flags/{projectKey}` lists a project's flags as `{items, totalCount,
+    _links}`, paged with `limit` (default 20) and `offset`; `_links` holds `first`,
+    `prev`, `next` and `last` when those pages exist. `filter` takes comma-separated
+    `field:value` pairs: `query` (a case-insensitive substring of the key or name),
+    `tags` (`+`-separated, URL-encoded as `%2B`: the flag must have all of them),
+    `state` (`live`, `deprecated` or `archived`), `type` (`temporary` or `permanent`)
+    and others. `sort` orders by `creationDate`, `key`, `maintainerId`, `name`, `tags`,
+    `targetingModifiedDate` or `type`, ascending, or descending with a `-` prefix.
+
+    `DELETE` deletes a flag in all environments. Errors answer `{code, message}`:
+    400 `invalid_request`, 401, 403, 404 for an invalid resource identifier, 405, 409
+    `conflict` for a conflict with a concurrent request, 422 and 429.
+servers:
+  - url: https://app.launchdarkly.com
+security:
+  - apiKey: []
+tags:
+  - name: Feature flags
+paths:
+  /api/v2/flags/{projectKey}:
+    parameters:
+      - $ref: "#/components/parameters/projectKey"
+    get:
+      tags: [Feature flags]
+      operationId: flags_list
+      summary: List feature flags
+      parameters:
+        - {name: env, in: query, description: Adds the named environment's configuration., schema: {type: string}}
+        - {name: tag, in: query, description: Only flags with this tag., schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 20}}
+        - {name: offset, in: query, schema: {type: integer, default: 0}}
+        - name: filter
+          in: query
+          description: "Comma-separated field:value pairs, e.g. `query:dark-mode,tags:beta+test,state:archived`."
+          schema: {type: string}
+        - name: sort
+          in: query
+          description: "creationDate, key, maintainerId, name, tags, targetingModifiedDate or type; ascending, `-` for descending."
+          schema: {type: string}
+        - {name: expand, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: A page of flags.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Flag"}}
+                  totalCount: {type: integer}
+                  _links: {$ref: "#/components/schemas/Links"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Feature flags]
+      operationId: flag_create
+      summary: Create a feature flag
+      parameters:
+        - {name: clone, in: query, description: The key of a flag whose targeting to copy., schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, key]
+              properties:
+                name: {type: string}
+                key: {type: string}
+                description: {type: string}
+                tags: {type: array, items: {type: string}}
+                temporary: {type: boolean}
+                variations: {type: array, items: {$ref: "#/components/schemas/Variation"}}
+                defaults:
+                  type: object
+                  properties:
+                    onVariation: {type: integer}
+                    offVariation: {type: integer}
+                clientSideAvailability:
+                  type: object
+                  properties:
+                    usingEnvironmentId: {type: boolean}
+                    usingMobileKey: {type: boolean}
+      responses:
+        "201":
+          description: The created flag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Flag"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+  /api/v2/flags/{projectKey}/{featureFlagKey}:
+    parameters:
+      - $ref: "#/components/parameters/projectKey"
+      - {name: featureFlagKey, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Feature flags]
+      operationId: flag_get
+      summary: Get a feature flag
+      parameters:
+        - {name: env, in: query, description: Restricts environments to the named ones., schema: {type: string}}
+        - {name: expand, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: The flag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Flag"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Feature flags]
+      operationId: flag_patch
+      summary: Update a feature flag
+      parameters:
+        - {name: ignoreConflicts, in: query, schema: {type: boolean}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              description: A JSON patch.
+              type: array
+              items:
+                type: object
+                required: [op, path]
+                properties:
+                  op: {type: string, enum: [add, remove, replace, move, copy, test]}
+                  path: {type: string}
+                  value: {}
+          application/json; domain-model=launchdarkly.semanticpatch:
+            schema:
+              type: object
+              required: [instructions]
+              properties:
+                comment: {type: string}
+                environmentKey: {type: string, description: Needed by turnFlagOn and turnFlagOff.}
+                instructions:
+                  type: array
+                  items:
+                    type: object
+                    required: [kind]
+                    properties:
+                      kind:
+                        type: string
+                        enum: [turnFlagOn, turnFlagOff, archiveFlag, restoreFlag, deprecateFlag, addTags, removeTags, updateName]
+                      values: {type: array, items: {type: string}}
+                      value: {type: string}
+      responses:
+        "200":
+          description: The flag.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Flag"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Feature flags]
+      operationId: flag_delete
+      summary: Delete a feature flag
+      responses:
+        "204": {description: Deleted in all environments.}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    apiKey: {type: apiKey, in: header, name: Authorization}
+  parameters:
+    projectKey: {name: projectKey, in: path, required: true, schema: {type: string}}
+  responses:
+    Error:
+      description: "`{code, message}`."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: {type: string, example: invalid_request}
+              message: {type: string, example: A feature with that key already exists}
+  schemas:
+    Link:
+      type: object
+      properties:
+        href: {type: string}
+        type: {type: string}
+    Links:
+      type: object
+      additionalProperties: {$ref: "#/components/schemas/Link"}
+    Variation:
+      type: object
+      properties:
+        _id: {type: string}
+        value: {}
+        name: {type: string}
+        description: {type: string}
+    Environment:
+      type: object
+      properties:
+        "on": {type: boolean}
+        archived: {type: boolean}
+        version: {type: integer}
+        lastModified: {type: integer, description: Unix ms.}
+        offVariation: {type: integer}
+        fallthrough: {type: object}
+        _environmentName: {type: string}
+    Flag:
+      type: object
+      properties:
+        key: {type: string}
+        name: {type: string}
+        description: {type: string}
+        kind: {type: string, enum: [boolean, multivariate]}
+        _version: {type: integer}
+        creationDate: {type: integer, description: Unix ms.}
+        variations: {type: array, items: {$ref: "#/components/schemas/Variation"}}
+        temporary: {type: boolean}
+        tags: {type: array, items: {type: string}}
+        archived: {type: boolean}
+        archivedDate: {type: integer}
+        deprecated: {type: boolean}
+        customProperties: {type: object}
+        experiments: {type: object}
+        environments:
+          type: object
+          additionalProperties: {$ref: "#/components/schemas/Environment"}
+        _links: {$ref: "#/components/schemas/Links"}

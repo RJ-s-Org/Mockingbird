@@ -1,0 +1,270 @@
+openapi: 3.0.3
+info:
+  title: Docusign eSignature REST API (envelopes)
+  version: "2.1"
+  description: |
+    A subset of the Docusign eSignature REST API v2.1, written from its public reference
+    (developers.docusign.com/docs/esign-rest-api/reference: Envelopes create, get,
+    update and listStatusChanges, EnvelopeRecipients list and EnvelopeCustomFields list).
+    Requests send an OAuth access token as `Authorization: Bearer <token>`. Every path is
+    under `/restapi/v2.1/accounts/{accountId}`. Bodies are JSON.
+
+    An envelope holds `documents` (each with `documentId`, `name`, `fileExtension`, which
+    a document that is not a PDF needs, and `documentBase64`), `recipients` (such as
+    `signers` with `email`, `name`, `recipientId` and `routingOrder`), an `emailSubject`
+    (at most 100 characters) and `customFields` (`textCustomFields` of `{name, value,
+    show, required}`, values at most 100 characters). `POST .../envelopes` with `status`
+    `created` (or none) saves a draft; with `status` `sent` it sends the envelope. It
+    answers 201 with `{envelopeId, status, statusDateTime, uri}`. Envelope ids are GUIDs.
+
+    `GET .../envelopes/{envelopeId}` answers the envelope: `envelopeId`, `status`
+    (`created`, `sent`, `delivered`, `signed`, `completed`, `declined`, `voided`, ...),
+    `emailSubject`, `createdDateTime`, `sentDateTime`, `statusChangedDateTime`,
+    `voidedDateTime` and `voidedReason` (truncated to 200 characters).
+
+    `PUT .../envelopes/{envelopeId}` changes only the properties it sends: `{"status":
+    "sent"}` sends a draft, and `{"status": "voided", "voidedReason": "..."}` voids an
+    in-process envelope. It answers 200 with `{envelopeId}`.
+
+    `GET .../envelopes/{envelopeId}/recipients` answers the recipient lists (`signers`,
+    `carbonCopies`, ...), `recipientCount` and `currentRoutingOrder`. A recipient's
+    `status` is `created` while its envelope is a draft and `sent` once it has been
+    notified that it is its turn to sign (then `delivered`, `signed`, `completed`,
+    `declined`, ...). `GET .../envelopes/{envelopeId}/custom_fields` answers the
+    envelope's `textCustomFields` and `listCustomFields`.
+
+    `GET .../envelopes` lists envelopes whose status changed in a window: `from_date`
+    (needed unless `envelope_ids` or `transaction_ids` is given) to `to_date` (default
+    now). `status` keeps the envelopes whose current status is one of a comma-separated
+    list (`any` matches every status); `custom_field` keeps those with a custom field of that value, written
+    `name=value`. `count` (at most 1000) and `start_position` (zero-based, default 0)
+    page it; no order is promised unless `order` and `order_by` are given. It answers
+    `{envelopes, resultSetSize, totalSetSize, startPosition, endPosition, nextUri,
+    previousUri}`, the sizes and positions as strings; `totalSetSize` is at least
+    `resultSetSize`, `nextUri` is null on the last page and `previousUri` on the first.
+
+    Errors answer 400 Bad Request with `{errorCode, message}`.
+servers:
+  - url: https://demo.docusign.net
+security:
+  - bearerAuth: []
+tags:
+  - name: Envelopes
+paths:
+  /restapi/v2.1/accounts/{accountId}/envelopes:
+    parameters:
+      - $ref: "#/components/parameters/accountId"
+    get:
+      tags: [Envelopes]
+      operationId: envelopes_list_status_changes
+      summary: List envelope status changes
+      parameters:
+        - {name: from_date, in: query, description: The start of the window; needed unless envelope_ids or transaction_ids is given., schema: {type: string}}
+        - {name: to_date, in: query, schema: {type: string}}
+        - {name: envelope_ids, in: query, schema: {type: string}}
+        - name: status
+          in: query
+          description: "Comma-separated current statuses: completed, created, declined, deleted, delivered, processing, sent, signed, timedout, voided, or any."
+          schema: {type: string}
+        - {name: from_to_status, in: query, schema: {type: string, default: Changed}}
+        - {name: custom_field, in: query, description: "name=value, e.g. Region=West.", schema: {type: string}}
+        - {name: search_text, in: query, schema: {type: string}}
+        - {name: count, in: query, description: At most 1000., schema: {type: string}}
+        - {name: start_position, in: query, description: Zero-based; default 0., schema: {type: string}}
+        - {name: order, in: query, schema: {type: string, enum: [asc, desc]}}
+        - name: order_by
+          in: query
+          schema: {type: string, enum: [last_modified, action_required, created, completed, envelope_name, expire, sent, signer_list, status, subject, user_name, status_changed]}
+        - {name: include, in: query, description: "Comma-separated: custom_fields, documents, attachments, extensions, folders, recipients, payment_tabs.", schema: {type: string}}
+      responses:
+        "200":
+          description: The envelopes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  envelopes: {type: array, items: {$ref: "#/components/schemas/Envelope"}}
+                  resultSetSize: {type: string}
+                  totalSetSize: {type: string}
+                  startPosition: {type: string}
+                  endPosition: {type: string}
+                  nextUri: {type: string, nullable: true}
+                  previousUri: {type: string, nullable: true}
+                  lastQueriedDateTime: {type: string}
+        "400": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Envelopes]
+      operationId: envelope_create
+      summary: Create an envelope (a draft, or sent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/EnvelopeDefinition"}
+      responses:
+        "201":
+          description: The envelope's summary.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EnvelopeSummary"}
+        "400": {$ref: "#/components/responses/Error"}
+  /restapi/v2.1/accounts/{accountId}/envelopes/{envelopeId}:
+    parameters:
+      - $ref: "#/components/parameters/accountId"
+      - $ref: "#/components/parameters/envelopeId"
+    get:
+      tags: [Envelopes]
+      operationId: envelope_get
+      summary: Get an envelope
+      parameters:
+        - {name: include, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: The envelope.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Envelope"}
+        "400": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Envelopes]
+      operationId: envelope_update
+      summary: Send, void or change an envelope
+      parameters:
+        - {name: resend_envelope, in: query, schema: {type: string}}
+        - {name: advanced_update, in: query, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: {type: string, enum: [sent, voided]}
+                voidedReason: {type: string}
+                emailSubject: {type: string}
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  envelopeId: {type: string}
+                  errorDetails: {$ref: "#/components/schemas/ErrorDetails"}
+        "400": {$ref: "#/components/responses/Error"}
+  /restapi/v2.1/accounts/{accountId}/envelopes/{envelopeId}/recipients:
+    parameters:
+      - $ref: "#/components/parameters/accountId"
+      - $ref: "#/components/parameters/envelopeId"
+    get:
+      tags: [Envelopes]
+      operationId: envelope_recipients_list
+      summary: Get the status of an envelope's recipients
+      responses:
+        "200":
+          description: The recipients.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Recipients"}
+        "400": {$ref: "#/components/responses/Error"}
+  /restapi/v2.1/accounts/{accountId}/envelopes/{envelopeId}/custom_fields:
+    parameters:
+      - $ref: "#/components/parameters/accountId"
+      - $ref: "#/components/parameters/envelopeId"
+    get:
+      tags: [Envelopes]
+      operationId: envelope_custom_fields_list
+      summary: Get an envelope's custom fields
+      responses:
+        "200":
+          description: The custom fields.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CustomFields"}
+        "400": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    accountId: {name: accountId, in: path, required: true, description: The account number or account id GUID., schema: {type: string}}
+    envelopeId: {name: envelopeId, in: path, required: true, description: The envelope's GUID., schema: {type: string}}
+  responses:
+    Error:
+      description: "`{errorCode, message}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorDetails"}
+  schemas:
+    ErrorDetails:
+      type: object
+      properties:
+        errorCode: {type: string}
+        message: {type: string}
+    TextCustomField:
+      type: object
+      properties:
+        fieldId: {type: string}
+        name: {type: string}
+        value: {type: string, maxLength: 100}
+        show: {type: string}
+        required: {type: string}
+    CustomFields:
+      type: object
+      properties:
+        textCustomFields: {type: array, items: {$ref: "#/components/schemas/TextCustomField"}}
+        listCustomFields: {type: array, items: {type: object}}
+    Signer:
+      type: object
+      properties:
+        email: {type: string}
+        name: {type: string}
+        recipientId: {type: string}
+        recipientIdGuid: {type: string}
+        routingOrder: {type: string}
+        status: {type: string, enum: [created, sent, delivered, signed, completed, declined, autoresponded, faxPending]}
+    Recipients:
+      type: object
+      properties:
+        signers: {type: array, items: {$ref: "#/components/schemas/Signer"}}
+        carbonCopies: {type: array, items: {$ref: "#/components/schemas/Signer"}}
+        recipientCount: {type: string}
+        currentRoutingOrder: {type: string}
+    Document:
+      type: object
+      properties:
+        documentId: {type: string}
+        name: {type: string}
+        fileExtension: {type: string}
+        documentBase64: {type: string}
+    EnvelopeDefinition:
+      type: object
+      properties:
+        status: {type: string, enum: [created, sent]}
+        emailSubject: {type: string, maxLength: 100}
+        emailBlurb: {type: string}
+        documents: {type: array, items: {$ref: "#/components/schemas/Document"}}
+        recipients: {$ref: "#/components/schemas/Recipients"}
+        customFields: {$ref: "#/components/schemas/CustomFields"}
+    EnvelopeSummary:
+      type: object
+      properties:
+        envelopeId: {type: string, format: uuid}
+        status: {type: string}
+        statusDateTime: {type: string, format: date-time}
+        uri: {type: string, example: /envelopes/4b728be4-a1d6-4f4b-a5a5-3f9d2f7c6c11}
+    Envelope:
+      type: object
+      properties:
+        envelopeId: {type: string, format: uuid}
+        envelopeUri: {type: string}
+        status: {type: string, enum: [created, sent, delivered, signed, completed, declined, voided, deleted, processing, timedout]}
+        emailSubject: {type: string}
+        createdDateTime: {type: string, format: date-time}
+        sentDateTime: {type: string, format: date-time}
+        statusChangedDateTime: {type: string, format: date-time}
+        voidedDateTime: {type: string, format: date-time}
+        voidedReason: {type: string}
+        customFields: {$ref: "#/components/schemas/CustomFields"}
+        recipients: {$ref: "#/components/schemas/Recipients"}

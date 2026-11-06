@@ -101,6 +101,14 @@ Suites (contracts are in-repo, so the bench is reproducible):
   Harvest time entries (task assignments, running timers, links.next paging) and Lob
   addresses and letters (metadata filters, after cursors, scheduled letters, cancelling,
   Idempotency-Key). Not in the default suites. Same rule; no check gates the rest.
+- journeys_blind13: the same again over five more contracts written for it, in
+  `scripts/llm-bench/contracts/blind13/`: Buildkite pipelines and builds (slugs, numbered
+  builds, cancel and rebuild, Link header pages), LaunchDarkly feature flags (semantic
+  patches, filter= grammar, archiving), BambooHR employees and time off (ids in Location,
+  fields=, status changes, overlapping date windows), Docusign envelopes (drafts sent and
+  voided, nested recipients and custom fields, start_position paging) and Mastodon
+  statuses (Idempotency-Key, favourites and bookmarks, Link cursors, edit history,
+  scheduled statuses). Not in the default suites. Same rule; no check gates the rest.
 - sse: `fixtures/openapi/events-3.1.yaml` `GET /ticks`: time to first event,
   events received, each event parsed and checked against the Tick schema.
 - import: smart import through the Admin API of every input in
@@ -167,7 +175,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 SUITES = ("consistency", "sse", "import", "journeys", "journeys_heldout", "journeys_blind", "journeys_blind2",
           "journeys_blind3", "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7",
           "journeys_blind8", "journeys_blind9", "journeys_blind10", "journeys_blind11",
-          "journeys_blind12")
+          "journeys_blind12", "journeys_blind13")
 # What a run without --suite does (and what run.py gets). The journey suites
 # cost real calls on top of these, so they are asked for by name.
 DEFAULT_SUITES = ("consistency", "sse", "import")
@@ -8613,6 +8621,882 @@ def run_journeys_blind12(srv, sink, args):
     run_journey_table(BLIND12_JOURNEYS, srv, sink, args)
 
 
+# ---------------------------------------------------------------- thirteenth blind journeys
+
+# The same rule again, over five more contracts written for this suite from each real
+# API's public documentation (scripts/llm-bench/contracts/blind13/). They were picked for
+# API styles and domains no earlier set has: pipelines addressed by a slug made from
+# their name, builds numbered within their pipeline, a build state machine (cancel only
+# while scheduled, running or failing; 422 after), rebuilds that copy a build, state,
+# branch and `meta_data[key]` filters and pages named in the `Link` header (Buildkite),
+# flags keyed by the client with a refused duplicate key, semantic patches (instructions
+# under a content type of their own, applied per environment) beside JSON patches, a
+# `filter=` grammar (`query:`, `tags:a+b`, `state:archived`), `sort` and `limit`/`offset`
+# and archiving (LaunchDarkly), employees whose new id comes back in the `Location`
+# header, reads that answer only the fields asked for, partial updates that refuse a
+# duplicate email with 409, time off requests created with `PUT`, approved and cancelled
+# through a status resource, and lists that keep the requests overlapping a date window
+# (BambooHR), envelopes saved as drafts or sent, sent and voided by a `PUT` of their
+# status, recipients and custom fields as nested resources, lists by `custom_field` and
+# status with string counts and `start_position` paging, and 400 errors with an
+# `errorCode` (Docusign eSignature), and statuses posted under an `Idempotency-Key`,
+# favourites and bookmarks toggled by actions, bookmarks paged by opaque `Link` cursors,
+# edits with a history, replies, scheduled statuses that answer another entity and
+# deletes that answer the source text (Mastodon).
+#
+# No check gates the rest, and one miss stays one miss: a check that uses an earlier
+# call's result goes by state the journey reads again (an id from a filtered list, a
+# status or name from a read) or a fallback of its own (an object a create did not make
+# is made again), so only the check that judges that call fails. A check asserts only
+# what the vendor's public documentation promises a client: no status code, order or
+# field it does not give. Do not edit a check to suit results.
+BLIND13_CHECKS = {
+    "buildkite": [
+        "a created pipeline answers 201 with the slug made from its name",
+        "the pipeline reads by its slug with its repository and default branch",
+        "a taken pipeline name is refused and one pipeline keeps it",
+        "a created build answers 201 with a number and a documented state",
+        "the build reads by its number with its commit, branch and message",
+        "a branch filter lists only that branch's build", "a meta_data filter lists the run's builds",
+        "cancel answers the build canceling or canceled when it could be cancelled",
+        "a state filter lists the run's builds in that state",
+        "a build that is not running is not cancelled again",
+        "a rebuild answers a new build with the original's commit, branch and message",
+        "per_page 1 answers one build and a next link", "the next link reaches another build",
+        "a deleted pipeline answers 204 and is not found",
+    ],
+    "launchdarkly": [
+        "a created flag answers 201 with its key, name, kind and tags",
+        "a taken key is refused and the flag keeps its name",
+        "the flag reads by key with its two variations",
+        "turnFlagOn turns targeting on in production only",
+        "addTags adds a tag and keeps the others", "updateName changes the name and keeps the key",
+        "a JSON patch replaces the description",
+        "a semantic patch sent as plain JSON is refused with 400 and changes nothing",
+        "a query filter lists the run's flags", "a tags filter keeps only the flags with every tag",
+        "sort=key and limit 1 answer the first key and a next link", "offset 1 answers the second key",
+        "archiveFlag archives the flag and state:archived lists only it", "a deleted flag is not found",
+    ],
+    "bamboohr": [
+        "a created employee answers 201 with its id in Location",
+        "the employee reads with the fields asked for", "a read without fields answers only the id",
+        "an update changes only the fields sent", "a duplicate work email is refused with 409 and changes nothing",
+        "a create without lastName is refused with 400", "an id with no employee reads 404",
+        "a time off request answers 201 with its id, dates and status",
+        "the request lists in its window as requested", "an approval answers 200 and the request lists approved",
+        "a cancellation answers 200 and the request lists canceled",
+        "status=approved keeps only the approved request", "a window keeps only the requests that overlap it",
+        "a window without end is refused with 400",
+    ],
+    "docusign": [
+        "a draft envelope answers 201 with its GUID and status created",
+        "the draft reads with its subject and status created",
+        "the envelope's custom fields hold the run's field", "the draft's signer is listed with status created",
+        "sending the draft answers 200 and it reads sent", "the sent envelope's signer is sent",
+        "an envelope created as sent answers 201 with status sent",
+        "a custom_field filter lists the run's envelopes", "a status filter keeps the envelopes in that status",
+        "count 1 answers one envelope, the total and a nextUri", "start_position 1 reaches another envelope",
+        "voiding the sent envelope answers 200 and it reads voided with its reason",
+        "status voided lists only the voided envelope", "an unknown envelope id is refused with 400 and an errorCode",
+    ],
+    "mastodon": [
+        "a posted status answers its id, visibility and text", "a repeated Idempotency-Key answers the same status",
+        "the status reads by id with its visibility and spoiler text",
+        "a status with no text is refused with 422 and an error",
+        "favourite answers favourited true and the read agrees", "unfavourite answers favourited false",
+        "bookmarked statuses answer bookmarked true and are listed",
+        "limit 1 answers one bookmark and a Link next", "the Link next reaches the other bookmark",
+        "an edit answers edited_at and the history lists both versions",
+        "a reply names the status it replies to", "a scheduled status answers its time and text and is listed",
+        "a cancelled scheduled status answers {} and is not found",
+        "a deleted status answers its source text and is not found",
+    ],
+}
+JOURNEY_CHECKS.update(BLIND13_CHECKS)
+BLIND13_DIR = "scripts/llm-bench/contracts/blind13"
+# Contracts alone: no persona.
+BLIND13_MOCKS = {name: (f"{BLIND13_DIR}/{name}.openapi.yaml", f"/{name}", None) for name in BLIND13_CHECKS}
+
+
+def link_rel(header, rel):
+    """The URL an RFC 8288 `Link` header gives for relation `rel`, or None."""
+    for url, params in re.findall(r"<([^>]*)>([^<]*)", str(header or "")):
+        found = re.search(r'rel\s*=\s*(?:"([^"]*)"|([^;,\s]+))', params)
+        if found and rel in (found.group(1) or found.group(2) or "").split():
+            return url
+    return None
+
+
+def success(status):
+    return isinstance(status, int) and 200 <= status < 300
+
+
+def raw_json(raw):
+    """The JSON value of a raw body, or None (an answer that is not JSON reads as None,
+    never as an empty object)."""
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def seeded_uuid(j):
+    return str(uuid.UUID(int=j.rng.getrandbits(128), version=4))
+
+
+def buildkite_steps(j):
+    # The pipeline is named for this run and every build carries the run's meta-data and
+    # branches, so every list a check judges holds only this run's builds. The reference
+    # gives 201 for a create, 200 for a cancel and a rebuild and 204 for a delete.
+    j.headers.update({"authorization": "Bearer bkua_bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    org = "/v2/organizations/bench-org"
+    name, slug = f"Bench CI {tag}", f"bench-ci-{tag}"
+    pipe = f"{org}/pipelines/{slug}"
+    run, main, release = f"bench-{tag}", f"main-{tag}", f"release-{tag}"
+    repo = f"git@github.com:bench/app-{tag}.git"
+    commit = made_up(j, "", 40, HEX)
+    cluster = seeded_uuid(j)
+    states = {"scheduled", "running", "passed", "failed", "blocked", "canceled", "canceling", "skipped", "not_run",
+              "waiting", "waiting_failed"}
+    cancellable = ("scheduled", "running", "failing")
+    # The values the list's state filter takes.
+    filters = {"creating", "scheduled", "running", "passed", "failing", "failed", "blocked", "canceling", "canceled",
+               "skipped", "not_run", "finished"}
+
+    def pipeline(pipeline_name, **extra):
+        return obj(j.call("POST", f"{org}/pipelines", body=dict({
+            "name": pipeline_name, "cluster_id": cluster, "repository": repo, "default_branch": main,
+            "configuration": "steps:\n  - label: test\n    command: make test\n"}, **extra)))
+
+    def builds(**query):
+        answer = j.call("GET", f"{pipe}/builds", query=dict({"meta_data[run]": run}, **query))
+        return dicts(answer if isinstance(answer, list) else [])
+
+    def numbers(rows):
+        return [r.get("number") for r in rows]
+
+    def build(branch, message):
+        return obj(j.call("POST", f"{pipe}/builds", body={"commit": commit, "branch": branch, "message": message,
+                                                          "meta_data": {"run": run}}))
+
+    def number_of(answer, branch, message):
+        """The number a create answered; else the one the run's list shows for its
+        message; else that of one made again. So a create that answered no number is its
+        own check's miss only."""
+        if is_int(answer.get("number")):
+            return answer["number"]
+        mine = [r.get("number") for r in builds(branch=branch) if eq(r.get("message"), message)]
+        if len(mine) == 1 and is_int(mine[0]):
+            return mine[0]
+        again = build(branch, message).get("number")
+        return again if is_int(again) else j.rng.randrange(10**3, 10**4)
+
+    def state_of(number):
+        return obj(j.call("GET", f"{pipe}/builds/{number}")).get("state")
+
+    made = pipeline(name)
+    status = j.last["status"]
+    j.check("a created pipeline answers 201 with the slug made from its name",
+            status == 201 and eq(made.get("slug"), slug) and eq(made.get("name"), name),
+            pipeline={k: made.get(k) for k in ("slug", "name")})
+    read = obj(j.call("GET", pipe))
+    if j.last["status"] == 404:
+        # The pipeline is not at the slug its name makes (the check before's miss): it is
+        # made again with that slug given, so the checks after it judge their own calls.
+        pipeline(name, slug=slug)
+        read = obj(j.call("GET", pipe))
+    j.check("the pipeline reads by its slug with its repository and default branch",
+            eq(read.get("slug"), slug) and eq(read.get("repository"), repo) and eq(read.get("default_branch"), main),
+            pipeline={k: read.get(k) for k in ("slug", "name", "repository", "default_branch")})
+    # The name the pipeline holds, so a create that stored another is that check's miss.
+    held = given(read.get("name"), name)
+    taken = pipeline(held, repository=f"git@github.com:bench/other-{tag}.git")
+    refused = j.last["status"]
+    answer = j.call("GET", f"{org}/pipelines", query={"name": held, "per_page": 100})
+    named = [p for p in dicts(answer if isinstance(answer, list) else []) if eq(p.get("name"), held)]
+    # The reference says only that the create returns an error, so any error passes.
+    j.check("a taken pipeline name is refused and one pipeline keeps it",
+            isinstance(refused, int) and refused >= 400 and len(named) == 1,
+            status_code=refused, error=taken, named=[p.get("slug") for p in named])
+    one, two = f"Build one {tag}", f"Build two {tag}"
+    first = build(main, one)
+    j.check("a created build answers 201 with a number and a documented state",
+            j.last["status"] == 201 and is_int(first.get("number")) and first.get("state") in states
+            and eq(first.get("commit"), commit) and eq(first.get("branch"), main) and eq(first.get("message"), one),
+            build={k: first.get(k) for k in ("number", "state", "commit", "branch", "message")})
+    n1 = number_of(first, main, one)
+    # No check judges the second create by itself.
+    n2 = number_of(build(release, two), release, two)
+    read = obj(j.call("GET", f"{pipe}/builds/{n1}"))
+    j.check("the build reads by its number with its commit, branch and message",
+            eq(read.get("number"), n1) and eq(read.get("commit"), commit) and eq(read.get("branch"), main)
+            and eq(read.get("message"), one),
+            build={k: read.get(k) for k in ("number", "commit", "branch", "message")})
+    rows = numbers(builds(branch=release))
+    j.check("a branch filter lists only that branch's build", rows == [n2], listed=rows, expected=[n2])
+    rows = numbers(builds())
+    j.check("a meta_data filter lists the run's builds", same_items(rows, [n1, n2]), listed=rows, expected=[n1, n2])
+    # Whether the cancel may succeed goes by the state the build reads in just before it.
+    before = state_of(n2)
+    answer = obj(j.call("PUT", f"{pipe}/builds/{n2}/cancel"))
+    status = j.last["status"]
+    if before in cancellable:
+        ok = status == 200 and answer.get("state") in ("canceling", "canceled")
+    else:
+        ok = status == 422
+    j.check("cancel answers the build canceling or canceled when it could be cancelled", ok,
+            state_before=before, status_code=status, state=answer.get("state"))
+    # The filter is judged on the state the build reads in now, whatever the cancel did.
+    now = state_of(n2)
+    wanted = now if now in filters else "canceled"
+    held = {n: state_of(n) for n in (n1, n2)}
+    want = [n for n in (n1, n2) if held[n] == wanted]
+    rows = numbers(builds(state=wanted))
+    j.check("a state filter lists the run's builds in that state", bool(want) and same_items(rows, want),
+            state=wanted, listed=rows, expected=want, states=held)
+    if state_of(n2) in cancellable:
+        # The first cancel did not hold (that check's miss): it is cancelled once more, so
+        # this check judges a build that is not running.
+        j.call("PUT", f"{pipe}/builds/{n2}/cancel")
+    after = state_of(n2)
+    again = obj(j.call("PUT", f"{pipe}/builds/{n2}/cancel"))
+    j.check("a build that is not running is not cancelled again",
+            after not in cancellable and j.last["status"] == 422,
+            state=after, status_code=j.last["status"], answer=again)
+    # The rebuild is compared with the original as it reads.
+    original = obj(j.call("GET", f"{pipe}/builds/{n1}"))
+    copy = obj(j.call("PUT", f"{pipe}/builds/{n1}/rebuild"))
+    j.check("a rebuild answers a new build with the original's commit, branch and message",
+            j.last["status"] == 200 and is_int(copy.get("number")) and copy.get("number") not in (n1, n2)
+            and all(eq(copy.get(k), original.get(k)) for k in ("commit", "branch", "message")),
+            rebuild={k: copy.get(k) for k in ("number", "commit", "branch", "message")},
+            original={k: original.get(k) for k in ("number", "commit", "branch", "message")})
+    # The run's builds as the filter lists them whole; a rebuild may or may not carry the
+    # meta-data, so the pages are judged against that list.
+    every = numbers(builds(per_page=100))
+    rows = builds(per_page=1)
+    nxt = link_rel(j.answer_headers.get("Link"), "next")
+    page = query_value(nxt, "page")
+    j.check("per_page 1 answers one build and a next link",
+            len(rows) == 1 and head(rows).get("number") in every and len(every) > 1 and page is not None,
+            listed=numbers(rows), every=every, link=j.answer_headers.get("Link"))
+    if page:
+        later = builds(per_page=1, page=page)
+        j.check("the next link reaches another build",
+                len(later) == 1 and head(later).get("number") in every
+                and head(later).get("number") not in numbers(rows),
+                first=numbers(rows), listed=numbers(later), every=every)
+    else:
+        j.check("the next link reaches another build", False, reason="the first page gave no next link",
+                link=j.answer_headers.get("Link"))
+    j.call("DELETE", pipe)
+    deleted = j.last["status"]
+    j.call("GET", pipe)
+    # The reference gives no code for reading a pipeline that does not exist, so any
+    # client error passes.
+    j.check("a deleted pipeline answers 204 and is not found",
+            deleted == 204 and isinstance(j.last["status"], int) and 400 <= j.last["status"] < 500,
+            delete_status=deleted, read_status=j.last["status"])
+
+
+SEMANTIC_PATCH = "application/json; domain-model=launchdarkly.semanticpatch"
+
+
+def launchdarkly_steps(j):
+    # Every flag's key starts with a word made for this run, and every list filters on it
+    # (filter=query:...), so the lists hold only what was made here. The reference gives
+    # 201 for a create and 200 for a list; it gives no success code for a patch or a
+    # delete, so those succeed with any 2xx.
+    j.headers.update({"authorization": "api-bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    run = f"bench{tag}"
+    flags = "/api/v2/flags/default"
+    k1, k2, k3 = f"{run}-checkout-v2", f"{run}-search-ranking", f"{run}-promo-banner"
+    variations = [{"value": True, "name": "Enabled"}, {"value": False, "name": "Disabled"}]
+
+    def create(key, name, tags):
+        return obj(j.call("POST", flags, body={"key": key, "name": name, "tags": tags, "temporary": True,
+                                               "description": f"Bench flag {tag}", "variations": variations}))
+
+    def read(key, **query):
+        return obj(j.call("GET", f"{flags}/{key}", query=query or None))
+
+    def ensure(key, name, tags):
+        """A flag no check judges the create of is made again when it does not read, so
+        the checks that use it judge only their own calls."""
+        create(key, name, tags)
+        if j.last["status"] == 404 or not read(key):
+            create(key, name, tags)
+
+    def semantic(key, *instructions, environment=None):
+        body = {"comment": f"bench {tag}", "instructions": list(instructions)}
+        if environment:
+            body["environmentKey"] = environment
+        j.headers["content-type"] = SEMANTIC_PATCH
+        try:
+            return obj(j.call("PATCH", f"{flags}/{key}", data=json.dumps(body).encode()))
+        finally:
+            j.headers.pop("content-type", None)
+
+    def listed(*filters, **query):
+        answer = obj(j.call("GET", flags, query=dict({"filter": ",".join((f"query:{run}",) + filters)}, **query)))
+        return ids_of(answer.get("items"), "key"), answer
+
+    def on_in(key, environment):
+        return obj(obj(read(key, env=environment).get("environments")).get(environment)).get("on")
+
+    def tags_of(flag):
+        tags = flag.get("tags")
+        return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
+
+    first = create(k1, "Checkout v2", ["bench", run])
+    created = j.last["status"] == 201
+    j.check("a created flag answers 201 with its key, name, kind and tags",
+            created and eq(first.get("key"), k1) and eq(first.get("name"), "Checkout v2")
+            and eq(first.get("kind"), "boolean") and same_items(first.get("tags"), ["bench", run])
+            and first.get("archived") is False,
+            flag={k: first.get(k) for k in ("key", "name", "kind", "tags", "archived")})
+    held = read(k1).get("name")
+    taken = obj(j.call("POST", flags, body={"key": k1, "name": "Checkout again", "variations": variations}))
+    if j.last["status"] == 201 and not isinstance(held, str):
+        # This create made the flag the first did not (the check before's miss), so the
+        # taken key is judged on one more.
+        held = "Checkout again"
+        taken = obj(j.call("POST", flags, body={"key": k1, "name": "Checkout third", "variations": variations}))
+    refused = j.last["status"]
+    now = read(k1)
+    # The endpoint lists 400 (invalid request) and 409 (status conflict); errors carry a message.
+    j.check("a taken key is refused and the flag keeps its name",
+            refused in (400, 409) and isinstance(taken.get("message"), str) and eq(now.get("name"), held),
+            status_code=refused, error=taken, flag_name=now.get("name"), held=held)
+    if j.last["status"] == 404:
+        create(k1, "Checkout v2", ["bench", run])
+    flag = read(k1)
+    values = [v.get("value") for v in dicts(flag.get("variations"))]
+    j.check("the flag reads by key with its two variations",
+            eq(flag.get("key"), k1) and eq(flag.get("kind"), "boolean") and len(values) == 2
+            and True in values and False in values,
+            flag={k: flag.get(k) for k in ("key", "kind", "variations")})
+    test_before = on_in(k1, "test")
+    answer = semantic(k1, {"kind": "turnFlagOn"}, environment="production")
+    patched = j.last["status"]
+    production, test = on_in(k1, "production"), on_in(k1, "test")
+    j.check("turnFlagOn turns targeting on in production only",
+            success(patched) and production is True and isinstance(test_before, bool) and test is test_before,
+            status_code=patched, error=answer if not success(patched) else None, production=production,
+            test=test, test_before=test_before)
+    # The tags the flag holds before, so a create that stored others is that check's miss.
+    before = tags_of(read(k1))
+    semantic(k1, {"kind": "addTags", "values": ["checkout"]})
+    patched = j.last["status"]
+    after = tags_of(read(k1))
+    j.check("addTags adds a tag and keeps the others",
+            success(patched) and same_items(after, list(dict.fromkeys(before + ["checkout"]))) and bool(before),
+            status_code=patched, before=before, after=after)
+    semantic(k1, {"kind": "updateName", "value": f"Checkout v2 {tag}"})
+    patched = j.last["status"]
+    flag = read(k1)
+    j.check("updateName changes the name and keeps the key",
+            success(patched) and eq(flag.get("name"), f"Checkout v2 {tag}") and eq(flag.get("key"), k1),
+            status_code=patched, flag={k: flag.get(k) for k in ("key", "name")})
+    j.call("PATCH", f"{flags}/{k1}", body=[{"op": "replace", "path": "/description", "value": f"New checkout {tag}"}])
+    patched = j.last["status"]
+    flag = read(k1)
+    j.check("a JSON patch replaces the description",
+            success(patched) and eq(flag.get("description"), f"New checkout {tag}"),
+            status_code=patched, description=flag.get("description"))
+    held = flag.get("name")
+    plain = obj(j.call("PATCH", f"{flags}/{k1}", body={"instructions": [{"kind": "updateName", "value": "Renamed"}]}))
+    refused = j.last["status"]
+    flag = read(k1)
+    j.check("a semantic patch sent as plain JSON is refused with 400 and changes nothing",
+            refused == 400 and isinstance(held, str) and eq(flag.get("name"), held),
+            status_code=refused, error=plain, flag_name=flag.get("name"), held=held)
+    ensure(k2, "Search ranking", ["bench", run, "search"])
+    ensure(k3, "Promo banner", ["bench", run, "checkout"])
+    # The flags the lists must hold are the ones that read now.
+    present = sorted(k for k in (k1, k2, k3) if read(k).get("key") == k)
+    rows, _ = listed()
+    j.check("a query filter lists the run's flags", bool(present) and same_items(rows, present),
+            listed=rows, expected=present)
+    want = [k for k in present if {run, "checkout"} <= set(tags_of(read(k)))]
+    rows, _ = listed(f"tags:{run}+checkout")
+    j.check("a tags filter keeps only the flags with every tag", bool(want) and same_items(rows, want),
+            listed=rows, expected=want)
+    rows, answer = listed(sort="key", limit=1)
+    nxt = obj(answer.get("_links")).get("next")
+    j.check("sort=key and limit 1 answer the first key and a next link",
+            len(present) > 1 and rows == present[:1] and isinstance(nxt, dict) and bool(nxt.get("href")),
+            listed=rows, expected=present[:1], next=nxt)
+    rows, _ = listed(sort="key", limit=1, offset=1)
+    j.check("offset 1 answers the second key", len(present) > 1 and rows == present[1:2], listed=rows,
+            expected=present[1:2])
+    semantic(k2, {"kind": "archiveFlag"})
+    patched = j.last["status"]
+    archived = read(k2).get("archived")
+    # The archived list is judged against the flags that read archived now.
+    want = [k for k in present if read(k).get("archived") is True]
+    rows, _ = listed("state:archived")
+    j.check("archiveFlag archives the flag and state:archived lists only it",
+            success(patched) and archived is True and rows == want and want == [k2],
+            status_code=patched, archived=archived, listed=rows, expected=want)
+    j.call("DELETE", f"{flags}/{k3}")
+    deleted = j.last["status"]
+    gone = read(k3)
+    j.check("a deleted flag is not found", success(deleted) and j.last["status"] == 404,
+            delete_status=deleted, read_status=j.last["status"], error=gone)
+
+
+def bamboohr_steps(j):
+    # The employees are made in this run, and every time off list a check judges filters
+    # on one of them, so the lists hold only this run's requests.
+    j.headers.update(dict(basic_auth("bench-api-key-placeholder", "x"), accept="application/json"))
+    tag = j.rng.randrange(10**5, 10**6)
+    emails = {"ana": f"ana.{tag}@bench.example", "ben": f"ben.{tag}@bench.example"}
+    fields = "firstName,lastName,workEmail,jobTitle"
+    base = datetime.now(timezone.utc).date() + timedelta(days=30)
+
+    def day(n):
+        return (base + timedelta(days=n)).isoformat()
+
+    def located():
+        """The id the Location header's URL holds (its last number), or None."""
+        url = urllib.parse.urlsplit(str(j.answer_headers.get("Location") or ""))
+        found = re.findall(r"\d+", f"{url.path}?{url.query}")
+        return found[-1] if found else None
+
+    def hire(first, last, email, title):
+        return obj(j.call("POST", "/api/v1/employees", body={"firstName": first, "lastName": last, "workEmail": email,
+                                                             "jobTitle": title, "hireDate": base.isoformat()}))
+
+    def employee_id(answer, again):
+        """The id the Location header names, else the body's, else one made again's, so a
+        create that named no id is its own check's miss only."""
+        for _ in range(2):
+            got = located() or (str(answer.get("id")) if is_int(answer.get("id")) or given(answer.get("id"), None)
+                                else None)
+            if got and re.fullmatch(r"\d+", got):
+                return got
+            answer = again()
+        return str(j.rng.randrange(10**4, 10**6))
+
+    def person(eid, with_fields=True):
+        return obj(j.call("GET", f"/api/v1/employees/{eid}", query={"fields": fields} if with_fields else None))
+
+    def requests(eid, start, end, **query):
+        answer = j.call("GET", "/api/v1/time_off/requests", query=dict({"employeeId": eid, "start": start, "end": end},
+                                                                        **query))
+        return dicts(answer if isinstance(answer, list) else [])
+
+    def ids(rows):
+        return [str(r.get("id")) for r in rows]
+
+    def status_of(eid, rid):
+        row = by_key([dict(r, id=str(r.get("id"))) for r in requests(eid, day(-30), day(60), id=rid)], "id", rid)
+        return obj(row.get("status")).get("status")
+
+    answer = hire("Ana", "Silva", emails["ana"], "Engineer")
+    status, where = j.last["status"], located()
+    body_id = answer.get("id")
+    j.check("a created employee answers 201 with its id in Location",
+            status == 201 and where is not None and (body_id is None or str(body_id) == where),
+            status_code=status, location=j.answer_headers.get("Location"), body=answer)
+    ana = employee_id(answer, lambda: hire("Ana", "Silva", emails["ana"], "Engineer"))
+    read = person(ana)
+    j.check("the employee reads with the fields asked for",
+            eq(read.get("id"), ana) and eq(read.get("firstName"), "Ana") and eq(read.get("lastName"), "Silva")
+            and eq(read.get("workEmail"), emails["ana"]) and eq(read.get("jobTitle"), "Engineer"),
+            employee=read)
+    bare = person(ana, with_fields=False)
+    j.check("a read without fields answers only the id", j.last["status"] == 200 and bare == {"id": ana},
+            employee=bare)
+    # The fields the update leaves alone are judged against how they read before it.
+    before = {k: person(ana).get(k) for k in ("firstName", "lastName", "workEmail")}
+    j.call("POST", f"/api/v1/employees/{ana}", body={"jobTitle": "Lead Engineer"})
+    updated = j.last["status"]
+    read = person(ana)
+    j.check("an update changes only the fields sent",
+            updated == 200 and eq(read.get("jobTitle"), "Lead Engineer") and all(isinstance(v, str) for v in before.values())
+            and all(eq(read.get(k), v) for k, v in before.items()),
+            status_code=updated, before=before, read=read)
+    # No check judges the second create by itself.
+    ben = employee_id(hire("Ben", "Okafor", emails["ben"], "Analyst"),
+                      lambda: hire("Ben", "Okafor", emails["ben"], "Analyst"))
+    taken = given(person(ana).get("workEmail"), emails["ana"])
+    held = person(ben).get("workEmail")
+    j.call("POST", f"/api/v1/employees/{ben}", body={"workEmail": taken})
+    refused = j.last["status"]
+    now = person(ben).get("workEmail")
+    j.check("a duplicate work email is refused with 409 and changes nothing",
+            refused == 409 and isinstance(held, str) and eq(now, held),
+            status_code=refused, held=held, read=now)
+    j.call("POST", "/api/v1/employees", body={"firstName": "Cleo"})
+    j.check("a create without lastName is refused with 400", j.last["status"] == 400, status_code=j.last["status"])
+    nobody = str(j.rng.randrange(10**8, 10**9))
+    j.call("GET", f"/api/v1/employees/{nobody}")
+    j.check("an id with no employee reads 404", j.last["status"] == 404, status_code=j.last["status"])
+    types = dicts(obj(j.call("GET", "/api/v1/meta/time_off/types")).get("timeOffTypes"))
+    kind = given(str(head(types).get("id")) if head(types).get("id") is not None else None, "1")
+
+    def ask(start, end, note):
+        return obj(j.call("PUT", f"/api/v1/employees/{ana}/time_off/request", body={
+            "status": "requested", "start": start, "end": end, "timeOffTypeId": kind, "amount": 2,
+            "notes": [{"from": "employee", "note": note}]}))
+
+    def request_id(answer, start, end, note):
+        """The id a create answered; else the one the window lists from that start; else
+        that of one made again."""
+        if is_int(answer.get("id")):
+            return str(answer["id"])
+        mine = [r for r in requests(ana, start, end) if eq(r.get("start"), start)]
+        if len(mine) == 1 and mine[0].get("id") is not None:
+            return str(mine[0]["id"])
+        again = ask(start, end, note).get("id")
+        return str(again) if again is not None else str(j.rng.randrange(10**4, 10**6))
+
+    trip = ask(day(0), day(2), f"Family trip {tag}")
+    j.check("a time off request answers 201 with its id, dates and status",
+            j.last["status"] == 201 and is_int(trip.get("id")) and eq(trip.get("start"), day(0))
+            and eq(trip.get("end"), day(2)) and eq(obj(trip.get("status")).get("status"), "requested")
+            and eq(str(trip.get("employeeId")), ana) and bool(j.answer_headers.get("Location")),
+            request={k: trip.get(k) for k in ("id", "employeeId", "start", "end", "status")},
+            location=j.answer_headers.get("Location"))
+    r1 = request_id(trip, day(0), day(2), f"Family trip {tag}")
+    rows = requests(ana, day(0), day(2))
+    j.check("the request lists in its window as requested",
+            ids(rows) == [r1] and eq(obj(head(rows).get("status")).get("status"), "requested"),
+            listed=ids(rows), status=obj(head(rows).get("status")).get("status"))
+    j.call("PUT", f"/api/v1/time_off/requests/{r1}/status", body={"status": "approved", "note": "Enjoy"})
+    approved, approval = j.last["status"], raw_json(j.raw)
+    now = status_of(ana, r1)
+    j.check("an approval answers 200 and the request lists approved",
+            approved == 200 and approval == {} and now == "approved",
+            status_code=approved, answer=approval, status=now)
+    # No check judges the second create by itself.
+    r2 = request_id(ask(day(10), day(11), f"Course {tag}"), day(10), day(11), f"Course {tag}")
+    j.call("PUT", f"/api/v1/time_off/requests/{r2}/status", body={"status": "canceled"})
+    cancelled = j.last["status"]
+    now = status_of(ana, r2)
+    j.check("a cancellation answers 200 and the request lists canceled", cancelled == 200 and now == "canceled",
+            status_code=cancelled, status=now)
+    if status_of(ana, r1) != "approved":
+        # The approval did not hold (that check's miss): it is approved once more, so the
+        # filter is judged on its own.
+        j.call("PUT", f"/api/v1/time_off/requests/{r1}/status", body={"status": "approved"})
+    # The statuses as the requests list them now, so a status change that did not hold is
+    # its own check's miss only.
+    held = {r: status_of(ana, r) for r in (r1, r2)}
+    want = [r for r in (r1, r2) if held[r] == "approved"]
+    rows = ids(requests(ana, day(-1), day(20), status="approved"))
+    j.check("status=approved keeps only the approved request", bool(want) and same_items(rows, want),
+            listed=rows, expected=want, statuses=held)
+    # The window is inclusive and keeps the requests that overlap it: day 2 to day 10
+    # touches both requests' edges, and day 3 to day 9 neither.
+    both = ids(requests(ana, day(2), day(10)))
+    between = ids(requests(ana, day(3), day(9)))
+    j.check("a window keeps only the requests that overlap it", same_items(both, [r1, r2]) and between == [],
+            edges=both, between=between)
+    j.call("GET", "/api/v1/time_off/requests", query={"employeeId": ana, "start": day(0)})
+    j.check("a window without end is refused with 400", j.last["status"] == 400, status_code=j.last["status"])
+
+
+GUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+
+def docusign_steps(j):
+    # Every envelope carries a text custom field naming this run, and every list a check
+    # judges filters on it (custom_field=run=...), so the lists hold only this run's
+    # envelopes.
+    j.headers.update({"authorization": "Bearer eyJ0eXAi.bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    run = f"bench-{tag}"
+    account = f"/restapi/v2.1/accounts/{seeded_uuid(j)}"
+    envelopes = f"{account}/envelopes"
+    since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    signer = {"email": f"ana.{tag}@bench.example", "name": "Ana Silva", "recipientId": "1", "routingOrder": "1"}
+    text = base64.b64encode(f"Offer letter {tag}: please sign.".encode()).decode()
+    subjects = {"offer": f"Offer letter {tag}", "nda": f"NDA {tag}", "lease": f"Lease {tag}"}
+
+    def create(status, subject):
+        return obj(j.call("POST", envelopes, body={
+            "status": status, "emailSubject": subject,
+            "documents": [{"documentId": "1", "name": f"{subject}.txt", "fileExtension": "txt", "documentBase64": text}],
+            "recipients": {"signers": [signer]},
+            "customFields": {"textCustomFields": [{"name": "run", "value": run, "show": "true", "required": "false"}]}}))
+
+    def listed(**query):
+        # status=any keeps every status, drafts too, unless a check asks for one.
+        answer = obj(j.call("GET", envelopes, query=dict({"from_date": since, "custom_field": f"run={run}",
+                                                          "status": "any"}, **query)))
+        return ids_of(answer.get("envelopes"), "envelopeId"), answer
+
+    def made(answer, status, subject, known):
+        """The id a create answered; else the one envelope of the run's list with its
+        subject that is not already known; else that of one made again."""
+        if matches(GUID, answer.get("envelopeId")):
+            return answer["envelopeId"]
+        _, page = listed()
+        other = [e.get("envelopeId") for e in dicts(page.get("envelopes"))
+                 if eq(e.get("emailSubject"), subject) and e.get("envelopeId") not in known]
+        if len(other) == 1 and matches(GUID, other[0]):
+            return other[0]
+        again = create(status, subject).get("envelopeId")
+        return again if matches(GUID, again) else seeded_uuid(j)
+
+    def read(eid):
+        return obj(j.call("GET", f"{envelopes}/{eid}"))
+
+    def signers(eid):
+        return dicts(obj(j.call("GET", f"{envelopes}/{eid}/recipients")).get("signers"))
+
+    def count_is(value, n):
+        # The reference types the sizes and positions as strings.
+        return value == str(n) or (is_int(value) and value == n)
+
+    draft = create("created", subjects["offer"])
+    j.check("a draft envelope answers 201 with its GUID and status created",
+            j.last["status"] == 201 and matches(GUID, draft.get("envelopeId")) and eq(draft.get("status"), "created"),
+            answer=draft)
+    e1 = made(draft, "created", subjects["offer"], [])
+    env = read(e1)
+    j.check("the draft reads with its subject and status created",
+            eq(env.get("envelopeId"), e1) and eq(env.get("status"), "created")
+            and eq(env.get("emailSubject"), subjects["offer"]),
+            envelope={k: env.get(k) for k in ("envelopeId", "status", "emailSubject")})
+    fields = dicts(obj(j.call("GET", f"{envelopes}/{e1}/custom_fields")).get("textCustomFields"))
+    mine = [f for f in fields if eq(f.get("name"), "run")]
+    j.check("the envelope's custom fields hold the run's field", len(mine) == 1 and eq(mine[0].get("value"), run),
+            fields=fields)
+    rows = signers(e1)
+    j.check("the draft's signer is listed with status created",
+            len(rows) == 1 and eq(rows[0].get("email"), signer["email"]) and str(rows[0].get("routingOrder")) == "1"
+            and eq(rows[0].get("status"), "created"),
+            signers=rows)
+    sent = obj(j.call("PUT", f"{envelopes}/{e1}", body={"status": "sent"}))
+    status = j.last["status"]
+    env = read(e1)
+    j.check("sending the draft answers 200 and it reads sent",
+            status == 200 and eq(env.get("status"), "sent") and given(env.get("sentDateTime"), None) is not None,
+            status_code=status, answer=sent, envelope={k: env.get(k) for k in ("status", "sentDateTime")})
+    if not eq(env.get("status"), "sent"):
+        # The send did not hold (the check before's miss): it is sent once more, so the
+        # next check judges the signer of a sent envelope.
+        j.call("PUT", f"{envelopes}/{e1}", body={"status": "sent"})
+    rows = signers(e1)
+    j.check("the sent envelope's signer is sent", len(rows) == 1 and eq(rows[0].get("status"), "sent"), signers=rows)
+    second = create("sent", subjects["nda"])
+    j.check("an envelope created as sent answers 201 with status sent",
+            j.last["status"] == 201 and matches(GUID, second.get("envelopeId")) and eq(second.get("status"), "sent"),
+            answer=second)
+    e2 = made(second, "sent", subjects["nda"], [e1])
+    # No check judges the third create by itself: it stays a draft.
+    e3 = made(create("created", subjects["lease"]), "created", subjects["lease"], [e1, e2])
+    rows, page = listed()
+    j.check("a custom_field filter lists the run's envelopes",
+            same_items(rows, [e1, e2, e3]) and count_is(page.get("resultSetSize"), 3)
+            and count_is(page.get("totalSetSize"), 3),
+            listed=rows, sizes={k: page.get(k) for k in ("resultSetSize", "totalSetSize")})
+    # The statuses as the envelopes read now, so a send that did not hold is its own
+    # check's miss only.
+    held = {e: read(e).get("status") for e in (e1, e2, e3)}
+    sent_ones = [e for e in (e1, e2, e3) if held[e] == "sent"]
+    drafts = [e for e in (e1, e2, e3) if held[e] == "created"]
+    rows_sent, _ = listed(status="sent")
+    rows_drafts, _ = listed(status="created")
+    j.check("a status filter keeps the envelopes in that status",
+            bool(sent_ones) and bool(drafts) and same_items(rows_sent, sent_ones) and same_items(rows_drafts, drafts),
+            sent=rows_sent, created=rows_drafts, statuses=held)
+    # The run's envelopes as the filter lists them whole; the pages are judged against it.
+    every, _ = listed()
+    # No order is promised unless one is asked for, so both pages ask for the same one.
+    rows, page = listed(count=1, order_by="created", order="asc")
+    j.check("count 1 answers one envelope, the total and a nextUri",
+            len(rows) == 1 and rows[0] in every and count_is(page.get("resultSetSize"), 1)
+            and count_is(page.get("totalSetSize"), len(every)) and len(every) > 1
+            and given(page.get("nextUri"), None) is not None,
+            listed=rows, every=every, page={k: page.get(k) for k in ("resultSetSize", "totalSetSize", "nextUri")})
+    later, page = listed(count=1, start_position=1, order_by="created", order="asc")
+    j.check("start_position 1 reaches another envelope",
+            len(later) == 1 and later[0] in every and later[0] not in rows and count_is(page.get("startPosition"), 1),
+            first=rows, listed=later, every=every, start=page.get("startPosition"))
+    if not eq(read(e2).get("status"), "sent"):
+        # The envelope was not sent when it was created (that check's miss): it is sent
+        # now, so the void is judged on an in-process envelope.
+        j.call("PUT", f"{envelopes}/{e2}", body={"status": "sent"})
+    reason = f"Superseded by run {tag}"
+    j.call("PUT", f"{envelopes}/{e2}", body={"status": "voided", "voidedReason": reason})
+    status = j.last["status"]
+    env = read(e2)
+    j.check("voiding the sent envelope answers 200 and it reads voided with its reason",
+            status == 200 and eq(env.get("status"), "voided") and eq(env.get("voidedReason"), reason),
+            status_code=status, envelope={k: env.get(k) for k in ("status", "voidedReason")})
+    if not eq(env.get("status"), "voided"):
+        # The void did not hold (the check before's miss): it is voided once more, so the
+        # list is judged on its own.
+        j.call("PUT", f"{envelopes}/{e2}", body={"status": "voided", "voidedReason": reason})
+    want = [e for e in (e1, e2, e3) if read(e).get("status") == "voided"]
+    rows, _ = listed(status="voided")
+    j.check("status voided lists only the voided envelope", want == [e2] and same_items(rows, want),
+            listed=rows, expected=want)
+    missing = read(seeded_uuid(j))
+    j.check("an unknown envelope id is refused with 400 and an errorCode",
+            j.last["status"] == 400 and given(missing.get("errorCode"), None) is not None
+            and isinstance(missing.get("message"), str),
+            error=missing)
+
+
+def mastodon_steps(j):
+    # Every status's text holds a number made for this run, and every list a check judges
+    # keeps only the run's own statuses, so runs stay apart.
+    j.headers.update({"authorization": "Bearer bench-placeholder", "accept": "application/json"})
+    tag = j.rng.randrange(10**5, 10**6)
+    texts = {"run": f"Morning run {tag}: 5 km along the river.", "swim": f"Evening swim {tag}: 40 lengths.",
+             "reply": f"Run {tag} again tomorrow?", "plan": f"Race day {tag} is coming."}
+    edited = f"Evening swim {tag}: 50 lengths, a new best."
+
+    def post(text, key=None, **fields):
+        if key:
+            j.headers["idempotency-key"] = key
+        try:
+            return obj(j.call("POST", "/api/v1/statuses", body=dict({"status": text, "visibility": "unlisted"},
+                                                                       **fields)))
+        finally:
+            j.headers.pop("idempotency-key", None)
+
+    def holds(status, marker):
+        """Whether a status's HTML content holds `marker` (the content is HTML, so only
+        the run's words are looked for)."""
+        return isinstance(status.get("content"), str) and marker in status["content"]
+
+    def own(answer, again):
+        """The id a post answered, else that of one posted again, so a post that answered
+        no id is its own check's miss only."""
+        if given(answer.get("id"), None):
+            return answer["id"]
+        return given(again().get("id"), made_up(j, "", 18, "0123456789"))
+
+    def read(sid):
+        return obj(j.call("GET", f"/api/v1/statuses/{sid}"))
+
+    def act(sid, action):
+        return obj(j.call("POST", f"/api/v1/statuses/{sid}/{action}"))
+
+    def bookmarks(**query):
+        answer = j.call("GET", "/api/v1/bookmarks", query=query or None)
+        return [s.get("id") for s in dicts(answer if isinstance(answer, list) else [])]
+
+    key = f"bench-{tag}-run"
+    first = post(texts["run"], key, spoiler_text="Run log")
+    j.check("a posted status answers its id, visibility and text",
+            j.last["status"] == 200 and given(first.get("id"), None) is not None
+            and eq(first.get("visibility"), "unlisted") and holds(first, str(tag)),
+            status={k: first.get(k) for k in ("id", "visibility", "content")})
+    s1 = own(first, lambda: post(texts["run"], key, spoiler_text="Run log"))
+    again = post(texts["run"], key, spoiler_text="Run log")
+    # The key prevents a duplicate submission, so the retry answers the status it made.
+    j.check("a repeated Idempotency-Key answers the same status", j.last["status"] == 200 and eq(again.get("id"), s1),
+            first=s1, again=again.get("id"))
+    status = read(s1)
+    j.check("the status reads by id with its visibility and spoiler text",
+            eq(status.get("id"), s1) and eq(status.get("visibility"), "unlisted")
+            and eq(status.get("spoiler_text"), "Run log") and holds(status, str(tag)),
+            status={k: status.get(k) for k in ("id", "visibility", "spoiler_text", "content")})
+    blank = obj(j.call("POST", "/api/v1/statuses", body={"status": ""}))
+    j.check("a status with no text is refused with 422 and an error",
+            j.last["status"] == 422 and given(blank.get("error"), None) is not None, error=blank)
+    liked = act(s1, "favourite")
+    status_code = j.last["status"]
+    now = read(s1).get("favourited")
+    j.check("favourite answers favourited true and the read agrees",
+            status_code == 200 and liked.get("favourited") is True and now is True,
+            answer=liked.get("favourited"), read=now)
+    unliked = act(s1, "unfavourite")
+    status_code = j.last["status"]
+    now = read(s1).get("favourited")
+    j.check("unfavourite answers favourited false",
+            status_code == 200 and unliked.get("favourited") is False and now is False,
+            answer=unliked.get("favourited"), read=now)
+    # No check judges the second post by itself.
+    s2 = own(post(texts["swim"]), lambda: post(texts["swim"]))
+    mine = (s1, s2)
+    marks = [act(sid, "bookmark").get("bookmarked") for sid in mine]
+    rows = [sid for sid in bookmarks(limit=40) if sid in mine]
+    j.check("bookmarked statuses answer bookmarked true and are listed",
+            marks == [True, True] and same_items(rows, list(mine)), answered=marks, listed=rows)
+    for sid in mine:
+        if sid not in rows:
+            # A bookmark that did not hold (the check before's miss) is made again, so the
+            # pages are judged on both.
+            act(sid, "bookmark")
+    rows = bookmarks(limit=1)
+    nxt = link_rel(j.answer_headers.get("Link"), "next")
+    j.check("limit 1 answers one bookmark and a Link next",
+            len(rows) == 1 and rows[0] in mine and nxt is not None,
+            listed=rows, link=j.answer_headers.get("Link"))
+    # The next page is reached by the query its URL holds, as given.
+    cursor = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(nxt or "").query).items()}
+    if nxt and cursor:
+        later = [sid for sid in bookmarks(**cursor) if sid in mine]
+        j.check("the Link next reaches the other bookmark", bool(later) and later[0] not in rows and later[0] in mine,
+                first=rows, listed=later, cursor=cursor)
+    else:
+        j.check("the Link next reaches the other bookmark", False, reason="the first page gave no next link",
+                link=j.answer_headers.get("Link"))
+    change = obj(j.call("PUT", f"/api/v1/statuses/{s2}", body={"status": edited}))
+    status_code = j.last["status"]
+    answer = j.call("GET", f"/api/v1/statuses/{s2}/history")
+    versions = dicts(answer if isinstance(answer, list) else [])
+    j.check("an edit answers edited_at and the history lists both versions",
+            status_code == 200 and holds(change, "50 lengths") and given(change.get("edited_at"), None) is not None
+            and len(versions) >= 2 and holds(versions[0], "40 lengths") and holds(versions[-1], "50 lengths"),
+            edit={k: change.get(k) for k in ("content", "edited_at")}, history=[v.get("content") for v in versions])
+    reply = post(texts["reply"], in_reply_to_id=s1)
+    replied = j.last["status"]
+    s3 = given(reply.get("id"), None)
+    back = read(s3) if s3 else {}
+    j.check("a reply names the status it replies to",
+            replied == 200 and eq(reply.get("in_reply_to_id"), s1) and eq(back.get("in_reply_to_id"), s1),
+            answer=reply.get("in_reply_to_id"), read=back.get("in_reply_to_id"))
+    when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(microsecond=0)
+    planned = post(texts["plan"], scheduled_at=when.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+    answered = j.last["status"]
+    pid = given(planned.get("id"), None)
+    at = instant(planned.get("scheduled_at"))
+    answer = j.call("GET", "/api/v1/scheduled_statuses")
+    queued = dicts(answer if isinstance(answer, list) else [])
+    j.check("a scheduled status answers its time and text and is listed",
+            answered == 200 and pid is not None and at is not None and abs((at - when).total_seconds()) <= 60
+            and eq(obj(planned.get("params")).get("text"), texts["plan"]) and pid in ids_of(queued),
+            answer={k: planned.get(k) for k in ("id", "scheduled_at", "params")}, listed=ids_of(queued))
+    if pid is None:
+        # The id comes from the list by its text, else from one scheduled again.
+        found = [s.get("id") for s in queued if eq(obj(s.get("params")).get("text"), texts["plan"])]
+        pid = found[0] if len(found) == 1 else given(
+            post(texts["plan"], scheduled_at=when.strftime("%Y-%m-%dT%H:%M:%S.000Z")).get("id"), "0")
+    j.call("DELETE", f"/api/v1/scheduled_statuses/{pid}")
+    cancelled, body = j.last["status"], raw_json(j.raw)
+    j.call("GET", f"/api/v1/scheduled_statuses/{pid}")
+    j.check("a cancelled scheduled status answers {} and is not found",
+            cancelled == 200 and body == {} and j.last["status"] == 404,
+            status_code=cancelled, answer=body, read_status=j.last["status"])
+    gone = obj(j.call("DELETE", f"/api/v1/statuses/{s1}"))
+    deleted = j.last["status"]
+    after = read(s1)
+    j.check("a deleted status answers its source text and is not found",
+            deleted == 200 and eq(gone.get("id"), s1) and eq(gone.get("text"), texts["run"])
+            and j.last["status"] == 404 and given(after.get("error"), None) is not None,
+            delete_status=deleted, answer={k: gone.get(k) for k in ("id", "text")}, read_status=j.last["status"])
+
+
+BLIND13_JOURNEYS = {"buildkite": buildkite_steps, "launchdarkly": launchdarkly_steps, "bamboohr": bamboohr_steps,
+                    "docusign": docusign_steps, "mastodon": mastodon_steps}
+
+
+def run_journeys_blind13(srv, sink, args):
+    run_journey_table(BLIND13_JOURNEYS, srv, sink, args)
+
+
 # ---------------------------------------------------------------- main
 
 RUNNERS = {
@@ -8633,6 +9517,7 @@ RUNNERS = {
     "journeys_blind10": (BLIND10_MOCKS, run_journeys_blind10),
     "journeys_blind11": (BLIND11_MOCKS, run_journeys_blind11),
     "journeys_blind12": (BLIND12_MOCKS, run_journeys_blind12),
+    "journeys_blind13": (BLIND13_MOCKS, run_journeys_blind13),
 }
 
 
