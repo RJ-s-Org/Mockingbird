@@ -3284,6 +3284,40 @@ fn a_parameter_only_path_takes_its_type_from_the_schema_its_routes_share() {
     assert_eq!(identity.path_param, None, "{{db}} names the collection");
 }
 
+/// Writes that answer a named acknowledgement (`DocumentResult {id, ok, rev}`, as a
+/// document store's create, replace and delete do) do not outvote the record: the
+/// schema the bodies send and the read answers (`Document`) is the type.
+#[test]
+fn a_parameter_only_path_takes_its_type_from_the_record_over_named_acknowledgements() {
+    let ack = "schema:\n                type: object\n                properties:\n                  id: {type: string}\n                  ok: {type: boolean}";
+    let contract = document_store(r##"{$ref: "#/components/schemas/Document"}"##, "");
+    assert_eq!(contract.matches(ack).count(), 3);
+    let contract = contract
+        .replace(ack, r##"schema: {$ref: "#/components/schemas/DocumentResult"}"##)
+        .replace(
+            "components:\n  schemas:\n",
+            "components:\n  schemas:\n    DocumentResult:\n      type: object\n      properties:\n        id: {type: string}\n        ok: {type: boolean}\n        rev: {type: string}\n",
+        );
+    let (bundle, warnings) = mb_import::compile_with_warnings(contract.as_bytes()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for id in ["getDocument", "putDocument", "deleteDocument"] {
+        let op = bundle.operation(id).unwrap();
+        assert_eq!(op.resource_type.as_deref(), Some("Document"), "{id}");
+        let identity = op.identity.as_ref().unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(identity.path_param.as_deref(), Some("docid"), "{id}");
+    }
+    let create = bundle.operation("createDocument").unwrap();
+    assert_eq!(create.resource_type.as_deref(), Some("Document"));
+    assert_eq!(create.kind, OperationKind::Command(Effect::Create));
+    assert_eq!(
+        create
+            .identity
+            .as_ref()
+            .map(|i| (i.path_param.as_deref(), i.field.as_str())),
+        Some((None, "id"))
+    );
+}
+
 /// With no schema name to go by, one tag every route of the family carries names
 /// the type.
 #[test]
