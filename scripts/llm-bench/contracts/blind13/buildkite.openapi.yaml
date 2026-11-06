@@ -1,0 +1,332 @@
+openapi: 3.0.3
+info:
+  title: Buildkite REST API (pipelines and builds)
+  version: "2"
+  description: |
+    A subset of the Buildkite REST API v2, written from its public documentation
+    (buildkite.com/docs/apis/rest-api, its Pipelines and Builds pages). Requests send an
+    API access token as `Authorization: Bearer <token>`; basic authentication is not
+    supported. All data is sent as JSON.
+
+    Pipelines belong to an organization and are addressed by slug:
+    `/v2/organizations/{org.slug}/pipelines/{pipeline.slug}`. A pipeline is created with
+    `name`, `cluster_id`, `repository` and a YAML `configuration` (a non-empty string)
+    and answers 201 Created. Its slug is made from the name unless `slug` is given: each
+    run of spaces becomes one hyphen and capitals become lower case, so "My Pipeline X"
+    is `my-pipeline-x`. Creating a pipeline whose name matches an existing pipeline's
+    name returns an error. `DELETE` answers 204 No Content.
+
+    Builds belong to a pipeline and are addressed by their `number`
+    (`.../builds/{number}`); each also has an `id`. A build is created with `commit` and
+    `branch` (required), and optionally `message`, `env` and `meta_data`, and answers
+    201 Created with the build, whose `state` is one of `scheduled`, `running`, `passed`,
+    `failed`, `blocked`, `canceled`, `canceling`, `skipped`, `not_run`, `waiting` and
+    `waiting_failed`. `PUT .../builds/{number}/cancel` cancels a build only if its state
+    is `scheduled`, `running` or `failing`; it answers 200 with the build, and 422 when
+    the build cannot be cancelled. `PUT .../builds/{number}/rebuild` answers 200 with a
+    new build that copies the commit, branch, message, environment variables and pull
+    request data of the original.
+
+    The list of a pipeline's builds filters by `branch`, `commit`, `state` (`creating`,
+    `scheduled`, `running`, `passed`, `failing`, `failed`, `blocked`, `canceling`,
+    `canceled`, `skipped`, `not_run`, `finished`) and `meta_data[<key>]=<value>`.
+
+    Paginated lists take `page` (default 1) and `per_page` (default 30, at most 100) and
+    answer `next`, `prev`, `first` and `last` links in the `Link` header.
+
+    Errors answer a `message`; validation errors answer 422 with
+    `{"message": "Validation Failed", "errors": [...]}`. A token without the
+    organization answers 404 `{"message": "No organization found"}`.
+servers:
+  - url: https://api.buildkite.com
+security:
+  - bearerAuth: []
+tags:
+  - name: Pipelines
+  - name: Builds
+paths:
+  /v2/organizations/{org}/pipelines:
+    parameters:
+      - $ref: "#/components/parameters/org"
+    get:
+      tags: [Pipelines]
+      operationId: pipelines_list
+      summary: List pipelines
+      parameters:
+        - {name: name, in: query, description: "A partial, case-insensitive match on the name.", schema: {type: string}}
+        - {name: repository, in: query, description: "A partial, case-insensitive match on the repository URL.", schema: {type: string}}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of pipelines; the Link header names the other pages.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Pipeline"}}
+    post:
+      tags: [Pipelines]
+      operationId: pipeline_create
+      summary: Create a YAML pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, cluster_id, repository, configuration]
+              properties:
+                name: {type: string}
+                slug: {type: string, maxLength: 100}
+                cluster_id: {type: string}
+                repository: {type: string}
+                configuration: {type: string, description: The pipeline's YAML steps; not empty.}
+                default_branch: {type: string}
+                description: {type: string}
+                tags: {type: array, items: {type: string}}
+                visibility: {type: string, enum: [private, public]}
+      responses:
+        "201":
+          description: The created pipeline.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pipeline"}
+        "422": {$ref: "#/components/responses/Validation"}
+  /v2/organizations/{org}/pipelines/{pipeline}:
+    parameters:
+      - $ref: "#/components/parameters/org"
+      - $ref: "#/components/parameters/pipeline"
+    get:
+      tags: [Pipelines]
+      operationId: pipeline_get
+      summary: Get a pipeline
+      responses:
+        "200":
+          description: The pipeline.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pipeline"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Pipelines]
+      operationId: pipeline_update
+      summary: Update a pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                configuration: {type: string}
+                default_branch: {type: string}
+                description: {type: string}
+      responses:
+        "200":
+          description: The updated pipeline.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Pipeline"}
+        "422": {$ref: "#/components/responses/Validation"}
+    delete:
+      tags: [Pipelines]
+      operationId: pipeline_delete
+      summary: Delete a pipeline
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/organizations/{org}/pipelines/{pipeline}/builds:
+    parameters:
+      - $ref: "#/components/parameters/org"
+      - $ref: "#/components/parameters/pipeline"
+    get:
+      tags: [Builds]
+      operationId: builds_list
+      summary: List the builds of a pipeline
+      parameters:
+        - {name: branch, in: query, schema: {type: string}}
+        - {name: commit, in: query, schema: {type: string}}
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [creating, scheduled, running, passed, failing, failed, blocked, canceling, canceled, skipped, not_run, finished]
+        - name: meta_data
+          in: query
+          style: deepObject
+          explode: true
+          description: "meta_data[some-key]=some-value: only builds with that meta-data."
+          schema: {type: object, additionalProperties: {type: string}}
+        - {name: created_from, in: query, schema: {type: string, format: date-time}}
+        - {name: created_to, in: query, schema: {type: string, format: date-time}}
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/per_page"
+      responses:
+        "200":
+          description: A page of builds; the Link header names the other pages.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Build"}}
+        "400": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Builds]
+      operationId: build_create
+      summary: Create a build
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [commit, branch]
+              properties:
+                commit: {type: string, description: "A ref, SHA or tag, such as HEAD."}
+                branch: {type: string}
+                message: {type: string}
+                author: {type: object, properties: {name: {type: string}, email: {type: string}}}
+                env: {type: object, additionalProperties: {type: string}}
+                meta_data: {type: object, additionalProperties: {type: string}}
+                clean_checkout: {type: boolean}
+                ignore_pipeline_branch_filters: {type: boolean}
+      responses:
+        "201":
+          description: The created build.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Build"}
+        "422": {$ref: "#/components/responses/Validation"}
+  /v2/organizations/{org}/pipelines/{pipeline}/builds/{number}:
+    parameters:
+      - $ref: "#/components/parameters/org"
+      - $ref: "#/components/parameters/pipeline"
+      - $ref: "#/components/parameters/number"
+    get:
+      tags: [Builds]
+      operationId: build_get
+      summary: Get a build
+      responses:
+        "200":
+          description: The build.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Build"}
+        "404": {$ref: "#/components/responses/Error"}
+  /v2/organizations/{org}/pipelines/{pipeline}/builds/{number}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/org"
+      - $ref: "#/components/parameters/pipeline"
+      - $ref: "#/components/parameters/number"
+    put:
+      tags: [Builds]
+      operationId: build_cancel
+      summary: Cancel a build
+      description: Cancels the build if its state is scheduled, running or failing.
+      responses:
+        "200":
+          description: The build.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Build"}
+        "422": {$ref: "#/components/responses/Error"}
+  /v2/organizations/{org}/pipelines/{pipeline}/builds/{number}/rebuild:
+    parameters:
+      - $ref: "#/components/parameters/org"
+      - $ref: "#/components/parameters/pipeline"
+      - $ref: "#/components/parameters/number"
+    put:
+      tags: [Builds]
+      operationId: build_rebuild
+      summary: Rebuild a build
+      description: A new build with the original's commit, branch, message, environment and pull request data.
+      responses:
+        "200":
+          description: The new build.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Build"}
+        "422": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    org: {name: org, in: path, required: true, description: The organization's slug., schema: {type: string}}
+    pipeline: {name: pipeline, in: path, required: true, description: The pipeline's slug., schema: {type: string}}
+    number: {name: number, in: path, required: true, description: The build's number (not its id)., schema: {type: integer}}
+    page: {name: page, in: query, schema: {type: integer, default: 1, minimum: 1}}
+    per_page: {name: per_page, in: query, schema: {type: integer, default: 30, minimum: 1, maximum: 100}}
+  headers:
+    Link:
+      description: 'RFC 8288 links to the next, prev, first and last pages, such as `<https://api.buildkite.com/v2/...?page=2&per_page=1>; rel="next"`.'
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{message}`."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message: {type: string}
+    Validation:
+      description: '`{"message": "Validation Failed", "errors": [...]}`.'
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message: {type: string, example: Validation Failed}
+              errors:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    field: {type: string}
+                    code: {type: string}
+  schemas:
+    Pipeline:
+      type: object
+      properties:
+        id: {type: string}
+        url: {type: string}
+        web_url: {type: string}
+        name: {type: string}
+        slug: {type: string}
+        description: {type: string, nullable: true}
+        repository: {type: string}
+        cluster_id: {type: string, nullable: true}
+        default_branch: {type: string, nullable: true}
+        configuration: {type: string}
+        steps: {type: array, items: {type: object}}
+        tags: {type: array, items: {type: string}, nullable: true}
+        visibility: {type: string}
+        archived_at: {type: string, format: date-time, nullable: true}
+        builds_url: {type: string}
+        created_at: {type: string, format: date-time}
+    Build:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        url: {type: string}
+        web_url: {type: string}
+        number: {type: integer}
+        state:
+          type: string
+          enum: [scheduled, running, passed, failed, blocked, canceled, canceling, skipped, not_run, waiting, waiting_failed]
+        blocked: {type: boolean}
+        message: {type: string, nullable: true}
+        commit: {type: string}
+        branch: {type: string}
+        env: {type: object, additionalProperties: true}
+        meta_data: {type: object, additionalProperties: {type: string}}
+        source: {type: string, example: api}
+        creator: {type: object, nullable: true}
+        jobs: {type: array, items: {type: object}}
+        created_at: {type: string, format: date-time}
+        scheduled_at: {type: string, format: date-time, nullable: true}
+        started_at: {type: string, format: date-time, nullable: true}
+        finished_at: {type: string, format: date-time, nullable: true}
+        pipeline: {$ref: "#/components/schemas/Pipeline"}

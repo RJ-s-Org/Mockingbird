@@ -1,0 +1,376 @@
+openapi: 3.0.3
+info:
+  title: Mastodon client API (statuses, bookmarks and scheduled statuses)
+  version: "4"
+  description: |
+    A subset of the Mastodon client REST API, written from its public documentation
+    (docs.joinmastodon.org: the statuses, bookmarks, scheduled_statuses and accounts
+    methods and the API guidelines). Requests send a user token as
+    `Authorization: Bearer <token>`. Parameters may be sent as JSON.
+
+    Ids are strings; clients treat them as opaque and do not cast them to integers.
+    Responses are generally in reverse chronological order of when the items were
+    inserted.
+
+    `POST /api/v1/statuses` posts a status from `status` (its text), with `visibility`
+    (`public`, `unlisted`, `private` or `direct`), `sensitive` (default false),
+    `spoiler_text`, `language` and `in_reply_to_id` (the status it replies to). It answers
+    200 with the Status. With `scheduled_at` (at least 5 minutes ahead) it answers a
+    ScheduledStatus instead. An `Idempotency-Key` header (any string; keys are kept up to
+    an hour) prevents duplicate submissions of the same status. A status with no text,
+    media or poll answers 422 `{"error": "Validation failed: Text can't be blank"}`.
+
+    `GET /api/v1/statuses/{id}` reads a status; 404 `{"error": "Record not found"}` when
+    it does not exist. `PUT /api/v1/statuses/{id}` edits it (`status`, `spoiler_text`,
+    `sensitive`, `language`) and answers the edited Status, with `edited_at` set.
+    `GET /api/v1/statuses/{id}/history` answers all known versions as StatusEdit objects,
+    including the initial and current states. `DELETE /api/v1/statuses/{id}` answers
+    200 with the deleted Status holding its source `text` (for delete and redraft);
+    afterwards the status is not found.
+
+    `POST /api/v1/statuses/{id}/favourite` and `/unfavourite` answer the Status with
+    `favourited` true or false; `POST /api/v1/statuses/{id}/bookmark` and `/unbookmark`
+    answer it with `bookmarked` true or false. `GET /api/v1/bookmarks` lists the user's
+    bookmarked statuses (`limit` default 20, at most 40); it pages with the HTTP `Link`
+    header, whose `rel="next"` URL holds a `max_id` (older results) and `rel="prev"` a
+    `min_id` (newer ones). Those values are internal, not status ids: a client follows
+    the URLs as given.
+
+    `GET /api/v1/scheduled_statuses` lists the user's scheduled statuses;
+    `GET /api/v1/scheduled_statuses/{id}` reads one (404 when it does not exist or is
+    not the user's); `DELETE /api/v1/scheduled_statuses/{id}` cancels it and answers 200
+    with `{}`. A ScheduledStatus holds `id`, `scheduled_at`, `params` (`text`,
+    `visibility`, `sensitive`, `spoiler_text`, `in_reply_to_id`, `idempotency`, ...)
+    and `media_attachments`.
+
+    Errors answer `{"error": "<message>"}`: 401 `The access token is invalid`, 404
+    `Record not found`, 422 `Validation failed: ...`.
+servers:
+  - url: https://mastodon.example
+security:
+  - bearerAuth: []
+tags:
+  - name: Statuses
+  - name: Bookmarks
+  - name: Scheduled statuses
+  - name: Accounts
+paths:
+  /api/v1/accounts/verify_credentials:
+    get:
+      tags: [Accounts]
+      operationId: verify_credentials
+      summary: The token's own account
+      responses:
+        "200":
+          description: The account, with its source.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Account"}
+        "401": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses:
+    post:
+      tags: [Statuses]
+      operationId: status_post
+      summary: Post a new status
+      parameters:
+        - {name: Idempotency-Key, in: header, description: Prevents duplicate submissions of the same status., schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: {type: string, description: "The text; optional only with media_ids or a poll."}
+                media_ids: {type: array, items: {type: string}}
+                in_reply_to_id: {type: string}
+                sensitive: {type: boolean, default: false}
+                spoiler_text: {type: string}
+                visibility: {type: string, enum: [public, unlisted, private, direct]}
+                language: {type: string}
+                scheduled_at: {type: string, format: date-time, description: At least 5 minutes ahead.}
+      responses:
+        "200":
+          description: The Status, or a ScheduledStatus when scheduled_at was given.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/Status"
+                  - $ref: "#/components/schemas/ScheduledStatus"
+        "401": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Statuses]
+      operationId: status_get
+      summary: View a status
+      responses:
+        "200":
+          description: The status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Statuses]
+      operationId: status_edit
+      summary: Edit a status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: {type: string}
+                spoiler_text: {type: string}
+                sensitive: {type: boolean}
+                language: {type: string}
+      responses:
+        "200":
+          description: The edited status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Statuses]
+      operationId: status_delete
+      summary: Delete a status
+      parameters:
+        - {name: delete_media, in: query, schema: {type: boolean}}
+      responses:
+        "200":
+          description: The deleted status, with its source text.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses/{id}/history:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Statuses]
+      operationId: status_history
+      summary: All known versions of the status, including the initial and current states
+      responses:
+        "200":
+          description: The versions.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/StatusEdit"}}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses/{id}/favourite:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [Statuses]
+      operationId: status_favourite
+      summary: Favourite a status
+      responses:
+        "200": {$ref: "#/components/responses/Status"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses/{id}/unfavourite:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [Statuses]
+      operationId: status_unfavourite
+      summary: Undo a favourite
+      responses:
+        "200": {$ref: "#/components/responses/Status"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses/{id}/bookmark:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [Statuses]
+      operationId: status_bookmark
+      summary: Bookmark a status
+      responses:
+        "200": {$ref: "#/components/responses/Status"}
+        "401": {$ref: "#/components/responses/Error"}
+  /api/v1/statuses/{id}/unbookmark:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    post:
+      tags: [Statuses]
+      operationId: status_unbookmark
+      summary: Undo a bookmark
+      responses:
+        "200": {$ref: "#/components/responses/Status"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/v1/bookmarks:
+    get:
+      tags: [Bookmarks]
+      operationId: bookmarks_list
+      summary: The user's bookmarked statuses
+      parameters:
+        - {name: max_id, in: query, description: Internal; follow the Link header., schema: {type: string}}
+        - {name: since_id, in: query, description: Internal; follow the Link header., schema: {type: string}}
+        - {name: min_id, in: query, description: Internal; follow the Link header., schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 20, maximum: 40}}
+      responses:
+        "200":
+          description: Bookmarked statuses.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/Status"}}
+        "401": {$ref: "#/components/responses/Error"}
+  /api/v1/scheduled_statuses:
+    get:
+      tags: [Scheduled statuses]
+      operationId: scheduled_statuses_list
+      summary: The user's scheduled statuses
+      parameters:
+        - {name: max_id, in: query, schema: {type: string}}
+        - {name: since_id, in: query, schema: {type: string}}
+        - {name: min_id, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 20, maximum: 40}}
+      responses:
+        "200":
+          description: Scheduled statuses.
+          headers:
+            Link: {$ref: "#/components/headers/Link"}
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/ScheduledStatus"}}
+  /api/v1/scheduled_statuses/{id}:
+    parameters:
+      - $ref: "#/components/parameters/id"
+    get:
+      tags: [Scheduled statuses]
+      operationId: scheduled_status_get
+      summary: View a scheduled status
+      responses:
+        "200":
+          description: The scheduled status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ScheduledStatus"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Scheduled statuses]
+      operationId: scheduled_status_update
+      summary: Move a scheduled status's publish time
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scheduled_at: {type: string, format: date-time, description: At least 5 minutes ahead.}
+      responses:
+        "200":
+          description: The scheduled status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ScheduledStatus"}
+        "404": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Scheduled statuses]
+      operationId: scheduled_status_cancel
+      summary: Cancel a scheduled status
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: {type: object, example: {}}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    id: {name: id, in: path, required: true, schema: {type: string}}
+  headers:
+    Link:
+      description: 'RFC 8288 links, e.g. `<https://mastodon.example/api/v1/bookmarks?max_id=7163058>; rel="next", <https://mastodon.example/api/v1/bookmarks?min_id=14183>; rel="prev"`.'
+      schema: {type: string}
+  responses:
+    Error:
+      description: '`{"error": "<message>"}`.'
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {type: string, example: Record not found}
+    Status:
+      description: The status.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Status"}
+  schemas:
+    Account:
+      type: object
+      properties:
+        id: {type: string}
+        username: {type: string}
+        acct: {type: string}
+        display_name: {type: string}
+        url: {type: string}
+        source: {type: object}
+    Status:
+      type: object
+      required: [id, created_at, content, visibility]
+      properties:
+        id: {type: string}
+        uri: {type: string}
+        url: {type: string, nullable: true}
+        created_at: {type: string, format: date-time}
+        edited_at: {type: string, format: date-time, nullable: true}
+        account: {$ref: "#/components/schemas/Account"}
+        content: {type: string, description: HTML.}
+        text: {type: string, nullable: true, description: The plain-text source; answered by a delete.}
+        visibility: {type: string, enum: [public, unlisted, private, direct]}
+        sensitive: {type: boolean}
+        spoiler_text: {type: string}
+        language: {type: string, nullable: true}
+        in_reply_to_id: {type: string, nullable: true}
+        in_reply_to_account_id: {type: string, nullable: true}
+        replies_count: {type: integer}
+        reblogs_count: {type: integer}
+        favourites_count: {type: integer}
+        favourited: {type: boolean}
+        reblogged: {type: boolean}
+        bookmarked: {type: boolean}
+        pinned: {type: boolean}
+        media_attachments: {type: array, items: {type: object}}
+        poll: {type: object, nullable: true}
+    StatusEdit:
+      type: object
+      properties:
+        content: {type: string}
+        spoiler_text: {type: string}
+        sensitive: {type: boolean}
+        created_at: {type: string, format: date-time}
+        account: {$ref: "#/components/schemas/Account"}
+        media_attachments: {type: array, items: {type: object}}
+        emojis: {type: array, items: {type: object}}
+    ScheduledStatus:
+      type: object
+      required: [id, scheduled_at, params]
+      properties:
+        id: {type: string}
+        scheduled_at: {type: string, format: date-time}
+        params:
+          type: object
+          properties:
+            text: {type: string}
+            visibility: {type: string, nullable: true}
+            sensitive: {type: boolean, nullable: true}
+            spoiler_text: {type: string, nullable: true}
+            in_reply_to_id: {type: string, nullable: true}
+            idempotency: {type: string, nullable: true}
+            scheduled_at: {type: string, nullable: true}
+            application_id: {type: integer}
+        media_attachments: {type: array, items: {type: object}}

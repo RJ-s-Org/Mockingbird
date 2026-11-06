@@ -422,6 +422,27 @@ class HeldOutJourneyTest(unittest.TestCase):
             earlier |= set(getattr(server_suites, f"BLIND{n}_MOCKS"))
         self.assertEqual(earlier & set(mocks), set())
 
+    def test_journeys_blind13_is_a_suite(self):
+        self.assertIn("journeys_blind13", server_suites.SUITES)
+        self.assertNotIn("journeys_blind13", server_suites.DEFAULT_SUITES)
+        mocks, runner = server_suites.RUNNERS["journeys_blind13"]
+        self.assertIs(runner, server_suites.run_journeys_blind13)
+        self.assertEqual(sorted(mocks), ["bamboohr", "buildkite", "docusign", "launchdarkly", "mastodon"])
+        self.assertEqual(sorted(server_suites.BLIND13_JOURNEYS), sorted(mocks))
+        for name, (contract, prefix, persona) in mocks.items():
+            self.assertIsNone(persona)
+            self.assertEqual(prefix, f"/{name}")
+            self.assertTrue(contract.startswith("scripts/llm-bench/contracts/blind13/"), contract)
+            self.assertTrue(os.path.exists(os.path.join(server_suites.REPO, contract)), contract)
+        for name in mocks:
+            self.assertEqual(len(server_suites.JOURNEY_CHECKS[name]), 14, name)
+            self.assertEqual(len(set(server_suites.JOURNEY_CHECKS[name])), 14, name)
+        # A blind set's journeys are new: none shares a name with an earlier suite's.
+        earlier = set(server_suites.JOURNEYS) | set(server_suites.HELDOUT_JOURNEYS) | set(server_suites.BLIND_JOURNEYS)
+        for n in range(2, 13):
+            earlier |= set(getattr(server_suites, f"BLIND{n}_MOCKS"))
+        self.assertEqual(earlier & set(mocks), set())
+
     def test_journeys_heldout_is_a_suite(self):
         self.assertIn("journeys_heldout", server_suites.SUITES)
         self.assertNotIn("journeys_heldout", server_suites.DEFAULT_SUITES)
@@ -545,7 +566,7 @@ class FakeEmpty(FakeStripe):
 
 
 class EmptyAnswersTest(unittest.TestCase):
-    def test_each_blind7_to_blind12_journey_records_every_check_on_empty_answers(self):
+    def test_each_blind7_to_blind13_journey_records_every_check_on_empty_answers(self):
         # Every check runs and fails on its own: none gates the rest and none raises.
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeEmpty)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -563,7 +584,8 @@ class EmptyAnswersTest(unittest.TestCase):
                                 ("journeys_blind9", server_suites.BLIND9_JOURNEYS),
                                 ("journeys_blind10", server_suites.BLIND10_JOURNEYS),
                                 ("journeys_blind11", server_suites.BLIND11_JOURNEYS),
-                                ("journeys_blind12", server_suites.BLIND12_JOURNEYS)):
+                                ("journeys_blind12", server_suites.BLIND12_JOURNEYS),
+                                ("journeys_blind13", server_suites.BLIND13_JOURNEYS)):
             for name, steps in journeys.items():
                 self.run_on_empty_answers(Srv, Args, suite, name, steps)
 
@@ -575,6 +597,104 @@ class EmptyAnswersTest(unittest.TestCase):
         self.assertEqual(sorted(rows), sorted(f"{name}.{c}" for c in server_suites.JOURNEY_CHECKS[name]), name)
         self.assertEqual([c for c, r in rows.items() if r["source"] == "skipped"], [], name)
         self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
+
+
+class FakeFlagsAndStatuses(FakeStripe):
+    """A LaunchDarkly whose create stores no tags, and a Mastodon whose history lists the
+    newest version first: both what their docs allow."""
+
+    flags, statuses = {}, {}
+
+    def route(self):
+        """The path without the journey's mount prefix and query."""
+        return "/" + self.path.split("?")[0].strip("/").split("/", 1)[-1]
+
+    def body(self):
+        raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+        try:
+            return json.loads(raw or b"null")
+        except ValueError:
+            return None
+
+    def do_POST(self):
+        path, body = self.route(), self.body()
+        if path == "/api/v2/flags/default" and isinstance(body, dict):
+            if body["key"] in self.flags:
+                return self.reply({"message": "taken"}, 409)
+            self.flags[body["key"]] = {"key": body["key"], "name": body.get("name"), "kind": "boolean",
+                                       "tags": [], "archived": False, "variations": body.get("variations")}
+            return self.reply(self.flags[body["key"]], 201)
+        if path == "/api/v1/statuses" and isinstance(body, dict):
+            sid = str(len(self.statuses) + 1)
+            self.statuses[sid] = [{"id": sid, "content": f"<p>{body.get('status')}</p>"}]
+            return self.reply(self.statuses[sid][-1])
+        self.reply({})
+
+    def do_PATCH(self):
+        key, body = self.route().rsplit("/", 1)[-1], self.body()
+        flag = self.flags.get(key)
+        if flag is None:
+            return self.reply({"message": "not found"}, 404)
+        if "semanticpatch" in (self.headers.get("content-type") or ""):
+            for i in body.get("instructions", []):
+                if i.get("kind") == "addTags":
+                    flag["tags"] += [t for t in i["values"] if t not in flag["tags"]]
+        else:
+            for op in body:
+                if op.get("op") == "replace" and op.get("path") == "/tags":
+                    flag["tags"] = list(op["value"])
+        self.reply(flag)
+
+    def do_PUT(self):
+        sid, body = self.route().rsplit("/", 1)[-1], self.body()
+        if sid not in self.statuses or not isinstance(body, dict):
+            return self.reply({})
+        self.statuses[sid].append({"id": sid, "content": f"<p>{body.get('status')}</p>",
+                                   "edited_at": "2026-11-06T12:00:00Z"})
+        self.reply(self.statuses[sid][-1])
+
+    def do_GET(self):
+        parts = self.route().strip("/").split("/")
+        if parts[:4] == ["api", "v2", "flags", "default"] and len(parts) == 5:
+            flag = self.flags.get(parts[4])
+            return self.reply(flag or {"message": "not found"}, 200 if flag else 404)
+        if parts[:3] == ["api", "v1", "statuses"] and len(parts) >= 4 and parts[3] in self.statuses:
+            versions = self.statuses[parts[3]]
+            return self.reply(versions[::-1] if parts[4:] == ["history"] else versions[-1])
+        self.reply([] if parts[:3] == ["api", "v1", "bookmarks"] else {})
+
+    do_DELETE = FakeStripe.do_POST
+
+
+class UnpromisedTest(unittest.TestCase):
+    """A check asks nothing the docs do not promise, and one miss stays one miss."""
+
+    def rows(self, name, steps):
+        FakeFlagsAndStatuses.flags, FakeFlagsAndStatuses.statuses = {}, {}
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeFlagsAndStatuses)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys_blind13")
+            server_suites.run_one_journey(name, steps, Srv, sink, Args, 0)
+        return {r["case"]: r for r in sink.rows}
+
+    def test_a_create_that_stored_no_tags_is_only_the_create_checks_miss(self):
+        rows = self.rows("launchdarkly", server_suites.launchdarkly_steps)
+        self.assertFalse(rows["launchdarkly.a created flag answers 201 with its key, name, kind and tags"]["ok"])
+        self.assertTrue(rows["launchdarkly.addTags adds a tag and keeps the others"]["ok"])
+
+    def test_a_history_listed_newest_first_holds_both_versions(self):
+        rows = self.rows("mastodon", server_suites.mastodon_steps)
+        self.assertTrue(rows["mastodon.an edit answers edited_at and the history lists both versions"]["ok"])
 
 
 class FakeCursorHeader(FakeStripe):
@@ -681,6 +801,10 @@ class FakeServer(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def route(self):
+        """The path without the journey's mount prefix and query."""
+        return "/" + self.path.split("?")[0].strip("/").split("/", 1)[-1]
 
     def body(self):
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))
@@ -864,6 +988,11 @@ class JobsTest(unittest.TestCase):
         rows = self.assert_same_rows("journeys_blind12")
         self.assertEqual(len(rows), 3 * 5 * 14)
         self.assertEqual({r["case"].split(".")[0] for r in rows}, set(server_suites.BLIND12_JOURNEYS))
+
+    def test_journeys_blind13(self):
+        rows = self.assert_same_rows("journeys_blind13")
+        self.assertEqual(len(rows), 3 * 5 * 14)
+        self.assertEqual({r["case"].split(".")[0] for r in rows}, set(server_suites.BLIND13_JOURNEYS))
 
     def test_a_unit_error_is_raised_and_stops_units_not_started(self):
         ran = []

@@ -1,0 +1,316 @@
+openapi: 3.0.3
+info:
+  title: BambooHR API (employees and time off)
+  version: "1"
+  description: |
+    A subset of the BambooHR API, written from its public reference
+    (documentation.bamboohr.com/reference: Create, Get and Update Employee, List Time Off
+    Types, Create Time Off Request, Update Time Off Request Status and List Time Off
+    Requests). Each company has its own host, `https://{companyDomain}.bamboohr.com`.
+    Requests authenticate with HTTP Basic: the API key as the user name and any string
+    (such as `x`) as the password. Bodies are JSON (or XML); `Accept: application/json`
+    asks for JSON answers.
+
+    `POST /api/v1/employees` creates an employee from `firstName` and `lastName`
+    (required) and any writable employee field (`workEmail`, `jobTitle`, `department`,
+    `hireDate`, ...). It answers 201 with a `Location` header holding the URL of the new
+    employee, which includes the new employee's id; the body holds `id`. It answers
+    400 when the minimum fields are missing and 409 when a field has an invalid value.
+
+    `GET /api/v1/employees/{id}` reads an employee by its internal id. `fields` is a
+    comma-separated list of the fields to answer; without it the body holds only `id`
+    (always a string). An id with no employee answers 404.
+
+    `POST /api/v1/employees/{id}` updates only the fields sent and answers 200 with
+    `{id}`. A field with an invalid value, such as a duplicate email, answers 409. An id
+    with no employee answers 404.
+
+    `GET /api/v1/meta/time_off/types` answers `{timeOffTypes: [{id, name, units, color,
+    icon, source}], defaultHours}`; type ids are strings.
+
+    `PUT /api/v1/employees/{employeeId}/time_off/request` creates a time off request
+    from `status` (`approved`, `denied`, `declined` or `requested`), `start`, `end` (on
+    or after `start`) and `timeOffTypeId`, all required, with `amount` and `notes`
+    optional. It answers 201 with the new request's URL in `Location` and, with
+    `Accept: application/json`, the request in the body: `id`, `employeeId`, `name`,
+    `start`, `end`, `created`, `status: {status, lastChanged, lastChangedByUserId}`,
+    `type: {id, name}`, `amount: {unit, amount}`, `actions` and `notes`.
+
+    `PUT /api/v1/time_off/requests/{requestId}/status` changes a request's status to
+    `approved`, `denied`, `declined` or `canceled`, with an optional `note`. It answers
+    200 with `{}`, 400 for a status that is not allowed and 404 for a request id that
+    does not exist.
+
+    `GET /api/v1/time_off/requests` lists requests as a JSON array (an empty array when
+    none match). `start` and `end` (YYYY-MM-DD) go together, or `updatedSince` is given;
+    a missing or invalid `start`/`end` answers 400. The window is inclusive and keeps the
+    requests that overlap it: `start` keeps requests ending on or after it and `end`
+    those starting on or before it. `id`, `employeeId`, `type` (comma-separated ids) and
+    `status` (comma-separated: `approved`, `denied`, `superceded`, `requested`,
+    `canceled`) narrow it. No order is promised unless `updatedSince` is used.
+servers:
+  - url: https://{companyDomain}.bamboohr.com
+    variables:
+      companyDomain: {default: acme}
+security:
+  - basicAuth: []
+tags:
+  - name: Employees
+  - name: Time Off
+paths:
+  /api/v1/employees:
+    post:
+      tags: [Employees]
+      operationId: employee_create
+      summary: Create an employee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/EmployeeFields"
+                - type: object
+                  required: [firstName, lastName]
+      responses:
+        "201":
+          description: Created. Location holds the new employee's URL, with its id.
+          headers:
+            Location:
+              description: "The new employee's URL, ending in its id."
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EmployeeId"}
+        "400": {description: The body is invalid or the minimum fields are missing.}
+        "403": {description: The API user may not add employees.}
+        "409": {description: A field was given an invalid value.}
+  /api/v1/employees/{id}:
+    parameters:
+      - {name: id, in: path, required: true, description: The internal employee id., schema: {type: string}}
+    get:
+      tags: [Employees]
+      operationId: employee_get
+      summary: Get an employee
+      parameters:
+        - name: fields
+          in: query
+          description: Comma-separated field names; without it only id is answered.
+          schema: {type: string}
+        - {name: onlyCurrent, in: query, schema: {type: boolean, default: true}}
+      responses:
+        "200":
+          description: The id and the fields asked for.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EmployeeId"
+                  - $ref: "#/components/schemas/EmployeeFields"
+        "403": {description: The caller may not view this employee.}
+        "404": {description: No employee has this id.}
+    post:
+      tags: [Employees]
+      operationId: employee_update
+      summary: Update an employee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/EmployeeFields"}
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EmployeeId"}
+        "400": {description: The body is invalid or changes only read-only fields.}
+        "404": {description: No employee has this id.}
+        "409": {description: "A field has an invalid value, such as a duplicate email."}
+  /api/v1/meta/time_off/types:
+    get:
+      tags: [Time Off]
+      operationId: time_off_types
+      summary: List time off types
+      parameters:
+        - {name: mode, in: query, schema: {type: string, enum: [request]}}
+      responses:
+        "200":
+          description: The active time off types and the default hours.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [timeOffTypes, defaultHours]
+                properties:
+                  timeOffTypes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string, example: "64"}
+                        name: {type: string, example: Vacation}
+                        units: {type: string, enum: [hours, days]}
+                        color: {type: string, nullable: true}
+                        icon: {type: string, nullable: true}
+                        source: {type: string, enum: [internal, remote, external]}
+                  defaultHours:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: {type: string, example: Monday}
+                        amount: {type: string, example: "8"}
+  /api/v1/employees/{employeeId}/time_off/request:
+    parameters:
+      - {name: employeeId, in: path, required: true, schema: {type: integer}}
+    put:
+      tags: [Time Off]
+      operationId: time_off_request_create
+      summary: Create a time off request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, start, end, timeOffTypeId]
+              properties:
+                status: {type: string, enum: [approved, denied, declined, requested]}
+                start: {type: string, format: date}
+                end: {type: string, format: date, description: On or after start.}
+                timeOffTypeId: {type: string}
+                amount: {type: number}
+                previousRequest: {type: string}
+                notes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      from: {type: string, enum: [employee, manager]}
+                      note: {type: string}
+      responses:
+        "201":
+          description: Created; Location holds the new request's URL.
+          headers:
+            Location: {description: The new request's URL., schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TimeOffRequest"}
+        "400": {description: "Invalid data, such as an invalid time off type."}
+        "403": {description: The caller may not make this request.}
+        "404": {description: No employee has this id.}
+  /api/v1/time_off/requests/{requestId}/status:
+    parameters:
+      - {name: requestId, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [Time Off]
+      operationId: time_off_request_status
+      summary: Change a time off request's status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: {type: string, enum: [approved, denied, declined, canceled, cancelled]}
+                note: {type: string}
+      responses:
+        "200":
+          description: The status was changed.
+          content:
+            application/json:
+              schema: {type: object, example: {}}
+        "400": {description: The status is not an allowed value.}
+        "403": {description: The caller may not change the status this way.}
+        "404": {description: No request has this id.}
+  /api/v1/time_off/requests:
+    get:
+      tags: [Time Off]
+      operationId: time_off_requests_list
+      summary: List time off requests
+      parameters:
+        - {name: id, in: query, schema: {type: integer}}
+        - {name: action, in: query, schema: {type: string, enum: [view, approve, myRequests], default: view}}
+        - {name: employeeId, in: query, schema: {type: string}}
+        - {name: start, in: query, description: "YYYY-MM-DD; keeps requests ending on or after it. Goes with end.", schema: {type: string, format: date}}
+        - {name: end, in: query, description: "YYYY-MM-DD; keeps requests starting on or before it. Goes with start.", schema: {type: string, format: date}}
+        - {name: updatedSince, in: query, schema: {type: string, format: date-time}}
+        - {name: type, in: query, description: Comma-separated time off type ids., schema: {type: string}}
+        - name: status
+          in: query
+          description: "Comma-separated: approved, denied, superceded, requested, canceled."
+          schema: {type: string}
+        - {name: excludeNote, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: The matching requests; an empty array when none match.
+          content:
+            application/json:
+              schema: {type: array, items: {$ref: "#/components/schemas/TimeOffRequest"}}
+        "400": {description: "A missing or invalid start/end, or an invalid updatedSince."}
+components:
+  securitySchemes:
+    basicAuth: {type: http, scheme: basic}
+  schemas:
+    EmployeeId:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+    EmployeeFields:
+      type: object
+      additionalProperties: true
+      properties:
+        firstName: {type: string}
+        lastName: {type: string}
+        workEmail: {type: string}
+        jobTitle: {type: string}
+        department: {type: string}
+        location: {type: string}
+        hireDate: {type: string, format: date}
+    TimeOffRequest:
+      type: object
+      properties:
+        id: {type: integer}
+        employeeId: {type: integer}
+        name: {type: string}
+        start: {type: string, format: date}
+        end: {type: string, format: date}
+        created: {type: string, format: date}
+        updated: {type: string, format: date-time, nullable: true}
+        status:
+          type: object
+          properties:
+            status: {type: string, enum: [approved, denied, declined, superceded, requested, canceled]}
+            lastChanged: {type: string, example: "2026-01-05 13:45:00"}
+            lastChangedByUserId: {type: integer}
+        type:
+          type: object
+          properties:
+            id: {type: string}
+            name: {type: string}
+            icon: {type: string}
+        amount:
+          type: object
+          properties:
+            unit: {type: string, enum: [hours, days]}
+            amount: {type: number}
+        actions:
+          type: object
+          properties:
+            view: {type: boolean}
+            edit: {type: boolean}
+            cancel: {type: boolean}
+            approve: {type: boolean}
+            deny: {type: boolean}
+            bypass: {type: boolean}
+        dates: {type: object, additionalProperties: {type: number}}
+        notes:
+          type: object
+          properties:
+            employee: {type: string}
+            manager: {type: string}
+        comments: {type: array, items: {type: object}}
