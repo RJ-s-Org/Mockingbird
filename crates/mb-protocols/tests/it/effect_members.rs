@@ -637,3 +637,207 @@ async fn an_effect_repeating_a_nested_key_at_the_top_still_applies() {
     let g = stored(&state, "gadgets", "g1").await;
     assert_eq!(g["phase"], "pinged", "{effects} {g}");
 }
+
+/// Decks keeping their members under `attributes`, beside `links`, an object whose
+/// `owner` is itself an object.
+const DECKS: &str = r##"
+openapi: 3.0.0
+info: {title: Decks, version: "1"}
+paths:
+  /decks/{id}:
+    get:
+      operationId: getDeck
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Deck"}}}}
+  /cards:
+    post:
+      operationId: createCard
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {deck_id: {type: string}}}
+      responses:
+        "201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Card"}}}}
+  /cards/{id}:
+    get:
+      operationId: getCard
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Card"}}}}
+components:
+  schemas:
+    Deck:
+      type: object
+      required: [id, attributes]
+      properties:
+        id: {type: string}
+        attributes:
+          type: object
+          properties:
+            label: {type: string}
+            full: {type: boolean}
+        links:
+          type: object
+          properties:
+            owner:
+              type: object
+              properties:
+                href: {type: string}
+    Card:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        deck_id: {type: string}
+"##;
+
+/// `owner` written at the top level as a string does not fit `links.owner`, an object:
+/// it is not moved there, so the rest of the effect still applies.
+#[tokio::test]
+async fn a_member_whose_value_does_not_fit_its_nested_place_is_not_moved() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let deck = json!({"id": "s1", "attributes": {"label": "A", "full": false},
+        "links": {"owner": {"href": "/u/1"}}});
+    store(&state, "decks", "s1", deck).await;
+    let answer = json!({"response": {"id": "k1", "deck_id": "s1"}, "effects": [
+        {"type": "decks", "id": "s1", "set": {"attributes": {"full": true}, "owner": "u9"}},
+    ]});
+    let card = json!({"deck_id": "s1"});
+    let (_, effects) = call(DECKS, &state, answer, ("POST", "/cards", Some(card))).await;
+    assert_eq!(effects[0]["outcome"], "applied", "{effects}");
+    let deck = stored(&state, "decks", "s1").await;
+    assert_eq!(deck["attributes"]["full"], true, "{deck}");
+    assert_eq!(deck["links"]["owner"], json!({"href": "/u/1"}), "{deck}");
+}
+
+/// A member whose value fits its nested place is still moved there.
+#[tokio::test]
+async fn a_member_whose_value_fits_its_nested_place_is_moved() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    let deck = json!({"id": "s1", "attributes": {"label": "A", "full": false},
+        "links": {"owner": {"href": "/u/1"}}});
+    store(&state, "decks", "s1", deck).await;
+    let answer = json!({"response": {"id": "k1", "deck_id": "s1"}, "effects": [
+        {"type": "decks", "id": "s1", "set": {"full": true, "owner": {"href": "/u/9"}}},
+    ]});
+    let card = json!({"deck_id": "s1"});
+    let (_, effects) = call(DECKS, &state, answer, ("POST", "/cards", Some(card))).await;
+    assert_eq!(effects[0]["outcome"], "applied", "{effects}");
+    let deck = stored(&state, "decks", "s1").await;
+    assert_eq!(deck["attributes"]["full"], true, "{deck}");
+    assert_eq!(deck["links"]["owner"], json!({"href": "/u/9"}), "{deck}");
+}
+
+/// An effect repeating the board's old `title` at the top level, beside what followed
+/// (`frozen`), does not undo the request's change, which the answer settles.
+#[tokio::test]
+async fn a_stale_member_written_too_high_does_not_undo_the_request() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "boards", "b1", board()).await;
+    let mut answered = board();
+    answered["attributes"]["title"] = json!("New");
+    let answer = json!({"response": answered, "effects": [
+        {"type": "boards", "id": "b1", "set": {"frozen": true, "title": "Plans"}},
+    ]});
+    let edit = json!({"attributes": {"title": "New"}});
+    let contract = unwrapped_boards();
+    let (_, effects) = call(
+        &contract,
+        &state,
+        answer,
+        ("PATCH", "/boards/b1", Some(edit)),
+    )
+    .await;
+    let board = stored(&state, "boards", "b1").await;
+    assert_eq!(board["attributes"]["title"], "New", "{effects} {board}");
+    assert_eq!(board["attributes"]["frozen"], true, "{effects} {board}");
+}
+
+/// The same with the effect written where the record keeps it.
+#[tokio::test]
+async fn a_stale_nested_member_does_not_undo_the_request() {
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "boards", "b1", board()).await;
+    let mut answered = board();
+    answered["attributes"]["title"] = json!("New");
+    let answer = json!({"response": answered, "effects": [
+        {"type": "boards", "id": "b1", "set": {"attributes": {"frozen": true, "title": "Plans"}}},
+    ]});
+    let edit = json!({"attributes": {"title": "New"}});
+    let contract = unwrapped_boards();
+    let (_, effects) = call(
+        &contract,
+        &state,
+        answer,
+        ("PATCH", "/boards/b1", Some(edit)),
+    )
+    .await;
+    let board = stored(&state, "boards", "b1").await;
+    assert_eq!(board["attributes"]["title"], "New", "{effects} {board}");
+    assert_eq!(board["attributes"]["frozen"], true, "{effects} {board}");
+}
+
+/// A request wrapping the record (`{data: {attributes: …}}`) names its members as
+/// well: an effect giving the request's `title` another value than the answer settled
+/// does not set it, written at the top level or where the record keeps it.
+#[tokio::test]
+async fn a_wrapped_request_member_the_answer_settles_is_not_the_effects() {
+    for set in [
+        json!({"frozen": true, "title": "Other"}),
+        json!({"attributes": {"frozen": true, "title": "Other"}}),
+    ] {
+        let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+        store(&state, "boards", "b1", board()).await;
+        let mut answered = board();
+        answered["attributes"]["title"] = json!("New");
+        let answer = json!({"response": answered, "effects": [
+            {"type": "boards", "id": "b1", "set": set},
+        ]});
+        let edit = json!({"data": {"attributes": {"title": "New"}}});
+        let (_, effects) = call(BOARDS, &state, answer, ("PATCH", "/boards/b1", Some(edit))).await;
+        let board = stored(&state, "boards", "b1").await;
+        assert_ne!(board["attributes"]["title"], "Other", "{effects} {board}");
+        assert_eq!(board["attributes"]["frozen"], true, "{effects} {board}");
+    }
+}
+
+/// With an acknowledgement answering only the board's `id`, a nested request member
+/// takes an effect's value only where it is the one the request sent.
+#[tokio::test]
+async fn an_acknowledged_nested_request_member_takes_only_the_requests_value() {
+    let acked = BOARDS.replace(
+        r##""200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Board"}}}}
+  /pins:"##,
+        r##""200": {description: ok, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}}}}}
+  /pins:"##,
+    );
+    assert_ne!(acked, BOARDS);
+    let state = Arc::new(MemoryStore::new(Duration::from_secs(3600)));
+    store(&state, "boards", "b1", board()).await;
+    let answer = json!({"response": {"id": "b1"}, "effects": [
+        {"type": "boards", "id": "b1", "set": {"frozen": true, "title": "Other"}},
+    ]});
+    let edit = json!({"data": {"attributes": {"title": "New"}}});
+    let (_, effects) = call(&acked, &state, answer, ("PATCH", "/boards/b1", Some(edit))).await;
+    let board = stored(&state, "boards", "b1").await;
+    assert_ne!(board["attributes"]["title"], "Other", "{effects} {board}");
+    assert_eq!(board["attributes"]["frozen"], true, "{effects} {board}");
+}
+
+/// [`BOARDS`] with an update whose body is the record's own members, unwrapped.
+fn unwrapped_boards() -> String {
+    let wrapped = r##"              properties:
+                data:
+                  type: object
+                  properties:
+                    attributes: {type: object, properties: {title: {type: string}}}"##;
+    assert!(BOARDS.contains(wrapped));
+    BOARDS.replace(
+        wrapped,
+        r##"              properties:
+                attributes: {type: object, properties: {title: {type: string}}}"##,
+    )
+}
