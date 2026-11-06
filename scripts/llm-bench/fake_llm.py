@@ -51,7 +51,7 @@ def resolve(schema, root, depth):
 
 
 def value_for(schema, root, depth=0, counter=None):
-    """A plausible value for `schema` (not guaranteed valid: patterns are ignored)."""
+    """A plausible value for `schema` (not guaranteed valid; simple string patterns are honoured)."""
     counter = counter if counter is not None else [0]
     counter[0] += 1
     schema = resolve(schema, root, depth)
@@ -110,7 +110,220 @@ def value_for(schema, root, depth=0, counter=None):
         s = s + "x" * (min_len - len(s))
     if max_len is not None:
         s = s[:max_len]
+    pattern = schema.get("pattern")
+    if isinstance(pattern, str):
+        return pattern_value(pattern, counter[0], min_len, max_len, s)
     return s
+
+
+# Values for a string schema's `pattern`. Only a small regex subset is generated:
+# literals, escapes (\d \w \s and their negations, escaped punctuation), `.`,
+# character classes (ranges, negation), groups ((...), (?:...)), alternation,
+# anchors and the quantifiers ? * + {n} {n,} {n,m}. Anything else (lookaround,
+# backreferences, \b, ...) is unsupported, and every generated value is checked
+# with `re` before it is used, so a pattern this cannot satisfy keeps the plain value.
+
+DIGITS = "0123456789"
+LOWER = "abcdefghijklmnopqrstuvwxyz"
+UPPER = LOWER.upper()
+WORD = LOWER + UPPER + DIGITS + "_"
+SPACE = " \t\n\r\f\v"
+POOL = LOWER + DIGITS + UPPER  # what `.` and negated sets draw from
+ESCAPE_SETS = {"d": DIGITS, "w": WORD, "s": SPACE}
+ESCAPE_LITERALS = {"t": "\t", "n": "\n", "r": "\r", "f": "\f", "v": "\v"}
+
+
+class Unsupported(Exception):
+    pass
+
+
+class PatternParser:
+    """Parses the subset into nodes: ("lit", c) | ("set", chars) | ("seq", [n])
+    | ("alt", [n]) | ("rep", n, lo, hi) | ("empty",)."""
+
+    def __init__(self, src):
+        self.src, self.i = src, 0
+
+    def peek(self):
+        return self.src[self.i] if self.i < len(self.src) else None
+
+    def take(self):
+        c = self.peek()
+        if c is None:
+            raise Unsupported("unexpected end")
+        self.i += 1
+        return c
+
+    def parse(self):
+        node = self.alt()
+        if self.peek() is not None:
+            raise Unsupported(f"unexpected {self.peek()!r}")
+        return node
+
+    def alt(self):
+        branches = [self.seq()]
+        while self.peek() == "|":
+            self.i += 1
+            branches.append(self.seq())
+        return branches[0] if len(branches) == 1 else ("alt", branches)
+
+    def seq(self):
+        items = []
+        while self.peek() not in (None, "|", ")"):
+            atom = self.atom()
+            items.append(self.quantified(atom))
+        return ("seq", items)
+
+    def atom(self):
+        c = self.take()
+        if c in "^$":
+            return ("empty",)
+        if c == ".":
+            return ("set", POOL)
+        if c == "(":
+            if self.src.startswith("?:", self.i):
+                self.i += 2
+            elif self.peek() == "?":
+                raise Unsupported("lookaround or named group")
+            node = self.alt()
+            if self.take() != ")":
+                raise Unsupported("unclosed group")
+            return node
+        if c == "[":
+            return ("set", self.char_class())
+        if c == "\\":
+            return self.escape()
+        if c in "*+?{)]|":
+            raise Unsupported(f"stray {c!r}")
+        return ("lit", c)
+
+    def escape(self):
+        c = self.take()
+        if c in ESCAPE_SETS:
+            return ("set", ESCAPE_SETS[c])
+        if c.lower() in ESCAPE_SETS:
+            excluded = set(ESCAPE_SETS[c.lower()])
+            return ("set", "".join(ch for ch in POOL + "-._~" if ch not in excluded))
+        if c in ESCAPE_LITERALS:
+            return ("lit", ESCAPE_LITERALS[c])
+        if c.isalnum():
+            raise Unsupported(f"escape \\{c}")
+        return ("lit", c)
+
+    def char_class(self):
+        negate = self.peek() == "^"
+        if negate:
+            self.i += 1
+        members, first = [], True
+        while True:
+            c = self.take()
+            if c == "]" and not first:
+                break
+            first = False
+            if c == "\\":
+                node = self.escape()
+                if node[0] == "set":
+                    members.extend(node[1])
+                    continue
+                c = node[1]
+            if self.peek() == "-" and self.i + 1 < len(self.src) and self.src[self.i + 1] != "]":
+                self.i += 1
+                end = self.take()
+                if end == "\\":
+                    node = self.escape()
+                    if node[0] == "set":
+                        raise Unsupported("range to a set")
+                    end = node[1]
+                if ord(end) < ord(c):
+                    raise Unsupported("reversed range")
+                members.extend(chr(o) for o in range(ord(c), ord(end) + 1))
+            else:
+                members.append(c)
+        if negate:
+            excluded = set(members)
+            members = [ch for ch in POOL + "-._~" if ch not in excluded]
+        chars = "".join(dict.fromkeys(members))
+        if not chars:
+            raise Unsupported("empty class")
+        return chars
+
+    def quantified(self, atom):
+        c = self.peek()
+        if c == "?":
+            lo, hi = 0, 1
+        elif c == "*":
+            lo, hi = 0, None
+        elif c == "+":
+            lo, hi = 1, None
+        elif c == "{":
+            m = re.match(r"\{(\d+)(,(\d*))?\}", self.src[self.i:])
+            if not m:
+                raise Unsupported("bad brace quantifier")
+            self.i += m.end() - 1
+            lo = int(m.group(1))
+            hi = lo if m.group(2) is None else (int(m.group(3)) if m.group(3) else None)
+        else:
+            return atom
+        self.i += 1
+        if self.peek() == "?":  # lazy: same language
+            self.i += 1
+        if atom[0] == "empty":
+            return atom
+        return ("rep", atom, lo, hi)
+
+
+def generate(node, seed, spread, out):
+    """Appends one string of `node` to `out`: the first branch of an alternation,
+    each repeat `spread` times clamped to its bounds, and a set's character picked
+    by `seed` and the position, so ids of different fields differ."""
+    kind = node[0]
+    if kind == "lit":
+        out.append(node[1])
+    elif kind == "set":
+        chars = node[1]
+        out.append(chars[(seed + len(out)) % len(chars)])
+    elif kind == "seq":
+        for item in node[1]:
+            generate(item, seed, spread, out)
+    elif kind == "alt":
+        generate(node[1][0], seed, spread, out)
+    elif kind == "rep":
+        _, inner, lo, hi = node
+        count = max(lo, spread if hi is None else min(hi, spread))
+        for _ in range(count):
+            generate(inner, seed, spread, out)
+
+
+def pattern_value(pattern, seed, min_len, max_len, plain):
+    """A value matching `pattern` (JSON Schema: unanchored search) and the length
+    bounds, deterministic in `seed`; `plain` when it already matches or when no
+    generated value does."""
+    try:
+        compiled = re.compile(pattern)
+    except (re.error, RecursionError):
+        return plain
+
+    def fits(s):
+        return (compiled.search(s) is not None and len(s) >= min_len
+                and (max_len is None or len(s) <= max_len))
+
+    if fits(plain):
+        return plain
+    try:
+        tree = PatternParser(pattern).parse()
+    except (Unsupported, RecursionError):
+        return plain
+    limit = max(64, min_len + 1)
+    for spread in [3, *range(1, limit + 1)]:
+        out = []
+        try:
+            generate(tree, seed, spread, out)
+        except RecursionError:
+            return plain
+        s = "".join(out)
+        if fits(s):
+            return s
+    return plain
 
 
 def schema_after(text, marker):
