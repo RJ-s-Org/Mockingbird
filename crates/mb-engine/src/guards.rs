@@ -679,14 +679,24 @@ pub fn refusal_tied_to(op: &mb_mcm::Operation, member: &str) -> Option<u16> {
 }
 
 /// Whether `call` carries a header `op` declares as an idempotency key, by its name or
-/// its description: a create sent again with one may be a retry the API answers as the
-/// first, so what it repeats is no conflict.
+/// its description, or the header `described` (the one a world description names as the
+/// operation's idempotency key, whatever its name): a create sent again with one may be
+/// a retry the API answers as the first, so what it repeats is no conflict.
 pub fn carries_an_idempotency_key(
     bundle: &mb_mcm::Bundle,
     op: &mb_mcm::Operation,
     call: &crate::OperationCall,
+    described: Option<&str>,
 ) -> bool {
     const KEY: &str = "idempoten";
+    if let Some(header) = described
+        && call
+            .headers
+            .keys()
+            .any(|sent| sent.eq_ignore_ascii_case(header))
+    {
+        return true;
+    }
     let Some(declared) = crate::prompt::declared(bundle, op.input.headers.as_ref()) else {
         return false;
     };

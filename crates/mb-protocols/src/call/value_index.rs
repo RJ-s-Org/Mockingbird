@@ -943,7 +943,12 @@ pub(super) async fn same_values(
         || plan.scenario.is_some()
         || !write_memory::applies(rt, plan)
         || !plan.engine.may_refuse(rt.bundle(), op)
-        || mb_engine::guards::carries_an_idempotency_key(rt.bundle(), op, call)
+        || mb_engine::guards::carries_an_idempotency_key(
+            rt.bundle(),
+            op,
+            call,
+            super::replays::header(rt, op),
+        )
     {
         return Vec::new();
     }

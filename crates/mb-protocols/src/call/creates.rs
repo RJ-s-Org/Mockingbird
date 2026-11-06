@@ -188,7 +188,12 @@ pub(super) async fn repeated_record(
                 ..
             }
         )
-        || mb_engine::guards::carries_an_idempotency_key(rt.bundle(), op, call)
+        || mb_engine::guards::carries_an_idempotency_key(
+            rt.bundle(),
+            op,
+            call,
+            super::replays::header(rt, op),
+        )
     {
         return None;
     }

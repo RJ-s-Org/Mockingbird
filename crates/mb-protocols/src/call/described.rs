@@ -95,13 +95,11 @@ impl Described {
     }
 
     /// How the description says operation `op_id` acts.
-    #[allow(dead_code, reason = "read by the later world-runtime tasks")]
     pub(crate) fn op(&self, op_id: &str) -> Option<&OpDesc> {
         self.world.as_ref()?.operations.get(op_id)
     }
 
     /// How the description says records of type `t` behave.
-    #[allow(dead_code, reason = "read by the later world-runtime tasks")]
     pub(crate) fn type_desc(&self, t: &str) -> Option<&TypeDesc> {
         self.world.as_ref()?.types.get(t)
     }
