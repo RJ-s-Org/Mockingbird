@@ -8987,12 +8987,17 @@ def launchdarkly_steps(j):
             status_code=patched, error=answer if not success(patched) else None, production=production,
             test=test, test_before=test_before)
     # The tags the flag holds before, so a create that stored others is that check's miss.
+    # A flag holding none is given its tags with an unjudged JSON patch first, so addTags
+    # is judged on keeping others even when the create stored no tags.
     before = tags_of(read(k1))
+    if not before:
+        j.call("PATCH", f"{flags}/{k1}", body=[{"op": "replace", "path": "/tags", "value": ["bench", run]}])
+        before = tags_of(read(k1))
     semantic(k1, {"kind": "addTags", "values": ["checkout"]})
     patched = j.last["status"]
     after = tags_of(read(k1))
     j.check("addTags adds a tag and keeps the others",
-            success(patched) and same_items(after, list(dict.fromkeys(before + ["checkout"]))) and bool(before),
+            success(patched) and same_items(after, list(dict.fromkeys(before + ["checkout"]))),
             status_code=patched, before=before, after=after)
     semantic(k1, {"kind": "updateName", "value": f"Checkout v2 {tag}"})
     patched = j.last["status"]
@@ -9451,7 +9456,8 @@ def mastodon_steps(j):
     versions = dicts(answer if isinstance(answer, list) else [])
     j.check("an edit answers edited_at and the history lists both versions",
             status_code == 200 and holds(change, "50 lengths") and given(change.get("edited_at"), None) is not None
-            and len(versions) >= 2 and holds(versions[0], "40 lengths") and holds(versions[-1], "50 lengths"),
+            and len(versions) >= 2 and any(holds(v, "40 lengths") for v in versions)
+            and any(holds(v, "50 lengths") for v in versions),
             edit={k: change.get(k) for k in ("content", "edited_at")}, history=[v.get("content") for v in versions])
     reply = post(texts["reply"], in_reply_to_id=s1)
     replied = j.last["status"]

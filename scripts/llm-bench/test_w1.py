@@ -599,6 +599,104 @@ class EmptyAnswersTest(unittest.TestCase):
         self.assertEqual([c for c, r in rows.items() if r["ok"]], [], name)
 
 
+class FakeFlagsAndStatuses(FakeStripe):
+    """A LaunchDarkly whose create stores no tags, and a Mastodon whose history lists the
+    newest version first: both what their docs allow."""
+
+    flags, statuses = {}, {}
+
+    def route(self):
+        """The path without the journey's mount prefix and query."""
+        return "/" + self.path.split("?")[0].strip("/").split("/", 1)[-1]
+
+    def body(self):
+        raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+        try:
+            return json.loads(raw or b"null")
+        except ValueError:
+            return None
+
+    def do_POST(self):
+        path, body = self.route(), self.body()
+        if path == "/api/v2/flags/default" and isinstance(body, dict):
+            if body["key"] in self.flags:
+                return self.reply({"message": "taken"}, 409)
+            self.flags[body["key"]] = {"key": body["key"], "name": body.get("name"), "kind": "boolean",
+                                       "tags": [], "archived": False, "variations": body.get("variations")}
+            return self.reply(self.flags[body["key"]], 201)
+        if path == "/api/v1/statuses" and isinstance(body, dict):
+            sid = str(len(self.statuses) + 1)
+            self.statuses[sid] = [{"id": sid, "content": f"<p>{body.get('status')}</p>"}]
+            return self.reply(self.statuses[sid][-1])
+        self.reply({})
+
+    def do_PATCH(self):
+        key, body = self.route().rsplit("/", 1)[-1], self.body()
+        flag = self.flags.get(key)
+        if flag is None:
+            return self.reply({"message": "not found"}, 404)
+        if "semanticpatch" in (self.headers.get("content-type") or ""):
+            for i in body.get("instructions", []):
+                if i.get("kind") == "addTags":
+                    flag["tags"] += [t for t in i["values"] if t not in flag["tags"]]
+        else:
+            for op in body:
+                if op.get("op") == "replace" and op.get("path") == "/tags":
+                    flag["tags"] = list(op["value"])
+        self.reply(flag)
+
+    def do_PUT(self):
+        sid, body = self.route().rsplit("/", 1)[-1], self.body()
+        if sid not in self.statuses or not isinstance(body, dict):
+            return self.reply({})
+        self.statuses[sid].append({"id": sid, "content": f"<p>{body.get('status')}</p>",
+                                   "edited_at": "2026-11-06T12:00:00Z"})
+        self.reply(self.statuses[sid][-1])
+
+    def do_GET(self):
+        parts = self.route().strip("/").split("/")
+        if parts[:4] == ["api", "v2", "flags", "default"] and len(parts) == 5:
+            flag = self.flags.get(parts[4])
+            return self.reply(flag or {"message": "not found"}, 200 if flag else 404)
+        if parts[:3] == ["api", "v1", "statuses"] and len(parts) >= 4 and parts[3] in self.statuses:
+            versions = self.statuses[parts[3]]
+            return self.reply(versions[::-1] if parts[4:] == ["history"] else versions[-1])
+        self.reply([] if parts[:3] == ["api", "v1", "bookmarks"] else {})
+
+    do_DELETE = FakeStripe.do_POST
+
+
+class UnpromisedTest(unittest.TestCase):
+    """A check asks nothing the docs do not promise, and one miss stays one miss."""
+
+    def rows(self, name, steps):
+        FakeFlagsAndStatuses.flags, FakeFlagsAndStatuses.statuses = {}, {}
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeFlagsAndStatuses)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        class Srv:
+            data = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        class Args:
+            model, timeout, repeat = "m/x", 10, 1
+
+        with tempfile.TemporaryDirectory() as out:
+            sink = server_suites.Sink(out, "m/x", "journeys_blind13")
+            server_suites.run_one_journey(name, steps, Srv, sink, Args, 0)
+        return {r["case"]: r for r in sink.rows}
+
+    def test_a_create_that_stored_no_tags_is_only_the_create_checks_miss(self):
+        rows = self.rows("launchdarkly", server_suites.launchdarkly_steps)
+        self.assertFalse(rows["launchdarkly.a created flag answers 201 with its key, name, kind and tags"]["ok"])
+        self.assertTrue(rows["launchdarkly.addTags adds a tag and keeps the others"]["ok"])
+
+    def test_a_history_listed_newest_first_holds_both_versions(self):
+        rows = self.rows("mastodon", server_suites.mastodon_steps)
+        self.assertTrue(rows["mastodon.an edit answers edited_at and the history lists both versions"]["ok"])
+
+
 class FakeCursorHeader(FakeStripe):
     """Answers every call with an empty JSON array and an `X-After-Cursor` header."""
 
@@ -703,6 +801,10 @@ class FakeServer(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def route(self):
+        """The path without the journey's mount prefix and query."""
+        return "/" + self.path.split("?")[0].strip("/").split("/", 1)[-1]
 
     def body(self):
         raw = self.rfile.read(int(self.headers.get("content-length") or 0))

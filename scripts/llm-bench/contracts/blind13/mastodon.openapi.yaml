@@ -23,8 +23,8 @@ info:
     `GET /api/v1/statuses/{id}` reads a status; 404 `{"error": "Record not found"}` when
     it does not exist. `PUT /api/v1/statuses/{id}` edits it (`status`, `spoiler_text`,
     `sensitive`, `language`) and answers the edited Status, with `edited_at` set.
-    `GET /api/v1/statuses/{id}/history` answers its versions as StatusEdit objects,
-    from the first version to the current one. `DELETE /api/v1/statuses/{id}` answers
+    `GET /api/v1/statuses/{id}/history` answers all known versions as StatusEdit objects,
+    including the initial and current states. `DELETE /api/v1/statuses/{id}` answers
     200 with the deleted Status holding its source `text` (for delete and redraft);
     afterwards the status is not found.
 
@@ -156,7 +156,7 @@ paths:
     get:
       tags: [Statuses]
       operationId: status_history
-      summary: The status's edit history, first version first
+      summary: All known versions of the status, including the initial and current states
       responses:
         "200":
           description: The versions.
