@@ -2938,6 +2938,43 @@ async fn a_refusal_is_answered_with_the_error_body_the_model_wrote_when_valid() 
     );
 }
 
+/// A refusal body the model wrote states the status it is refused with: an integer
+/// `status` and a string member shown as a 3-digit status, whatever the model put there.
+#[tokio::test]
+async fn a_written_refusal_body_states_its_own_status() {
+    let contract = TEAMS.replace(
+        "Error: {type: object, required: [detail], properties: {detail: {type: string}}}",
+        "Error: {type: object, required: [detail], properties: {detail: {type: string}, status: {type: integer}, errors: {type: array, items: {type: object, properties: {status: {type: string, examples: [\"400\"]}}}}}}",
+    );
+    assert_ne!(contract, TEAMS);
+    let bundle = inline(&contract);
+    let op = bundle.operation("createTeam").unwrap();
+    let written = json!({"detail": "taken", "status": 400, "errors": [{"status": "400"}]});
+    let refuse = json!({"effects": [], "response": null, "refusal": 409, "refusal_body": written});
+    let (_provider, engine) = scripted(vec![Ok(refuse.to_string())]);
+    let c = OperationCall {
+        operation_id: "createTeam".into(),
+        path_params: Map::from_iter([("org".to_string(), json!("acme"))]),
+        body: Some(json!({"slug": "core"})),
+        ..OperationCall::default()
+    };
+    let related = [StoredResource {
+        resource_type: "orgs".into(),
+        id: "acme".into(),
+        data: json!({"id": "acme"}),
+    }];
+    let ctx = GenerationContext {
+        related: &related,
+        ..ctx()
+    };
+    let out = engine.generate(&bundle, op, &c, ctx).await.unwrap();
+    assert_eq!(out.status, 409);
+    let body = out.body.unwrap();
+    assert_eq!(body["detail"], "taken", "{body}");
+    assert_eq!(body["status"], 409, "{body}");
+    assert_eq!(body["errors"][0]["status"], "409", "{body}");
+}
+
 /// The id a create's body asks for under its identity field is its asked identity, a
 /// string or a number, when the request's body schema declares that member writable (at
 /// its top level or in an `allOf` part); nothing else is, and no other operation has one.
