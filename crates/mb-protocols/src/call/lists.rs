@@ -640,7 +640,7 @@ pub(super) fn narrow(
         if let Some(items) = list_items_mut(&mut kept) {
             let was = items.len();
             items.retain(|item| {
-                list_query::keeps(q.as_ref(), item, |i| {
+                list_query::keeps_answered(q.as_ref(), item, |i| {
                     !filters.iter().any(|filter| contradicts(i, filter))
                 })
             });

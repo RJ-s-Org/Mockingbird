@@ -305,6 +305,39 @@ async fn a_nested_member_filter_narrows() {
     assert_eq!(ids(&body), ["c1", "c3"]);
 }
 
+/// Over the model's answer, an item that does not hold a described filter's member (or
+/// holds `null` there) says nothing about it and is kept; one holding another value is
+/// left out.
+#[tokio::test]
+async fn a_described_filter_keeps_an_answered_item_lacking_the_member() {
+    let h = harness(
+        json!({"filters": [{"param": "email", "member": "billing_address.email", "kind": "eq"}]}),
+        vec![list(vec![
+            contact("c1", "z@x.io", "a@x.io"),
+            json!({"id": "c2", "email": "a@x.io"}),
+            contact("c3", "a@x.io", "b@x.io"),
+            json!({"id": "c4", "billing_address": {"email": null}}),
+        ])],
+    );
+    let body = get(&h, "/contacts?email=a@x.io").await;
+    assert_eq!(ids(&body), ["c1", "c2", "c4"]);
+}
+
+/// A numeric bound over the model's answer keeps an item with no amount too.
+#[tokio::test]
+async fn a_described_bound_keeps_an_answered_item_lacking_the_member() {
+    let h = harness(
+        json!({"filters": [{"param": "atLeast", "member": "amount", "kind": "gte"}]}),
+        vec![list(vec![
+            json!({"id": "c1", "amount": 1}),
+            json!({"id": "c2"}),
+            json!({"id": "c3", "amount": 5}),
+        ])],
+    );
+    let body = get(&h, "/contacts?atLeast=3").await;
+    assert_eq!(ids(&body), ["c2", "c3"]);
+}
+
 #[tokio::test]
 async fn a_contains_filter_matches_an_array_of_objects() {
     let h = harness(

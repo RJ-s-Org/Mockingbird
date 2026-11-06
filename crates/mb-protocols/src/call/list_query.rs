@@ -4,7 +4,8 @@
 //! `order` has a [`ListQuery`]: what the request asks of the list's items, as the
 //! description says it. Every path that puts records into a list answer ([`lists`]'s
 //! `narrow`, its held-record paths, and the pages [`pages`] and [`runs`] serve) keeps
-//! an item through [`keeps`], so each described key replaces only its own heuristic:
+//! an item through [`keeps`] ([`keeps_answered`] for the model's own items), so each
+//! described key replaces only its own heuristic:
 //!
 //! - `filters` (non-empty) replace the name-matched query filters; unset or empty, the
 //!   heuristic filters run as before.
@@ -26,7 +27,11 @@
 //! sides are one, and otherwise narrow nothing; `flag` keeps the member equal to the
 //! boolean; `text` is a case-insensitive substring of the item's string members, or of
 //! the described member. A value that is not one of the member's declared type
-//! narrows nothing. An item that does not hold the member does not match it.
+//! narrows nothing. An item the model answered (a stored record may be overlaid on
+//! it) that does not hold the member, or holds `null` there, says nothing about it and
+//! is kept ([`keeps_answered`], as the heuristic filters keep one); only a value that
+//! disagrees leaves it out. Where the store fills the page from stored records
+//! ([`keeps`]), a record that does not hold the member does not match it.
 //!
 //! Paging: the position is an offset into the matched, ordered items. A page number is
 //! 1-based unless its parameter's `minimum` is 0. The size is the request's size
@@ -437,11 +442,24 @@ fn element_is(e: &Value, wanted: &Value) -> bool {
         })
 }
 
-/// Whether `item` holds what `filter` asks.
-fn holds(filter: &Filter, item: &Value) -> bool {
+/// Where the items a list keeps come from, which decides what an item that does not
+/// hold a filtered member says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// The store fills the page from stored records: a record lacking the member does
+    /// not match.
+    Stored,
+    /// The model answered the items (a stored record may be overlaid on one): an item
+    /// lacking the member, or holding `null` there, is unknown, and is kept.
+    Answered,
+}
+
+/// Whether `item` holds what `filter` asks, its items coming from `source`.
+fn holds(filter: &Filter, item: &Value, source: Source) -> bool {
     if filter.values.is_empty() {
         return true;
     }
+    let absent = source == Source::Answered;
     if filter.kind == FilterKind::Text {
         return filter.values.iter().any(|v| {
             let Some(wanted) = v.as_str().map(str::to_lowercase) else {
@@ -449,14 +467,17 @@ fn holds(filter: &Filter, item: &Value) -> bool {
             };
             match filter.member.as_str() {
                 "" => holds_text(item, &wanted, 0),
-                member => mb_mcm::member_at(item, member)
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| s.to_lowercase().contains(&wanted)),
+                member => match mb_mcm::member_at(item, member).filter(|h| !h.is_null()) {
+                    None => absent,
+                    Some(held) => held
+                        .as_str()
+                        .is_some_and(|s| s.to_lowercase().contains(&wanted)),
+                },
             }
         });
     }
     let Some(held) = mb_mcm::member_at(item, &filter.member).filter(|h| !h.is_null()) else {
-        return false;
+        return absent;
     };
     filter.values.iter().any(|wanted| match filter.kind {
         FilterKind::Eq | FilterKind::Flag => same(held, wanted),
@@ -485,27 +506,49 @@ fn soft_deleted(q: &ListQuery, item: &Value) -> bool {
     q.lifecycle.as_ref().is_some_and(|gone| gone.excludes(item))
 }
 
-/// Whether `item` matches the described keys of `q`: its filters (when non-empty), its
-/// scope, and its soft delete.
-pub(super) fn matches(q: &ListQuery, item: &Value) -> bool {
-    q.filters.iter().all(|f| holds(f, item)) && in_scope(q, item) && !soft_deleted(q, item)
+/// Whether `item`, from `source`, matches the described keys of `q`: its filters (when
+/// non-empty), its scope, and its soft delete.
+fn matches_from(q: &ListQuery, item: &Value, source: Source) -> bool {
+    q.filters.iter().all(|f| holds(f, item, source)) && in_scope(q, item) && !soft_deleted(q, item)
 }
 
-/// Whether a list keeps `item`: with described filters, by them; else by `heuristic`,
-/// the path's own filter test; and by the described scope, when set. A soft-deleted
-/// item is left out either way, unless the request asks for deleted ones.
-pub(super) fn keeps(
+/// [`keeps`] for `item` from `source`.
+fn keeps_from(
     q: Option<&ListQuery>,
     item: &Value,
     heuristic: impl Fn(&Value) -> bool,
+    source: Source,
 ) -> bool {
     match q {
         None => heuristic(item),
         Some(q) if q.filters.is_empty() => {
             heuristic(item) && in_scope(q, item) && !soft_deleted(q, item)
         }
-        Some(q) => matches(q, item),
+        Some(q) => matches_from(q, item, source),
     }
+}
+
+/// Whether a list the store fills keeps stored `item`: with described filters, by them
+/// (a record lacking a filtered member does not match); else by `heuristic`, the path's
+/// own filter test; and by the described scope, when set. A soft-deleted item is left
+/// out either way, unless the request asks for deleted ones.
+pub(super) fn keeps(
+    q: Option<&ListQuery>,
+    item: &Value,
+    heuristic: impl Fn(&Value) -> bool,
+) -> bool {
+    keeps_from(q, item, heuristic, Source::Stored)
+}
+
+/// [`keeps`] for an item the model answered (a stored record may be overlaid on it):
+/// an item that does not hold a described filter's member, or holds `null` there, is
+/// unknown and is kept; only a value that disagrees leaves it out.
+pub(super) fn keeps_answered(
+    q: Option<&ListQuery>,
+    item: &Value,
+    heuristic: impl Fn(&Value) -> bool,
+) -> bool {
+    keeps_from(q, item, heuristic, Source::Answered)
 }
 
 /// How `a` and `b` order under `member`, both holding it: numbers by value, date-times
@@ -560,6 +603,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Whether stored `item` matches the described keys of `q`.
+    fn matches(q: &ListQuery, item: &Value) -> bool {
+        matches_from(q, item, Source::Stored)
+    }
 
     fn query(filters: Vec<Filter>) -> ListQuery {
         ListQuery {
@@ -632,6 +680,49 @@ mod tests {
         let q = query(vec![filter("", FilterKind::Text, vec![json!("WALK")])]);
         assert!(matches(&q, &json!({"title": "Walk the dog"})));
         assert!(!matches(&q, &json!({"title": "Feed the cat"})));
+    }
+
+    #[test]
+    fn an_answered_item_lacking_the_member_is_kept_and_a_stored_one_is_not() {
+        let q = query(vec![filter(
+            "project.id",
+            FilterKind::Eq,
+            vec![json!("p1")],
+        )]);
+        let heuristic = |_: &Value| false;
+        // Over a model's answer, an absent or null member says nothing.
+        assert!(keeps_answered(Some(&q), &json!({"id": "t1"}), heuristic));
+        assert!(keeps_answered(
+            Some(&q),
+            &json!({"id": "t1", "project": null}),
+            heuristic
+        ));
+        assert!(keeps_answered(
+            Some(&q),
+            &json!({"id": "t1", "project": {"id": null}}),
+            heuristic
+        ));
+        assert!(keeps_answered(
+            Some(&q),
+            &json!({"project": {"id": "p1"}}),
+            heuristic
+        ));
+        assert!(!keeps_answered(
+            Some(&q),
+            &json!({"project": {"id": "p2"}}),
+            heuristic
+        ));
+        // A described text filter over a named member too.
+        let t = query(vec![filter("title", FilterKind::Text, vec![json!("walk")])]);
+        assert!(keeps_answered(Some(&t), &json!({"id": "t1"}), heuristic));
+        assert!(!keeps_answered(
+            Some(&t),
+            &json!({"title": "Feed the cat"}),
+            heuristic
+        ));
+        // From the store, a record lacking the member does not match.
+        assert!(!keeps(Some(&q), &json!({"id": "t1"}), heuristic));
+        assert!(!keeps(Some(&t), &json!({"id": "t1"}), heuristic));
     }
 
     #[test]

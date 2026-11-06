@@ -261,6 +261,28 @@ async fn a_described_filter_answers_from_state_exactly() {
     assert_eq!(h.provider.requests().len(), 2);
 }
 
+/// From state, the store fills the page itself: a stored record lacking a described
+/// filter's member does not match it.
+#[tokio::test]
+async fn a_described_filter_from_state_leaves_out_a_record_lacking_the_member() {
+    let h = harness(
+        json!({"filters": [{"param": "minAmount", "member": "amount", "kind": "gte"}]}),
+        vec![
+            list(vec![
+                template("t1", "a@x.io", 1),
+                json!({"id": "t2", "email": "a@x.io"}),
+                template("t3", "a@x.io", 9),
+            ]),
+            template("t4", "a@x.io", 7),
+        ],
+    );
+    get(&h, "/templates").await;
+    create(&h, "/templates", template("t4", "a@x.io", 7)).await;
+    let (source, body) = get(&h, "/templates?minAmount=5").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(ids(&body, "templates"), ["t3", "t4"]);
+}
+
 #[tokio::test]
 async fn pages_from_state_never_repeat_an_item() {
     let five = || {
