@@ -10,6 +10,8 @@ This harness runs OpenRouter models through Mockingbird's real LLM code paths: t
 | `server_suites.py` | The `mockingbird serve` workloads: consistency, SSE, smart import, the multi-step journeys and the held-out journeys. |
 | `grade.py` | Deterministic schema conformance grading of the samples. |
 | `aggregate.py` | Joins all outputs into `results.json`, `results.csv` and `tables.md`. |
+| `world_author.py` | World descriptions for `--world`: blind authoring by a coding agent, the cache per contract hash, and applying a description to a suite's mocks. |
+| `stub_author.py` | A free, deterministic stand-in author for dry runs and tests. |
 
 ## The key
 
@@ -190,6 +192,62 @@ Results for these two checks from before the change are not comparable with late
 
 `server_suites.py --suite journeys_blind11` is the eleventh set, over five more contracts written for it from each API's public documentation and kept in [`contracts/blind11/`](contracts/blind11/): BigCommerce catalog products and orders, Help Scout conversations, Mux live streams, Postmark templates and message streams, and HCP Terraform workspaces. None of these vendors appears in an earlier set. They were picked to vary the domain and the API style again: two API versions in one store, a V3 `{data, meta.pagination}` envelope beside bare V2 arrays, `id:in` form lists, `page`/`limit` pages, money as four-place decimal strings, order totals computed from catalog prices, a `status_id` state machine, archiving as a soft delete that lists only under `is_deleted=true`, 409 for a taken product name and 204 for an empty list (BigCommerce), HAL answers under `_embedded` with a `page` object, a 201 whose new id is in the `Resource-ID` header, threads as a nested resource listed newest first, JSON Patch operations answered 204, tags replaced by `PUT`, a `status` filter whose default is `active`, a `query` search expression and `vnd.error` validation errors that name the field (Help Scout), a `data` envelope, a stream state machine driven by `disable` and `enable` actions, a secret stream key that is reset and found by `stream_key`, playback ids as a nested resource, `limit`/`page` paging and `{error: {type, messages}}` errors (Mux), PascalCase fields, templates named by their number or by a client alias, a layout that cannot be deleted while in use, the `LayoutTemplate` filter, `Count`/`Offset` with `TotalCount`, client-chosen stream ids, archiving with an `ExpectedPurgeDate` 45 days out and unarchiving, and 422 errors told apart by `ErrorCode` (Postmark), and JSON:API documents (`application/vnd.api+json`) with kebab-case attributes, a workspace by id or by organization and name, `search[name]`, `page[number]`/`page[size]` with `meta.pagination`, a lock that refuses a second lock with 409, variables whose key is unique per category, sensitive values that answer null, and safe delete (HCP Terraform). Each journey has 14 checks, each check asserts only what its contract promises a client, and no check gates the rest; `test_w1.py` runs every journey against empty answers to show that each check is recorded on its own. Each run's names, aliases, tags and emails hold a number made for the run, and every list a check judges filters on them (or, for Mux, whose lists have no such filter, is judged on the run's own streams only), so runs stay apart. The BigCommerce paging pair and the Terraform paging pair judge the first page in one check and the next page in the other. Before its first model run, the suite was run against `mockingbird serve` with the LLM profile pointed at `fake_llm.py`: every mock mounted, every call routed (no 404 for a missing route) and every check ran. Do not edit a check or a contract to suit results. The suite is not in the default set; it costs real calls.
 
+## World descriptions (`--world`)
+
+`server_suites.py --world none|derived|agent` sets the world description every mock of a run serves with (see [`docs/world.md`](../../docs/world.md)). The flag is per run, so measuring the three tiers takes three runs into the same `--out`:
+
+| tier | what the mocks get |
+|---|---|
+| `none` (default) | No revision. The runtime reads the heuristic description implicitly, as every run did before the flag. |
+| `derived` | Mockingbird's own heuristic (tier-0) description, read with `get_world` and written back as an explicit revision (author `user`). The runtime is meant to answer exactly as with `none` (the step 3 plan's "tier 0 must change nothing"), so a gap between the two is a runtime bug, not a description effect. |
+| `agent` | A description a coding agent wrote from the contract alone, before any suite ran, written as a revision with author `agent`. `agent` minus `derived` is what the agent's understanding adds. |
+
+**How the agent writes it.** For each contract of the selected suites, `world_author.py` starts a private `mockingbird serve` with that contract alone (fresh SQLite, free ports, no LLM profile, so nothing reaches OpenRouter) and a working directory holding only a copy of the contract and the Mockingbird skills (`mockingbird agent skills .claude/skills`). In that directory it runs a headless Claude Code, the way a user's coding agent works with the Mockingbird plugin:
+
+```sh
+claude -p "<prompt>" --model claude-opus-5-5 --output-format stream-json --verbose \
+  --restricted --strict-mcp-config \
+  --mcp-config '{"mcpServers":{"mockingbird":{"command":"<binary>","args":["--admin-url","<admin>","mcp"],"env":{"MB_DATA_URL":"<data plane>"}}}}' \
+  --tools Read,Grep,Glob --allowedTools Read,Grep,Glob,mcp__mockingbird__get_world,... \
+  --disallowedTools mcp__mockingbird__import_contract,... \
+  --permission-prompts none --no-session-persistence --max-budget-usd 5 [--bare]
+```
+
+The prompt names the contract file and the mock and asks for the `mockingbird-world` skill's loop: read `get_world` and its gaps, write with `patch_world`/`put_world` and `author: "agent"`, read `refused` and fix it, optionally try entries with `call_mock`. It names no suite, journey or check. `--restricted` confines Read, Grep and Glob to the working directory and ignores user and project settings. Bash, web and agent tools are not available. The Mockingbird MCP server is the only MCP server, and only its read, world and `call_mock`/request-log tools are allowed (no imports, deletes, servers, LLM profiles or key setup). Every other Mockingbird tool is in `--disallowedTools`, read from `mockingbird mcp`'s own tool list. `MB_DATA_URL` points `call_mock` at the authoring server's data plane. Without it, `call_mock` would go to a server on the default port. So the agent writes only through Mockingbird's authoring interface, and it sees the contract and the skill, never the journeys, the checks, the engine or a past result. The agent's environment has no OpenRouter key: not `OPENROUTER_API_KEY`, no variable holding its value, and no other `*_API_KEY` but `ANTHROPIC_API_KEY`.
+
+The bench checks isolation from the session's `system/init` event. When the session offers a built-in tool beyond Read, Grep and Glob, an MCP server other than `mockingbird`, or a plugin other than Claude Code's own built-in ones (source `<name>@builtin`), the authoring fails. Built-in plugins add no tools, as the tool check shows; their names are kept in the entry under `builtin_plugins`. The event's tools, MCP servers, skills and plugins are kept in the entry under `session`.
+
+Two limits remain:
+- `--restricted` still loads the user's own `~/.claude/CLAUDE.md`. `--author-isolation bare` adds `--bare`, which skips CLAUDE.md, auto-memory and hooks, but needs `ANTHROPIC_API_KEY` authentication.
+- `call_mock` takes an optional `base_url`, so the agent could call another URL on the machine. Its prompt and the skill never point it anywhere but the mock. `--author stub` runs `stub_author.py` instead. It writes through the CLI (`mockingbird world show|patch --author agent`), restates the heuristic identities and sends one unknown operation to exercise a refusal. It costs nothing, carries no knowledge of the API, and is for dry runs only.
+
+**What is recorded.** Each contract's result is cached as `--world-cache` (default `docs/benchmarks/world-cache`)`/<author id>/<contract sha256>.json`, next to the agent's stream-json transcript (`.transcript.jsonl`; both are scanned for `sk-or-` before they are written). The author id is `claude-code~<model>~p<prompt version>`. `--author-model` defaults to a full id (`claude-opus-5-5`), not an alias, so a new model release is never mistaken for a cache hit. Each entry also records the sha256 of the skills Mockingbird installs and of the world schema (`inputs`). A different contract, model, prompt, skill text or schema is therefore authored again, while a rerun reads the cache and pays nothing. Concurrent runs that need the same contract (`run.py --parallel` models, two terminals) take a lock per contract: the first authors it, and the others wait and read the cache. A failed authoring is kept as `<sha>.failed.json` and is never read back, so the next run tries again. Failure means a non-zero exit, an error result, a timeout, or an isolation problem. In the run that hit the failure, applying it fails the suite (`suite_error`) rather than silently running the heuristics. The entry holds:
+
+- the cost (`total_cost_usd` from Claude Code), duration, turns and token usage;
+- every world write's answer from the transcript: `revision` and `refused` entries (`path`, `code`, `message`), or the problem of a whole-document refusal, which stores nothing (an answer that is not JSON is `ok: null`, unknown rather than failed);
+- every revision the agent stored;
+- the accepted description: `document`, the newest revision's overlay;
+- the gaps before and after authoring, the refused entries left at the end, each entry's author, and the effective description.
+
+`--refresh` authors again. Commit the cache with a run's results, so the numbers can be traced to the exact descriptions. The stored transcript drops session ids and machine paths.
+
+During a run, `<out>/world-authoring.jsonl` gets one summary row per contract (`cached` true on a hit, with the first authoring's cost and time). `<out>/world-applied.jsonl` gets one row per (model, suite, mock) with the revision the write made on the suite's mock and the entries the server refused then (the runtime's validator may differ from the one at authoring time). A description the server refuses as a whole fails the suite (`suite_error`). Rows of a run with a world carry `"world": "<tier>"` in `server.jsonl` (rows with no `world` are `none`). The proxy label and the server log are `<slug>~<suite>@<tier>`, so the ledger keeps the tiers' LLM spend apart.
+
+**Aggregate.** `aggregate.py` keys the journeys table by `<suite>@<tier>`. The scored blocks read `none` rows only: consistency, SSE, import, and the ledger's reliability, latency and cost (so Q, the gates and Value too). A `--world` run in the same directory therefore changes no score. Its LLM calls are reported per tier under `world.ledger`. `server.worlds` in `results.json`, and a table in section 8 of `tables.md`, put each suite's ok rate under `none`, `derived` and `agent` side by side for each model. `world` in `results.json` and the table after it list each contract's latest authoring: cost, minutes, turns, writes, failed writes, entries refused in writes, refused at the end, gaps before and after, and the error if it failed. The totals count every authoring that ran in the directory, including a `--refresh`, but not cache hits. A tier that failed to apply shows its suite errors.
+
+**Running it.** Author ahead of the suites (optional; `--world agent` authors whatever is not cached), then run the three tiers. Use the same model, suites, repeat and jobs for each:
+
+```sh
+python3 scripts/llm-bench/world_author.py --suite journeys_blind11 --out $OUT          # authoring only
+for w in none derived agent; do
+  python3 scripts/llm-bench/server_suites.py --model $MODEL --proxy-base $PROXY --out $OUT \
+    --suite journeys_blind11 --repeat 3 --jobs 5 --world $w
+done
+python3 scripts/llm-bench/aggregate.py --out $OUT
+```
+
+`run.py full --world agent` passes the flag on to every model's server suites, with `--author`, `--author-model`, `--author-isolation`, `--world-cache` and `--refresh-world` (sent as `--refresh`). Under `--journey`, only the named journeys' contracts are authored and applied. The default suites (`consistency`, `sse`) would author the full Stripe, TMDB and Square specs, so name the suites you want measured. The headline is the `agent` tier on a blind set that was never diagnosed, judged against `derived` on the same model and providers. A dry run needs no spend: `fake_llm.py` stands in for the proxy (`--proxy-base http://127.0.0.1:<its port>`) and `--author stub --world-cache <scratch dir>` stands in for the agent.
+
 ## Testing without spend
 
 Both scripts accept a hidden `--upstream URL` flag that points the proxy at a fake chat endpoint. With it, `run.py` skips the key calls. `fake_llm.py` can stand in for OpenRouter:
@@ -199,3 +257,5 @@ python3 scripts/llm-bench/fake_llm.py --port 18999 &
 env -u OPENROUTER_API_KEY python3 scripts/llm-bench/run.py pilot --out /tmp/bench-test \
   --models a/x,b/y --upstream http://127.0.0.1:18999/api/v1/chat/completions
 ```
+
+`python3 -m unittest scripts/llm-bench/test_world.py` tests the `--world` mode with fakes only: transcript parsing, the agent's blind tool set and environment, the cache, applying each tier, the row and label changes, and the aggregate split. One end-to-end test runs `stub_author.py` against a real `mockingbird serve` when `target/release/mockingbird` is built.
