@@ -1,0 +1,648 @@
+{
+  "author": {
+    "id": "claude-code~claude-opus-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-opus-5-5",
+    "model_requested": "claude-opus-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-06T19:49:05Z",
+  "authors": {
+    "/operations/createOrganization/answer": "agent",
+    "/operations/createOrganization/request": "agent",
+    "/operations/createWorkspace/answer": "agent",
+    "/operations/createWorkspace/not_found": "agent",
+    "/operations/createWorkspace/request": "agent",
+    "/operations/createWorkspaceVariable/answer": "agent",
+    "/operations/createWorkspaceVariable/not_found": "agent",
+    "/operations/createWorkspaceVariable/request": "agent",
+    "/operations/deleteWorkspaceVariable/not_found": "agent",
+    "/operations/deleteWorkspaceVariable/target": "agent",
+    "/operations/forceDeleteWorkspace/not_found": "agent",
+    "/operations/forceDeleteWorkspace/target": "agent",
+    "/operations/listWorkspaceVariables/not_found": "agent",
+    "/operations/listWorkspaceVariables/scope": "agent",
+    "/operations/listWorkspaces/filters": "agent",
+    "/operations/listWorkspaces/not_found": "agent",
+    "/operations/listWorkspaces/paging": "agent",
+    "/operations/listWorkspaces/scope": "agent",
+    "/operations/lockWorkspace/changes": "agent",
+    "/operations/lockWorkspace/kind": "agent",
+    "/operations/lockWorkspace/not_found": "agent",
+    "/operations/lockWorkspace/target": "agent",
+    "/operations/safeDeleteWorkspace/kind": "agent",
+    "/operations/safeDeleteWorkspace/not_found": "agent",
+    "/operations/showOrganization/not_found": "agent",
+    "/operations/showWorkspace/not_found": "agent",
+    "/operations/showWorkspaceByName/not_found": "agent",
+    "/operations/unlockWorkspace/changes": "agent",
+    "/operations/unlockWorkspace/kind": "agent",
+    "/operations/unlockWorkspace/not_found": "agent",
+    "/operations/unlockWorkspace/target": "agent",
+    "/operations/updateWorkspace/not_found": "agent",
+    "/operations/updateWorkspace/request": "agent",
+    "/operations/updateWorkspaceVariable/not_found": "agent",
+    "/operations/updateWorkspaceVariable/request": "agent",
+    "/types/organizations/identity": "agent",
+    "/types/vars/identity": "agent",
+    "/types/vars/parent": "agent",
+    "/types/vars/unique": "agent",
+    "/types/workspaces/identity": "agent",
+    "/types/workspaces/parent": "agent",
+    "/types/workspaces/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind11/terraform.openapi.yaml",
+  "contract_sha256": "9736f65a09dff700a1f2563f34c20e75424f569a7d891d5891ce6d1472708120",
+  "cost_usd": 0.3749772,
+  "document": {
+    "operations": {
+      "createOrganization": {
+        "answer": {
+          "identity_header": false,
+          "record": "/data"
+        },
+        "request": {
+          "record": "/data"
+        }
+      },
+      "createWorkspace": {
+        "answer": {
+          "identity_header": false,
+          "record": "/data"
+        },
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      },
+      "createWorkspaceVariable": {
+        "answer": {
+          "identity_header": false,
+          "record": "/data"
+        },
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      },
+      "deleteWorkspaceVariable": {
+        "not_found": 404,
+        "target": {
+          "path_param": "variable_id"
+        }
+      },
+      "forceDeleteWorkspace": {
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        }
+      },
+      "listWorkspaceVariables": {
+        "not_found": 404,
+        "scope": {
+          "member": "relationships.configurable.data.id",
+          "param": "workspace_id"
+        }
+      },
+      "listWorkspaces": {
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "attributes.name",
+            "param": "search[name]"
+          }
+        ],
+        "not_found": 404,
+        "paging": {
+          "request": "page[number]",
+          "response": "meta.pagination.next-page",
+          "size": "page[size]",
+          "style": "page"
+        },
+        "scope": {
+          "member": "relationships.organization.data.id",
+          "param": "organization_name"
+        }
+      },
+      "lockWorkspace": {
+        "changes": {
+          "attributes.locked": {
+            "value": true
+          },
+          "attributes.locked-reason": {
+            "from_request": "/reason"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        }
+      },
+      "safeDeleteWorkspace": {
+        "kind": "delete",
+        "not_found": 404
+      },
+      "showOrganization": {
+        "not_found": 404
+      },
+      "showWorkspace": {
+        "not_found": 404
+      },
+      "showWorkspaceByName": {
+        "not_found": 404
+      },
+      "unlockWorkspace": {
+        "changes": {
+          "attributes.locked": {
+            "value": false
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        }
+      },
+      "updateWorkspace": {
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      },
+      "updateWorkspaceVariable": {
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      }
+    },
+    "types": {
+      "organizations": {
+        "identity": {
+          "alternates": [
+            "attributes.name"
+          ],
+          "member": "id"
+        }
+      },
+      "vars": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "relationships.configurable.data.id",
+          "path_param": "workspace_id",
+          "type": "workspaces"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.key",
+              "attributes.category"
+            ],
+            "scope": "relationships.configurable.data.id"
+          }
+        ]
+      },
+      "workspaces": {
+        "identity": {
+          "alternates": [
+            "attributes.name"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "member": "relationships.organization.data.id",
+          "path_param": "organization_name",
+          "type": "organizations"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.name"
+            ],
+            "scope": "relationships.organization.data.id"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 46034,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `forceDeleteWorkspace` (Delete) acts on one `workspaces` record but no target says where the request names it",
+      "operation": "forceDeleteWorkspace",
+      "type": "workspaces"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteWorkspaceVariable` (Delete) acts on one `vars` record but no target says where the request names it",
+      "operation": "deleteWorkspaceVariable",
+      "type": "vars"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "5de2c7bfbebee3ca2e6a23d8df4433ee32c800c16a7080079a759cfa44a5bd8f",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "terraform",
+  "model_usage": {
+    "claude-opus-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 30062,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 30062,
+      "cacheReadInputTokens": 186886,
+      "canonicalModel": "claude-opus-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.3749772,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 4852,
+      "provider": "firstParty",
+      "thinkingTokens": 1384,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 13,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-06T19:48:38.987618Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 30062,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 30062,
+    "cache_read_input_tokens": 186886,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 3499,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 3499,
+        "cache_read_input_tokens": 34225,
+        "input_tokens": 2,
+        "output_tokens": 1209,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 4852,
+    "output_tokens_details": {
+      "thinking_tokens": 1384
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 46611,
+  "world": {
+    "operations": {
+      "createOrganization": {
+        "answer": {
+          "identity_header": false,
+          "record": "/data"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/data"
+        },
+        "type": "organizations"
+      },
+      "createWorkspace": {
+        "answer": {
+          "identity_header": false,
+          "record": "/data"
+        },
+        "kind": "create",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "type": "workspaces"
+      },
+      "createWorkspaceVariable": {
+        "answer": {
+          "identity_header": false,
+          "record": "/data"
+        },
+        "kind": "create",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "type": "vars"
+      },
+      "deleteWorkspaceVariable": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "variable_id"
+        },
+        "type": "vars"
+      },
+      "forceDeleteWorkspace": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "listWorkspaceVariables": {
+        "kind": "list",
+        "not_found": 404,
+        "scope": {
+          "member": "relationships.configurable.data.id",
+          "param": "workspace_id"
+        },
+        "type": "vars"
+      },
+      "listWorkspaces": {
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "attributes.name",
+            "param": "search[name]"
+          }
+        ],
+        "kind": "list",
+        "not_found": 404,
+        "paging": {
+          "request": "page[number]",
+          "response": "meta.pagination.next-page",
+          "size": "page[size]",
+          "style": "page"
+        },
+        "scope": {
+          "member": "relationships.organization.data.id",
+          "param": "organization_name"
+        },
+        "type": "workspaces"
+      },
+      "lockWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "changes": {
+          "attributes.locked": {
+            "value": true
+          },
+          "attributes.locked-reason": {
+            "from_request": "/reason"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "safeDeleteWorkspace": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "showOrganization": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "organization_name"
+        },
+        "type": "organizations"
+      },
+      "showWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "showWorkspaceByName": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_name"
+        },
+        "type": "workspaces"
+      },
+      "unlockWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "changes": {
+          "attributes.locked": {
+            "value": false
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "updateWorkspace": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "target": {
+          "path_param": "workspace_id"
+        },
+        "type": "workspaces"
+      },
+      "updateWorkspaceVariable": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "target": {
+          "path_param": "variable_id"
+        },
+        "type": "vars"
+      }
+    },
+    "types": {
+      "organizations": {
+        "identity": {
+          "alternates": [
+            "attributes.name"
+          ],
+          "member": "id"
+        }
+      },
+      "vars": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "relationships.configurable.data.id",
+          "path_param": "workspace_id",
+          "type": "workspaces"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.key",
+              "attributes.category"
+            ],
+            "scope": "relationships.configurable.data.id"
+          }
+        ]
+      },
+      "workspaces": {
+        "identity": {
+          "alternates": [
+            "attributes.name"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "member": "relationships.organization.data.id",
+          "path_param": "organization_name",
+          "type": "organizations"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "attributes.name"
+            ],
+            "scope": "relationships.organization.data.id"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

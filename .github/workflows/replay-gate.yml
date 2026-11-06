@@ -4,7 +4,9 @@ name: Replay gate
 # against the release binary of this change, offline and with no key, and fails when a
 # check the recording passed now fails although every LLM call of its journey was
 # answered from the recording. Such a failure is the engine's, so it shows here for
-# free instead of in a paid bench run. See scripts/llm-bench/README.md#replay-gate.
+# free instead of in a paid bench run. Both tiers run: none (no world description) and
+# agent (each mock's description read from docs/benchmarks/world-cache, never authored).
+# See scripts/llm-bench/README.md#replay-gate.
 on:
   push:
     branches: [main]
@@ -16,6 +18,7 @@ on:
       - crates/mb-store/**
       - crates/mb-llm/**
       - scripts/llm-bench/**
+      - docs/benchmarks/world-cache/**
       - .github/workflows/replay-gate.yml
   pull_request:
     paths:
@@ -26,6 +29,7 @@ on:
       - crates/mb-store/**
       - crates/mb-llm/**
       - scripts/llm-bench/**
+      - docs/benchmarks/world-cache/**
       - .github/workflows/replay-gate.yml
   workflow_dispatch:
 
@@ -57,7 +61,7 @@ jobs:
       # page is enough here.
       - name: Build the release binary
         run: cargo build --release -p mockingbird-cli --locked
-      - name: Replay tests (matching, comparison, security scan, end to end with fake_llm)
+      - name: Replay tests (matching, comparison, security scans, end to end with fake_llm on both tiers)
         env:
           MB_BENCH_BINARY: target/release/mockingbird
         run: python3 -m unittest discover -s scripts/llm-bench -p 'test_replay.py'
@@ -65,7 +69,7 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/llm-bench/replay.py gate --binary target/release/mockingbird \
-            --report "$RUNNER_TEMP/replay-gate.json" | tee "$RUNNER_TEMP/replay-gate.md"
+            --world none --world agent --report "$RUNNER_TEMP/replay-gate.json" | tee "$RUNNER_TEMP/replay-gate.md"
       - name: Summary
         if: always()
         run: |

@@ -1,0 +1,7 @@
+# Only the authored descriptions are committed: <author id>/<contract sha256>.json.
+# Authoring transcripts, failed attempts and the per-contract locks stay local
+# (test_world.py fails when one is tracked).
+*.transcript.jsonl
+*.failed.*
+*.lock
+.tmp-*

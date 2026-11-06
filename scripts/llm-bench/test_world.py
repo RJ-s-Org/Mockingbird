@@ -256,6 +256,114 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(self.calls, ["a.yaml", "a.yaml"])
 
 
+class CacheOnlyTest(CacheTest):
+    """`--world-cache-only` (replay.py's agent tier): read, never author or lock."""
+
+    def only(self, contracts, **kw):
+        args = author_args(world_cache=os.path.join(self.dir, "cache"), world_cache_only=True, **kw)
+        never = mock.Mock(side_effect=AssertionError("cache-only must not author"))
+        with mock.patch.object(world_author, "author_contract", never), \
+                mock.patch.object(world_author, "author_inputs", never), \
+                redirect_stderr(io.StringIO()):
+            return world_author.ensure_authored(contracts, args, os.path.join(self.dir, "out"))
+
+    def test_a_cached_contract_is_read_whatever_its_inputs(self):
+        self.run_once([self.a], skills="old")
+        got = self.only([self.a])
+        self.assertEqual(got[self.a]["document"], {"version": 1, "types": {}})
+        self.assertEqual(self.calls, ["a.yaml"])
+        self.assertTrue(self.rows()[-1]["cached"])
+
+    def test_a_miss_is_an_error_naming_every_contract(self):
+        self.run_once([self.a])
+        with self.assertRaises(world_author.CacheMiss) as e:
+            self.only([self.a, self.b])
+        self.assertIn("b.yaml", str(e.exception))
+        self.assertNotIn("a.yaml", str(e.exception))
+
+    def test_a_failure_is_a_miss_and_nothing_is_written(self):
+        self.failing = True
+        self.run_once([self.a])
+        before = sorted(os.listdir(os.path.join(self.dir, "cache", world_author.author_id("stub", "x"))))
+        with self.assertRaises(world_author.CacheMiss):
+            self.only([self.a])
+        after = sorted(os.listdir(os.path.join(self.dir, "cache", world_author.author_id("stub", "x"))))
+        self.assertEqual(before, after, "no lock and no entry written")
+
+
+class CacheTextTest(CacheTest):
+    def entry_on_disk(self, failed=False):
+        sha = world_author.sha256_file(self.a)
+        folder = os.path.join(self.dir, "cache", world_author.author_id("stub", "x"))
+        with open(os.path.join(folder, f"{sha}{'.failed' if failed else ''}.json")) as f:
+            return json.load(f)
+
+    def fake_author(self, contract, args, sha=None):
+        entry = super().fake_author(contract, args, sha)
+        entry.update(summary="I wrote the description", stderr_tail="warning: x")
+        return entry
+
+    def test_a_successful_entry_keeps_no_agent_text(self):
+        self.run_once([self.a])
+        entry = self.entry_on_disk()
+        self.assertNotIn("summary", entry)
+        self.assertNotIn("stderr_tail", entry)
+        self.assertEqual(entry["document"], {"version": 1, "types": {}})
+
+    def test_a_failed_entry_keeps_its_stderr(self):
+        self.failing = True
+        self.run_once([self.a])
+        self.assertEqual(self.entry_on_disk(failed=True)["stderr_tail"], "warning: x")
+
+
+class CommittedCacheCheckTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.sha = "a" * 64
+        os.makedirs(os.path.join(self.dir, "aid"))
+
+    def put(self, name, entry):
+        with open(os.path.join(self.dir, name), "w") as f:
+            json.dump(entry, f)
+
+    def test_transcripts_locks_failures_and_agent_text_are_refused(self):
+        self.put(f"aid/{self.sha}.json", {"contract_sha256": self.sha, "document": {}, "summary": "prose"})
+        self.put(f"aid/{'b' * 64}.json", {"contract_sha256": "c" * 64})
+        problems = world_author.committed_cache_problems(self.dir, [
+            ".gitignore", f"aid/{self.sha}.json", f"aid/{self.sha}.transcript.jsonl", f"aid/{self.sha}.lock",
+            f"aid/{self.sha}.failed.json", f"aid/{'b' * 64}.json"])
+        self.assertEqual(len(problems), 5, problems)
+        self.assertTrue(any("agent's text" in p for p in problems))
+
+    def test_a_clean_entry_passes(self):
+        self.put(f"aid/{self.sha}.json", {"contract_sha256": self.sha, "document": {}, "cost_usd": 0.3})
+        self.assertEqual(world_author.committed_cache_problems(self.dir, [".gitignore", f"aid/{self.sha}.json"]), [])
+
+
+class ScanTest(unittest.TestCase):
+    def test_finds_keys_tokens_and_private_addresses(self):
+        text = ('{"h": "Authorization: Bearer abc123def456", "k": "sk-or-v1-0123456789abcdef", '
+                '"g": "ghp_' + "A" * 36 + '", "api_key": "Zx81kq0Pp2mNn3bb", "to": "jane@gmail.com"}')
+        found = world_author.scan_text(text)
+        self.assertEqual(len(found), 5, found)
+        self.assertFalse(any("0123456789abcdef" in f or "abc123def456" in f for f in found),
+                         "a finding never repeats the secret")
+
+    def test_placeholders_and_reserved_domains_pass(self):
+        text = ('Authorization: Bearer test; Bearer bench-placeholder; a@example.com b@mail.example.org '
+                'c@host.test d@x.invalid e@bench.dev "api_key": "", "password": "short", cc-plugin@builtin')
+        self.assertEqual(world_author.scan_text(text), [])
+
+    def test_scan_files_names_the_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        with open(os.path.join(d, "x.json"), "w") as f:
+            f.write('{"token": "sk-ant-api03-abcdefghijkl"}')
+        [problem] = world_author.scan_files([d])
+        self.assertIn("x.json", problem)
+
+
 class FakeAdmin(BaseHTTPRequestHandler):
     """The world endpoints of the Admin API: GET answers a tier-0 view, PUT records
     the document and author and answers a revision; a 'bad' mock answers 422. `runtime`

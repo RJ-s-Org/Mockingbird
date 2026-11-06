@@ -15,8 +15,14 @@ same as when the check passed.
     # Free (re-)recording against the fake LLM (what seeds the committed recordings)
     python3 scripts/llm-bench/replay.py record --fake --calibrate 30
 
-    # The gate: free, offline, a few minutes
-    python3 scripts/llm-bench/replay.py gate --binary target/release/mockingbird
+    # The agent tier: each mock runs its committed world description (never authored)
+    python3 scripts/llm-bench/replay.py record --fake --world agent --calibrate 30
+
+    # The gate: free, offline, a few minutes (default tier none; CI names both)
+    python3 scripts/llm-bench/replay.py gate --binary target/release/mockingbird --world none --world agent
+
+    # Recordings from a tagged run's proxy --dump (every run is tagged by default)
+    python3 scripts/llm-bench/replay.py pack-dump <run>/exchanges.jsonl <run>/server/<slug>/server.jsonl --rep 0
 
     # A PR that changes a paid recording's check on purpose, until the next paid run
     python3 scripts/llm-bench/replay.py expect scripts/llm-bench/recordings/<slug>~<suite>.json.gz \\
@@ -37,8 +43,8 @@ Every match is in the replay log. A journey is dirty when one of its calls match
 `reused`, `nearest` or `none`, when it called an operation a different number of times
 than when recorded, or when one of its recorded calls went unused: a check that changes
 in a dirty journey is drift, never a regression. The journey comes from the
-`x-bench-journey` header that `server_suites.py --tag-journeys` gives each mock's LLM
-profile; the rep from the mark it posts to the proxy before each journey.
+`x-bench-journey` header that `server_suites.py` (tagging journeys by default) gives
+each mock's LLM profile; the rep from the mark it posts to the proxy before each journey.
 
 Standard library only.
 """
@@ -66,6 +72,11 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 RECORDINGS = os.path.join(HERE, "recordings")
 FORMAT = 1
 JOURNEY_HEADER = "x-bench-journey"
+# What `Tags.tag` gives each call, kept by a raw recording and by `proxy.py --dump`.
+TAG_FIELDS = ("journey", "rep", "op", "n", "hash", "now")
+# The world description tiers a recording can be made on (`server_suites.py --world`):
+# none, the default, or agent, read from the committed world-cache only.
+WORLDS = ("none", "agent")
 UNMATCHED = "REPLAY_UNMATCHED"
 # The model id the free recordings are made with (fake_llm.py answers every call).
 FAKE_MODEL = "bench/fake-llm"
@@ -73,7 +84,8 @@ FAKE_MODEL = "bench/fake-llm"
 # replay against the fake LLM's recording takes about a second per journey.
 JOURNEY_SUITES = ("journeys", "journeys_heldout", "journeys_blind", "journeys_blind2", "journeys_blind3",
                   "journeys_blind4", "journeys_blind5", "journeys_blind6", "journeys_blind7", "journeys_blind8",
-                  "journeys_blind9", "journeys_blind10", "journeys_blind11", "journeys_blind12")
+                  "journeys_blind9", "journeys_blind10", "journeys_blind11", "journeys_blind12",
+                  "journeys_blind13")
 # Anything that looks like an OpenRouter key: a recording never holds one.
 KEY_PATTERN = re.compile(r"sk-or-[A-Za-z0-9_\-]*")
 AUTH_HEADER = re.compile(r"authorization[\\\"']{0,3}\s*[:=]\s*[\\\"']{0,3}\s*(bearer|basic|token)\b", re.I)
@@ -361,6 +373,18 @@ def pack_problems(raw_path: str, server_jsonl: str, ledger: Optional[str] = None
     return problems
 
 
+def split_label(label: str) -> Tuple[str, str, str]:
+    """`<slug>~<suite>[@<world>]` -> (slug, suite, world); world `none` when absent."""
+    slug, _, rest = label.partition("~")
+    suite, _, world = rest.partition("@")
+    return slug, suite, world or "none"
+
+
+def world_of(doc_or_row: Dict[str, Any]) -> str:
+    """The world tier of a recording or a server.jsonl row (`none` when it has none)."""
+    return doc_or_row.get("world") or "none"
+
+
 def pack(raw_path: str, server_jsonl: str, dest: str, source: str, rep: int = 0,
          ledger: Optional[str] = None) -> List[str]:
     """Writes one recording per label of the raw recording: the calls and the
@@ -369,25 +393,70 @@ def pack(raw_path: str, server_jsonl: str, dest: str, source: str, rep: int = 0,
     problems = pack_problems(raw_path, server_jsonl, ledger)
     if problems:
         raise PackRefused(problems)
-    calls = [c for c in read_jsonl(raw_path) if c.get("rep") == rep]
+    return pack_calls(read_jsonl(raw_path), server_jsonl, dest, source, rep)
+
+
+def pack_calls(raw: List[Dict[str, Any]], server_jsonl: str, dest: str, source: str, rep: int = 0,
+               with_results_only: bool = False) -> List[str]:
+    """`pack`'s writing half. A label's suite and world come from the label, and its
+    results are the rows of that model, suite and world. `with_results_only` skips a
+    label that has no row there (a dump holds every suite and model of a run)."""
+    calls = [c for c in raw if c.get("rep") == rep]
     rows = [r for r in read_jsonl(server_jsonl) if r.get("rep") == rep]
-    os.makedirs(dest, exist_ok=True)
     written = []
     for label in sorted({c["label"] for c in calls}):
-        slug, _, suite = label.partition("~")
+        slug, suite, world = split_label(label)
         mine = [c for c in calls if c["label"] == label]
-        models = {r["model"] for r in rows if r.get("suite") == suite and r.get("model", "").replace("/", "__") == slug}
+        here = [r for r in rows if r.get("suite") == suite and world_of(r) == world]
+        models = {r["model"] for r in here if r.get("model", "").replace("/", "__") == slug}
         model = sorted(models)[0] if models else slug.replace("__", "/")
-        results = {r["case"]: bool(r["ok"]) for r in rows if r.get("suite") == suite and r.get("model") == model
+        results = {r["case"]: bool(r["ok"]) for r in here if r.get("model") == model
                    and r.get("case") != "suite_error"}
-        keep = ("journey", "rep", "op", "n", "hash", "now", "status", "finish_reason", "content", "error")
+        if with_results_only and not results:
+            continue
+        keep = TAG_FIELDS + ("status", "finish_reason", "content", "error")
         doc = {"format": FORMAT, "label": label, "model": model, "suite": suite, "source": source, "rep": rep,
                "recorded": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
                "calls": [{k: c.get(k) for k in keep} for c in mine], "results": results}
+        if world != "none":
+            doc["world"] = world
+        os.makedirs(dest, exist_ok=True)
         path = os.path.join(dest, recording_name(label))
         write_recording(path, doc)
         written.append(path)
     return written
+
+
+def pack_dump(dump_path: str, server_jsonl: str, dest: str, source: str, rep: int = 0,
+              ledger: Optional[str] = None, skipped: Optional[List[str]] = None) -> List[str]:
+    """Recordings from a run's `proxy.py --dump` (exchanges.jsonl), which holds each
+    call's journey tag since journeys are tagged by default: one per label of a
+    journeys suite (JOURNEY_SUITES) that has results in `server_jsonl` (the run's
+    model). A run's dump holds every suite of the run, tagged too, so the labels of
+    any other suite are left out, and appended to `skipped` when given. The ledger
+    (default: calls.jsonl next to the dump) and a BUDGET_TRIPPED there refuse it as
+    `pack` does, and so does a dumped call without a tag (a run before tagging, or
+    one with --no-tag-journeys). Nothing is written when it is refused."""
+    if ledger is None:
+        beside = os.path.join(os.path.dirname(os.path.abspath(dump_path)), "calls.jsonl")
+        ledger = beside if os.path.exists(beside) else None
+    problems = pack_problems(dump_path, server_jsonl, ledger)
+    rows = []
+    others = set()
+    for c in read_jsonl(dump_path):
+        if split_label(c.get("label") or "")[1] in JOURNEY_SUITES:
+            rows.append(c)
+        else:
+            others.add(c.get("label") or "")
+    if skipped is not None:
+        skipped.extend(sorted(others))
+    untagged = sum(1 for c in rows if c.get("journey") is None or c.get("n") is None or not c.get("label"))
+    if untagged:
+        problems.append(f"dump: {untagged} call(s) without a journey tag (a dump from before tagging, "
+                        "or a run with --no-tag-journeys)")
+    if problems:
+        raise PackRefused(problems)
+    return pack_calls(rows, server_jsonl, dest, source, rep, with_results_only=True)
 
 
 # ---------------------------------------------------------------- replay
@@ -529,12 +598,18 @@ def compare(recording: Dict[str, Any], rows: List[Dict[str, Any]], calls: List[D
     label = recording["label"]
     now = {r["case"]: bool(r["ok"]) for r in rows if r.get("rep", 0) == 0 and r.get("case") != "suite_error"}
     errors = [r for r in rows if r.get("case") == "suite_error"]
+    if not rows:
+        # Nothing ran (the server did not start, or the agent tier's world cache had no
+        # description for a contract): a failure, never dirt that masks the checks.
+        errors = [{"detail": "the suite reported no result (see server_suites.log under --keep)"}]
     mine = [c for c in calls if c.get("label") == label]
     counts = {m: sum(1 for c in mine if c.get("match") == m) for m in MATCHES}
     why = dirty_journeys(recording, calls)
     unstable = set(recording.get("unstable") or [])
     expected = set(recording.get("expected_change") or [])
-    out: Dict[str, Any] = {"label": label, "suite": recording["suite"], "model": recording["model"],
+    world = world_of(recording)
+    shown = recording["suite"] + ("" if world == "none" else f"@{world}")
+    out: Dict[str, Any] = {"label": label, "suite": shown, "model": recording["model"], "world": world,
                            "checks": len(recording["results"]), "unstable": len(unstable), "flaky": [],
                            "recorded_ok": sum(recording["results"].values()),
                            "replay_ok": sum(1 for c, ok in now.items() if ok and c in recording["results"]),
@@ -646,15 +721,22 @@ def stop(proc: Optional[subprocess.Popen]) -> None:
 
 
 def run_suites(model: str, suites: List[str], proxy_base: str, out: str, args: argparse.Namespace,
-               repeat: int) -> int:
+               repeat: int, world: str = "none") -> int:
+    """server_suites.py on `suites` through the proxy. With world `agent`, every mock
+    gets its description from the world cache only (`--world-cache-only`): nothing is
+    authored, and a contract with no cached description fails its suite."""
     cmd = [sys.executable, os.path.join(HERE, "server_suites.py"), "--model", model, "--proxy-base", proxy_base,
            "--out", out, "--repeat", str(repeat), "--binary", args.binary, "--tag-journeys",
            "--jobs", str(args.jobs), "--suites-parallel",
            # Recorded answers: the live endpoint list says nothing about them.
            "--no-provider-check"]
+    if world != "none":
+        cmd += ["--world", world, "--world-cache-only"]
+        if getattr(args, "world_cache", None):
+            cmd += ["--world-cache", os.path.abspath(args.world_cache)]
     for s in suites:
         cmd += ["--suite", s]
-    log = open(os.path.join(out, "server_suites.log"), "w")
+    log = open(os.path.join(out, "server_suites.log" if world == "none" else f"server_suites@{world}.log"), "a")
     try:
         return subprocess.call(cmd, cwd=REPO, env=child_env(), stdout=log, stderr=subprocess.STDOUT)
     finally:
@@ -683,8 +765,9 @@ def replay_once(docs: List[Dict[str, Any]], paths: List[str], args: argparse.Nam
         try:
             base = f"http://127.0.0.1:{port}"
             wait_http(f"{base}/healthz", proxy)
-            for model in sorted({d["model"] for d in docs}):
-                run_suites(model, [d["suite"] for d in docs if d["model"] == model], base, work, args, repeat=1)
+            for model, world in sorted({(d["model"], world_of(d)) for d in docs}):
+                run_suites(model, [d["suite"] for d in docs if d["model"] == model and world_of(d) == world],
+                           base, work, args, repeat=1, world=world)
         finally:
             stop(proxy)
         server = os.path.join(work, "server.jsonl")
@@ -701,9 +784,11 @@ def replay_once(docs: List[Dict[str, Any]], paths: List[str], args: argparse.Nam
 def verdicts(docs: List[Dict[str, Any]], rows: List[Dict[str, Any]], calls: List[Dict[str, Any]]
              ) -> List[Dict[str, Any]]:
     out = []
-    for d in sorted(docs, key=lambda d: (d["model"], JOURNEY_SUITES.index(d["suite"])
-                                         if d["suite"] in JOURNEY_SUITES else 99, d["suite"])):
-        mine = [r for r in rows if r.get("model") == d["model"] and r.get("suite") == d["suite"]]
+    for d in sorted(docs, key=lambda d: (d["model"], WORLDS.index(world_of(d)) if world_of(d) in WORLDS else 9,
+                                         JOURNEY_SUITES.index(d["suite"]) if d["suite"] in JOURNEY_SUITES else 99,
+                                         d["suite"])):
+        mine = [r for r in rows if r.get("model") == d["model"] and r.get("suite") == d["suite"]
+                and world_of(r) == world_of(d)]
         out.append(compare(d, mine, calls))
     return out
 
@@ -720,6 +805,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         docs = [d for d in docs if d["suite"] in args.suite]
     if args.model:
         docs = [d for d in docs if d["model"] in args.model]
+    docs = [d for d in docs if world_of(d) in args.world]
     if not docs:
         print("gate: no recording to replay", file=sys.stderr)
         return 2
@@ -786,11 +872,31 @@ def render_baseline_dirty(dirty: Dict[str, Dict[str, List[str]]]) -> str:
     return "\n".join(lines)
 
 
+def cached_suites(cache: Optional[str] = None) -> List[str]:
+    """The journeys suites whose every contract has a description in the world cache
+    (default: the committed one), the ones `record --world agent` records by default."""
+    import server_suites  # noqa: E402  (only here: the suites are large)
+    import world_author  # noqa: E402
+    cache = os.path.abspath(cache) if cache else os.path.join(REPO, world_author.DEFAULT_CACHE)
+    aid = world_author.author_id("claude", world_author.DEFAULT_AUTHOR_MODEL)
+    out = []
+    for suite in JOURNEY_SUITES:
+        contracts = [os.path.join(REPO, c) for c, _, _ in server_suites.RUNNERS[suite][0].values()]
+        if contracts and all(world_author.load_cached(cache, aid, world_author.sha256_file(c)) for c in contracts):
+            out.append(suite)
+    return out
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     """Runs the suites once through a recording proxy, packs the recordings, then
     calibrates them with free replays."""
     args.binary = binary_path(args.binary)
-    suites = args.suite or list(JOURNEY_SUITES)
+    world = getattr(args, "world", "none") or "none"
+    suites = args.suite or (list(JOURNEY_SUITES) if world == "none"
+                            else cached_suites(getattr(args, "world_cache", None)))
+    if not suites:
+        print(f"record: no journeys suite has cached descriptions for --world {world}", file=sys.stderr)
+        return 2
     model = FAKE_MODEL if args.fake else args.model
     if not model:
         print("record: --model (a paid run) or --fake", file=sys.stderr)
@@ -820,7 +926,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                                      stderr=subprocess.STDOUT, start_new_session=True)
         base = f"http://127.0.0.1:{port}"
         wait_http(f"{base}/healthz", proxy)
-        code = run_suites(model, suites, base, work, args, repeat=1)
+        code = run_suites(model, suites, base, work, args, repeat=1, world=world)
         stop(proxy)
         proxy = None
         try:
@@ -880,12 +986,21 @@ def main() -> int:
     g.add_argument("--jobs", type=int, default=6, help="journeys at once per suite")
     g.add_argument("--confirm", type=int, default=2,
                    help="re-runs of a suite with a regression; it counts only if it regresses every time")
+    g.add_argument("--world", action="append", choices=WORLDS,
+                   help="replay the recordings of these world tiers (repeatable; default none). agent reads "
+                        "each mock's description from the world cache only")
+    g.add_argument("--world-cache", help="the world cache the agent tier reads (default: the committed one)")
     g.add_argument("--report", help="write the verdict as JSON here")
     g.add_argument("--keep", action="store_true", help="keep the work directory")
     r = sub.add_parser("record", help="record a run's LLM answers and results (paid unless --fake)")
     r.add_argument("--model", help="the model to record (a paid run through OpenRouter)")
     r.add_argument("--fake", action="store_true", help=f"record fake_llm.py's answers as {FAKE_MODEL} (free)")
-    r.add_argument("--suite", action="append", help="default: every journeys suite")
+    r.add_argument("--suite", action="append",
+                   help="default: every journeys suite (with --world agent: every one with cached descriptions)")
+    r.add_argument("--world", choices=WORLDS, default="none",
+                   help="the world tier to record on (default none); agent reads each mock's description from "
+                        "the world cache only, and its recordings are a separate set (`<label>@agent`)")
+    r.add_argument("--world-cache", help="the world cache the agent tier reads (default: the committed one)")
     r.add_argument("--dest", default=RECORDINGS)
     r.add_argument("--binary", default="target/release/mockingbird")
     r.add_argument("--jobs", type=int, default=6)
@@ -895,6 +1010,13 @@ def main() -> int:
     r.add_argument("--calibrate", type=int, default=4,
                    help="free replays after recording; a check that changes in any is marked unstable")
     r.add_argument("--keep", action="store_true")
+    pd = sub.add_parser("pack-dump", help="a tagged proxy --dump (exchanges.jsonl) + server.jsonl -> recordings")
+    pd.add_argument("dump", help="the proxy's --dump file of the run")
+    pd.add_argument("server", help="the run's server.jsonl")
+    pd.add_argument("--rep", type=int, default=0, help="the rep to pack (default 0)")
+    pd.add_argument("--dest", default=RECORDINGS)
+    pd.add_argument("--source", help="what answered the calls, kept in the recording (default: the dump's file name)")
+    pd.add_argument("--ledger", help="the proxy's calls.jsonl (default: calls.jsonl next to the dump, if any)")
     p = sub.add_parser("pack", help="raw recording + server.jsonl -> recordings")
     p.add_argument("--raw", required=True)
     p.add_argument("--server", required=True)
@@ -911,7 +1033,26 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "gate":
         args.recordings = args.recordings or [RECORDINGS]
+        args.world = args.world or ["none"]
         return cmd_gate(args)
+    if args.cmd == "pack-dump":
+        skipped: List[str] = []
+        try:
+            written = pack_dump(args.dump, args.server, args.dest, args.source or f"proxy dump ({os.path.basename(args.dump)})",
+                                args.rep, ledger=args.ledger, skipped=skipped)
+        except PackRefused as e:
+            print("pack-dump: refusing to pack this run, nothing written:", file=sys.stderr)
+            for p in e.problems:
+                print(f"  - {p}", file=sys.stderr)
+            return 1
+        for label in skipped:
+            print(f"pack-dump: skipped {label or '(no label)'}: not a journeys suite", file=sys.stderr)
+        if not written:
+            print("pack-dump: no journeys suite of the dump has results in that server.jsonl", file=sys.stderr)
+            return 1
+        for path in written:
+            print(path)
+        return 0
     if args.cmd == "record":
         return cmd_record(args)
     if args.cmd == "expect":

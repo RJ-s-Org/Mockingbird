@@ -1,0 +1,595 @@
+{
+  "author": {
+    "id": "claude-code~claude-opus-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-opus-5-5",
+    "model_requested": "claude-opus-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-06T19:47:57Z",
+  "authors": {
+    "/operations/createConversation/answer": "agent",
+    "/operations/createConversation/request": "agent",
+    "/operations/deleteConversation/not_found": "agent",
+    "/operations/deleteConversation/target": "agent",
+    "/operations/getConversation/not_found": "agent",
+    "/operations/getMailbox/not_found": "agent",
+    "/operations/listConversations/answer": "agent",
+    "/operations/listConversations/filters": "agent",
+    "/operations/listConversations/order": "agent",
+    "/operations/listConversations/paging": "agent",
+    "/operations/listMailboxes/answer": "agent",
+    "/operations/listMailboxes/paging": "agent",
+    "/operations/listThreads/answer": "agent",
+    "/operations/listThreads/not_found": "agent",
+    "/operations/listThreads/order": "agent",
+    "/operations/listThreads/paging": "agent",
+    "/operations/updateConversation/kind": "agent",
+    "/operations/updateConversation/not_found": "agent",
+    "/operations/updateConversation/target": "agent",
+    "/operations/updateConversationTags/changes": "agent",
+    "/operations/updateConversationTags/kind": "agent",
+    "/operations/updateConversationTags/not_found": "agent",
+    "/operations/updateConversationTags/target": "agent",
+    "/operations/updateConversationTags/type": "agent",
+    "/types/conversations/derived": "agent",
+    "/types/conversations/lifecycle": "agent",
+    "/types/threads/identity": "agent",
+    "/types/threads/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind11/helpscout.openapi.yaml",
+  "contract_sha256": "63b8ff591ad46c33d57b33d816cf68aa340680b7636b396157598778dc99c7f8",
+  "cost_usd": 0.36079419999999995,
+  "document": {
+    "operations": {
+      "createConversation": {
+        "answer": {
+          "identity_header": "Resource-ID"
+        },
+        "request": {
+          "record": ""
+        }
+      },
+      "deleteConversation": {
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        }
+      },
+      "getConversation": {
+        "not_found": 404
+      },
+      "getMailbox": {
+        "not_found": 404
+      },
+      "listConversations": {
+        "answer": {
+          "records": "/_embedded/conversations"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "number",
+            "param": "number"
+          },
+          {
+            "kind": "eq",
+            "member": "assignee.id",
+            "param": "assigned_to"
+          },
+          {
+            "kind": "text",
+            "param": "query"
+          }
+        ],
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        }
+      },
+      "listMailboxes": {
+        "answer": {
+          "records": "/_embedded/mailboxes"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        }
+      },
+      "listThreads": {
+        "answer": {
+          "records": "/_embedded/threads"
+        },
+        "not_found": 404,
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        }
+      },
+      "updateConversation": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        }
+      },
+      "updateConversationTags": {
+        "changes": {
+          "tags": {
+            "from_request": "/tags"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        },
+        "type": "conversations"
+      }
+    },
+    "types": {
+      "conversations": {
+        "derived": {
+          "threads": {
+            "kind": "count",
+            "of": "threads"
+          }
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "active",
+            "pending",
+            "closed",
+            "spam"
+          ]
+        }
+      },
+      "threads": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "conversationId",
+          "type": "conversations"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 54551,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `notes` is written by `createNote` but has no identity: no member is known to name a record",
+      "type": "notes"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `reply` is written by `createReply` but has no identity: no member is known to name a record",
+      "type": "reply"
+    },
+    {
+      "code": "no_record",
+      "message": "operation `createConversation` answers an object with no `id` and no member holding a `conversations` record; set answer.record to where it is",
+      "operation": "createConversation",
+      "type": "conversations"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `notes` is written by `createNote` but has no identity: no member is known to name a record",
+      "type": "notes"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `reply` is written by `createReply` but has no identity: no member is known to name a record",
+      "type": "reply"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `tags` is written by `updateConversationTags` but has no identity: no member is known to name a record",
+      "type": "tags"
+    },
+    {
+      "code": "no_record",
+      "message": "operation `createConversation` answers an object with no `id` and no member holding a `conversations` record; set answer.record to where it is",
+      "operation": "createConversation",
+      "type": "conversations"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteConversation` (Delete) acts on one `conversations` record but no target says where the request names it",
+      "operation": "deleteConversation",
+      "type": "conversations"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `updateConversation` (Update) acts on one `conversations` record but no target says where the request names it",
+      "operation": "updateConversation",
+      "type": "conversations"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `updateConversationTags` (Update) acts on one `tags` record but no target says where the request names it",
+      "operation": "updateConversationTags",
+      "type": "tags"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "5de2c7bfbebee3ca2e6a23d8df4433ee32c800c16a7080079a759cfa44a5bd8f",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "helpscout",
+  "model_usage": {
+    "claude-opus-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 26327,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 26327,
+      "cacheReadInputTokens": 243091,
+      "canonicalModel": "claude-opus-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.36079419999999995,
+      "inputTokens": 20,
+      "maxOutputTokens": 128000,
+      "outputTokens": 5074,
+      "provider": "firstParty",
+      "thinkingTokens": 2019,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 3,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-06T19:47:26.714126Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-06T19:47:31.254601Z",
+      "revision": 2
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-06T19:47:35.891564Z",
+      "revision": 3
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 26327,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 26327,
+    "cache_read_input_tokens": 243091,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 20,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1427,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1427,
+        "cache_read_input_tokens": 32562,
+        "input_tokens": 2,
+        "output_tokens": 1192,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 5074,
+    "output_tokens_details": {
+      "thinking_tokens": 2019
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 55140,
+  "world": {
+    "operations": {
+      "createConversation": {
+        "answer": {
+          "identity_header": "Resource-ID"
+        },
+        "kind": "create",
+        "request": {
+          "record": ""
+        },
+        "type": "conversations"
+      },
+      "createNote": {
+        "answer": {
+          "identity_header": "Resource-ID"
+        },
+        "kind": "create",
+        "type": "notes"
+      },
+      "createReply": {
+        "answer": {
+          "identity_header": "Resource-ID"
+        },
+        "kind": "create",
+        "type": "reply"
+      },
+      "deleteConversation": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        },
+        "type": "conversations"
+      },
+      "getConversation": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        },
+        "type": "conversations"
+      },
+      "getMailbox": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "mailboxId"
+        },
+        "type": "mailboxes"
+      },
+      "listConversations": {
+        "answer": {
+          "records": "/_embedded/conversations"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "number",
+            "param": "number"
+          },
+          {
+            "kind": "eq",
+            "member": "assignee.id",
+            "param": "assigned_to"
+          },
+          {
+            "kind": "text",
+            "param": "query"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "conversations"
+      },
+      "listMailboxes": {
+        "answer": {
+          "records": "/_embedded/mailboxes"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "mailboxes"
+      },
+      "listThreads": {
+        "answer": {
+          "records": "/_embedded/threads"
+        },
+        "kind": "list",
+        "not_found": 404,
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "page",
+          "style": "page"
+        },
+        "type": "threads"
+      },
+      "updateConversation": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        },
+        "type": "conversations"
+      },
+      "updateConversationTags": {
+        "changes": {
+          "tags": {
+            "from_request": "/tags"
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversationId"
+        },
+        "type": "conversations"
+      }
+    },
+    "types": {
+      "conversations": {
+        "derived": {
+          "threads": {
+            "kind": "count",
+            "of": "threads"
+          }
+        },
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "active",
+            "pending",
+            "closed",
+            "spam"
+          ]
+        }
+      },
+      "mailboxes": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "threads": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "conversationId",
+          "type": "conversations"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "type `threads` has no record schema to find `id` in",
+          "path": "/types/threads/identity/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "type `threads` has no record schema to find `createdAt` in",
+          "path": "/operations/listThreads/order/member"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "type `threads` has no record schema to find `id` in",
+          "path": "/types/threads/identity/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "type `threads` has no record schema to find `createdAt` in",
+          "path": "/operations/listThreads/order/member"
+        }
+      ],
+      "revision": 2,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 3,
+      "tool": "patch_world"
+    }
+  ]
+}
