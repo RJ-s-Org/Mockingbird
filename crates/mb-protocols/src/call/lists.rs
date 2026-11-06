@@ -588,6 +588,10 @@ pub(super) struct Cut {
     /// For a list the world describes the query of, the answer as generated, before
     /// it was narrowed: what is served when no token for the cut fits the schema.
     pub(super) unnarrowed: Option<Value>,
+    /// For a list the world describes the query of, the answer narrowed and ordered
+    /// but not cut: what is served when the cut is not kept for another reason (no
+    /// place for a token, or a first page no run can follow).
+    pub(super) uncut: Option<Value>,
 }
 
 /// Applies a list read's equality filters and page size to its generated answer (see
@@ -681,6 +685,7 @@ pub(super) fn narrow(
         return None;
     }
     let rest = items.split_off(size);
+    let uncut = unnarrowed.as_ref().map(|_| body.clone());
     if !valid(&capped) {
         if unnarrowed.is_some() {
             tracing::info!(
@@ -701,6 +706,7 @@ pub(super) fn narrow(
         stored: 0,
         truncated: false,
         unnarrowed,
+        uncut,
     })
 }
 
@@ -1543,6 +1549,7 @@ async fn stored_records(
         stored: 0,
         truncated: false,
         unnarrowed: None,
+        uncut: None,
     });
     cut.rest.extend(missing);
     cut.stored = stored;

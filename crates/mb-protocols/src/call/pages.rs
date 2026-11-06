@@ -1388,15 +1388,22 @@ pub(super) async fn mint(
     let Some(body) = generated.body.as_ref() else {
         return false;
     };
-    // A described cut no token fits is served as generated, before it was narrowed.
+    // A described cut no token fits is served as generated, before it was narrowed; one
+    // not kept for another reason is served narrowed and ordered, but whole.
     let unnarrowed = cut.unnarrowed.clone();
-    let restore = |generated: &mut GeneratedResponse| {
+    let uncut = cut.uncut.clone();
+    let refused = |generated: &mut GeneratedResponse| {
         if let Some(unnarrowed) = &unnarrowed {
             tracing::info!(
                 operation = %op.id,
                 "no next-page token of a described list fits the answer's schema; the generated list is served"
             );
             generated.body = Some(unnarrowed.clone());
+        }
+    };
+    let whole = |generated: &mut GeneratedResponse| {
+        if let Some(uncut) = &uncut {
+            generated.body = Some(uncut.clone());
         }
     };
     let slot = slot(
@@ -1410,7 +1417,7 @@ pub(super) async fn mint(
     // on the last of their pages.
     .filter(|slot| slot.url.is_none() || slot.given(body).is_none() || cut.stored > 0);
     if slot.is_none() && !runs::starts(rt, (op, call), &cut.size_param) {
-        restore(generated);
+        whole(generated);
         return false;
     }
     // What a delete marker covers is no later page's.
@@ -1462,6 +1469,7 @@ pub(super) async fn mint(
     });
     let size_param = cut.size_param.clone();
     let kept = match slot {
+        // Only a token or page the schema refuses leaves `tokened` with none.
         Some(slot) => tokened(
             rt,
             (plan, call),
@@ -1469,7 +1477,8 @@ pub(super) async fn mint(
             slot,
             (cut.size, cut.size_param),
             (rest, cut.stored > 0),
-        ),
+        )
+        .ok_or(true),
         None => runs::first_page(
             rt,
             (plan, call),
@@ -1477,11 +1486,19 @@ pub(super) async fn mint(
             (cut.size, &cut.size_param),
             (rest, truncated, generated_rest > 0),
         )
-        .map(|(page, document)| (page, document, None)),
+        .map(|(page, document)| (page, document, None))
+        .ok_or(false),
     };
-    let Some((page, document, header)) = kept else {
-        restore(generated);
-        return false;
+    let (page, document, header) = match kept {
+        Ok(kept) => kept,
+        Err(true) => {
+            refused(generated);
+            return false;
+        }
+        Err(false) => {
+            whole(generated);
+            return false;
+        }
     };
     // The items left out are the session's, as a list's items are.
     if let Some(t) = t
@@ -1541,9 +1558,31 @@ pub(super) async fn mint(
         generated.body = Some(page);
         generated.headers.extend(header);
     } else {
-        restore(generated);
+        whole(generated);
     }
     kept
+}
+
+/// Marks an answer of `op` that serves no next token of a described header cursor as
+/// the last page: the header is set empty, so no value of the faker's (which no cut
+/// serves) stands in for it. A header that refuses an empty value is left.
+pub(super) fn no_next_header(
+    rt: &MockRuntime,
+    (op, call): (&Operation, &OperationCall),
+    headers: &mut Vec<(String, String)>,
+) {
+    let Some(name) = list_query::of(rt, op, call)
+        .and_then(|q| q.page)
+        .and_then(|p| p.response_header)
+    else {
+        return;
+    };
+    if headers.iter().any(|(h, _)| h.eq_ignore_ascii_case(&name)) {
+        return;
+    }
+    if header_fits(rt, op, &name, "") {
+        headers.push((name, String::new()));
+    }
 }
 
 /// Whether `token` is a value the header `name` of `op`'s success answer declares (any
@@ -1733,7 +1772,14 @@ pub(super) async fn serve(
                 "no end of a page token validates; the last page is generated"
             );
         }
-        end?
+        let mut end = end?;
+        if let Some(name) = &cut.slot.header
+            && header_fits(rt, op, name, "")
+        {
+            end.headers.retain(|(h, _)| !h.eq_ignore_ascii_case(name));
+            end.headers.push((name.clone(), String::new()));
+        }
+        end
     };
     if let Some(t) = t
         && state.tracks_deleted

@@ -931,6 +931,7 @@ pub(crate) async fn complete(
             // A first page kept nothing: no run of an earlier one serves its next pages,
             // and a token of the model's it keeps leads on to nothing the mock served.
             if !kept {
+                pages::no_next_header(rt, (op, call), &mut generated.headers);
                 runs::forget(&mut state, (plan, call)).await;
                 if followed.is_none()
                     && let Some(body) = generated.body.as_ref()

@@ -29,6 +29,7 @@ paths:
         - {name: tag, in: query, schema: {type: string}}
         - {name: folder, in: query, schema: {type: string}}
         - {name: minAmount, in: query, schema: {type: string}}
+        - {name: atLeast, in: query, schema: {type: integer}}
       responses:
         "200":
           description: ok
@@ -225,9 +226,69 @@ async fn a_header_cursor_is_served_in_its_header() {
         )
         .await;
     assert_eq!(ids(&second), ["c3", "c4"]);
-    let next = headers["x-next-cursor"].to_str().unwrap();
+    let next = headers["x-next-cursor"].to_str().unwrap().to_string();
     assert_ne!(next, token);
+    let (_, headers, last) = h
+        .send("GET", &format!("/contacts?rows=2&cursor={next}"), None, &[])
+        .await;
+    assert_eq!(ids(&last), ["c5"]);
+    // The last page carries no next token.
+    assert!(
+        headers.get("x-next-cursor").is_none_or(|v| v.is_empty()),
+        "{headers:?}"
+    );
     assert_eq!(h.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_header_cursor_list_on_one_page_carries_no_next() {
+    let h = harness(
+        json!({"paging": {"style": "header_cursor", "request": "cursor", "response_header": "X-Next-Cursor", "size": "rows"}}),
+        vec![list(numbered(2))],
+    );
+    let (_, headers, only) = h.send("GET", "/contacts?rows=5", None, &[]).await;
+    assert_eq!(ids(&only), ["c1", "c2"]);
+    assert!(
+        headers.get("x-next-cursor").is_none_or(|v| v.is_empty()),
+        "{headers:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_described_page_follows_a_numeric_filter() {
+    let amounts = list(
+        (1..=6)
+            .map(|i| json!({"id": format!("c{i}"), "amount": i}))
+            .collect(),
+    );
+    let desc = json!({
+        "filters": [{"param": "atLeast", "member": "amount", "kind": "gte"}],
+        "paging": {"style": "page", "request": "sheet", "size": "rows"},
+    });
+    let h = harness(desc, vec![amounts]);
+    let first = get(&h, "/contacts?atLeast=3&rows=2").await;
+    assert_eq!(ids(&first), ["c3", "c4"]);
+    let second = get(&h, "/contacts?atLeast=3&rows=2&sheet=2").await;
+    assert_eq!(ids(&second), ["c5", "c6"]);
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_described_cut_with_no_token_place_keeps_its_filters() {
+    // A cursor paging that names no answer member nor header has no place for a token:
+    // the page is served whole, but narrowed as described.
+    let amounts = list(
+        (1..=5)
+            .map(|i| json!({"id": format!("c{i}"), "amount": i}))
+            .collect(),
+    );
+    let desc = json!({
+        "filters": [{"param": "atLeast", "member": "amount", "kind": "gte"}],
+        "paging": {"style": "cursor", "request": "from", "size": "rows"},
+    });
+    let h = harness(desc, vec![amounts]);
+    let body = get(&h, "/contacts?atLeast=2&rows=2").await;
+    assert_eq!(ids(&body), ["c2", "c3", "c4", "c5"]);
 }
 
 #[tokio::test]

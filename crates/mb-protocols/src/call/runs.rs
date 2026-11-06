@@ -394,19 +394,24 @@ fn whole(value: &Value) -> Option<usize> {
     usize::try_from(n).ok()
 }
 
-/// Whether every number `call`'s query carries, but under `skip`, is its parameter's
-/// `default` or `minimum`, which asks for nothing: any other (a count, a price) could be
-/// found anywhere, so which items it keeps is not known (as [`lists::stored_rest`] has it).
+/// Whether every number `call`'s query carries, but under `skip` or one the world's
+/// description of the list names, is its parameter's `default` or `minimum`, which asks
+/// for nothing: any other (a count, a price) could be found anywhere, so which items it
+/// keeps is not known (as [`lists::stored_rest`] has it). A described parameter is
+/// applied as described, and is part of the run's query, so what it keeps is known.
 fn numbers_ask_nothing(
-    bundle: &mb_mcm::Bundle,
+    rt: &MockRuntime,
     op: &Operation,
     call: &OperationCall,
     skip: [&str; 2],
 ) -> bool {
+    let bundle = rt.bundle();
+    let described = list_query::of(rt, op, call);
     let declared = op.input.query.as_ref().and_then(|q| q.get("properties"));
     call.query
         .iter()
         .filter(|(param, _)| !skip.contains(&param.as_str()))
+        .filter(|(param, _)| !described.as_ref().is_some_and(|q| q.knows(param)))
         .all(|(param, raw)| {
             let (parts, _) = schema_parts(bundle, declared.and_then(|d| d.get(param.as_str())));
             let types = lists::types_of(&parts);
@@ -586,7 +591,7 @@ pub(super) fn first_page(
     let op = plan.op;
     let position = position(rt, (op, call), size_param)?;
     if !starts(rt, (op, call), size_param)
-        || !numbers_ask_nothing(bundle, op, call, [&position.param, size_param])
+        || !numbers_ask_nothing(rt, op, call, [&position.param, size_param])
     {
         return None;
     }
@@ -644,7 +649,7 @@ pub(super) async fn serve(
     let described = list_query::of(rt, op, call).is_some_and(|q| q.page.is_some());
     let position = position(rt, (op, call), size_param)?;
     let at = whole(call.query.get(&position.param)?)?;
-    if !numbers_ask_nothing(bundle, op, call, [&position.param, size_param]) {
+    if !numbers_ask_nothing(rt, op, call, [&position.param, size_param]) {
         return None;
     }
     let size = usize::try_from(limit.items).ok()?;
