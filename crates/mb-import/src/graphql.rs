@@ -705,6 +705,7 @@ fn operation(
             headers: None,
             body: Some(Value::Object(body)),
             body_required,
+            bodies: Vec::new(),
         },
         outputs: vec![OutputVariant {
             status: StatusSelector::Code(200),

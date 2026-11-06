@@ -276,6 +276,7 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
                 headers: params_schema(&params, "header"),
                 body,
                 body_required,
+                bodies: Vec::new(),
             };
             let id = ids.assign(op, key, path);
             let kind = infer_kind(method, path);

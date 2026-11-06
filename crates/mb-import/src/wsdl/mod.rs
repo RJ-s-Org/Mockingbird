@@ -1041,6 +1041,7 @@ impl<'a> Wsdl<'a> {
                 headers: None,
                 body: input,
                 body_required: true,
+                bodies: Vec::new(),
             },
             outputs,
             resource_type: resource_from_name(name),

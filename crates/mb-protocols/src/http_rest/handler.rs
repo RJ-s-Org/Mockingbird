@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use mb_engine::{
 };
 use mb_ext::{Rejection, Tenancy};
 use mb_llm::Usage;
-use mb_mcm::{HttpMethod, Operation, OperationKind, OutputVariant, StatusSelector};
+use mb_mcm::{BodyVariant, HttpMethod, Operation, OperationKind, OutputVariant, StatusSelector};
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use tracing::Instrument;
@@ -51,6 +52,9 @@ struct InputValidators {
     path: Option<SchemaValidator>,
     query: Option<SchemaValidator>,
     body: Option<SchemaValidator>,
+    /// One per declared body media type, as `InputSchemas::bodies` lists
+    /// them.
+    bodies: Vec<Option<SchemaValidator>>,
 }
 
 impl RestState {
@@ -75,6 +79,12 @@ impl RestState {
                     path: compile(op, &op.input.path),
                     query: compile(op, &op.input.query),
                     body: compile(op, &op.input.body),
+                    bodies: op
+                        .input
+                        .bodies
+                        .iter()
+                        .map(|b| compile(op, &Some(b.schema.clone())))
+                        .collect(),
                 };
                 (op.id.clone(), v)
             })
@@ -337,6 +347,20 @@ async fn serve(
         );
     };
     let validators = st.inputs.get(&op_id);
+    // The body the request's media type selects is the one it is decoded,
+    // validated and answered for.
+    let variant = body_variant(
+        &op.input.bodies,
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+    );
+    let op = with_body(op, variant.map(|(_, b)| &b.schema));
+    let op: &Operation = &op;
+    let body_validator = validators.and_then(|v| match variant {
+        Some((i, _)) => v.bodies.get(i).and_then(Option::as_ref),
+        None => v.body.as_ref(),
+    });
     log.declared_body_type = op
         .input
         .body
@@ -412,7 +436,7 @@ async fn serve(
             v.query.as_ref(),
             Some(&Value::Object(query.clone())),
         );
-        check(&mut errors, "body", v.body.as_ref(), body.as_ref());
+        check(&mut errors, "body", body_validator, body.as_ref());
     }
     if !errors.is_empty() {
         // The entered span is not held across the await.
@@ -1221,6 +1245,67 @@ fn string_params(pairs: Vec<(String, String)>) -> Map<String, Value> {
 /// Decodes an `application/x-www-form-urlencoded` body.
 fn form_pairs(raw: &[u8]) -> Result<Vec<(String, String)>, serde_urlencoded::de::Error> {
     serde_urlencoded::from_bytes::<Vec<(String, String)>>(raw)
+}
+
+/// `op` with `schema` as its request body, when it is not that already.
+fn with_body<'a>(op: &'a Operation, schema: Option<&Value>) -> Cow<'a, Operation> {
+    match schema {
+        Some(schema) if op.input.body.as_ref() != Some(schema) => {
+            let mut op = op.clone();
+            op.input.body = Some(schema.clone());
+            Cow::Owned(op)
+        }
+        _ => Cow::Borrowed(op),
+    }
+}
+
+/// The declared body (and its index) a request sent as `content_type`
+/// selects: among the entries of the same base type, one whose every
+/// declared parameter the request carries with an equal value, preferring
+/// the most parameters (so a bare entry is the fallback). Type and parameter
+/// names match whatever their case; `charset` is ignored on both sides.
+/// `None` when no entry matches: the operation's default body applies.
+fn body_variant<'a>(
+    variants: &'a [BodyVariant],
+    content_type: Option<&str>,
+) -> Option<(usize, &'a BodyVariant)> {
+    let (base, params) = media_parts(content_type?);
+    let mut best: Option<(usize, usize, &BodyVariant)> = None;
+    for (i, v) in variants.iter().enumerate() {
+        let (declared_base, declared) = media_parts(&v.media_type);
+        let carried = declared.iter().all(|(name, value)| {
+            params
+                .iter()
+                .any(|(n, val)| n.eq_ignore_ascii_case(name) && val == value)
+        });
+        if !declared_base.eq_ignore_ascii_case(base) || !carried {
+            continue;
+        }
+        if best.is_none_or(|(score, _, _)| declared.len() > score) {
+            best = Some((declared.len(), i, v));
+        }
+    }
+    best.map(|(_, i, v)| (i, v))
+}
+
+/// A media type's base type and its parameters other than `charset`, each
+/// trimmed, a quoted value unquoted.
+fn media_parts(ct: &str) -> (&str, Vec<(&str, &str)>) {
+    let mut parts = ct.split(';');
+    let base = parts.next().unwrap_or_default().trim();
+    let params = parts
+        .filter_map(|p| {
+            let (name, value) = p.split_once('=')?;
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            Some((name.trim(), value))
+        })
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("charset"))
+        .collect();
+    (base, params)
 }
 
 /// The lowercased media type of the request's `Content-Type`, without

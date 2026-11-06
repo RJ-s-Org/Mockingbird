@@ -266,6 +266,7 @@ fn operation(id: String, service: &ServiceDescriptor, method: &MethodDescriptor)
             headers: None,
             body: Some(def_ref(method.input().full_name())),
             body_required: true,
+            bodies: Vec::new(),
         },
         outputs: vec![OutputVariant {
             status: StatusSelector::Code(200),

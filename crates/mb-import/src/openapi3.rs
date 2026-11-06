@@ -7,8 +7,8 @@ use crate::schema::{collect_refs, defs_name, normalize_schema};
 use crate::security::compile_security;
 use crate::{Ctx, ImportError};
 use mb_mcm::{
-    Binding, Bundle, HttpMethod, InputSchemas, Operation, OperationKind, OutputVariant, Protocol,
-    StatusSelector, WebhookDef,
+    Binding, BodyVariant, Bundle, HttpMethod, InputSchemas, Operation, OperationKind,
+    OutputVariant, Protocol, StatusSelector, WebhookDef,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -583,12 +583,21 @@ fn response_headers(
     out
 }
 
-/// The request body schema and whether the body is required: the JSON
-/// media entry's, else the form's (then the multipart one's), tagged with
-/// its [`CONTENT_TYPE_EXT`].
-fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<(Option<Value>, bool), ImportError> {
+/// An operation's request body as compiled from its `requestBody`.
+#[derive(Default)]
+struct CompiledBody {
+    /// The default schema: the JSON media entry's, else the form's (then
+    /// the multipart one's), tagged with its [`CONTENT_TYPE_EXT`].
+    schema: Option<Value>,
+    /// Whether the body is required.
+    required: bool,
+    /// Every media entry's schema, when the body declares more than one.
+    variants: Vec<BodyVariant>,
+}
+
+fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<CompiledBody, ImportError> {
     let Some(body) = op.get("requestBody") else {
-        return Ok((None, false));
+        return Ok(CompiledBody::default());
     };
     let body = deref(doc, body, &format!("{at}/requestBody"))?;
     let content = body.get("content").and_then(Value::as_object);
@@ -596,28 +605,51 @@ fn compile_body(doc: &Value, op: &Value, at: &str) -> Result<(Option<Value>, boo
         Some((_, m)) => Some(schema_of(m)),
         None => content.and_then(form_body),
     };
+    let variants = match content {
+        Some(content) if content.len() > 1 => content
+            .iter()
+            .map(|(ct, m)| BodyVariant {
+                media_type: ct.clone(),
+                schema: media_schema(ct, m),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let required = body.get("required").and_then(Value::as_bool) == Some(true);
-    Ok((schema, required))
+    Ok(CompiledBody {
+        schema,
+        required,
+        variants,
+    })
 }
 
 /// The form (or else multipart) body schema of `content`, tagged with its
 /// media type.
 fn form_body(content: &Map<String, Value>) -> Option<Value> {
-    let media = |wanted: &str| {
-        content.iter().find(|(k, _)| {
-            k.split(';')
-                .next()
-                .is_some_and(|base| base.trim().eq_ignore_ascii_case(wanted))
-        })
-    };
+    let media = |wanted: &str| content.iter().find(|(k, _)| form_kind(k) == Some(wanted));
     let (ct, m) = [FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE]
         .into_iter()
-        .find_map(|ct| media(ct).map(|(_, m)| (ct, m)))?;
+        .find_map(media)?;
+    Some(media_schema(ct, m))
+}
+
+/// The form or multipart media type `ct` names, whatever its case and
+/// parameters.
+fn form_kind(ct: &str) -> Option<&'static str> {
+    let base = ct.split(';').next().unwrap_or_default().trim();
+    [FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE]
+        .into_iter()
+        .find(|wanted| base.eq_ignore_ascii_case(wanted))
+}
+
+/// The schema of media entry `m` declared as `ct`: a form or multipart one
+/// tagged with its media type ([`CONTENT_TYPE_EXT`]).
+fn media_schema(ct: &str, m: &Value) -> Value {
     let mut schema = schema_of(m);
-    if let Value::Object(o) = &mut schema {
-        o.insert(CONTENT_TYPE_EXT.into(), json!(ct));
+    if let (Some(kind), Value::Object(o)) = (form_kind(ct), &mut schema) {
+        o.insert(CONTENT_TYPE_EXT.into(), json!(kind));
     }
-    Some(schema)
+    schema
 }
 
 /// Rejects a `$ref` in `value` that names no definition. `at` names the
@@ -816,13 +848,14 @@ pub(crate) fn compile(doc: &Value, bytes: &[u8], ctx: &mut Ctx) -> Result<Bundle
             let id = ids.assign(op, key, path);
             warn_cookie_params(&params, &id, ctx);
             let outputs = compile_outputs(doc, op, &at, &id, ctx)?;
-            let (body, body_required) = compile_body(doc, op, &at)?;
+            let body = compile_body(doc, op, &at)?;
             let input = InputSchemas {
                 path: params_schema(&params, "path"),
                 query: params_schema(&params, "query"),
                 headers: params_schema(&params, "header"),
-                body,
-                body_required,
+                body: body.schema,
+                body_required: body.required,
+                bodies: body.variants,
             };
             let kind = infer_kind(method, path);
             let mut op_out = Operation {
@@ -978,7 +1011,7 @@ fn path_item_payload(
     let item = deref(doc, item, at)?;
     for (key, _) in METHODS {
         let Some(op) = item.get(key) else { continue };
-        if let (Some(schema), _) = compile_body(doc, op, &format!("{at}/{key}"))? {
+        if let Some(schema) = compile_body(doc, op, &format!("{at}/{key}"))?.schema {
             let summary = op
                 .get("summary")
                 .or_else(|| item.get("summary"))

@@ -145,6 +145,7 @@ mod tests {
                 headers: None,
                 body: None,
                 body_required: false,
+                bodies: Vec::new(),
             },
             outputs: Vec::new(),
             resource_type: resource_type.map(Into::into),

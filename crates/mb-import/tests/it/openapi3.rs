@@ -1,7 +1,7 @@
 #![cfg(test)]
 use mb_import::{ImportError, compile};
 use mb_mcm::{Bundle, Effect, Identity, OperationKind, StatusSelector};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Every name an API-key scheme declares is kept on the bundle: one no requirement
 /// references, and one in a requirement dropped for being ANDed with a scheme the mock
@@ -3470,4 +3470,57 @@ paths:
         warnings[0].message.contains("does not declare"),
         "{warnings:?}"
     );
+}
+
+#[test]
+fn every_request_media_type_keeps_its_body_schema() {
+    let src = oas(r#"
+  /flags/{key}:
+    patch:
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: array, items: {type: object}}
+          application/json; domain-model=x.semanticpatch:
+            schema:
+              type: object
+              required: [instructions]
+              properties: {instructions: {type: array}}
+      responses: {"200": {description: OK}}
+  /one:
+    post:
+      requestBody:
+        content: {application/json: {schema: {type: object}}}
+      responses: {"200": {description: OK}}
+"#);
+    let b = compile(src.as_bytes()).unwrap();
+    let input = &b.operation("patch_flags_key").unwrap().input;
+    // The default stays the plain JSON entry.
+    assert_eq!(
+        input.body,
+        Some(json!({"type": "array", "items": {"type": "object"}}))
+    );
+    let bodies: Vec<(&str, &Value)> = input
+        .bodies
+        .iter()
+        .map(|v| (v.media_type.as_str(), &v.schema))
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            (
+                "application/json",
+                &json!({"type": "array", "items": {"type": "object"}})
+            ),
+            (
+                "application/json; domain-model=x.semanticpatch",
+                &json!({"type": "object", "required": ["instructions"],
+                        "properties": {"instructions": {"type": "array"}}})
+            ),
+        ]
+    );
+    // A single media type needs no variants: the body says it all.
+    assert!(b.operation("post_one").unwrap().input.bodies.is_empty());
 }

@@ -1598,6 +1598,7 @@ mod tests {
                         headers: None,
                         body: None,
                         body_required: false,
+                        bodies: Vec::new(),
                     },
                     outputs: vec![OutputVariant {
                         status: StatusSelector::Code(200),
