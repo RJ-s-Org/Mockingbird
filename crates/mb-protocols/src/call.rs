@@ -53,6 +53,7 @@ mod reporting;
 mod runs;
 mod session_memory;
 mod state_access;
+#[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
 mod streams;
 mod tokens;
 mod value_index;
@@ -69,10 +70,13 @@ pub(crate) use effects::*;
 use entities::*;
 use lookup::*;
 use owners::*;
-pub(crate) use relations::*;
+#[cfg(feature = "graphql")]
+pub(crate) use relations::referenced;
+use relations::*;
 pub(crate) use reporting::*;
 pub(crate) use session_memory::*;
 pub(crate) use state_access::*;
+#[cfg(any(feature = "sse", feature = "graphql", feature = "grpc"))]
 pub(crate) use streams::*;
 pub(crate) use value_index::{ValueFeed, ValueIndex};
 pub(crate) use writes::*;
