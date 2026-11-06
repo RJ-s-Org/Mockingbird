@@ -7565,7 +7565,7 @@ BLIND12_CHECKS = {
         "a scheduled letter keeps its send_date and is expected after it",
         "a repeated Idempotency-Key answers the same letter",
         "a metadata filter lists the run's letters newest first", "scheduled true lists only the scheduled letter",
-        "a scheduled letter is cancelled with deleted true", "a cancelled letter is no longer listed as scheduled",
+        "a scheduled letter is cancelled with deleted true", "scheduled false lists only the unscheduled letter",
         "a letter with an unknown use_type is refused with 422",
     ],
 }
@@ -7621,12 +7621,14 @@ def couchdb_steps(j):
     j.check("a PUT document answers its id and a first revision",
             written() and put.get("ok") is True and eq(put.get("id"), "order-001") and revision(put.get("rev")) == 1,
             answer=put)
-    rev1 = own_rev(put.get("rev"), 1)
     read = doc("order-001")
     etag = str(j.answer_headers.get("ETag") or "")
+    # rev1 is the PUT's answer, or the read's when the PUT answered no revision, so a
+    # stored document with a missing rev is the PUT check's miss only.
+    rev1 = put.get("rev") if revision(put.get("rev")) is not None else own_rev(read.get("_rev"), 1)
     j.check("the document reads with its _id, _rev and ETag",
             eq(read.get("_id"), "order-001") and eq(read.get("_rev"), rev1) and eq(read.get("customer"), customer)
-            and near(read.get("total"), 12.5, 0.001) and etag.strip('"') == rev1,
+            and near(read.get("total"), 12.5, 0.001) and etag.strip('"') == read.get("_rev"),
             document=read, etag=etag)
     again = obj(j.call("PUT", f"{db}/order-001", body=dict(first, status="cancelled")))
     refused = j.last["status"]
@@ -7646,13 +7648,19 @@ def couchdb_steps(j):
             and eq(read.get("status"), "paid") and near(read.get("total"), 12.5, 0.001),
             answer=update, current=current, read={k: read.get(k) for k in ("_rev", "status", "total")})
     rev2 = own_rev(update.get("rev"), revision(current) + 1)
-    stale = obj(j.call("PUT", f"{db}/order-001", query={"rev": rev1}, body=dict(first, status="refunded")))
+    # The stale check compares with what the read after the update showed, so an update
+    # that was refused or answered no rev is the update check's miss only. rev1 is stale
+    # once the update was stored; else a made-up revision of the same generation is.
+    after = {k: read.get(k) for k in ("_rev", "status")}
+    old = rev1 if not eq(after["_rev"], rev1) else own_rev(None, revision(rev1) or 1)
+    stale = obj(j.call("PUT", f"{db}/order-001", query={"rev": old}, body=dict(first, status="refunded")))
     refused = j.last["status"]
     kept = doc("order-001")
     j.check("a stale revision is refused and changes nothing",
-            refused == 409 and eq(stale.get("error"), "conflict") and eq(kept.get("_rev"), rev2)
-            and eq(kept.get("status"), "paid"),
-            status_code=refused, error=stale, read={k: kept.get(k) for k in ("_rev", "status")})
+            refused == 409 and eq(stale.get("error"), "conflict") and eq(kept.get("_rev"), after["_rev"])
+            and eq(kept.get("status"), after["status"]),
+            status_code=refused, error=stale, sent=old, held=after,
+            read={k: kept.get(k) for k in ("_rev", "status")})
     # The revision order-001 holds after that check (rev2 unless the stale PUT was stored),
     # so a stored stale write is that check's miss only.
     held = own_rev(kept.get("_rev"), revision(rev2))
@@ -7660,7 +7668,6 @@ def couchdb_steps(j):
     stored = written()
     note = given(posted.get("id"), None)
     read = doc(note) if note else {}
-    noted = note is not None and j.last["status"] == 200 and eq(read.get("_id"), note)
     j.check("a POST stores a document under an id the server makes",
             stored and note is not None and posted.get("ok") is True and revision(posted.get("rev")) == 1
             and eq(read.get("_id"), note) and eq(read.get("type"), "note"),
@@ -7668,10 +7675,11 @@ def couchdb_steps(j):
     second = obj(j.call("PUT", f"{db}/order-002", body={"type": "order", "customer": customer, "total": 40,
                                                          "status": "open"}))
     rev_b = own_rev(second.get("rev"), 1)
-    # The lists after this go by the documents the reads showed exist, so a note that was
-    # not stored is the POST check's miss only.
-    expected = ["order-001", "order-002"] + ([note] if noted else [])
     rows, listed = all_docs(include_docs="true")
+    # The lists after this go by the two orders and the one other id _all_docs shows (the
+    # note as it was stored), whatever the POST answered, so a note that was not stored or
+    # answered no id is the POST check's miss only.
+    expected = ["order-001", "order-002"] + [r for r in rows if r not in ("order-001", "order-002")][:1]
     revs = {r.get("id"): obj(r.get("value")).get("rev") for r in dicts(listed.get("rows"))}
     orders = [r for r in rows if r in ("order-001", "order-002")]
     j.check("_all_docs lists every document by id with total_rows",
@@ -7762,8 +7770,8 @@ def rabbitmq_steps(j):
             status_code=status, read={k: read.get(k) for k in ("name", "vhost", "durable", "arguments")})
     status, _ = declare(created, **{"x-max-length": 1000})
     read = queue(created)
-    # The reference shows only 201 for a PUT that creates, so a repeat is judged by a 2xx
-    # and by the queue it leaves, not by a particular code.
+    # The reference states no code for a repeated PUT, so a repeat is judged by a 2xx and
+    # by the queue it leaves, not by a particular code.
     j.check("declaring the queue again the same way succeeds and changes nothing",
             200 <= status < 300 and eq(obj(read.get("arguments")).get("x-max-length"), 1000),
             status_code=status, arguments=read.get("arguments"))
@@ -7828,12 +7836,18 @@ def rabbitmq_steps(j):
     kept = obj(j.call("DELETE", f"{queues}/audit", query={"if-empty": "true"}))
     refused = j.last["status"]
     read = queue("audit")
+    read_status = j.last["status"]
     # The reference says only that if-empty prevents the delete from succeeding, so any
     # answer that is not a success passes, with the queue still there.
     j.check("if-empty keeps a queue that holds messages",
-            not 200 <= refused < 300 and j.last["status"] == 200
+            not 200 <= refused < 300 and read_status == 200
             and eq(read.get("name"), "audit"),
-            status_code=refused, error=kept, read_status=j.last["status"])
+            status_code=refused, error=kept, read_status=read_status)
+    # A queue the if-empty delete removed is declared and filled again, so that delete is
+    # the check before's miss only and the next check judges the purge and the delete.
+    if read_status == 404:
+        declare("audit")
+        put_on("audit", f"audit {tag} refilled")
     j.call("DELETE", f"{queues}/audit/contents")
     purged = j.last["status"]
     j.call("DELETE", f"{queues}/audit", query={"if-empty": "true"})
@@ -8145,7 +8159,7 @@ def lob_steps(j):
             j.headers["idempotency-key"] = key
         try:
             return obj(j.call("POST", "/v1/letters", body=dict({
-                "description": f"Reminder {tag}", "to": a2, "from": sender, "file": html, "color": False,
+                "description": f"Reminder {tag}", "to": to, "from": sender, "file": html, "color": False,
                 "use_type": "operational", "metadata": {"run": run}}, **fields)))
         finally:
             j.headers.pop("idempotency-key", None)
@@ -8164,11 +8178,21 @@ def lob_steps(j):
             address={k: made.get(k) for k in ("id", "object", "name", "address_city", "metadata")})
     a1 = own(made.get("id"), "adr_")
     read = obj(j.call("GET", f"/v1/addresses/{a1}"))
+    # A US address may read back standardised with a ZIP+4, so only the five digits are judged.
     j.check("the address reads back by id",
             eq(read.get("id"), a1) and same_text(read.get("name"), "Ana Silva")
-            and same_text(read.get("address_line1"), "210 King St") and same_text(read.get("address_zip"), "94107"),
+            and same_text(read.get("address_line1"), "210 King St")
+            and matches(r"94107(-\d{4})?", read.get("address_zip")),
             address={k: read.get(k) for k in ("id", "name", "address_line1", "address_zip")})
-    a2 = own(address("Ben Okafor", "1 Market St", "San Francisco", "CA", "94105").get("id"), "adr_")
+    ben = {"name": "Ben Okafor", "address_line1": "1 Market St", "address_city": "San Francisco",
+           "address_state": "CA", "address_zip": "94105", "address_country": "US"}
+    second = address(*(ben[k] for k in ("name", "address_line1", "address_city", "address_state", "address_zip")))
+    # The letters go to the second address by id; when its create answered no adr_ id they
+    # go to it inline (which the contract allows), so a failed create is the list checks'
+    # miss only.
+    by_id = matches("adr_[A-Za-z0-9]+", second.get("id"))
+    a2 = own(second.get("id"), "adr_")
+    to = a2 if by_id else ben
     rows, _ = listed("/v1/addresses")
     j.check("a metadata filter lists the run's addresses newest first", rows == [a2, a1], listed=rows)
     # One check judges the first page and the next follows its cursor, so a short first
@@ -8193,7 +8217,8 @@ def lob_steps(j):
     first = letter()
     j.check("a letter to the address answers its ltr_ id and both addresses",
             j.last["status"] == 200 and matches("ltr_[A-Za-z0-9]+", first.get("id")) and eq(first.get("object"), "letter")
-            and eq(obj(first.get("to")).get("id"), a2) and same_text(obj(first.get("to")).get("name"), "Ben Okafor")
+            and (not by_id or eq(obj(first.get("to")).get("id"), a2))
+            and same_text(obj(first.get("to")).get("name"), "Ben Okafor")
             and same_text(obj(first.get("from")).get("name"), "Bench Mail Co")
             and eq(first.get("use_type"), "operational") and first.get("color") is False,
             letter={k: first.get(k) for k in ("id", "object", "use_type", "color")},
@@ -8222,18 +8247,15 @@ def lob_steps(j):
     j.check("a scheduled letter is cancelled with deleted true",
             j.last["status"] == 200 and eq(cancelled.get("id"), l2) and cancelled.get("deleted") is True,
             answer=cancelled)
-    # A cancel removes the letter from production. It is judged only after a cancel that
-    # answered deleted true, so a cancel that did not happen is the check before's miss.
-    if eq(cancelled.get("id"), l2) and cancelled.get("deleted") is True:
-        rows, _ = listed("/v1/letters", scheduled="true")
-        rows = [r for r in rows if r not in extra]
-        j.check("a cancelled letter is no longer listed as scheduled", l2 not in rows, listed=rows)
-    else:
-        j.check("a cancelled letter is no longer listed as scheduled", False,
-                reason="the cancel did not answer deleted true", answer=cancelled)
+    # scheduled=false keeps the letters whose send_date is their date_created. The
+    # scheduled letter's send_date stays later whether or not it was cancelled, so this
+    # holds either way and a failed cancel is the check before's miss only.
+    rows, _ = listed("/v1/letters", scheduled="false")
+    rows = [r for r in rows if r not in extra]
+    j.check("scheduled false lists only the unscheduled letter", rows == [l1], listed=rows)
     # use_type is marketing or operational; a missing one is allowed only with an account
     # default, so an unknown value is what is always refused.
-    bad = obj(j.call("POST", "/v1/letters", body={"to": a2, "from": sender, "file": html, "color": False,
+    bad = obj(j.call("POST", "/v1/letters", body={"to": to, "from": sender, "file": html, "color": False,
                                                   "use_type": "promotional", "metadata": {"run": run}}))
     j.check("a letter with an unknown use_type is refused with 422",
             j.last["status"] == 422 and eq(obj(bad.get("error")).get("status_code"), 422), error=bad)

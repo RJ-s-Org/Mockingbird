@@ -11,9 +11,9 @@ info:
     exchange by its virtual host and its name, both in the path
     (`/api/queues/{vhost}/{name}`; the default virtual host `/` is written `%2F`).
     Declaring is idempotent: `PUT` of a virtual host, a queue or an exchange creates it
-    and answers 201 Created (the reference's example). A `PUT` of one that already
-    exists with the same properties changes nothing and succeeds (the server answers
-    204, which the reference does not show). A queue or exchange that exists with other
+    (the server answers 201 Created; the reference states no status code for it). A
+    `PUT` of one that already exists with the same properties changes nothing and
+    succeeds (the server answers 204, which the reference does not show). A queue or exchange that exists with other
     properties (`durable`, `auto_delete` or `arguments` such as `x-max-length`) is not
     changed and the declaration is refused (as AMQP refuses an inequivalent
     re-declaration; the server answers 400 with a `reason` such as
@@ -21,8 +21,9 @@ info:
 
     A binding routes an exchange's messages to a queue:
     `POST /api/bindings/{vhost}/e/{exchange}/q/{queue}` with a `routing_key` (and
-    optional `arguments`) creates one and answers 201 with a `Location` header holding
-    the new binding's URI, which ends in its `properties_key`. A binding is named by its
+    optional `arguments`) creates one and answers with a `Location` header holding the
+    new binding's URI, which ends in its `properties_key` (the server answers 201; the
+    reference states no status code for it). A binding is named by its
     `properties_key`: its routing key when it has no arguments, else the routing key,
     `~` and a hash of the arguments. `GET` on the same path lists the bindings between
     that exchange and that queue (there may be several). A `topic` exchange routes a
@@ -63,7 +64,8 @@ info:
     `sort_reverse=true` for descending). With `page` (from 1) it answers one page instead,
     an object whose `items` are that page's queues and whose `page` is the page number.
     `page_size` is 1 to 500 (default 100); `name` keeps only the queues whose name holds
-    it (with `use_regex=true` it is a regular expression). The reference lists only
+    it as a substring (the server's match, which the reference does not state; with
+    `use_regex=true` it is a regular expression). The reference lists only
     these request parameters; the server also answers `page_size`, `page_count`,
     `item_count`, `filtered_count` and `total_count`, which the reference does not
     document.
@@ -188,7 +190,7 @@ paths:
       tags: [Queues]
       operationId: declareQueue
       summary: Declare a queue
-      description: "201 when created; a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
+      description: "Created when new (the server answers 201); a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
       requestBody:
         content:
           application/json:
@@ -280,7 +282,7 @@ paths:
       tags: [Exchanges]
       operationId: declareExchange
       summary: Declare an exchange
-      description: "201 when created; a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
+      description: "Created when new (the server answers 201); a success when it exists with the same properties (the server answers 204); refused when it exists with other ones (the server answers 400)."
       requestBody:
         required: true
         content:

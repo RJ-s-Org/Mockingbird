@@ -40,8 +40,7 @@ info:
 
     `DELETE /v1/letters/{id}` cancels a letter whose `send_date` has not passed (a
     cancelled letter is not charged) and answers `{"id": "ltr_...", "deleted": true}`
-    (`deleted` is only returned when the resource was deleted). A cancel completely
-    removes the letter from production, so it is no longer listed with `scheduled=true`.
+    (`deleted` is only returned when the resource was deleted).
 
     A `POST /v1/letters` with an `Idempotency-Key` header (at most 256 characters) is
     safe to retry: a second request with the same key within 24 hours creates nothing
