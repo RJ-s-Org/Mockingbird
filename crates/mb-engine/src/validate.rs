@@ -602,8 +602,81 @@ impl SchemaValidator {
     }
 
     fn compute_declared_properties(&self) -> Option<HashSet<String>> {
+        self.declared_properties_of(&self.schema)
+    }
+
+    /// The property names the schema of the record an answer holds at `record`
+    /// declares (the answer's own where `record` is `None`), as
+    /// [`SchemaValidator::declared_properties`] reads them; `None` when it declares
+    /// none, or where the schema does not say what is there.
+    pub fn declared_properties_at(
+        &self,
+        record: Option<&mb_mcm::RecordAt>,
+    ) -> Option<HashSet<String>> {
+        let Some(record) = record else {
+            return self.declared_property_names().cloned();
+        };
+        let tokens: Vec<(&str, bool)> = match record {
+            mb_mcm::RecordAt::Member(m) => vec![(m.as_str(), false)],
+            mb_mcm::RecordAt::Item => vec![("", true)],
+            mb_mcm::RecordAt::MemberItem(m) => vec![(m.as_str(), false), ("", true)],
+            mb_mcm::RecordAt::Pointer(tokens) => {
+                tokens.iter().map(|t| (t.as_str(), t == "0")).collect()
+            }
+        };
+        // Every schema a step reaches is inside the root, so no step copies one.
+        let mut node = &self.schema;
+        for (token, items) in tokens {
+            let as_items = items
+                .then(|| self.subschema_where(node, &|n| n.get("items")))
+                .flatten();
+            node = match as_items {
+                Some(items) => items,
+                None => {
+                    self.subschema_where(node, &|n| n.get("properties").and_then(|p| p.get(token)))?
+                }
+            };
+        }
+        self.declared_properties_of(node)
+    }
+
+    /// The first schema `pick` finds in `node` or, through `$ref`s and the branches
+    /// of `allOf`/`anyOf`/`oneOf`, in a schema it stands for (bounded).
+    fn subschema_where<'a>(
+        &'a self,
+        node: &'a Value,
+        pick: &dyn Fn(&'a Value) -> Option<&'a Value>,
+    ) -> Option<&'a Value> {
+        let mut pending = vec![node];
+        let mut hops = 0;
+        while let Some(node) = pending.pop() {
+            hops += 1;
+            if hops > MAX_SCHEMA_HOPS {
+                break;
+            }
+            if let Some(found) = pick(node) {
+                return Some(found);
+            }
+            if let Some(target) = node
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.strip_prefix('#'))
+                .and_then(|pointer| self.schema.pointer(pointer))
+            {
+                pending.push(target);
+            }
+            for keyword in ["allOf", "anyOf", "oneOf"] {
+                if let Some(Value::Array(branches)) = node.get(keyword) {
+                    pending.extend(branches.iter().rev());
+                }
+            }
+        }
+        None
+    }
+
+    fn declared_properties_of(&self, root: &Value) -> Option<HashSet<String>> {
         let mut names = HashSet::new();
-        let mut pending = vec![&self.schema];
+        let mut pending = vec![root];
         let mut hops = 0;
         while let Some(node) = pending.pop() {
             hops += 1;

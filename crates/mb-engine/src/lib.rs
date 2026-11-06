@@ -3752,6 +3752,13 @@ fn force_identity(
     } else {
         identity.field.as_str()
     };
+    // Only a member the record's schema declares takes the value: a write
+    // acknowledgement (`{ok, id, rev}`) of a record keyed by `_id` names it in its
+    // own `id`, and gets no `_id` an open schema would let in.
+    let declared = validator.declared_properties_at(identity.record.as_ref());
+    let Some(field) = declared_member(declared.as_ref(), field) else {
+        return body;
+    };
     // A path value that reached a held record by another member than its key (a
     // template read by its id where its alias is its key) names that record: its key
     // keeps the held value, not the path's.
@@ -3772,6 +3779,30 @@ fn force_identity(
         }
     }
     body
+}
+
+/// The member of a record whose schema declares `declared` that takes the value meant
+/// for `member`: `member` itself where the schema declares it (a dotted one by its
+/// first step) or declares nothing at all, else the bare id it declares (see
+/// [`mb_mcm::is_generic_id`], `id` first), as the id of an answer that is not the
+/// record names the record written. `None` when it declares neither.
+fn declared_member<'a>(declared: Option<&'a HashSet<String>>, member: &'a str) -> Option<&'a str> {
+    let Some(names) = declared else {
+        return Some(member);
+    };
+    if consistency::declares_member(names, member) {
+        return Some(member);
+    }
+    if names.contains("id") {
+        return Some("id");
+    }
+    let mut generic: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| mb_mcm::is_generic_id(n))
+        .collect();
+    generic.sort_unstable();
+    generic.first().copied()
 }
 
 /// The key `target` holds, when the path value `id` reached it by another member than
@@ -3876,6 +3907,10 @@ fn fitted(
         .and_then(mb_mcm::world::record_pointer)
         .map_or_else(String::new, |p| p.as_str().to_owned());
     let at = format!("{prefix}/{}", member.replace('.', "/"));
+    let declared = validator.declared_properties_at(identity.record.as_ref());
+    if declared.is_some_and(|names| !consistency::declares_member(&names, member)) {
+        return None;
+    }
     let elsewhere = |location: &str, _: &Value| location != at;
     id_candidates(id).into_iter().find_map(|candidate| {
         let mut forced = body.clone();
@@ -4520,6 +4555,87 @@ components:
             "a uuid key refuses a name at a deep pointer"
         );
         assert!(v.is_valid_output(&out), "{out}");
+    }
+
+    /// `PUT /{db}/{docid}` whose identity a world description names `_id`, answering
+    /// 201 with the write acknowledgement `schema`.
+    fn acknowledged_put(schema: &str) -> (Operation, SchemaValidator, OperationCall) {
+        let contract = format!(
+            r##"
+openapi: 3.0.0
+info: {{title: Docs, version: "1"}}
+paths:
+  /{{db}}/{{docid}}:
+    parameters:
+      - {{name: db, in: path, required: true, schema: {{type: string}}}}
+      - {{name: docid, in: path, required: true, schema: {{type: string}}}}
+    put:
+      operationId: putDoc
+      requestBody:
+        content: {{application/json: {{schema: {{type: object}}}}}}
+      responses:
+        "201":
+          description: ok
+          content:
+            application/json:
+              schema: {{$ref: "#/components/schemas/WriteResult"}}
+components:
+  schemas:
+    WriteResult: {schema}
+"##
+        );
+        let bundle = mb_import::compile(contract.as_bytes()).unwrap();
+        let mut op = bundle.operation("putDoc").unwrap().clone();
+        op.kind = OperationKind::Command(Effect::Update);
+        op.identity = Some(mb_mcm::Identity {
+            field: "_id".into(),
+            path_param: Some("docid".into()),
+            input_field: None,
+            path_field: None,
+            record: None,
+        });
+        let schema = op.output_for_status(201).unwrap().schema.as_ref().unwrap();
+        let v = SchemaValidator::for_output(&bundle.with_reachable_defs(schema)).unwrap();
+        let mut path_params = Map::new();
+        path_params.insert("db".into(), json!("orders"));
+        path_params.insert("docid".into(), json!("order-001"));
+        let call = OperationCall {
+            operation_id: "putDoc".into(),
+            path_params,
+            ..OperationCall::default()
+        };
+        (op, v, call)
+    }
+
+    #[test]
+    fn a_write_acknowledgement_gets_the_id_member_its_schema_declares() {
+        let (op, v, call) = acknowledged_put(
+            "{type: object, properties: {ok: {type: boolean}, id: {type: string}, rev: {type: string}}}",
+        );
+        let out = force_identity(&v, &op, &call, None, json!({"ok": true, "rev": "1-abc"}));
+        assert_eq!(out, json!({"ok": true, "rev": "1-abc", "id": "order-001"}));
+    }
+
+    #[test]
+    fn an_answer_declaring_the_identity_member_gets_it() {
+        let (op, v, call) = acknowledged_put(
+            "{type: object, properties: {_id: {type: string}, id: {type: string}, rev: {type: string}}}",
+        );
+        let out = force_identity(&v, &op, &call, None, json!({"rev": "1-abc"}));
+        assert_eq!(out, json!({"rev": "1-abc", "_id": "order-001"}));
+    }
+
+    #[test]
+    fn an_answer_declaring_neither_id_member_gets_none_added() {
+        let (op, v, call) = acknowledged_put(
+            "{type: object, properties: {ok: {type: boolean}, rev: {type: string}}}",
+        );
+        let answer = json!({"ok": true, "rev": "1-abc"});
+        assert_eq!(force_identity(&v, &op, &call, None, answer.clone()), answer);
+        // A schema that declares no members still takes the identity member.
+        let (op, v, call) = acknowledged_put("{type: object}");
+        let out = force_identity(&v, &op, &call, None, json!({"ok": true}));
+        assert_eq!(out, json!({"ok": true, "_id": "order-001"}));
     }
 
     /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.

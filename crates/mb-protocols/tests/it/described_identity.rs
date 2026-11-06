@@ -1121,3 +1121,56 @@ async fn another_owners_record_named_by_a_described_alternate_is_not_missing() {
     let (ok, missing) = (StatusCode::OK, StatusCode::NOT_FOUND);
     assert_eq!(statuses, [ok, missing, ok, missing, missing, missing]);
 }
+
+/// Documents keyed by `_id`, whose replace answers a write acknowledgement
+/// `{ok, id, rev}` rather than the document.
+const ACKNOWLEDGED: &str = r##"
+openapi: 3.0.0
+info: {title: Documents, version: "1"}
+paths:
+  /orders/{docid}:
+    parameters: [{name: docid, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getOrder
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}, "404": {description: missing}}
+    put:
+      operationId: putOrder
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}
+      responses: {"201": {description: written, content: {application/json: {schema: {$ref: "#/components/schemas/WriteResult"}}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      properties:
+        _id: {type: string}
+        _rev: {type: string}
+        total: {type: integer}
+    WriteResult:
+      type: object
+      properties:
+        ok: {type: boolean}
+        id: {type: string}
+        rev: {type: string}
+"##;
+
+#[tokio::test]
+async fn a_write_acknowledgement_names_the_record_in_the_id_it_declares() {
+    let world = json!({
+        "types": {"orders": {"identity": {"member": "_id"}}},
+        "operations": {
+            "getOrder": {"kind": "read", "target": {"path_param": "docid"}},
+            "putOrder": {"kind": "replace", "target": {"path_param": "docid"}}
+        }
+    });
+    let h = support::described(
+        ACKNOWLEDGED,
+        world,
+        vec![json!({"ok": true, "rev": "1-abc"})],
+    );
+    let (status, _, body) = h
+        .send("PUT", "/orders/order-001", Some(json!({"total": 3})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["id"], json!("order-001"), "{body}");
+    assert!(body.get("_id").is_none(), "{body}");
+}

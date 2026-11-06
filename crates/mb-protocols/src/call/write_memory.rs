@@ -2364,17 +2364,28 @@ fn route(op: &Operation) -> String {
 }
 
 /// What the identity of `held` says, over `answer`: a regeneration is of the same
-/// resource, however the LLM wrote its id or the key its path reads by.
+/// resource, however the LLM wrote its id or the key its path reads by. Only into a
+/// member the type's record schema declares (or one the answer holds already): an
+/// open schema does not make an `id` of `held`'s another member of the answer.
 fn keeping_identity(rt: &MockRuntime, held: &StoredResource, answer: &Value) -> Value {
     let mut answer = answer.clone();
     let index = rt.index();
     let t = &held.resource_type;
+    let declared =
+        read_schema(rt, t).and_then(|s| mb_engine::consistency::declared_members(rt.bundle(), s));
     let fields = ["id", "number"]
         .into_iter()
         .chain(index.identity_fields(t).iter().map(String::as_str))
         .chain(index.path_fields(t).iter().map(String::as_str));
     if answer.is_object() {
         for field in fields {
+            let takes = declared
+                .as_ref()
+                .is_none_or(|names| mb_engine::consistency::declares_member(names, field))
+                || mb_mcm::member_at(&answer, field).is_some();
+            if !takes {
+                continue;
+            }
             if let Some(value) = mb_mcm::member_at(&held.data, field) {
                 mb_mcm::set_member_at(&mut answer, field, value.clone());
             }
@@ -3038,6 +3049,46 @@ service Items {
         let session = plan.session.clone();
         let memory = store.list(&session, INTERNAL_TYPE, 10).await.unwrap();
         (memory, op.binding.clone())
+    }
+
+    #[test]
+    fn a_kept_identity_goes_only_into_members_the_record_declares() {
+        let contract = br##"
+openapi: 3.0.0
+info: {title: Docs, version: "1"}
+paths:
+  /docs/{doc_id}:
+    parameters:
+      - {name: doc_id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getDoc
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}
+components:
+  schemas:
+    Doc:
+      type: object
+      properties:
+        doc_id: {type: string}
+        title: {type: string}
+"##;
+        let rt = MockRuntime::new(
+            "m",
+            Arc::new(mb_import::compile(contract).unwrap()),
+            Arc::new(Engine::new(None, EngineConfig::default())),
+            Arc::new(MemoryStore::new(Duration::from_secs(60))),
+        );
+        let t = rt.bundle().operations[0].resource_type.clone().unwrap();
+        let held = StoredResource {
+            resource_type: t,
+            id: "d1".into(),
+            data: json!({"doc_id": "d1", "id": "x9", "number": 4, "title": "old"}),
+        };
+        let kept = keeping_identity(&rt, &held, &json!({"doc_id": "d2", "title": "new"}));
+        assert_eq!(kept, json!({"doc_id": "d1", "title": "new"}));
+        // A member the answer holds already keeps the held value.
+        let kept = keeping_identity(&rt, &held, &json!({"id": "y", "title": "new"}));
+        assert_eq!(kept, json!({"id": "x9", "doc_id": "d1", "title": "new"}));
     }
 
     /// The memory is for HTTP-bound operations: gRPC, SOAP and GraphQL calls
