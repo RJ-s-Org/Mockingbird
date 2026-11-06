@@ -67,6 +67,20 @@ paths:
                 properties:
                   templates: {type: array, items: {$ref: "#/components/schemas/Template"}}
                   tally: {type: integer}
+  /strict2:
+    get:
+      operationId: listStrictFixed
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templates, tally]
+                properties:
+                  templates: {type: array, items: {$ref: "#/components/schemas/Template"}}
+                  tally: {type: integer, default: 0}
 components:
   schemas:
     Template:
@@ -292,15 +306,32 @@ async fn pages_from_state_never_repeat_an_item() {
 
 #[tokio::test]
 async fn a_list_page_whose_envelope_cannot_be_filled_is_generated() {
-    let strict = |id: &str| json!({"templates": [template(id, "a@x.io", 1)], "tally": 1});
+    let strict = |id: &str| json!({"templates": [template(id, "a@x.io", 1)], "tally": 7});
+    let ordered = json!({"order": {"member": "amount"}});
+
+    // `tally` is required and its schema fixes it (a `default`): the envelope is
+    // filled as a held answer's is, and the second list comes from state.
     let h = support::described(
         CONTRACT,
-        json!({"operations": {"listStrict": {"order": {"member": "amount"}}}}),
+        json!({"operations": {"listStrictFixed": ordered.clone()}}),
+        vec![strict("t1")],
+    );
+    let (first, _) = get(&h, "/strict2").await;
+    assert_ne!(first, "state");
+    let (second, body) = get(&h, "/strict2").await;
+    assert_eq!(second, "state", "{body}");
+    assert_eq!(body["tally"], json!(0), "{body}");
+    assert_eq!(ids(&body, "templates"), ["t1"]);
+    assert_eq!(h.provider.requests().len(), 1);
+
+    // The same list, but nothing fixes `tally`'s value: no answer from state.
+    let h = support::described(
+        CONTRACT,
+        json!({"operations": {"listStrict": ordered}}),
         vec![strict("t1"), strict("t1")],
     );
     let (first, _) = get(&h, "/strict").await;
     assert_ne!(first, "state");
-    // `tally` is required, and nothing fixes its value: no answer from state.
     let (second, body) = get(&h, "/strict").await;
     assert_ne!(second, "state", "{body}");
     assert_eq!(h.provider.requests().len(), 2);
