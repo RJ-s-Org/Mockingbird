@@ -1417,3 +1417,78 @@ type Mutation {
         assert_eq!(read["data"]["widget"]["starred"], json!(true), "{read}");
     }
 }
+
+/// An RPC-style API: every call a `POST` to `<type>.<verb>`, the record named by a body
+/// member and answered in an `{ok, <record>}` envelope.
+const RPC: &str = r##"
+openapi: 3.0.0
+info: {title: Rpc, version: "1"}
+paths:
+  /api/widgets.create:
+    post:
+      operationId: widgetsCreate
+      requestBody: {content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/WidgetAnswer"}}}}}
+  /api/widgets.info:
+    post:
+      operationId: widgetsInfo
+      requestBody: {content: {application/json: {schema: {type: object, required: [widget], properties: {widget: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/WidgetAnswer"}}}}}
+  /api/widgets.list:
+    post:
+      operationId: widgetsList
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, properties: {ok: {type: boolean}, widgets: {type: array, items: {$ref: "#/components/schemas/Widget"}}}}}}}}
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    WidgetAnswer:
+      type: object
+      required: [widget]
+      properties: {ok: {type: boolean}, widget: {$ref: "#/components/schemas/Widget"}}
+"##;
+
+/// Tier 0 classifies the path-less read as a read of one widget, its target the body
+/// member named for the type, so the executor answers it from the store.
+#[tokio::test]
+async fn a_path_less_rpc_read_names_its_target_by_a_body_member() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        RPC,
+        vec![json!({"ok": true, "widget": {"id": "W1", "name": "a"}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/api/widgets.create",
+            Some(json!({"name": "a"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, headers, body) = h
+        .send(
+            "POST",
+            "/api/widgets.info",
+            Some(json!({"widget": "W1"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["widget"], json!({"id": "W1", "name": "a"}));
+    assert_eq!(
+        capture.of("widgetsInfo"),
+        vec![ExecLine {
+            operation: "widgetsInfo".into(),
+            exec: "read".into(),
+            exec_fallback: None,
+            render_error: None,
+        }]
+    );
+    assert_eq!(h.provider.requests().len(), 1, "the read made no LLM call");
+}

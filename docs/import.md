@@ -67,7 +67,13 @@ Where a `POST` lists several successes, these rules read the `201`. The mock ans
 
 This choice depends on the model. Measured for a reply with a stored parent, a new id came back 8 times out of 8 with Luna and the default model, and at most 2 out of 8 with Lightning, so on a model like that a reply can overwrite its parent. When every call of a route makes a new record, say so with `x-mockingbird-resource: {action: false, type: <the parent's type>}`.
 
-A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read.
+A tail of two or more segments with a body, a `PUT` or `PATCH` on a tail, and two parameters in a row (`/repos/{o}/{r}/merge`) give no such signal and keep what their shape implies. A `POST` whose last segment is a read verb (`/databases/{id}/query`) with a body stays a read. A `POST` that acts on its parent with a one-segment tail of exactly `delete` or `update` (`POST /customers/{customer_id}/delete`) is that write on the parent, whatever it answers.
+
+### RPC-style calls and other protocols
+
+A `POST` with no path parameter whose last segment's action starts with `create`, `update` or `delete` is that write, of the type before the verb: `conversations.create` creates `conversations`, `/files/delete_v2` deletes `files`, `/link/token/create` creates `token`. A read verb there makes a read in the same way (`users.list`, `/accounts/get`). Such a call names its record in its body: a one-record read (`get`, `info`, `retrieve`, `read`, `fetch`, `lookup`) that answers one record, or an update or delete of a type whose other operations agree on its key, takes as its target the one single-value body member named as that key (`id`), as the type's key (`widget_id`, `widgetId`), or as the type (`widget`, as `users.info` takes `user`). A body that names its record otherwise (`path`), or two such members, gives no target; lists and searches take none.
+
+A GraphQL create or delete whose name names a record type with an `id` (`issueCreate`, `commentDelete`) and that answers a payload holding the record in one member (`IssuePayload.issue`) is identified by that member, and a delete by its `id` (or `<type>Id`) argument. An update keeps no identity: its `input` is applied by name. A SOAP answer with no `id` that holds a record in a member named for the operation's type is read by the type's key (`GetItem` answering `Item` keyed by `ItemID`, taken from the request's `ItemID`), and a create whose request sends the one record another operation answers is of that operation's type when its answer holds the key (`AddFixedPriceItem` sending `Item`, answering `ItemID`).
 
 ### Correcting it: `x-mockingbird-resource`
 
