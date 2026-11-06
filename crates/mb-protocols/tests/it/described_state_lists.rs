@@ -4,6 +4,10 @@
 //! from the session's records, before any model call, once the session has listed that
 //! collection; the first list of a collection is still generated and seeded. The
 //! "listed" mark lives in the state store, so it survives a rebuild.
+//!
+//! A list the state-first executor takes is answered from the session's records from
+//! its first call (`tests/exec.rs`); the lists here that are generated first share
+//! their item type with other lists with no path parameter, which the executor leaves.
 #![cfg(test)]
 #![cfg(feature = "http-rest")]
 
@@ -510,12 +514,17 @@ async fn a_nested_list_keeps_its_parents_children_across_a_rebuild() {
         let parent = |p: &'static str| named.then_some(p);
         let store = memory();
         let provider = scripted(vec![
-            json!({"notes": [note("c1", parent("p1")), note("c2", parent("p1"))]}),
-            json!({"notes": [note("c3", parent("p2"))]}),
+            note("c1", parent("p1")),
+            note("c2", parent("p1")),
+            note("c3", parent("p2")),
             note("c4", parent("p1")),
         ]);
         let desc = json!({"operations": {"listNotes": {"order": {"member": "title"}}}});
         let before = on_store(&contract, &store, &provider, desc.clone(), 1);
+        create(&before, "/folders/p1/notes", note("c1", parent("p1"))).await;
+        create(&before, "/folders/p1/notes", note("c2", parent("p1"))).await;
+        create(&before, "/folders/p2/notes", note("c3", parent("p2"))).await;
+        // Listed from state, which marks each collection listed.
         get(&before, "/folders/p1/notes").await;
         get(&before, "/folders/p2/notes").await;
         create(&before, "/folders/p1/notes", note("c4", parent("p1"))).await;
@@ -527,7 +536,7 @@ async fn a_nested_list_keeps_its_parents_children_across_a_rebuild() {
         let (source, body) = get(&after, "/folders/p2/notes").await;
         assert_eq!(source, "state", "{named}: {body}");
         assert_eq!(ids(&body, "notes"), ["c3"], "{named}");
-        assert_eq!(provider.requests().len(), 3, "{named}");
+        assert_eq!(provider.requests().len(), 4, "{named}");
     }
 }
 
@@ -722,14 +731,13 @@ fn required_next(name: &str, member: &str) -> String {
         .replace("{member}", member)
 }
 
-fn three_with(name: &str, next: Value) -> Value {
-    let mut body = list(vec![
+/// The three templates the session holds.
+fn three() -> Vec<Value> {
+    vec![
         template("t1", "a@x.io", 1),
         template("t2", "b@x.io", 2),
         template("t3", "c@x.io", 3),
-    ]);
-    body[name] = next;
-    body
+    ]
 }
 
 fn cursor_paging() -> Value {
@@ -750,15 +758,15 @@ async fn a_last_page_from_state_carries_no_example_cursor() {
         let h = support::described(
             &required_next("continuation", member),
             world(cursor_paging()),
-            vec![three_with("continuation", json!("model-token"))],
+            Vec::new(),
         );
-        get(&h, "/templates").await;
+        h.hold("templates", &three()).await;
         // The whole list, uncut: no next page.
         let (source, body) = get(&h, "/templates").await;
         assert_eq!(source, "state", "{member}: {body}");
         assert_eq!(ids(&body, "templates"), ["t1", "t2", "t3"]);
         assert_eq!(body["continuation"], end, "{member}: {body}");
-        assert_eq!(h.provider.requests().len(), 1, "{member}");
+        assert_eq!(h.provider.requests().len(), 0, "{member}");
     }
 }
 
@@ -769,9 +777,9 @@ async fn a_middle_page_from_state_carries_a_token_to_the_next() {
     let h = support::described(
         &required_next("continuation", r#"{type: string, examples: ["c-example"]}"#),
         world(cursor_paging()),
-        vec![three_with("continuation", json!("model-token"))],
+        Vec::new(),
     );
-    get(&h, "/templates").await;
+    h.hold("templates", &three()).await;
     let (source, body) = get(&h, "/templates?rows=2").await;
     assert_eq!(source, "state", "{body}");
     assert_eq!(ids(&body, "templates"), ["t1", "t2"]);
@@ -783,7 +791,7 @@ async fn a_middle_page_from_state_carries_a_token_to_the_next() {
     let (_, body) = get(&h, &format!("/templates?rows=2&from={token}")).await;
     assert_eq!(ids(&body, "templates"), ["t3"], "{body}");
     assert_ne!(body["continuation"], json!("c-example"), "{body}");
-    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 /// The last numbered page from state: a required next page number is `null` where it
@@ -794,9 +802,9 @@ async fn a_last_numbered_page_from_state_carries_no_example_page() {
     let h = support::described(
         &required_next("nextSheet", r#"{type: [integer, "null"], examples: [2]}"#),
         world(paging.clone()),
-        vec![three_with("nextSheet", json!(2))],
+        Vec::new(),
     );
-    get(&h, "/templates").await;
+    h.hold("templates", &three()).await;
     let (source, body) = get(&h, "/templates?rows=2&sheet=1").await;
     assert_eq!(source, "state", "{body}");
     assert_eq!(body["nextSheet"], json!(2), "{body}");
@@ -815,9 +823,9 @@ async fn a_last_numbered_page_from_state_carries_no_example_page() {
     let h = support::described(
         &required_next("nextSheet", "{type: integer, examples: [2]}"),
         world(paging),
-        vec![three_with("nextSheet", json!(2))],
+        Vec::new(),
     );
-    get(&h, "/templates").await;
+    h.hold("templates", &three()).await;
     let (source, body) = get(&h, "/templates?rows=2&sheet=2").await;
     assert_eq!(source, "state", "{body}");
     assert_eq!(body["nextSheet"], json!(2), "{body}");

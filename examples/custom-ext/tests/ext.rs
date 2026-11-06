@@ -78,14 +78,20 @@ async fn call(base: &str, tenant: Option<&str>) -> reqwest::Response {
 }
 
 /// A served call: 200 with a `listOrders` body (an array of orders), so a
-/// different route that also answers 200 fails the test.
+/// different route that also answers 200 fails the test. The list is the
+/// session's records, from state: none, as nothing was created.
 async fn assert_orders(base: &str, tenant: Option<&str>) {
     let r = call(base, tenant).await;
     assert_eq!(r.status(), 200, "tenant {tenant:?}");
+    assert_eq!(
+        r.headers()
+            .get("x-mockingbird-source")
+            .and_then(|v| v.to_str().ok()),
+        Some("state"),
+        "tenant {tenant:?}"
+    );
     let body: Value = r.json().await.unwrap();
     let orders = body.as_array().unwrap_or_else(|| panic!("{body}"));
-    // The faker makes at least one element of a top-level array.
-    assert!(!orders.is_empty(), "{body}");
     for order in orders {
         assert!(order["id"].is_string(), "{order}");
         assert!(order["customerId"].is_string(), "{order}");

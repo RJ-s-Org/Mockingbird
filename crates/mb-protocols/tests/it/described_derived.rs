@@ -209,16 +209,12 @@ async fn a_sum_into_a_string_member_keeps_the_children_scale() {
 
 #[tokio::test]
 async fn a_generated_parent_with_no_held_children_keeps_the_models_value() {
-    let h = support::described(
-        CONTRACT,
-        world(),
-        vec![order("o9"), json!({"orders": [order("o5")]})],
-    );
+    let h = support::described(CONTRACT, world(), vec![order("o9")]);
     // Not held: generated, and nothing under it is held.
     let (_, body) = get(&h, "/orders/o9").await;
     assert_eq!(body["line_count"], json!(7), "{body}");
-    // Held by a list's seeding, not created in the session, with no child held.
-    get(&h, "/orders").await;
+    // Held, not created in the session by this runtime, with no child held.
+    h.hold("orders", &[order("o5")]).await;
     let (source, body) = get(&h, "/orders/o5").await;
     assert_eq!(source, "state", "{body}");
     assert_eq!(body["line_count"], json!(7), "{body}");
@@ -312,15 +308,16 @@ async fn a_page_of_parents_lists_the_children_once() {
     w["operations"] = json!({"listOrders": {"paging": {"style": "page", "request": "page"}}});
     let h = support::harness(
         CONTRACT,
-        vec![json!({"orders": ten}), line("l1", 1.0, "1.00", "posted")],
+        vec![line("l1", 1.0, "1.00", "posted")],
         &HarnessOptions::default(),
         |mut rt| {
             rt.state = store as Arc<dyn StateStore>;
             support::with_effective(rt, w, false)
         },
     );
+    h.hold("orders", &ten).await;
     let (first, _) = get(&h, "/orders").await;
-    assert_ne!(first, "state");
+    assert_eq!(first, "state");
     send(&h, "POST", "/orders/o3/lines", Some(json!({}))).await;
     let before = counting.lines.load(Ordering::SeqCst);
     let (second, body) = get(&h, "/orders").await;
@@ -328,7 +325,7 @@ async fn a_page_of_parents_lists_the_children_once() {
     assert_eq!(counting.lines.load(Ordering::SeqCst) - before, 1);
     let orders = body["orders"].as_array().unwrap();
     assert_eq!(orders.len(), 10, "{body}");
-    // A seeded order with a held child counts it; one with none keeps the model's.
+    // A held order with a held child counts it; one with none keeps its own.
     assert_eq!(orders[2]["line_count"], json!(1), "{body}");
     assert_eq!(orders[0]["line_count"], json!(7), "{body}");
 }
@@ -375,10 +372,11 @@ async fn a_list_whose_items_declare_no_derived_member_is_still_answered_from_sta
     let h = support::described(
         &summary_contract(),
         w,
-        vec![json!({"orders": ten}), line("l1", 1.0, "1.00", "posted")],
+        vec![line("l1", 1.0, "1.00", "posted")],
     );
+    h.hold("orders", &ten).await;
     let (first, _) = get(&h, "/orders").await;
-    assert_ne!(first, "state");
+    assert_eq!(first, "state");
     send(&h, "POST", "/orders/o3/lines", Some(json!({}))).await;
     let (second, body) = get(&h, "/orders").await;
     assert_eq!(second, "state", "{body}");

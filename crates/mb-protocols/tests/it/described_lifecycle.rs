@@ -262,19 +262,17 @@ async fn listed_with_lists_it_again() {
         vec![
             space("s1", "Docs", "ACTIVE"),
             space("s2", "Notes", "ACTIVE"),
-            space("s1", "Docs", "ACTIVE"),
-            spaces(vec![
-                space("s1", "Docs", "ACTIVE"),
-                space("s2", "Notes", "ACTIVE"),
-            ]),
         ],
     );
     create_space(&h, "Docs").await;
     create_space(&h, "Notes").await;
+    // Executed from state: no model call.
     delete(&h, "/spaces/s1").await;
+    // From state, least recently written first: the soft delete wrote `s1` last.
     let body = get(&h, "/spaces?showDeleted=true").await;
-    assert_eq!(ids(&body), ["s1", "s2"], "{body}");
-    assert_eq!(body["spaces"][0]["state"], "DELETE_REQUESTED", "{body}");
+    assert_eq!(ids(&body), ["s2", "s1"], "{body}");
+    assert_eq!(body["spaces"][1]["state"], "DELETE_REQUESTED", "{body}");
+    assert_eq!(h.provider.requests().len(), 2);
 }
 
 #[tokio::test]
@@ -286,54 +284,47 @@ async fn a_soft_deleted_record_is_not_added_back_by_the_held_record_paths() {
         vec![
             space("s1", "Docs", "ACTIVE"),
             space("s2", "Notes", "ACTIVE"),
-            space("s1", "Docs", "ACTIVE"),
-            // A full page of one with no cursor: the session's held records are its rest.
-            spaces(vec![space("g1", "Other", "ACTIVE")]),
-            // A list naming the soft-deleted record as the model last saw it, under a
-            // name filter.
-            spaces(vec![
-                space("s1", "Notes", "ACTIVE"),
-                space("s2", "Notes", "ACTIVE"),
-                space("g2", "Else", "ACTIVE"),
-            ]),
+            space("s3", "Other", "ACTIVE"),
         ],
     );
     create_space(&h, "Docs").await;
     create_space(&h, "Notes").await;
     delete(&h, "/spaces/s1").await;
+    create_space(&h, "Other").await;
 
-    // stored_rest: the rest of the full page holds `s2`, not `s1`.
+    // A full page of one, then its rest by the minted cursor: `s1` on neither.
     let first = get(&h, "/spaces?limit=1").await;
-    assert_eq!(ids(&first), ["g1"], "{first}");
+    assert_eq!(ids(&first), ["s2"], "{first}");
     let token = first["cursor"]
         .as_str()
         .expect("a minted cursor")
         .to_string();
     let rest = get(&h, &format!("/spaces?limit=1&cursor={token}")).await;
-    assert_eq!(ids(&rest), ["s2"], "{rest}");
+    assert_eq!(ids(&rest), ["s3"], "{rest}");
     assert!(
         rest.get("cursor").is_none_or(|c| c.is_null() || c == ""),
         "{rest}"
     );
 
-    // overlay_stored shows `s1` as stored, deleted, and narrow drops it; the
-    // name-matched filter still drops `g2`.
+    // The name-matched filter over the held records: `s1` stays out.
     let named = get(&h, "/spaces?displayName=Notes").await;
     assert_eq!(ids(&named), ["s2"], "{named}");
+    assert_eq!(h.provider.requests().len(), 3);
 }
 
 #[tokio::test]
 async fn a_record_soft_deleted_after_the_first_page_is_not_on_the_next() {
-    let h = support::described(
-        CONTRACT,
-        soft_spaces(),
-        vec![spaces(vec![
+    let h = support::described(CONTRACT, soft_spaces(), vec![]);
+    h.hold(
+        "spaces",
+        &[
             space("s1", "A", "ACTIVE"),
             space("s2", "B", "ACTIVE"),
             space("s3", "C", "ACTIVE"),
             space("s4", "D", "ACTIVE"),
-        ])],
-    );
+        ],
+    )
+    .await;
     let first = get(&h, "/spaces?limit=2").await;
     assert_eq!(ids(&first), ["s1", "s2"], "{first}");
     let token = first["cursor"]
@@ -343,8 +334,9 @@ async fn a_record_soft_deleted_after_the_first_page_is_not_on_the_next() {
     delete(&h, "/spaces/s3").await;
     let next = get(&h, &format!("/spaces?limit=2&cursor={token}")).await;
     assert_eq!(ids(&next), ["s4"], "{next}");
-    // The list, and nothing else: the delete is executed, the next page served.
-    assert_eq!(h.provider.requests().len(), 1);
+    // The list is answered from the session's records, the delete is executed and the
+    // next page served: no model call at all.
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 #[tokio::test]

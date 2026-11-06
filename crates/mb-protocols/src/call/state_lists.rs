@@ -1,6 +1,10 @@
 //! Lists answered from state, for operations the world description pages, filters,
 //! scopes or orders.
 //!
+//! The state-first executor answers a list of a type with an identity from its first
+//! call (`exec/list.rs`), through this module's [`page`] and marks; what follows is
+//! the path of a list it leaves to generation.
+//!
 //! A list read is answered from the session's records, before any model call, when:
 //! - the description sets its operation's `paging`, `filters` (non-empty), `scope` or
 //!   `order` ([`ListQuery::describes_query`]; a soft delete alone is not enough);
@@ -198,6 +202,22 @@ pub(super) async fn mark_listed(
     write_mark(state, &plan.session, id, &mark).await;
 }
 
+/// The ids the mark of the collection list `call` names holds, in the order it placed
+/// them; empty when it has none, or one over [`MAX_SCAN`].
+pub(super) async fn marked(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+) -> Vec<String> {
+    let Some(key) = collection_key(plan.op, collection_of(plan.op, call).as_ref()) else {
+        return Vec::new();
+    };
+    match read_mark(state, &plan.session, &mark_id(t, &key)).await {
+        Some(mark) if !mark.over => mark.ids,
+        _ => Vec::new(),
+    }
+}
+
 /// Adds `id`, a record of type `t` that `op` created in `collection`, to that
 /// collection's mark, when it has one (see the module's doc).
 pub(super) async fn mark_created(
@@ -300,6 +320,73 @@ fn page_ends(body: &Value, path: &[String]) -> Vec<Value> {
         .collect()
 }
 
+/// Where `op`'s list answer holds its items ([`list_place`]), with the schemas a page
+/// from state is rendered by.
+pub(super) struct Shape {
+    /// The answer's schema.
+    schema: Value,
+    /// The member path of the items; empty for an answer that is the array.
+    path: Vec<String>,
+    /// The array's schema.
+    array: Value,
+    /// The schema of one item.
+    pub(super) items: Value,
+}
+
+impl Shape {
+    /// The shape of `op`'s success answer; `None` when it holds no one list.
+    pub(super) fn of(rt: &MockRuntime, op: &Operation) -> Option<Self> {
+        let schema = op.success_output()?.schema.as_ref()?;
+        let (path, array) = list_place(rt, op, schema)?;
+        let (array_parts, _) = schema_parts(rt.bundle(), Some(&array));
+        let items = array_parts.iter().find_map(|p| p.get("items"))?.clone();
+        Some(Self {
+            schema: schema.clone(),
+            path,
+            array,
+            items,
+        })
+    }
+
+    /// The answer's schema.
+    pub(super) fn schema(&self) -> &Value {
+        &self.schema
+    }
+
+    /// The members above the list: empty for a list at the envelope's top, or an answer
+    /// that is the array.
+    pub(super) fn parents(&self) -> &[String] {
+        self.path.split_last().map_or(&[], |(_, parents)| parents)
+    }
+
+    /// The envelope of an empty page, its other required members filled as a held
+    /// answer's are, from `kept` first (see [`mb_engine::Engine::fill_envelope`]);
+    /// `None` when one cannot be.
+    pub(super) fn envelope(
+        &self,
+        rt: &MockRuntime,
+        plan: &CallPlan<'_>,
+        kept: Option<&Map<String, Value>>,
+    ) -> Option<Value> {
+        let Some(first) = self.path.first() else {
+            return Some(Value::Array(Vec::new()));
+        };
+        let mut top = Map::new();
+        plan.engine
+            .fill_envelope(rt.bundle(), &self.schema, &mut top, first, kept)?;
+        with_items(&Value::Object(top), &self.path, Vec::new())
+    }
+}
+
+/// Why [`page`] serves no page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Unserved {
+    /// The page does not validate against the answer's schema.
+    Render,
+    /// The page drops records past its size, and no token or run can serve them.
+    NoPlace,
+}
+
 /// The answer to list `call` from the session's records (see the module's doc), tagged
 /// `State`; `None` when it is not one to answer so, the collection was not listed this
 /// session, or the answer does not validate: the list is then generated.
@@ -328,11 +415,8 @@ pub(super) async fn answer(
         return None;
     }
     let bundle = rt.bundle();
-    let schema = op.success_output()?.schema.as_ref()?;
-    let (path, array_schema) = list_place(rt, op, schema)?;
-    let (array_parts, _) = schema_parts(bundle, Some(&array_schema));
-    let items_schema = array_parts.iter().find_map(|p| p.get("items"))?.clone();
-    let (item_parts, _) = schema_parts(bundle, Some(&items_schema));
+    let shape = Shape::of(rt, op)?;
+    let (item_parts, _) = schema_parts(bundle, Some(&shape.items));
     let size = list_query::requested_page(rt, op, call);
     let size_ref = size.as_ref().map(|(name, limit)| (name.as_str(), *limit));
     let query = op.input.query.as_ref();
@@ -348,16 +432,7 @@ pub(super) async fn answer(
     }) {
         return None;
     }
-    // The envelope, its other required members filled as a held answer's are.
-    let envelope = match path.split_first() {
-        None => Value::Array(Vec::new()),
-        Some((first, _)) => {
-            let mut top = Map::new();
-            plan.engine
-                .fill_envelope(bundle, schema, &mut top, first, None)?;
-            Value::Object(top)
-        }
-    };
+    let envelope = shape.envelope(rt, plan, None)?;
     let key = collection_key(op, collection_of(op, call).as_ref())?;
     let mark = read_mark(state, session, &mark_id(t, &key)).await?;
     if mark.over {
@@ -377,8 +452,7 @@ pub(super) async fn answer(
         .map(|(at, id)| (id.as_str(), at))
         .collect();
     records.sort_by_key(|r| placed.get(r.id.as_str()).copied().unwrap_or(usize::MAX));
-    let shape = with_items(&envelope, &path, Vec::new())?;
-    let field = item_identity(bundle, op, &shape);
+    let field = item_identity(bundle, op, &envelope);
     let mut items = Vec::new();
     for r in &records {
         if !placed.contains_key(r.id.as_str())
@@ -386,7 +460,7 @@ pub(super) async fn answer(
         {
             continue;
         }
-        let item = lists::projected(bundle, Some(&items_schema), &r.data, 0);
+        let item = lists::projected(bundle, Some(&shape.items), &r.data, 0);
         let kept = list_query::keeps(Some(&q), &item, |i| {
             filters.iter().all(|(_, f)| lists::holds_wanted(i, f))
         });
@@ -394,16 +468,54 @@ pub(super) async fn answer(
             items.push(item);
         }
     }
+    page(
+        state,
+        (plan, call),
+        (t, Some(&q)),
+        (&shape, &envelope),
+        items,
+        false,
+    )
+    .await
+    .ok()
+}
+
+/// The page list `call` asks for of `items`, the records of type `t` its query keeps,
+/// each as the items declare it, in the collection's order, placed in `envelope` (an
+/// empty page of `shape`): each item's derived members filled, ordered by `q`'s
+/// described order, counted, and cut by its described page (a page number or offset
+/// from state, a token's later pages kept as a [`pages`] cut), else by the page size a
+/// parameter asks for (see the module's doc). Tagged `State`. A cut with no place for
+/// a token, nor a run, is not served, unless `served_anyway`: then a described page is
+/// served whole (narrowed and ordered, but not cut, as a generated one is), and a page
+/// size the description does not name cuts the page.
+pub(super) async fn page(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    (t, q): (&str, Option<&ListQuery>),
+    (shape, envelope): (&Shape, &Value),
+    mut items: Vec<Value>,
+    served_anyway: bool,
+) -> Result<GeneratedResponse, Unserved> {
+    let rt = state.rt;
+    let op = plan.op;
+    let bundle = rt.bundle();
+    let (schema, path) = (&shape.schema, &shape.path);
+    let (array_parts, _) = schema_parts(bundle, Some(&shape.array));
+    let size = list_query::requested_page(rt, op, call);
     // Each item's derived members, from one listing per child type.
-    derived::fill_page(state, session, t, &mut items, Some(&items_schema)).await;
-    list_query::sort(&q, &mut items);
+    derived::fill_page(state, &plan.session, t, &mut items, Some(&shape.items)).await;
+    if let Some(q) = q {
+        list_query::sort(q, &mut items);
+    }
     // What the query keeps, before the page is cut: the list's count on every page.
     let total = items.len();
     let mut next: Option<usize> = None;
     let mut cut = None;
-    let page: Vec<Value> = match q.page.as_ref() {
-        Some(ask) if ask.counts() => {
-            let (page, more) = list_query::page(&q, &items);
+    let ask = q.and_then(|q| q.page.as_ref());
+    let page: Vec<Value> = match (q, ask) {
+        (Some(q), Some(ask)) if ask.counts() => {
+            let (page, more) = list_query::page(q, &items);
             let size = ask.size.unwrap_or_default();
             next = more
                 .and_then(|end| end.parse::<usize>().ok())
@@ -413,7 +525,7 @@ pub(super) async fn answer(
                 });
             page.to_vec()
         }
-        Some(ask) => match (ask.size.filter(|s| *s > 0), ask.size_param.clone()) {
+        (_, Some(ask)) => match (ask.size.filter(|s| *s > 0), ask.size_param.clone()) {
             (Some(size), Some(size_param)) if items.len() > size => {
                 let rest = items.split_off(size);
                 cut = Some((rest, size, size_param));
@@ -421,7 +533,7 @@ pub(super) async fn answer(
             }
             _ => items,
         },
-        None => match size.as_ref() {
+        (_, None) => match size.as_ref() {
             Some((size_param, limit)) => match lists::page_size(*limit, &array_parts) {
                 Some(size) if items.len() > size => {
                     let rest = items.split_off(size);
@@ -433,18 +545,22 @@ pub(super) async fn answer(
             None => items,
         },
     };
-    let mut body = with_items(&envelope, &path, page)?;
+    let all: Option<Vec<Value>> = match &cut {
+        Some((rest, _, _)) if served_anyway && ask.is_some() => {
+            Some(page.iter().chain(rest).cloned().collect())
+        }
+        _ => None,
+    };
+    let mut body = with_items(envelope, path, page).ok_or(Unserved::Render)?;
     let valid = |candidate: &Value| plan.engine.serve_stored(bundle, op, candidate, None);
     if let Some(counted) =
-        with_count(bundle, schema, &body, &path, total).filter(|c| valid(c).is_some())
+        with_count(bundle, schema, &body, path, total).filter(|c| valid(c).is_some())
     {
         body = counted;
     }
     // The paging member the envelope was filled with (a fixed value, or the contract's
     // example) is no position of this list: with no next page to write there, it ends.
-    let at_next = q
-        .page
-        .as_ref()
+    let at_next = ask
         .and_then(|ask| ask.response.as_deref())
         .map(|member| member.split('.').map(str::to_string).collect::<Vec<_>>());
     let mut no_end = false;
@@ -467,22 +583,31 @@ pub(super) async fn answer(
         }
     }
     let mut header = None;
-    if let (Some(next), Some(ask)) = (next, q.page.as_ref()) {
+    if let (Some(next), Some(ask)) = (next, ask) {
         if let Some(at) = &at_next {
             body = [Value::from(next), Value::String(next.to_string())]
                 .into_iter()
                 .filter_map(|value| pages::placed(&body, at, Some(value)))
-                .find(|candidate| valid(candidate).is_some())?;
+                .find(|candidate| valid(candidate).is_some())
+                .ok_or(Unserved::Render)?;
         }
         if let Some(name) = &ask.response_header {
             let value = next.to_string();
             if !pages::header_fits(rt, op, name, &value) {
-                return None;
+                return Err(Unserved::Render);
             }
             header = Some((name.clone(), value));
         }
+        // The one flag beside the list saying more follow (`has_more`) says so.
+        if let [flag] = pages::booleans_at(bundle, op, shape.parents()).as_slice()
+            && flag.to_ascii_lowercase().contains("more")
+            && let Some(more) =
+                pages::with_more(&body, shape.parents(), flag).filter(|c| valid(c).is_some())
+        {
+            body = more;
+        }
     }
-    let mut served = valid(&body)?;
+    let mut served = valid(&body).ok_or(Unserved::Render)?;
     served.headers.extend(header);
     if no_end {
         served.world_gaps.push(NO_PAGE_END.to_string());
@@ -495,13 +620,17 @@ pub(super) async fn answer(
             size_param,
             truncated: false,
             unnarrowed: None,
-            uncut: None,
+            uncut: all
+                .and_then(|all| with_items(&body, path, all))
+                .filter(|whole| valid(whole).is_some()),
         };
         // No place for a token, nor a run: the page would drop the rest, so it goes to
-        // the model.
-        if !pages::mint(state, (plan, call), Some(t), cut, &mut served).await {
-            return None;
+        // the model, unless it is served anyway ([`pages::mint`] put a whole one in
+        // place).
+        if !pages::mint(state, (plan, call), Some(t), cut, &mut served).await && !served_anyway {
+            return Err(Unserved::NoPlace);
         }
     }
-    Some(served)
+    pages::no_next_header(rt, (op, call), &mut served.headers);
+    Ok(served)
 }

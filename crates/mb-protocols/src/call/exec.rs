@@ -111,7 +111,10 @@ pub(super) fn classify(
     } else if !desc
         .and_then(|d| d.r#type.as_deref())
         .or(op.resource_type.as_deref())
-        .is_some_and(|t| identified(rt, op, t))
+        .is_some_and(|t| match kind {
+            OpKind::List => op.identity.is_some() || list::identified(rt, op, kind),
+            _ => identified(rt, op, t),
+        })
     {
         Some(Fallback::NoIdentity)
     } else if !matches!(kind, OpKind::Create | OpKind::List) && target_id(op, call).is_none() {
