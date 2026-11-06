@@ -3524,3 +3524,38 @@ fn every_request_media_type_keeps_its_body_schema() {
     // A single media type needs no variants: the body says it all.
     assert!(b.operation("post_one").unwrap().input.bodies.is_empty());
 }
+
+/// A `$ref` in a request body media type other than the default is checked
+/// like the default's: a missing component is stubbed, with a warning that
+/// names the media type.
+#[test]
+fn dangling_ref_in_a_non_default_request_media_type_is_checked() {
+    let src = oas(r#"
+  /flags/{key}:
+    patch:
+      operationId: patchFlag
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: array}
+          application/json; domain-model=x.semanticpatch:
+            schema: {$ref: '#/components/schemas/Missing'}
+      responses: {"200": {description: OK}}
+"#);
+    let (b, warnings) = mb_import::compile_with_warnings(src.as_bytes()).unwrap();
+    let input = &b.operation("patchFlag").unwrap().input;
+    assert_eq!(input.bodies[1].schema, json!({"$ref": "#/$defs/Missing"}));
+    assert_eq!(b.defs["Missing"], json!(true));
+    let dangling: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == "dangling_ref")
+        .collect();
+    assert_eq!(dangling.len(), 1, "{warnings:?}");
+    let message = &dangling[0].message;
+    assert!(message.contains("operation patchFlag"), "{message}");
+    assert!(
+        message.contains("application/json; domain-model=x.semanticpatch"),
+        "{message}"
+    );
+}

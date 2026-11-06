@@ -773,8 +773,9 @@ pub(crate) fn check_defs_refs(
     Ok(())
 }
 
-/// Checks the refs of every input and output schema of `op`, stubbing
-/// dangling ones as [`check_refs_or_stub`] does.
+/// Checks the refs of every input and output schema of `op`, each declared
+/// request body media type included, stubbing dangling ones as
+/// [`check_refs_or_stub`] does.
 pub(crate) fn check_operation_refs(
     op: &Operation,
     defs: &mut Map<String, Value>,
@@ -793,6 +794,10 @@ pub(crate) fn check_operation_refs(
             let at = format!("operation {} {part}", op.id);
             check_refs_or_stub(s, defs, &at, "", source_prefix, ctx)?;
         }
+    }
+    for variant in &input.bodies {
+        let at = format!("operation {} request body {}", op.id, variant.media_type);
+        check_refs_or_stub(&variant.schema, defs, &at, "", source_prefix, ctx)?;
     }
     for o in &op.outputs {
         if let Some(s) = &o.schema {
@@ -1021,4 +1026,46 @@ fn path_item_payload(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A context that rejects dangling refs refuses one in a request body
+    /// media type other than the default, naming that media type.
+    #[test]
+    fn strict_refuses_dangling_ref_in_a_non_default_request_media_type() {
+        let src = r#"
+openapi: 3.0.3
+info: {title: T, version: "1"}
+paths:
+  /flags/{key}:
+    patch:
+      operationId: patchFlag
+      parameters: [{name: key, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: array}
+          application/json; domain-model=x.semanticpatch:
+            schema: {$ref: '#/components/schemas/Missing'}
+      responses: {"200": {description: OK}}
+"#;
+        let doc: Value = serde_saphyr::from_str(src).unwrap();
+        let mut ctx = Ctx {
+            stub_dangling_refs: false,
+            ..Ctx::new()
+        };
+        match compile(&doc, src.as_bytes(), &mut ctx) {
+            Err(ImportError::Invalid { message, .. }) => {
+                assert!(message.contains("operation patchFlag"), "{message}");
+                assert!(
+                    message.contains("domain-model=x.semanticpatch"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
 }
