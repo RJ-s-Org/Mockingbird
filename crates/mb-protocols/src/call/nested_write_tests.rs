@@ -404,6 +404,12 @@ components:
         street: {type: string}
         city: {type: string}
         zip: {type: string}
+        note: {type: string, nullable: true}
+        geo:
+          type: object
+          properties:
+            lat: {type: number}
+            lng: {type: number}
     Account:
       type: object
       required: [id]
@@ -504,4 +510,46 @@ async fn an_acknowledged_put_with_an_agreeing_effect_replaces_the_object() {
         json!({"street": "Elm 2", "city": "Bergen"}),
         "{stored}"
     );
+}
+
+/// An acknowledged `PUT` of a declared object holding a declared object, with an
+/// agreeing effect: the inner object is the request's too, the member it left out gone.
+#[tokio::test]
+async fn an_acknowledged_put_replaces_a_nested_declared_object_whole() {
+    let held = json!({"id": "a1", "address": {"city": "Oslo", "geo": {"lat": 1, "lng": 2}}});
+    let answer = json!({"response": {"ok": true}, "effects": [
+        {"type": "accounts", "id": "a1", "set": {"address": {"city": "Bergen", "geo": {"lat": 5}}}},
+    ]});
+    let edit = json!({"address": {"city": "Bergen", "geo": {"lat": 5}}});
+    let stored = after_update(
+        ACCOUNTS,
+        ("accounts", "a1", held),
+        answer,
+        ("PUT", "/accounts/a1", "application/json", edit),
+    )
+    .await;
+    assert_eq!(
+        stored["address"],
+        json!({"city": "Bergen", "geo": {"lat": 5}}),
+        "{stored}"
+    );
+}
+
+/// An acknowledged `PUT` leaving out an optional member that admits `null`: the member
+/// is gone, not stored as `null`.
+#[tokio::test]
+async fn an_acknowledged_put_drops_a_nullable_member_it_leaves_out() {
+    let held = json!({"id": "a1", "address": {"city": "Oslo", "note": "x"}});
+    let answer = json!({"response": {"ok": true}, "effects": [
+        {"type": "accounts", "id": "a1", "set": {"address": {"city": "Bergen"}}},
+    ]});
+    let edit = json!({"address": {"city": "Bergen"}});
+    let stored = after_update(
+        ACCOUNTS,
+        ("accounts", "a1", held),
+        answer,
+        ("PUT", "/accounts/a1", "application/json", edit),
+    )
+    .await;
+    assert_eq!(stored["address"], json!({"city": "Bergen"}), "{stored}");
 }

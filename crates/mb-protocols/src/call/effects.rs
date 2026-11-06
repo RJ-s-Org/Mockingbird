@@ -966,11 +966,15 @@ pub(super) async fn apply_effect(
         return Err("it sets only what was redacted");
     }
     let requested = if let Some((plan, call, status)) = own {
-        let set = write_memory::own_effect_members(rt, plan, call, &held, &requested, status);
-        if set.is_empty() {
+        let own = write_memory::own_effect_members(rt, plan, call, &held, &requested, status);
+        if own.set.is_empty() {
             return Err("it sets no member an effect on this update's target may");
         }
-        set
+        // A member a `PUT` replaces whole goes where nothing is held.
+        for key in &own.whole {
+            data.remove(key);
+        }
+        own.set
     } else {
         requested
     };

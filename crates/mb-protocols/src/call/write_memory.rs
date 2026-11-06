@@ -2444,7 +2444,7 @@ pub(super) fn own_effect_members(
     held: &StoredResource,
     set: &Map<String, Value>,
     status: u16,
-) -> Map<String, Value> {
+) -> OwnMembers {
     let t = held.resource_type.as_str();
     let bundle = rt.bundle();
     let level = Level::of(bundle, read_schema(rt, t));
@@ -2482,17 +2482,22 @@ pub(super) fn own_effect_members(
         .filter(|(key, _)| !paths.contains(*key) && !shows_path(key))
         .filter_map(|(key, value)| Some((key, request.unsettled(&[key.as_str()], value)?)))
         .map(|(key, value)| {
-            let value = match (request.replaces, request.sent(&[key.as_str()])) {
-                (true, Some(_)) => replacing(rt, held.data.get(key), value, declared(key)),
-                _ => value,
+            let whole = match (request.replaces, request.sent(&[key.as_str()])) {
+                (true, Some(_)) => replacing(rt, held.data.get(key), &value, declared(key)),
+                _ => None,
             };
-            (key, value)
+            match whole {
+                Some(whole) => (key, whole, true),
+                None => (key, value, false),
+            }
         })
-        .filter(|(key, value)| {
-            // The member as it would merge (see [`merge_at`]), not as written.
+        .filter(|(key, value, whole)| {
+            // The member as it would merge (see [`merge_at`]), not as written: one a
+            // `PUT` replaces whole goes where nothing is held.
             let mut alone = held.data.clone();
             if let Value::Object(members) = &mut alone {
-                let merged = merge_at(rt, members.get(*key), value, declared(key));
+                let was = if *whole { None } else { members.get(*key) };
+                let merged = merge_at(rt, was, value, declared(key));
                 match merged {
                     Some(merged) => members.insert((*key).clone(), merged),
                     None => return false,
@@ -2500,8 +2505,23 @@ pub(super) fn own_effect_members(
             }
             keeps_owner(rt, plan, call, held, &alone)
         })
-        .map(|(key, value)| (key.clone(), value))
-        .collect()
+        .fold(OwnMembers::default(), |mut out, (key, value, whole)| {
+            if whole {
+                out.whole.push(key.clone());
+            }
+            out.set.insert(key.clone(), value);
+            out
+        })
+}
+
+/// What [`own_effect_members`] lets go on an update's own target.
+#[derive(Default)]
+pub(super) struct OwnMembers {
+    /// The members, as they go on (see [`merge_at`]).
+    pub(super) set: Map<String, Value>,
+    /// Those a `PUT` replaces whole (see [`replacing`]): each goes where nothing is
+    /// held, keeping nothing of the held member it does not carry.
+    pub(super) whole: Vec<String>,
 }
 
 /// What an update's request sent, and what its answer settles of it (see
@@ -2678,29 +2698,35 @@ fn patched(
 }
 
 /// `value`, an effect's object for a top-level member a `PUT` sent, as it replaces the
-/// held one where the member's place declares members (which [`merge_at`] merges member
-/// by member): each held member it leaves out is set to `null`, which removes an
-/// optional one and clears a nullable one (see [`Place::null_member`]). A required one
-/// is left as held, for a `null` there would refuse the effect whole.
+/// held one whole where the member's place declares members (which [`merge_at`] would
+/// merge member by member); none for any other place, where the effect's value is put
+/// as it merges. A held member the value leaves out is gone, at every depth of a
+/// declared object both hold, but for a required one, left as held: without it the
+/// record would break its schema, and the effect be refused whole.
 fn replacing(
     rt: &MockRuntime,
     held: Option<&Value>,
-    value: Value,
+    value: &Value,
     schema: Option<&Value>,
-) -> Value {
-    let (Some(Value::Object(had)), Value::Object(mut set)) = (held, value.clone()) else {
-        return value;
+) -> Option<Value> {
+    let (Some(Value::Object(had)), Value::Object(set)) = (held, value) else {
+        return None;
     };
-    let place = Place::of(rt, schema);
+    let place = Place::of_held(rt, schema, held);
     if !place.declares() {
-        return value;
+        return None;
     }
-    for key in had.keys() {
-        if !set.contains_key(key) && place.null_member(rt, key) != NullMember::Refused {
-            set.insert(key.clone(), Value::Null);
+    let mut out = Map::new();
+    for (key, inner) in set {
+        let deeper = replacing(rt, had.get(key), inner, place.property(key));
+        out.insert(key.clone(), deeper.unwrap_or_else(|| inner.clone()));
+    }
+    for (key, was) in had {
+        if !set.contains_key(key) && place.requires(key) {
+            out.insert(key.clone(), was.clone());
         }
     }
-    Value::Object(set)
+    Some(Value::Object(out))
 }
 
 /// Whether `value`, what an effect set, says what `given`, what a request sent, did:
