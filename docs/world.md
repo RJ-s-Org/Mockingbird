@@ -111,7 +111,7 @@ YAML or JSON, `version: 1`. Every key is optional; an absent key falls back to t
 | `kind` | `create`, `read`, `list`, `update`, `replace`, `delete`, `action` | What the operation does. |
 | `type` | string | Its resource type. |
 | `target` | `{path_param}` or `{member}` | What names the record it acts on. |
-| `request`, `answer` | `{record}` or `{records}` (JSON pointers) | Where the body holds the record or records: nested envelopes, one-item arrays, bulk arrays. `answer.long_running: {done, result}` for long-running operations. |
+| `request`, `answer` | `{record}` or `{records}` (JSON pointers) | Where the body holds the record or records: nested envelopes, one-item arrays, bulk arrays. `answer.record: ""` (and `request.record: ""`) says the answer (the request body) is itself the record. `answer.long_running: {done, result}` for long-running operations. |
 | `transition` | `{<member>: <value>}` | Members an action sets; the type needs a `lifecycle`. |
 | `changes` | `{<member>: {from_request: <pointer>} \| {value}}` | Members of the target the operation changes. |
 | `scope` | `{param, member}` | The parameter that limits a list to one scope. |

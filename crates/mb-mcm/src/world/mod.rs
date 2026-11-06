@@ -26,8 +26,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod apply;
+mod effective;
+mod tier0;
 mod validate;
 
+pub use apply::{apply, record_at};
+pub use effective::{effective, effective_validated};
+pub use tier0::{record_pointer, tier0};
 pub use validate::{Refusal, RefusalCode, Validation, check_size, validate};
 
 /// The published JSON Schema (draft 2020-12) of a world description.
@@ -598,6 +604,21 @@ impl Pointer {
         Ok(())
     }
 
+    /// Checks a record pointer's syntax (`answer.record`, `request.record`): the
+    /// root pointer `""`, which says the whole answer (or request body) is the
+    /// record, or any pointer [`Pointer::check`] accepts.
+    pub fn check_record(s: &str) -> Result<(), PointerError> {
+        if s.is_empty() {
+            return Ok(());
+        }
+        Self::check(s)
+    }
+
+    /// Whether this is the root pointer `""`, the whole document.
+    pub fn is_root(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// The pointer text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -812,6 +833,21 @@ mod tests {
             Pointer::parse("/a~1b/~0/0").unwrap().tokens(),
             vec!["a/b".to_owned(), "~".to_owned(), "0".to_owned()]
         );
+    }
+
+    #[test]
+    fn check_record_accepts_the_root_pointer_only_there() {
+        assert_eq!(Pointer::check(""), Err(PointerError::Empty));
+        assert_eq!(Pointer::check_record(""), Ok(()));
+        assert_eq!(Pointer::check_record("/data/0"), Ok(()));
+        assert_eq!(
+            Pointer::check_record("data"),
+            Err(PointerError::NoLeadingSlash)
+        );
+        let root: Pointer = serde_json::from_value(json!("")).unwrap();
+        assert!(root.is_root());
+        assert!(root.tokens().is_empty());
+        assert!(!Pointer::parse("/a").unwrap().is_root());
     }
 
     #[test]

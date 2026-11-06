@@ -99,12 +99,14 @@ pub(crate) fn with_echoes_required(
         Some(RecordAt::Member(m)) => vec![Step::Member(m.clone())],
         Some(RecordAt::Item) => vec![Step::Items],
         Some(RecordAt::MemberItem(m)) => vec![Step::Member(m.clone()), Step::Items],
+        Some(RecordAt::Pointer(tokens)) => pointer_steps(&doc, tokens),
     };
     let mut wanted: Vec<(Vec<Step>, String)> = Vec::new();
-    if let Some(RecordAt::Member(m) | RecordAt::MemberItem(m)) =
-        identity.and_then(|i| i.record.as_ref())
-    {
-        wanted.push((Vec::new(), m.clone()));
+    // Each envelope member on the way to the record is required where it is.
+    for (at, step) in record.iter().enumerate() {
+        if let Step::Member(m) = step {
+            wanted.push((record[..at].to_vec(), m.clone()));
+        }
     }
     let is_list = op.kind == OperationKind::Query
         && identity.is_none_or(|i| i.path_param.is_none() && i.input_field.is_none());
@@ -136,23 +138,8 @@ pub(crate) fn with_echoes_required(
             .and_then(|i| Some((i, i.record_in(body)?)));
         let sent = held.map_or(body, |(_, record)| record);
         // The request's schema of what it sent: of the record its envelope holds.
-        let input = match (
-            held.and_then(|(i, _)| i.record.as_ref()),
-            op.input.body.as_ref(),
-        ) {
-            (Some(RecordAt::Member(m)), Some(schema)) => {
-                crate::consistency::property_schema(bundle, schema, m)
-            }
-            (Some(RecordAt::MemberItem(m)), Some(schema)) => {
-                crate::consistency::property_schema(bundle, schema, m).and_then(|list| {
-                    crate::consistency::deref(bundle, &list)
-                        .get("items")
-                        .cloned()
-                })
-            }
-            (Some(RecordAt::Item), Some(schema)) => crate::consistency::deref(bundle, schema)
-                .get("items")
-                .cloned(),
+        let input = match (held.map(|(i, _)| i), op.input.body.as_ref()) {
+            (Some(identity), Some(schema)) => crate::record_schema(bundle, identity, schema),
             (_, schema) => schema.cloned(),
         };
         let input = input.as_ref();
@@ -184,6 +171,30 @@ pub(crate) fn with_echoes_required(
         root.insert("$defs".to_string(), defs);
     }
     doc
+}
+
+/// The steps of a [`RecordAt::Pointer`](mb_mcm::RecordAt::Pointer)'s `tokens` into
+/// `doc`: a `"0"` where the schema there is an array's is its items, any other token a
+/// member.
+fn pointer_steps(doc: &Value, tokens: &[String]) -> Vec<Step> {
+    let none = Value::Object(serde_json::Map::new());
+    let defs = doc.get("$defs").unwrap_or(&none);
+    let mut node = Some(resolved(doc, defs));
+    tokens
+        .iter()
+        .map(|token| {
+            let items = node.and_then(|n| n.get("items")).filter(|_| token == "0");
+            let (step, next) = match items {
+                Some(items) => (Step::Items, Some(items)),
+                None => (
+                    Step::Member(token.clone()),
+                    node.and_then(|n| n.get("properties")?.get(token)),
+                ),
+            };
+            node = next.map(|n| resolved(n, defs));
+            step
+        })
+        .collect()
 }
 
 /// Whether [`require_at`] adds `name` at `path`: the schema there declares it (in its

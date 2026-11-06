@@ -3711,10 +3711,12 @@ fn force_alternative(
     [key, other]: [&str; 2],
 ) -> Value {
     // An item of a list is held nowhere this tells apart.
-    if matches!(
-        identity.record,
-        Some(mb_mcm::RecordAt::Item | mb_mcm::RecordAt::MemberItem(_))
-    ) {
+    let in_a_list = match &identity.record {
+        Some(mb_mcm::RecordAt::Item | mb_mcm::RecordAt::MemberItem(_)) => true,
+        Some(mb_mcm::RecordAt::Pointer(tokens)) => tokens.iter().any(|t| t == "0"),
+        Some(mb_mcm::RecordAt::Member(_)) | None => false,
+    };
+    if in_a_list {
         return body;
     }
     let Some(record) = identity.record_in(&body) else {
@@ -3789,8 +3791,13 @@ fn id_candidates(id: &Value) -> Vec<Value> {
 }
 
 /// The schema of the record an answer of `schema` holds where `identity` says: its
-/// envelope's member, or its items.
-fn record_schema(bundle: &Bundle, identity: &mb_mcm::Identity, schema: &Value) -> Option<Value> {
+/// envelope's member, or its items; along a deep pointer, an array's items at a `"0"`
+/// and a member at any other token.
+pub(crate) fn record_schema(
+    bundle: &Bundle,
+    identity: &mb_mcm::Identity,
+    schema: &Value,
+) -> Option<Value> {
     match identity.record.as_ref()? {
         mb_mcm::RecordAt::Member(member) => consistency::property_schema(bundle, schema, member),
         mb_mcm::RecordAt::Item => consistency::deref(bundle, schema).get("items").cloned(),
@@ -3798,6 +3805,12 @@ fn record_schema(bundle: &Bundle, identity: &mb_mcm::Identity, schema: &Value) -
             let list = consistency::property_schema(bundle, schema, member)?;
             consistency::deref(bundle, &list).get("items").cloned()
         }
+        mb_mcm::RecordAt::Pointer(tokens) => tokens.iter().try_fold(schema.clone(), |at, token| {
+            let items = (token == "0")
+                .then(|| consistency::deref(bundle, &at).get("items").cloned())
+                .flatten();
+            items.or_else(|| consistency::property_schema(bundle, &at, token))
+        }),
     }
 }
 

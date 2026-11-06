@@ -397,29 +397,37 @@ impl<'a> Ctx<'a> {
             .operations
             .get(&op.id)
             .and_then(|d| d.answer.as_ref());
-        let at = |p: &Option<Pointer>| {
+        let at = |p: &Option<Pointer>, root_ok: bool| {
             p.as_ref()
-                .filter(|p| Pointer::check(p.as_str()).is_ok())
+                .filter(|p| {
+                    let syntax = if root_ok {
+                        Pointer::check_record
+                    } else {
+                        Pointer::check
+                    };
+                    syntax(p.as_str()).is_ok()
+                })
                 .and_then(|p| at_pointer(b, answer, &p.tokens()))
         };
         let record = match desc {
-            Some(d) if at(&d.record).is_some() => at(&d.record),
+            Some(d) if at(&d.record, true).is_some() => at(&d.record, true),
             // Only a `records` pointer `check_pointer` would accept: one on
             // an array whose items resolve. A refused one leaves the lookup
             // to the bundle's own record location.
             Some(d)
-                if at(&d.records)
+                if at(&d.records, false)
                     .filter(|s| is_array(b, s))
                     .and_then(|s| items(b, s))
                     .is_some() =>
             {
-                at(&d.records).and_then(|s| items(b, s))
+                at(&d.records, false).and_then(|s| items(b, s))
             }
             _ => match op.identity.as_ref().and_then(|i| i.record.as_ref()) {
                 None => Some(answer),
                 Some(RecordAt::Member(m)) => property(b, answer, m),
                 Some(RecordAt::Item) => items(b, answer),
                 Some(RecordAt::MemberItem(m)) => property(b, answer, m).and_then(|s| items(b, s)),
+                Some(RecordAt::Pointer(tokens)) => at_pointer(b, answer, tokens),
             },
         }?;
         if is_array(b, record) {
@@ -572,16 +580,23 @@ impl<'a> Ctx<'a> {
     }
 
     /// A pointer into `schema`, the operation's `what` schema; `records`
-    /// pointers must land on an array.
+    /// pointers must land on an array. With `root_ok` (a `record` pointer) the
+    /// root pointer `""` is accepted, and says the whole `what` is the record,
+    /// so its schema must be an object's.
     fn check_pointer(
         &mut self,
         schema: Option<&'a Value>,
         pointer: &Pointer,
-        array: bool,
+        (array, root_ok): (bool, bool),
         what: &str,
         path: &Path,
     ) -> bool {
-        if let Err(e) = Pointer::check(pointer.as_str()) {
+        let syntax = if root_ok {
+            Pointer::check_record
+        } else {
+            Pointer::check
+        };
+        if let Err(e) = syntax(pointer.as_str()) {
             self.refuse(path, RefusalCode::Invalid, format!("`{pointer}`: {e}"));
             return false;
         }
@@ -601,6 +616,14 @@ impl<'a> Ctx<'a> {
             );
             return false;
         };
+        if root_ok && pointer.is_root() && !is_object(self.bundle, target) {
+            self.refuse(
+                path,
+                RefusalCode::Unresolved,
+                format!("the {what} is not an object, so it is not itself the record (`\"\"`)"),
+            );
+            return false;
+        }
         if array && !is_array(self.bundle, target) {
             self.refuse(
                 path,
@@ -999,10 +1022,22 @@ impl<'a> Ctx<'a> {
                 r,
                 RecordsAt {
                     record: r.record.clone().filter(|ptr| {
-                        self.check_pointer(body, ptr, false, "request body", &p.join("record"))
+                        self.check_pointer(
+                            body,
+                            ptr,
+                            (false, true),
+                            "request body",
+                            &p.join("record"),
+                        )
                     }),
                     records: r.records.clone().filter(|ptr| {
-                        self.check_pointer(body, ptr, true, "request body", &p.join("records"))
+                        self.check_pointer(
+                            body,
+                            ptr,
+                            (true, false),
+                            "request body",
+                            &p.join("records"),
+                        )
                     }),
                     extra: Extra::new(),
                 },
@@ -1042,10 +1077,10 @@ impl<'a> Ctx<'a> {
                 a,
                 AnswerDesc {
                     record: a.record.clone().filter(|ptr| {
-                        self.check_pointer(answer, ptr, false, "answer", &p.join("record"))
+                        self.check_pointer(answer, ptr, (false, true), "answer", &p.join("record"))
                     }),
                     records: a.records.clone().filter(|ptr| {
-                        self.check_pointer(answer, ptr, true, "answer", &p.join("records"))
+                        self.check_pointer(answer, ptr, (true, false), "answer", &p.join("records"))
                     }),
                     long_running,
                     extra: Extra::new(),
@@ -1119,7 +1154,13 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             if let ChangeDesc::FromRequest(ptr) = change
-                && !self.check_pointer(body, ptr, false, "request body", &p.join("from_request"))
+                && !self.check_pointer(
+                    body,
+                    ptr,
+                    (false, false),
+                    "request body",
+                    &p.join("from_request"),
+                )
             {
                 continue;
             }
@@ -1331,6 +1372,26 @@ fn is_array(b: &Bundle, schema: &Value) -> bool {
         };
         typed
             || schema.get("items").is_some()
+            || branches(schema).any(|s| walk(b, s, seen, depth + 1))
+    }
+    walk(b, schema, &mut Seen::new(), 0)
+}
+
+/// Whether `schema` describes an object, through `$ref`s and branches: typed
+/// `object`, or declaring `properties` or `additionalProperties`.
+fn is_object(b: &Bundle, schema: &Value) -> bool {
+    fn walk(b: &Bundle, schema: &Value, seen: &mut Seen, depth: usize) -> bool {
+        let Some(schema) = visit(b, schema, seen, depth) else {
+            return false;
+        };
+        let typed = match schema.get("type") {
+            Some(Value::String(t)) => t == "object",
+            Some(Value::Array(ts)) => ts.iter().any(|t| t == "object"),
+            _ => false,
+        };
+        typed
+            || schema.get("properties").is_some()
+            || schema.get("additionalProperties").is_some()
             || branches(schema).any(|s| walk(b, s, seen, depth + 1))
     }
     walk(b, schema, &mut Seen::new(), 0)

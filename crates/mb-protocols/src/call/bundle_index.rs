@@ -98,6 +98,17 @@ pub(super) fn record_schema_of(
             let (parts, _) = schema_parts(bundle, Some(&list));
             parts.iter().find_map(|p| p.get("items")).cloned()
         }
+        // An array's items at a `"0"` where the schema there is an array's, else
+        // the member each token names.
+        mb_mcm::RecordAt::Pointer(tokens) => tokens.iter().try_fold(schema.clone(), |at, token| {
+            let items = (token == "0")
+                .then(|| {
+                    let (parts, _) = schema_parts(bundle, Some(&at));
+                    parts.iter().find_map(|p| p.get("items")).cloned()
+                })
+                .flatten();
+            items.or_else(|| property_schema(bundle, &at, token))
+        }),
     }
 }
 

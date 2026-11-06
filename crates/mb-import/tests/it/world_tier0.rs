@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use mb_import::world::tier0;
 use mb_import::{SourceFile, compile_files};
-use mb_mcm::world::{OpKind, Pointer, validate};
+use mb_mcm::world::{OpKind, Pointer, World, overlay, validate};
 use mb_mcm::{Bundle, RecordAt};
 
 /// Every contract file under `examples/apis` and `scripts/llm-bench/contracts`:
@@ -124,6 +124,7 @@ fn tier0_matches_bundle_identity() {
                     RecordAt::Member(m) => format!("/{m}"),
                     RecordAt::Item => "/0".to_owned(),
                     RecordAt::MemberItem(m) => format!("/{m}/0"),
+                    RecordAt::Pointer(_) => panic!("{at}: the heuristics wrote a deep pointer"),
                 })
                 .unwrap()
             });
@@ -137,6 +138,39 @@ fn tier0_matches_bundle_identity() {
         agreeing * 100 >= described * 95,
         "{agreeing} of {described}"
     );
+}
+
+/// Tier 0 restates the bundle, so writing it into the bundle changes
+/// nothing: no answer, status or stored record moves under a tier-0 world.
+#[test]
+fn apply_of_tier0_is_identity() {
+    for (path, b) in bundles() {
+        let base = tier0(&b);
+        assert!(
+            mb_mcm::world::apply(&b, &base, &base) == b,
+            "{}",
+            path.display()
+        );
+    }
+}
+
+/// A description with no entries, laid over tier 0, writes nothing.
+#[test]
+fn apply_writes_nothing_for_a_world_with_no_entries() {
+    for (path, b) in bundles() {
+        let base = tier0(&b);
+        let world = overlay(&base, &World::default());
+        assert!(
+            mb_mcm::world::apply(&b, &base, &world) == b,
+            "{}",
+            path.display()
+        );
+        assert!(
+            mb_mcm::world::apply(&b, &base, &World::default()) == b,
+            "{}",
+            path.display()
+        );
+    }
 }
 
 #[test]
