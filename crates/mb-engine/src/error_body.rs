@@ -29,14 +29,13 @@
 //!   path-like members). Offline, or when the model's answer fails, the faker's body
 //!   stands, with the same facts (a failed write is asked for again after a minute).
 //! - Since a written body serves every later call, it is checked before it is kept
-//!   ([`body_flaw`]): it validates against the declared error schema; each code-like
-//!   string is a short token (at most [`MAX_CODE_LEN`] characters, no unit of two or
-//!   more characters repeated back to back [`MIN_REPEATS`] times, no whitespace run,
-//!   line break, tab or edge space), unless it is a token the API description or the
-//!   response's description names in backticks (`` `invalid_parameters` ``); and no
-//!   string is longer than [`MAX_ERROR_STRING_LEN`] characters, nor, past
-//!   [`REPEAT_FLOOR`] characters, more than [`MAX_REPEAT_SHARE`] percent one unit
-//!   repeated. A body that fails is asked for once more ([`WRITE_ASKS`] in all); when
+//!   (`body_flaw`): it validates against the declared error schema; each code-like
+//!   string is a short token (at most `64` characters, no unit of two or more
+//!   characters repeated back to back 3 times, no whitespace run, line break, tab or
+//!   edge space), unless it is a token the API description or the response's
+//!   description names in backticks (`` `invalid_parameters` ``); and no string is
+//!   longer than `2048` characters, nor, past `40` characters, more than `50` percent
+//!   one unit repeated. A body that fails is asked for once more (2 asks in all); when
 //!   the second fails too, the write failed: the faker's body stands.
 
 use mb_mcm::{Bundle, Operation};
