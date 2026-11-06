@@ -915,12 +915,12 @@ impl<'a> StubWalk<'a, '_> {
 /// Merges `effect` into the stored resource it names and returns the result and the
 /// members it set, as they now are; `Err` says why not. The resource must exist (an
 /// effect never creates one, and never deletes one), keep its identity and owner and,
-/// merged, still suit its type, which must have a schema to check against (see
-/// [`entity_fits`]). Each member goes as its place in the schema says (see
-/// [`merge_at`]), a dotted key may be a path (see [`dotted_as_paths`]), and objects
-/// that only name stored records are filled with them (see [`fill_stubs`]). Member
-/// names written with JSON around them are the declared ones first (see
-/// [`mended_set`]). A `null` a member's schema does not admit removes the member when
+/// merged, still suit its type when it did before (one held in an earlier, incomplete
+/// shape takes it), which must have a schema to check against (see [`entity_fits`]).
+/// Each member goes as its place in the schema says (see [`merge_at`]), a dotted key
+/// may be a path (see [`dotted_as_paths`]), and objects that only name stored records
+/// are filled with them (see [`fill_stubs`]). Member names written with JSON around
+/// them are the declared ones first (see [`mended_set`]). A `null` a member's schema does not admit removes the member when
 /// it is optional and rejects the effect when it is required (see
 /// [`Place::null_member`]). It applies whole or not at all.
 pub(super) async fn apply_effect(
@@ -1010,7 +1010,9 @@ pub(super) async fn apply_effect(
     merge_members(rt, t, data, requested);
     // Objects the effect names only by their identity are the records stored under it.
     fill_stubs(state, session, rt, t, &mut stored.data, &keys).await;
-    if !entity_fits(rt, t, &stored.data) {
+    // Refused only when it breaks a record that fit: one held in an earlier, incomplete
+    // shape takes the effect.
+    if !entity_fits(rt, t, &stored.data) && entity_fits(rt, t, &held.data) {
         return Err("the merged resource breaks its schema");
     }
     if let Some((plan, call, _)) = own

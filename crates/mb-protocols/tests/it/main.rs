@@ -29,6 +29,7 @@ mod create_refusals_enforced;
 mod create_repeats;
 mod data_plane_auth;
 mod data_plane_auth_protocols;
+mod described_actions_partial;
 mod described_conflicts;
 mod described_derived;
 mod described_identity;
