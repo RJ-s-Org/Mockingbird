@@ -375,9 +375,9 @@ struct Target {
 }
 
 impl Target {
-    fn of(rt: &MockRuntime, t: &str, member: &str) -> Option<Self> {
+    /// `member` as record schema `record` declares it; `None` when it does not.
+    fn of(rt: &MockRuntime, record: &Value, member: &str) -> Option<Self> {
         let bundle = rt.bundle();
-        let record = write_memory::read_schema(rt, t)?;
         let schema = property_schema(bundle, record, member)?;
         let (parts, _) = schema_parts(bundle, Some(&schema));
         let mut types: Vec<Value> = Vec::new();
@@ -409,11 +409,17 @@ impl Target {
 /// Fills the derived members of type `t` on each of `items`, records of it: one
 /// children listing per child type for the whole page. Answers, per item, the members
 /// it set.
+///
+/// `items_schema` is the schema each item answers to (a list's item schema): only
+/// the members it declares are set, each written as it types it, and an item it
+/// refuses once filled is put back as it was. With none, the members are typed by
+/// type `t`'s read schema and the caller checks the answer they end up in.
 pub(super) async fn fill_page(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
     items: &mut [Value],
+    items_schema: Option<&Value>,
 ) -> Vec<Vec<String>> {
     let mut set: Vec<Vec<String>> = vec![Vec::new(); items.len()];
     let rt = state.rt;
@@ -421,6 +427,9 @@ pub(super) async fn fill_page(
         return set;
     }
     let Some(desc) = rt.described().type_desc(t) else {
+        return set;
+    };
+    let Some(record_schema) = items_schema.or_else(|| write_memory::read_schema(rt, t)) else {
         return set;
     };
     let mut groups: HashMap<&str, Children> = HashMap::new();
@@ -440,10 +449,20 @@ pub(super) async fn fill_page(
     if groups.is_empty() {
         return set;
     }
+    // Each filled item still answers to `items_schema`, when one is given.
+    let item_check = match items_schema {
+        Some(schema) => {
+            match SchemaValidator::for_output(&rt.bundle().with_reachable_defs(schema)) {
+                Ok(validator) => Some(validator),
+                Err(_) => return set,
+            }
+        }
+        None => None,
+    };
     let targets: HashMap<&str, Target> = desc
         .derived
         .keys()
-        .filter_map(|member| Some((member.as_str(), Target::of(rt, t, member)?)))
+        .filter_map(|member| Some((member.as_str(), Target::of(rt, record_schema, member)?)))
         .collect();
     let field = identity_member(rt, t);
     for (item, set) in items.iter_mut().zip(set.iter_mut()) {
@@ -462,6 +481,7 @@ pub(super) async fn fill_page(
         if !created && !any_child {
             continue;
         }
+        let before = item_check.as_ref().map(|_| item.clone());
         for (member, d) in &desc.derived {
             let (Some(children), Some(target)) =
                 (groups.get(child_type(d)), targets.get(member.as_str()))
@@ -484,19 +504,32 @@ pub(super) async fn fill_page(
                 set.push(member.clone());
             }
         }
+        if !set.is_empty()
+            && let (Some(validator), Some(before)) = (&item_check, before)
+            && !validator.is_valid(item)
+        {
+            tracing::info!(
+                mock = %rt.name,
+                r#type = %t,
+                "an item with its derived members does not fit its schema: not set"
+            );
+            *item = before;
+            set.clear();
+        }
     }
     set
 }
 
-/// Fills the derived members of type `t` on `record`, one record of it; answers the
-/// members it set.
+/// Fills the derived members of type `t` on `record`, one record of it, typed by `t`'s
+/// read schema (the caller checks the answer it ends up in); answers the members it
+/// set.
 pub(super) async fn fill(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     t: &str,
     record: &mut Value,
 ) -> Vec<String> {
-    fill_page(state, session, t, std::slice::from_mut(record))
+    fill_page(state, session, t, std::slice::from_mut(record), None)
         .await
         .pop()
         .unwrap_or_default()

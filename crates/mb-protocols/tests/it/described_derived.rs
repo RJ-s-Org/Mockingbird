@@ -355,3 +355,55 @@ async fn a_children_listing_cut_at_max_scan_sets_nothing() {
     assert_eq!(body["line_count"], json!(7), "{body}");
     assert_eq!(body["total"], json!("42.00"), "{body}");
 }
+
+/// [`CONTRACT`], its list answering summaries that declare no derived member and
+/// nothing else.
+fn summary_contract() -> String {
+    let listed = r##"orders: {type: array, items: {$ref: "#/components/schemas/Order"}}"##;
+    assert!(CONTRACT.contains(listed));
+    CONTRACT.replace(
+        listed,
+        r##"orders: {type: array, items: {$ref: "#/components/schemas/OrderSummary"}}"##,
+    ) + "    OrderSummary:\n      type: object\n      additionalProperties: false\n      required: [id]\n      properties:\n        id: {type: string}\n"
+}
+
+#[tokio::test]
+async fn a_list_whose_items_declare_no_derived_member_is_still_answered_from_state() {
+    let ten: Vec<Value> = (1..=10).map(|i| json!({"id": format!("o{i}")})).collect();
+    let mut w = world();
+    w["operations"] = json!({"listOrders": {"paging": {"style": "page", "request": "page"}}});
+    let h = support::described(
+        &summary_contract(),
+        w,
+        vec![json!({"orders": ten}), line("l1", 1.0, "1.00", "posted")],
+    );
+    let (first, _) = get(&h, "/orders").await;
+    assert_ne!(first, "state");
+    send(&h, "POST", "/orders/o3/lines", Some(json!({}))).await;
+    let (second, body) = get(&h, "/orders").await;
+    assert_eq!(second, "state", "{body}");
+    let orders = body["orders"].as_array().unwrap();
+    assert_eq!(orders.len(), 10, "{body}");
+    // The summary declares no derived member: none is added.
+    assert!(
+        orders.iter().all(|o| o.get("line_count").is_none()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_create_whose_schema_refuses_the_derived_value_keeps_the_models() {
+    // The create's own schema bounds `line_count` below any count.
+    let contract = CONTRACT.replace(
+        r##"responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}"##,
+        r##"responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/OrderCreated"}}}}}"##,
+    ) + "    OrderCreated:\n      type: object\n      required: [id]\n      properties:\n        id: {type: string}\n        line_count: {type: integer, maximum: -1}\n";
+    assert!(contract.contains("schemas/OrderCreated\"}}}}}"));
+    let h = support::described(
+        &contract,
+        world(),
+        vec![json!({"id": "o1", "line_count": -5})],
+    );
+    let created = send(&h, "POST", "/orders", Some(json!({}))).await;
+    assert_eq!(created["line_count"], json!(-5), "{created}");
+}
