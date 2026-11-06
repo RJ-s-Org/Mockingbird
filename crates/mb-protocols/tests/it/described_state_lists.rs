@@ -580,3 +580,99 @@ async fn lists_after_an_identity_change_still_hold_earlier_records() {
     assert_eq!(ids(&body, "templates"), ["t1", "t2", "t3"]);
     assert_eq!(provider.requests().len(), 2);
 }
+
+/// Templates listed in an envelope that counts them, in an optional member.
+const COUNTED: &str = r##"
+openapi: 3.0.0
+info: {title: Counted, version: "1"}
+paths:
+  /templates:
+    get:
+      operationId: listTemplates
+      parameters:
+        - {name: Offset, in: query, schema: {type: integer, minimum: 0}}
+        - {name: Count, in: query, schema: {type: integer, minimum: 1}}
+        - {name: from, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  TotalCount: {type: integer}
+                  Templates: {type: array, items: {$ref: "#/components/schemas/Template"}}
+                  continuation: {type: string}
+  /templates/{templateId}:
+    get:
+      operationId: getTemplate
+      parameters: [{name: templateId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+components:
+  schemas:
+    Template:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        email: {type: string, format: email}
+"##;
+
+fn counted_three() -> Value {
+    json!({
+        "TotalCount": 3,
+        "Templates": [
+            {"id": "t1", "email": "a@x.io"},
+            {"id": "t2", "email": "b@x.io"},
+            {"id": "t3", "email": "c@x.io"},
+        ],
+    })
+}
+
+/// A page served from state counts the list as the generated first page did: every
+/// item the query keeps, before the page is cut.
+#[tokio::test]
+async fn a_page_from_state_carries_the_list_count() {
+    let h = support::described(
+        COUNTED,
+        world(json!({"paging": {"style": "offset", "request": "Offset", "size": "Count"}})),
+        vec![counted_three()],
+    );
+    let (first, body) = get(&h, "/templates").await;
+    assert_ne!(first, "state");
+    assert_eq!(body["TotalCount"], json!(3), "{body}");
+    let (second, body) = get(&h, "/templates?Count=1&Offset=1").await;
+    assert_eq!(second, "state", "{body}");
+    assert_eq!(ids(&body, "Templates"), ["t2"]);
+    assert_eq!(body["TotalCount"], json!(3), "{body}");
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+/// A cursor-paged list from state counts the list on its first page and on each page
+/// its token serves.
+#[tokio::test]
+async fn a_cursor_paged_list_from_state_keeps_its_count() {
+    let h = support::described(
+        COUNTED,
+        world(
+            json!({"paging": {"style": "cursor", "request": "from", "response": "continuation", "size": "Count"}}),
+        ),
+        vec![counted_three()],
+    );
+    get(&h, "/templates").await;
+    let mut seen = Vec::new();
+    let mut uri = "/templates?Count=2".to_string();
+    for _ in 0..5 {
+        let (source, body) = get(&h, &uri).await;
+        assert_eq!(source, "state", "{body}");
+        assert_eq!(body["TotalCount"], json!(3), "{body}");
+        seen.extend(ids(&body, "Templates"));
+        match body["continuation"].as_str().filter(|t| !t.is_empty()) {
+            Some(token) => uri = format!("/templates?Count=2&from={token}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["t1", "t2", "t3"]);
+    assert_eq!(h.provider.requests().len(), 1);
+}
