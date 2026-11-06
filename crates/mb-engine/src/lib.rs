@@ -4153,6 +4153,11 @@ fn force_identity(
     // acknowledgement (`{ok, id, rev}`) of a record keyed by `_id` names it in its
     // own `id`, and gets no `_id` an open schema would let in.
     let declared = validator.declared_properties_at(identity.record.as_ref());
+    // A delete's answer that declares no members (`{}`) is no record: the deleted
+    // record's key is not added to it.
+    if declared.is_none() && op.kind == OperationKind::Command(Effect::Delete) {
+        return body;
+    }
     let Some(field) = declared_member(declared.as_ref(), field) else {
         return body;
     };
@@ -5081,6 +5086,19 @@ components:
         let (op, v, call) = acknowledged_put("{type: object}");
         let out = force_identity(&v, &op, &call, None, json!({"ok": true}));
         assert_eq!(out, json!({"ok": true, "_id": "order-001"}));
+    }
+
+    #[test]
+    fn a_delete_answer_declaring_no_members_gets_no_identity() {
+        let (mut op, v, call) = acknowledged_put("{type: object, example: {}}");
+        op.kind = OperationKind::Command(Effect::Delete);
+        assert_eq!(force_identity(&v, &op, &call, None, json!({})), json!({}));
+        // A delete answering a schema that declares the member still gets it.
+        let (mut op, v, call) =
+            acknowledged_put("{type: object, properties: {_id: {type: string}}}");
+        op.kind = OperationKind::Command(Effect::Delete);
+        let out = force_identity(&v, &op, &call, None, json!({}));
+        assert_eq!(out, json!({"_id": "order-001"}));
     }
 
     /// A read by path answering `{<siblings>, data: Deal}`, its siblings `properties`.
