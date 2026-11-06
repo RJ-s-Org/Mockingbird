@@ -299,10 +299,22 @@ python3 scripts/llm-bench/replay.py record --fake
 # A paid recording: one rep of every journeys suite through the budget-guarded proxy
 source ~/.zshenv >/dev/null 2>&1   # OPENROUTER_API_KEY, never printed
 python3 scripts/llm-bench/replay.py record --model deepseek/deepseek-v4.1-flash-1017 \
-  --budget-usd 3 --prices docs/benchmarks/<latest run>/roster.json [--suite journeys_blind6 ...]
+  --budget-usd 1.5 --prices docs/benchmarks/<latest run>/roster.json [--suite journeys_blind6 ...]
 ```
 
-`record` starts `proxy.py --record`, which forwards each call as usual (budget, pins, ledger) and also appends the call's journey tag and answer to a raw file; it runs the suites once with `--tag-journeys`, then `replay.py pack` joins the raw file with `server.jsonl` into `recordings/`, calibrates, and scans the result. Only the proxy gets the key; `server_suites.py` and the server get a placeholder. The paid run's cost is about one rep of each suite: check the pilot projection for the model first. Commit the new `recordings/*.json.gz` with the run.
+**Budget for a paid recording.** One rep of all 14 journeys suites on one model costs about $0.2: the last full run of the default model on all 14 suites at `--repeat 4` cost $0.75. `--budget-usd` defaults to 1.5, about 7× that, because the proxy also reserves an estimate for every call in flight (the 14 suites run at once, `--jobs` journeys each) and a pricier model costs more. Pass `--prices`: without roster prices the proxy reserves each call at its high fallback rates (4096 × $40 per M output tokens, about $0.16 a call), and ten calls in flight trip a $1.5 budget at once. Raise `--budget-usd` for a pricier model, from its pilot projection.
+
+**What `record` refuses to pack.** `pack` (and `record`, which runs it) exits 1 and writes no recording when the run is not one the model answered in full:
+
+- the proxy wrote `BUDGET_TRIPPED` (next to the raw file or the ledger);
+- a call in the raw recording or the ledger has a status other than 200, a 402 (`error_kind: budget`, which reaches only the ledger), or any other error kind, such as an in-stream `stream_error` behind a 200 head, `timeout`, `provider_unavailable` or a client hang-up (499). Only `refusal` and `empty`, the model's own answers, are kept;
+- a check in `server.jsonl` is labelled `detail.infra` or `detail.infra_cascade` (judged on a provider failure).
+
+Such a recording would hold faker fallbacks as the model's answers, and the gate would then protect the wrong results. Re-run with a larger budget, or later for a provider outage. `replay.py pack --ledger <calls.jsonl>` applies the same checks to a hand-packed run.
+
+**The scan fails closed.** `replay.py scan` (and `record`'s last step) flags an Authorization header shape anywhere in a recording, answers included. A model answer that legitimately carries an authorization field with a scheme (`"Authorization": "Bearer ..."`, also `Basic` or `Token`, in any quoting) therefore fails the scan, and `record` exits 1: do not commit that recording; drop that suite from the run, or re-record. An API's own `authorizations` field, or an `authorization` field without a scheme, does not match.
+
+`record` starts `proxy.py --record`, which forwards each call as usual (budget, pins, ledger) and also appends the call's journey tag and answer to a raw file; it runs the suites once with `--tag-journeys`, then `replay.py pack` joins the raw file with `server.jsonl` into `recordings/` (or refuses, as above, and `record` stops there), calibrates, prints the journeys dirty at baseline, and scans the result. Only the proxy gets the key; `server_suites.py` and the server get a placeholder. The paid run's cost is about one rep of each suite (see the budget above): check the pilot projection for the model first. Commit the new `recordings/*.json.gz` with the run.
 
 The recordings committed now are the free seed (`source: "fake_llm.py"`, model `bench/fake-llm`). Its answers are schema-shaped values, so its passing checks are mostly the ones the engine answers from state: reads of what a write stored, lists that hold a created item, deletes that leave a 404. That is what the gate protects first. The 2026-10-30 dumps under `docs/benchmarks` (`exchanges.jsonl.gz`) predate the journey tags and many engine changes, so they cannot seed it. A paid recording adds the checks that pass only with a real model's answers.
 
@@ -316,6 +328,6 @@ env -u OPENROUTER_API_KEY python3 scripts/llm-bench/run.py pilot --out /tmp/benc
   --models a/x,b/y --upstream http://127.0.0.1:18999/api/v1/chat/completions
 ```
 
-`test_replay.py` tests the matching (`reused` included), the shift of timestamps, the comparison and what makes a journey dirty, the baseline report of calibration, `expect`, packing, the security scan and the proxy's replay mode (with every upstream connection patched to fail). Its end-to-end test records the `journeys` suite against `fake_llm.py`, replays it green, then claims a failing check passed and expects the gate to fail; it runs when the release binary is built (`target/release/mockingbird`, `$CARGO_TARGET_DIR/release/mockingbird` or `MB_BENCH_BINARY`).
+`test_replay.py` tests the matching (`reused` included), the shift of timestamps, the comparison and what makes a journey dirty, the baseline report of calibration, `expect`, packing and its refusals, the security scan and the proxy's replay mode (with every upstream connection patched to fail). Its end-to-end test records the `journeys` suite against `fake_llm.py`, replays it green, then claims a failing check passed and expects the gate to fail; it runs when the release binary is built (`target/release/mockingbird`, `$CARGO_TARGET_DIR/release/mockingbird` or `MB_BENCH_BINARY`).
 
 `python3 -m unittest scripts/llm-bench/test_world.py` tests the `--world` mode with fakes only: transcript parsing, the agent's blind tool set and environment, the cache, applying each tier, the row and label changes, and the aggregate split. One end-to-end test runs `stub_author.py` against a real `mockingbird serve` when `target/release/mockingbird` is built.

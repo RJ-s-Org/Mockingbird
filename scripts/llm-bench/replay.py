@@ -10,7 +10,7 @@ same as when the check passed.
 
     # Paid (re-)recording: costs real calls, needs OPENROUTER_API_KEY (never printed)
     python3 scripts/llm-bench/replay.py record --model deepseek/deepseek-v4.1-flash-1017 \\
-        --suite journeys_blind6 --budget-usd 2 --prices docs/benchmarks/<run>/roster.json
+        --budget-usd 1.5 --prices docs/benchmarks/<run>/roster.json [--suite journeys_blind6 ...]
 
     # Free (re-)recording against the fake LLM (what seeds the committed recordings)
     python3 scripts/llm-bench/replay.py record --fake
@@ -245,7 +245,8 @@ class Recorder(Tags):
 
     def write(self, tag: Dict[str, Any], rec: Dict[str, Any], content: str, finish_reason: Optional[str]) -> None:
         line = dict(tag, status=rec.get("status"), finish_reason=finish_reason, content=content,
-                    error=rec.get("error_excerpt") if rec.get("error_kind") else None)
+                    error=rec.get("error_excerpt") if rec.get("error_kind") else None,
+                    error_kind=rec.get("error_kind"))
         text = scrub(json.dumps(line, ensure_ascii=False))
         with self.write_lock:
             with open(self.path, "a", encoding="utf-8") as f:
@@ -299,9 +300,75 @@ def read_jsonl(path: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def pack(raw_path: str, server_jsonl: str, dest: str, source: str, rep: int = 0) -> List[str]:
+# A call's error_kind that is the model's own answer, not a failed call: a recording
+# keeps those as the model gave them.
+MODEL_ERROR_KINDS = ("refusal", "empty")
+
+
+class PackRefused(Exception):
+    """The run is not one to record: `problems` says why. Nothing was written."""
+
+    def __init__(self, problems: List[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
+def failed_call(c: Dict[str, Any]) -> Optional[str]:
+    """Why a raw or ledger call record is not a clean answer, or None."""
+    status = c.get("status")
+    kind = c.get("error_kind")
+    if status == 402 or kind == "budget":
+        return "402 (budget)"
+    if status != 200:
+        return f"status {status}" + (f" ({kind})" if kind else "")
+    if kind and kind not in MODEL_ERROR_KINDS:
+        return f"error {kind}"  # an in-stream failure keeps its 200 head
+    return None
+
+
+def pack_problems(raw_path: str, server_jsonl: str, ledger: Optional[str] = None) -> List[str]:
+    """Why a run must not be packed: the proxy's budget tripped, a call failed (a
+    non-200 status, a 402, an infra error kind), or a check is labelled as judged on
+    a provider failure (`detail.infra` or `detail.infra_cascade`). Empty when clean."""
+    problems: List[str] = []
+    dirs = {os.path.dirname(os.path.abspath(raw_path))}
+    if ledger:
+        dirs.add(os.path.dirname(os.path.abspath(ledger)))
+    for d in sorted(dirs):
+        if os.path.exists(os.path.join(d, "BUDGET_TRIPPED")):
+            problems.append(f"the proxy's budget tripped ({os.path.join(d, 'BUDGET_TRIPPED')})")
+    sources = [("raw", raw_path)] + ([("ledger", ledger)] if ledger else [])
+    for name, path in sources:
+        if not os.path.exists(path):
+            if name == "ledger":
+                problems.append(f"no ledger at {path}")
+            continue
+        bad: Dict[str, int] = {}
+        for c in read_jsonl(path):
+            why = failed_call(c)
+            if why:
+                bad[why] = bad.get(why, 0) + 1
+        for why, n in sorted(bad.items()):
+            problems.append(f"{name}: {n} call(s) with {why}")
+    labelled: Dict[str, int] = {}
+    for r in read_jsonl(server_jsonl):
+        detail = r.get("detail") if isinstance(r.get("detail"), dict) else {}
+        for label in ("infra", "infra_cascade"):
+            if detail.get(label):
+                labelled[label] = labelled.get(label, 0) + 1
+    for label, n in sorted(labelled.items()):
+        problems.append(f"server: {n} check(s) labelled detail.{label} (a provider failure)")
+    return problems
+
+
+def pack(raw_path: str, server_jsonl: str, dest: str, source: str, rep: int = 0,
+         ledger: Optional[str] = None) -> List[str]:
     """Writes one recording per label of the raw recording: the calls and the
-    per-check results of rep `rep` (`case` -> ok). Returns the files written."""
+    per-check results of rep `rep` (`case` -> ok). Returns the files written.
+    Raises PackRefused, having written nothing, when `pack_problems` finds any."""
+    problems = pack_problems(raw_path, server_jsonl, ledger)
+    if problems:
+        raise PackRefused(problems)
     calls = [c for c in read_jsonl(raw_path) if c.get("rep") == rep]
     rows = [r for r in read_jsonl(server_jsonl) if r.get("rep") == rep]
     os.makedirs(dest, exist_ok=True)
@@ -754,8 +821,15 @@ def cmd_record(args: argparse.Namespace) -> int:
         code = run_suites(model, suites, base, work, args, repeat=1)
         stop(proxy)
         proxy = None
-        written = pack(raw, os.path.join(work, "server.jsonl"), args.dest,
-                       source="fake_llm.py" if args.fake else f"paid run via OpenRouter ({model})")
+        try:
+            written = pack(raw, os.path.join(work, "server.jsonl"), args.dest,
+                           source="fake_llm.py" if args.fake else f"paid run via OpenRouter ({model})",
+                           ledger=os.path.join(work, "calls.jsonl"))
+        except PackRefused as e:
+            print("record: refusing to pack this run, nothing written (--keep keeps the ledger):", file=sys.stderr)
+            for p in e.problems:
+                print(f"  - {p}", file=sys.stderr)
+            return 1
         dirty = calibrate(written, args, args.calibrate) if args.calibrate else {}
         for p in written:
             doc = read_recording(p)
@@ -813,7 +887,8 @@ def main() -> int:
     r.add_argument("--dest", default=RECORDINGS)
     r.add_argument("--binary", default="target/release/mockingbird")
     r.add_argument("--jobs", type=int, default=6)
-    r.add_argument("--budget-usd", type=float, default=2.0, help="the recording proxy's hard budget")
+    r.add_argument("--budget-usd", type=float, default=1.5,
+                   help="the recording proxy's hard budget (one rep of all 14 suites on one model is about $0.2)")
     r.add_argument("--prices", help="roster.json (per-token prices) for the budget")
     r.add_argument("--calibrate", type=int, default=4,
                    help="free replays after recording; a check that changes in any is marked unstable")
@@ -824,6 +899,8 @@ def main() -> int:
     p.add_argument("--dest", default=RECORDINGS)
     p.add_argument("--source", required=True, help="what answered the calls, kept in the recording")
     p.add_argument("--rep", type=int, default=0)
+    p.add_argument("--ledger", help="the proxy's calls.jsonl: its failed calls and a BUDGET_TRIPPED next to it "
+                   "refuse the pack too")
     e = sub.add_parser("expect", help="mark checks of a recording as expected to change until it is re-recorded")
     e.add_argument("recording", help="the recording (recordings/<model slug>~<suite>.json.gz)")
     e.add_argument("check", nargs="+", help="the checks, as `<journey>.<check>`")
@@ -838,7 +915,14 @@ def main() -> int:
     if args.cmd == "expect":
         return cmd_expect(args)
     if args.cmd == "pack":
-        for path in pack(args.raw, args.server, args.dest, args.source, args.rep):
+        try:
+            written = pack(args.raw, args.server, args.dest, args.source, args.rep, ledger=args.ledger)
+        except PackRefused as e:
+            print("pack: refusing to pack this run, nothing written:", file=sys.stderr)
+            for p in e.problems:
+                print(f"  - {p}", file=sys.stderr)
+            return 1
+        for path in written:
             print(path)
         return 0
     problems = scan(args.paths or [RECORDINGS])

@@ -352,6 +352,102 @@ class RecordTest(unittest.TestCase):
             self.assertEqual(f.read(), first)  # the same recording gives the same bytes
 
 
+class PackRefusalTest(unittest.TestCase):
+    """`pack` (and so `record`) writes nothing for a run that tripped its budget or
+    has a failed call: such a recording would hold answers the model never gave."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.raw = os.path.join(self.dir, "raw.jsonl")
+        self.server = os.path.join(self.dir, "server.jsonl")
+        self.ledger = os.path.join(self.dir, "calls.jsonl")
+        self.dest = os.path.join(self.dir, "out")
+        self.write(self.raw, [dict(call("jira", "createIssue", 0, "{}"), label="a__b~journeys")])
+        self.write(self.server, [{"model": "a/b", "suite": "journeys", "case": "jira.x", "rep": 0, "ok": True,
+                                  "detail": {}}])
+        self.write(self.ledger, [{"label": "a__b~journeys", "status": 200, "error_kind": None}])
+
+    def write(self, path, rows):
+        with open(path, "w") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+
+    def refused(self, needle):
+        with self.assertRaises(replay.PackRefused) as cm:
+            replay.pack(self.raw, self.server, self.dest, source="test", ledger=self.ledger)
+        self.assertIn(needle, " ".join(cm.exception.problems))
+        self.assertFalse(os.path.exists(self.dest), "a refused pack must write nothing")
+
+    def test_a_clean_run_packs(self):
+        self.assertEqual(replay.pack_problems(self.raw, self.server, self.ledger), [])
+        self.assertEqual(len(replay.pack(self.raw, self.server, self.dest, source="test", ledger=self.ledger)), 1)
+
+    def test_budget_tripped(self):
+        with open(os.path.join(self.dir, "BUDGET_TRIPPED"), "w") as f:
+            f.write("{}\n")
+        self.refused("budget tripped")
+
+    def test_a_402_in_the_ledger(self):
+        # A budget refusal never reaches the raw recording, only the ledger.
+        self.write(self.ledger, [{"status": 200}, {"status": 402, "error_kind": "budget"}])
+        self.refused("402")
+
+    def test_a_non_200_call(self):
+        self.write(self.raw, [dict(call("jira", "createIssue", 0, "", status=503), label="a__b~journeys",
+                                   error_kind="provider_unavailable")])
+        self.refused("raw: 1 call(s) with status 503")
+
+    def test_an_in_stream_error_with_a_200_head(self):
+        self.write(self.ledger, [{"status": 200, "error_kind": "stream_error"}])
+        self.refused("error stream_error")
+
+    def test_a_client_hang_up(self):
+        self.write(self.ledger, [{"status": 499, "error_kind": "client_closed"}])
+        self.refused("status 499")
+
+    def test_an_infra_label(self):
+        for label in ("infra", "infra_cascade"):
+            self.write(self.server, [{"model": "a/b", "suite": "journeys", "case": "jira.x", "rep": 0,
+                                      "ok": False, "detail": {label: True}}])
+            self.refused(f"detail.{label}")
+
+    def test_a_model_refusal_or_empty_answer_is_recorded(self):
+        # The model's own answer, not a failed call.
+        self.write(self.ledger, [{"status": 200, "error_kind": "refusal"}, {"status": 200, "error_kind": "empty"}])
+        self.assertEqual(replay.pack_problems(self.raw, self.server, self.ledger), [])
+
+    def test_a_missing_ledger_refuses(self):
+        os.remove(self.ledger)
+        self.refused("no ledger")
+
+    def test_pack_cli_exits_non_zero(self):
+        self.write(self.ledger, [{"status": 402, "error_kind": "budget"}])
+        out = subprocess.run([sys.executable, os.path.join(HERE, "replay.py"), "pack", "--raw", self.raw,
+                              "--server", self.server, "--ledger", self.ledger, "--dest", self.dest,
+                              "--source", "test"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("refusing to pack", out.stderr)
+        self.assertFalse(os.path.exists(self.dest))
+
+    def test_record_refuses_a_tripped_run(self):
+        """cmd_record packs nothing when the proxy tripped its budget mid-run."""
+        def fake_run(model, suites, base, work, args, repeat):
+            self.write(os.path.join(work, "raw.jsonl"), [dict(call("jira", "createIssue", 0, "{}"),
+                                                              label="a__b~journeys")])
+            self.write(os.path.join(work, "server.jsonl"), [{"model": "a/b", "suite": "journeys",
+                                                             "case": "jira.x", "rep": 0, "ok": True}])
+            with open(os.path.join(work, "BUDGET_TRIPPED"), "w") as f:
+                f.write("{}\n")
+            return 0
+        args = argparse.Namespace(binary="target/release/mockingbird", suite=["journeys"], fake=True, model=None,
+                                  dest=self.dest, jobs=1, budget_usd=1.5, prices=None, calibrate=0, keep=False)
+        with mock.patch.object(replay, "run_suites", fake_run), \
+                mock.patch.object(replay, "calibrate", side_effect=AssertionError("calibrated a refused run")):
+            self.assertEqual(replay.cmd_record(args), 1)
+        self.assertFalse(os.path.exists(self.dest))
+
+
 class SecurityScanTest(unittest.TestCase):
     """Committed recordings never hold an Authorization header or anything like a key."""
 
