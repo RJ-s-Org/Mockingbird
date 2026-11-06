@@ -568,3 +568,42 @@ async fn an_uncut_stream_line_is_not_salvaged() {
     assert_eq!(sources, vec![Source::Llm, Source::Repaired]);
     assert_eq!(provider.requests().len(), 1, "one repair call");
 }
+
+/// The `id` a fresh engine with `seed` refills in a stream's second item, cut
+/// inside its `id` at `max_tokens`.
+async fn refilled_stream_id(seed: Option<u64>) -> String {
+    let bundle = stream_bundle();
+    let provider = Arc::new(ScriptedProvider::new(vec![]).with_streams(vec![Ok(vec![
+        Ok("{\"id\":\"a\",\"n\":1}\n{\"n\":2,\"id\":\"bcd".into()),
+        Err(LlmError::Truncated {
+            message: "stopped at max_tokens (64)".into(),
+            partial: String::new(),
+            usage: Usage::default(),
+        }),
+    ])]));
+    let dyn_provider: Arc<dyn Provider> = provider;
+    let engine = Engine::new(Some(dyn_provider), EngineConfig::default());
+    let engine = Arc::new(match seed {
+        Some(seed) => engine.with_faker_seed(seed),
+        None => engine,
+    });
+    let items = collect(&engine, &bundle, StreamContext::default(), Some(2)).await;
+    assert_eq!(items[1].source, Source::Patched);
+    assert_eq!(items[1].value["n"], 2);
+    let id = items[1].value["id"].as_str().unwrap().to_owned();
+    assert_ne!(id, "bcd");
+    id
+}
+
+/// A stream item's local repair is drawn from the seed, the call and the
+/// item's place: the same seed and call repair it alike, another seed otherwise.
+#[tokio::test]
+async fn a_seeded_stream_item_repair_repeats() {
+    let first = refilled_stream_id(Some(7)).await;
+    assert_eq!(
+        first,
+        refilled_stream_id(Some(7)).await,
+        "same seed and call"
+    );
+    assert_ne!(first, refilled_stream_id(Some(8)).await, "another seed");
+}

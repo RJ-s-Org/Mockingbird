@@ -472,7 +472,7 @@ enum Test {
 }
 
 /// A filter: the member, the values it asks of it, and how.
-struct Filter<'a> {
+pub(super) struct Filter<'a> {
     /// The object member of the item holding the member, when it is one object down.
     parent: Option<&'a str>,
     member: &'a str,
@@ -715,7 +715,7 @@ pub(super) fn narrow(
 
 /// The page size `limit` asks of the list whose array `array_parts` describe: none when
 /// the contract ties it to another array, or it is under the array's `minItems`.
-fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
+pub(super) fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
     let fewest = declared_count(array_parts, "minItems").unwrap_or(0);
     // A size the contract ties to another array is not this one's.
     if limit
@@ -733,7 +733,7 @@ fn page_size(limit: PageLimit, array_parts: &[&Value]) -> Option<usize> {
 /// ([`runs::Paging::pages_list`]: `offset`, `page`) filters no member one object down that
 /// shares its name (`timezone.offset`): only a member of the items themselves would say
 /// so.
-fn filters_of<'a, 'c>(
+pub(super) fn filters_of<'a, 'c>(
     bundle: &'a mb_mcm::Bundle,
     op: &Operation,
     query: Option<&'a Value>,
@@ -809,7 +809,7 @@ fn filters_of<'a, 'c>(
 
 /// Whether `item` holds what `filter` asks, as a member of the same shape: a missing
 /// member or `null` holds nothing.
-fn holds_wanted(item: &Value, filter: &Filter<'_>) -> bool {
+pub(super) fn holds_wanted(item: &Value, filter: &Filter<'_>) -> bool {
     let Some(held) = filter.held(item).filter(|held| !held.is_null()) else {
         return false;
     };
@@ -839,7 +839,7 @@ fn mentions(value: &Value, wanted: &str, depth: usize) -> bool {
 /// record another node wrote counts only by its members. A route with no path
 /// parameter is one collection; [`stored_rest`] reads one only when it is the type's
 /// sole such list (see [`BundleIndex::sole_written_list`]).
-fn in_collection(
+pub(super) fn in_collection(
     rt: &MockRuntime,
     (plan, call): (&CallPlan<'_>, &OperationCall),
     item_type: &str,
@@ -1565,7 +1565,7 @@ async fn stored_records(
 /// `additionalProperties` gives them a schema; of an array, each element as its
 /// `items` declares it. An object whose schema declares no members and no
 /// `additionalProperties: false` is free-form, and stays as it is, as does a scalar.
-fn projected(
+pub(super) fn projected(
     bundle: &mb_mcm::Bundle,
     schema: Option<&Value>,
     value: &Value,

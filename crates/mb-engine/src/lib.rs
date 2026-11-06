@@ -1364,6 +1364,24 @@ impl Engine {
         ) else {
             return Some(answer);
         };
+        self.fill_envelope(bundle, schema, envelope, member, kept)?;
+        Some(answer)
+    }
+
+    /// Fills the members object `schema` requires of `envelope` that it lacks, but
+    /// `member` (what the envelope holds), as [`Engine::held_answer`] does: the value
+    /// `kept` holds for it, else the value the member's schema fixes (a `const`, a
+    /// one-value `enum`, a `default`), else its example when that suits it and is not
+    /// a boolean's. `None` when a required member has none of these.
+    #[must_use]
+    pub fn fill_envelope(
+        &self,
+        bundle: &Bundle,
+        schema: &Value,
+        envelope: &mut Map<String, Value>,
+        member: &str,
+        kept: Option<&Map<String, Value>>,
+    ) -> Option<()> {
         for name in consistency::required_members(bundle, schema) {
             if name == member || envelope.contains_key(&name) {
                 continue;
@@ -1380,7 +1398,7 @@ impl Engine {
                 })?;
             envelope.insert(name, value);
         }
-        Some(answer)
+        Some(())
     }
 
     /// A `404` for a resource the session does not hold: the operation's
@@ -2267,7 +2285,7 @@ impl Engine {
             Ok(Reply {
                 text,
                 truncated: None,
-            }) => self.effects_only(&text),
+            }) => self.effects_only(&text, self.repair_seed(bundle, &op.id, [call])),
             Ok(Reply {
                 truncated: Some(reason),
                 ..
