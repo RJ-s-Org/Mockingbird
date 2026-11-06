@@ -115,7 +115,7 @@ pub(super) fn classify(
             .is_none()
     {
         Some(Fallback::NoIdentity)
-    } else if target_id(op, call).is_none() {
+    } else if !matches!(kind, OpKind::Create | OpKind::List) && target_id(op, call).is_none() {
         Some(Fallback::NoTarget)
     } else {
         None
