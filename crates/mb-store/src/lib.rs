@@ -151,9 +151,10 @@ pub trait ControlStore: Send + Sync {
     /// Adds a revision of `version`'s world description, numbered the
     /// version's newest revision plus one (1 for the first). `Conflict` when
     /// `r.expect` is set and is not the newest revision (`0` for none),
-    /// `NotFound` when the mock or the version does not exist. It does not
-    /// publish a change: nothing at runtime reads it. The default refuses
-    /// with `Invalid`, for stores written before this method existed.
+    /// `NotFound` when the mock or the version does not exist. A revision of
+    /// the mock's active version publishes the mock's change, so its runtime
+    /// is rebuilt with it. The default refuses with `Invalid`, for stores
+    /// written before this method existed.
     async fn add_world_revision(
         &self,
         mock_id: Uuid,

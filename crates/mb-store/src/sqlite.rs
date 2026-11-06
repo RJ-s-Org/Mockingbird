@@ -1067,18 +1067,21 @@ impl ControlStore for SqliteControlStore {
         r: NewWorldRevision,
     ) -> Result<WorldRevision, StoreError> {
         let document = serde_json::to_string(&r.document)?;
+        let (ws, name) = self.require_mock_key(mock_id).await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let exists: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM contract_versions WHERE mock_id = ? AND version = ?")
-                .bind(mock_id.to_string())
-                .bind(version)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if exists.is_none() {
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM contract_versions WHERE mock_id = ? AND version = ?",
+        )
+        .bind(mock_id.to_string())
+        .bind(version)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(status) = status else {
             return Err(StoreError::NotFound(format!(
                 "contract version {version} of mock {mock_id}"
             )));
-        }
+        };
+        let active = ContractStatus::parse(&status)? == ContractStatus::Active;
         let current: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(revision), 0) FROM world_revisions WHERE mock_id = ? AND version = ?",
         )
@@ -1116,6 +1119,10 @@ impl ControlStore for SqliteControlStore {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        // The runtime serving the active version is rebuilt with it.
+        if active {
+            self.publish_mock(&ws, &name);
+        }
         Ok(revision)
     }
 

@@ -36,7 +36,7 @@ use mb_auth::Permission;
 use mb_mcm::Bundle;
 use mb_mcm::world::{
     Author, ChangeDesc, OpDesc, Pointer, Refusal, RefusalCode, TypeDesc, Validation, World,
-    check_size, effective_validated, tier0, validate,
+    check_size, effective, effective_validated, tier0, validate,
 };
 use mb_protocols::world_gaps::{Gap, GapCode, gaps};
 use mb_store::{
@@ -144,6 +144,43 @@ pub async fn effective_world(
         refused,
         gaps,
     })
+}
+
+/// The world description a runtime of `mock_id`'s contract `version` serves,
+/// with its revision: what [`effective_world`] answers as `(world, revision)`,
+/// over `base` (`tier0(bundle)`, computed once by the caller).
+///
+/// It reads only the newest revision, once, and none of the earlier ones:
+/// the runtime needs neither the authors nor the gaps. A newest revision
+/// whose document is not a world description serves `base` at that
+/// revision, as [`effective_world`] does (the refusal is logged). With no
+/// revision it is `base` at revision `0`.
+///
+/// # Errors
+///
+/// Only when the store read fails.
+pub async fn runtime_world(
+    store: &dyn ControlStore,
+    mock_id: Uuid,
+    version: i64,
+    bundle: &Bundle,
+    base: &World,
+) -> Result<(World, i64), StoreError> {
+    let Some(latest) = store.latest_world_revision(mock_id, version).await? else {
+        return Ok((base.clone(), 0));
+    };
+    match serde_json::from_value::<World>(latest.document) {
+        Ok(doc) => Ok((effective(bundle, base, &doc).0, latest.revision)),
+        Err(error) => {
+            tracing::warn!(
+                mock = %mock_id,
+                revision = latest.revision,
+                %error,
+                "the newest world revision is not a world description; serving tier 0"
+            );
+            Ok((base.clone(), latest.revision))
+        }
+    }
 }
 
 /// The pointer of each entry `doc` sets, with its value: each field of each
