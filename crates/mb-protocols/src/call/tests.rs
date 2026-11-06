@@ -570,6 +570,40 @@ fn target_id_from_input_field() {
     assert_eq!(target_id(&op, &missing), None);
 }
 
+/// A create both a path parameter and a request member name: the path parameter
+/// can only be a parent's (the new record is not in the route yet), so the member
+/// names the new record. Without the member in the body, the path parameter does,
+/// as before; an update keeps the path parameter first.
+#[test]
+fn a_create_prefers_its_request_member_to_a_path_parameter() {
+    let rt = stream_runtime();
+    let mut op = rt.bundle.operations[0].clone();
+    op.kind = OperationKind::Command(Effect::Create);
+    op.identity = Some(Identity {
+        path_param: Some("parentKey".into()),
+        field: "key".into(),
+        input_field: Some("key".into()),
+        path_field: None,
+        record: None,
+    });
+    let call = OperationCall {
+        operation_id: op.id.clone(),
+        path_params: [("parentKey".to_owned(), json!("p1"))]
+            .into_iter()
+            .collect(),
+        body: Some(json!({"key": "alpha"})),
+        ..OperationCall::default()
+    };
+    assert_eq!(target_id(&op, &call), Some("alpha".into()));
+    let no_member = OperationCall {
+        body: Some(json!({"name": "x"})),
+        ..call.clone()
+    };
+    assert_eq!(target_id(&op, &no_member), Some("p1".into()));
+    op.kind = OperationKind::Command(Effect::Update);
+    assert_eq!(target_id(&op, &call), Some("p1".into()));
+}
+
 /// A read a world description gave an identity by its kind alone (no path
 /// parameter, no request member) names no target id, whatever the request
 /// carries: it is generated as a read of an unheld id is.

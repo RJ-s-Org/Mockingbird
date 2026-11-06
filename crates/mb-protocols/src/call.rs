@@ -113,21 +113,30 @@ const NOT_GENERATED_SOURCE: &str = "not_generated";
 /// The id of the resource this operation reads, updates or deletes: the
 /// identity's path parameter, else its input field in the request body,
 /// else, for HTTP updates and deletes whose identity names no path
-/// parameter, the last path parameter.
+/// parameter, the last path parameter. A create whose identity names both
+/// takes the input field first: the record it makes is named by what it
+/// sends, and a path parameter beside it names where it goes (a parent).
 pub(crate) fn target_id(op: &Operation, call: &OperationCall) -> Option<String> {
     let identity = op.identity.as_ref();
     let path_param = identity.and_then(|i| i.path_param.as_deref());
+    let from_body = || {
+        identity
+            .and_then(|i| i.input_field.as_deref())
+            .and_then(|f| call.body.as_ref()?.get(f))
+            .and_then(id_string)
+    };
+    if op.kind == OperationKind::Command(Effect::Create)
+        && let Some(id) = from_body()
+    {
+        return Some(id);
+    }
     if let Some(id) = path_param
         .and_then(|p| call.path_params.get(p))
         .and_then(id_string)
     {
         return Some(id);
     }
-    if let Some(id) = identity
-        .and_then(|i| i.input_field.as_deref())
-        .and_then(|f| call.body.as_ref()?.get(f))
-        .and_then(id_string)
-    {
+    if let Some(id) = from_body() {
         return Some(id);
     }
     if path_param.is_some()

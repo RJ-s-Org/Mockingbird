@@ -705,10 +705,14 @@ impl fmt::Display for Pointer {
 
 /// Overlays `top` on `base` entry by entry: each type and operation of `top`
 /// is merged into `base`'s field by field, a field set in `top` replacing
-/// `base`'s. A type's `identity` and an operation's `target` and `answer`
-/// merge field by field too, so `answer: {identity_header: ..}` keeps the
-/// lower tier's `answer.record`. Other sub-objects, vectors and maps replace
-/// whole (`identity.alternates` among them); unknown keys merge key by key.
+/// `base`'s. A type's `identity` and an operation's `answer` merge field by
+/// field too, so `answer: {identity_header: ..}` keeps the lower tier's
+/// `answer.record`. An operation's `target` replaces `base`'s whole: a member
+/// `top` leaves out is not inherited, so `target: {member: ..}` drops the
+/// lower tier's `path_param`; and a `top` that makes an operation a create
+/// without naming a target drops `base`'s. Other sub-objects, vectors and maps
+/// replace whole (`identity.alternates` among them); unknown keys merge key by
+/// key.
 pub fn overlay(base: &World, top: &World) -> World {
     let mut out = base.clone();
     for (name, t) in &top.types {
@@ -770,12 +774,6 @@ fn overlay_identity(b: &mut IdentityDesc, t: &IdentityDesc) {
     merge_extra(&mut b.extra, &t.extra);
 }
 
-fn overlay_target(b: &mut TargetDesc, t: &TargetDesc) {
-    set(&mut b.path_param, &t.path_param);
-    set(&mut b.member, &t.member);
-    merge_extra(&mut b.extra, &t.extra);
-}
-
 fn overlay_answer(b: &mut AnswerDesc, t: &AnswerDesc) {
     set(&mut b.record, &t.record);
     set(&mut b.records, &t.records);
@@ -796,9 +794,16 @@ fn overlay_type(mut b: TypeDesc, t: &TypeDesc) -> TypeDesc {
 }
 
 fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
+    // A target names the record whole: a lower tier's path parameter kept next to
+    // an authored member would name another record (a create under a parent keyed
+    // by the parent). And a kind made a create inherits no target: what a lower
+    // tier took for the target of another kind names no new record.
+    let made_create = t.kind == Some(OpKind::Create) && b.kind != Some(OpKind::Create);
+    if t.target.is_some() || made_create {
+        b.target.clone_from(&t.target);
+    }
     set(&mut b.kind, &t.kind);
     set(&mut b.r#type, &t.r#type);
-    merge_sub(&mut b.target, &t.target, overlay_target);
     set(&mut b.request, &t.request);
     merge_sub(&mut b.answer, &t.answer, overlay_answer);
     set(&mut b.transition, &t.transition);
@@ -991,16 +996,53 @@ mod tests {
     }
 
     #[test]
-    fn overlay_keeps_base_target_members_the_top_leaves_out() {
-        let base: World =
-            serde_json::from_value(json!({"operations": {"o": {"target": {"path_param": "id"}}}}))
+    fn an_authored_target_replaces_the_base_target_whole() {
+        // Tier 0 took the parent collection's segment for the create's target; the
+        // author names the new record by a body member. Nothing of tier 0's stays.
+        let base: World = serde_json::from_value(json!({"operations": {"createThing": {
+            "kind": "create", "type": "things", "target": {"path_param": "parentKey"}
+        }}}))
+        .unwrap();
+        let top: World = serde_json::from_value(json!({"operations": {"createThing": {
+            "target": {"member": "key"}
+        }}}))
+        .unwrap();
+        let op = &overlay(&base, &top).operations["createThing"];
+        assert_eq!(
+            op.target,
+            Some(TargetDesc {
+                member: Some("key".into()),
+                ..TargetDesc::default()
+            })
+        );
+        assert_eq!(op.kind, Some(OpKind::Create));
+        // A top that sets no target keeps the base's.
+        let none: World =
+            serde_json::from_value(json!({"operations": {"createThing": {"type": "things"}}}))
                 .unwrap();
-        let top: World =
-            serde_json::from_value(json!({"operations": {"o": {"target": {"member": "id"}}}}))
-                .unwrap();
-        let target = overlay(&base, &top).operations["o"].target.clone().unwrap();
-        assert_eq!(target.path_param.as_deref(), Some("id"));
-        assert_eq!(target.member.as_deref(), Some("id"));
+        assert_eq!(
+            overlay(&base, &none).operations["createThing"].target,
+            base.operations["createThing"].target
+        );
+    }
+
+    #[test]
+    fn a_kind_changed_to_create_drops_the_base_target() {
+        // What a heuristic took for an action's target names no new record.
+        let base: World = serde_json::from_value(json!({"operations": {"o": {
+            "kind": "action", "target": {"path_param": "parentKey"}
+        }}}))
+        .unwrap();
+        let create: World =
+            serde_json::from_value(json!({"operations": {"o": {"kind": "create"}}})).unwrap();
+        assert_eq!(overlay(&base, &create).operations["o"].target, None);
+        // Another kind keeps the base target: a read or an update names the same record.
+        let update: World =
+            serde_json::from_value(json!({"operations": {"o": {"kind": "update"}}})).unwrap();
+        assert_eq!(
+            overlay(&base, &update).operations["o"].target,
+            base.operations["o"].target
+        );
     }
 
     #[test]

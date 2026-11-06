@@ -47,8 +47,11 @@ fn changed<'a, T: PartialEq>(world: Option<&'a T>, base: Option<&T>) -> Option<&
 ///   an identity; list is a query with none, so a set `kind: list` clears the
 ///   operation's identity, and its target and record are then not written;
 /// - `type`: the resource type;
-/// - `target.path_param` and `target.member`: the identity's `path_param` and
-///   `input_field`;
+/// - `target`: the identity's `path_param` and `input_field`, both written
+///   from `world`'s target where it differs from `base`'s, a member it leaves
+///   out cleared (an authored `{member}` drops the `path_param` tier 0 took);
+///   a set `kind: create` that `world` gives no target clears both, as
+///   [`overlay`](super::overlay) drops the lower tier's target then;
 /// - `answer.record`: the identity's `record`, the root pointer `""` as `None`
 ///   (the answer is the record);
 /// - a type's `identity.member`: the identity `field` of each operation of the
@@ -123,14 +126,15 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
 
     let wt = w.target.as_ref();
     let bt = b.target.as_ref();
-    let path_param = changed(
-        wt.and_then(|t| t.path_param.as_ref()),
-        bt.and_then(|t| t.path_param.as_ref()),
-    );
-    let input_field = changed(
-        wt.and_then(|t| t.member.as_ref()),
-        bt.and_then(|t| t.member.as_ref()),
-    );
+    // A target is written whole where `world` sets one that differs from `base`'s,
+    // or drops `base`'s by making the operation a create (see [`overlay`]).
+    let made_create = kind == Some(OpKind::Create);
+    let retarget = match wt {
+        Some(t) => (Some(t) != bt).then_some(Some(t)),
+        None => (made_create && bt.is_some()).then_some(None),
+    };
+    let path_param = retarget.and_then(|t| t?.path_param.as_ref());
+    let input_field = retarget.and_then(|t| t?.member.as_ref());
     let wr = w.answer.as_ref().and_then(|a| a.record.as_ref());
     let br = b.answer.as_ref().and_then(|a| a.record.as_ref());
     let record = changed(wr, br);
@@ -149,12 +153,8 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
         if identifies {
             op.identity = Some(Identity {
                 field: effective_member.unwrap_or_else(|| "id".to_owned()),
-                path_param: wt
-                    .and_then(|t| t.path_param.clone())
-                    .or_else(|| bt.and_then(|t| t.path_param.clone())),
-                input_field: wt
-                    .and_then(|t| t.member.clone())
-                    .or_else(|| bt.and_then(|t| t.member.clone())),
+                path_param: retarget.unwrap_or(bt).and_then(|t| t.path_param.clone()),
+                input_field: retarget.unwrap_or(bt).and_then(|t| t.member.clone()),
                 path_field: None,
                 record: wr.or(br).and_then(record_of),
             });
@@ -167,11 +167,9 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
     if let Some(field) = member {
         identity.field = field;
     }
-    if let Some(p) = path_param {
-        identity.path_param = Some(p.clone());
-    }
-    if let Some(f) = input_field {
-        identity.input_field = Some(f.clone());
+    if let Some(t) = retarget {
+        identity.path_param = t.and_then(|t| t.path_param.clone());
+        identity.input_field = t.and_then(|t| t.member.clone());
     }
     if let Some(r) = record {
         identity.record = record_of(r);
@@ -181,7 +179,7 @@ fn apply_op(op: &mut Operation, base: &World, world: &World) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{RefusalCode, effective, tier0, validate};
+    use crate::world::{RefusalCode, TargetDesc, effective, tier0, validate};
     use crate::{Binding, HttpMethod, InputSchemas, OutputVariant, Protocol, StatusSelector};
     use serde_json::{Map, Value, json};
 
@@ -720,6 +718,76 @@ mod tests {
         let w = world(json!({"operations": {"safeDelete": {"kind": "delete"}}}));
         let op = applied(&b, &w, "safeDelete");
         assert_eq!(op.identity, Some(identity("id")));
+    }
+
+    /// Things created under a parent: the bundle took the parent's key for the
+    /// create's target, as a heuristic does for a POST whose route ends in a
+    /// parameter.
+    fn things_under_parents() -> Bundle {
+        let thing = reference("Thing");
+        let mut create = typed(
+            op(
+                "createThing",
+                "POST",
+                "/parents/{parentKey}/things",
+                thing.clone(),
+            ),
+            "things",
+            Some(by("parentKey", "key")),
+        );
+        create.input.body = Some(thing.clone());
+        bundle(
+            vec![
+                create,
+                typed(
+                    op(
+                        "getThing",
+                        "GET",
+                        "/parents/{parentKey}/things/{key}",
+                        thing,
+                    ),
+                    "things",
+                    Some(by("key", "key")),
+                ),
+            ],
+            json!({"Thing": {"type": "object", "properties": {
+                "key": {"type": "string"}, "name": {"type": "string"}
+            }}}),
+        )
+    }
+
+    #[test]
+    fn an_authored_target_replaces_the_path_param_tier0_took() {
+        let b = things_under_parents();
+        let base = tier0(&b);
+        assert_eq!(
+            base.operations["createThing"].target,
+            Some(TargetDesc {
+                path_param: Some("parentKey".into()),
+                ..TargetDesc::default()
+            })
+        );
+        let doc = world(json!({"operations": {"createThing": {"target": {"member": "key"}}}}));
+        let (effective, refused) = effective(&b, &base, &doc);
+        assert_eq!(refused, vec![]);
+        assert_eq!(
+            effective.operations["createThing"].target,
+            Some(TargetDesc {
+                member: Some("key".into()),
+                ..TargetDesc::default()
+            })
+        );
+        let op = apply(&b, &base, &effective)
+            .operation("createThing")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            op.identity,
+            Some(Identity {
+                input_field: Some("key".into()),
+                ..identity("key")
+            })
+        );
     }
 
     #[test]
