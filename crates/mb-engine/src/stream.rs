@@ -64,6 +64,7 @@ impl Engine {
         // One generator for the stream: its items differ from each other,
         // and a seeded stream repeats item for item.
         let draws = self.call_draws(&bundle, &op.id, status, &call);
+        let repair_seed = self.repair_seed(&bundle, &op.id, [&call]);
 
         let (upstream, repair_system) = match &self.provider {
             None => (Upstream::Closed, None),
@@ -107,6 +108,7 @@ impl Engine {
             attributed: Usage::default(),
             repair_usage: Usage::default(),
             draws,
+            repair_seed,
         };
         Ok(futures::stream::unfold(state, |mut state| async move {
             let item = state.next_item().await?;
@@ -217,9 +219,23 @@ struct StreamState {
     repair_usage: Usage,
     /// The faker draws of the stream's fallback items.
     draws: crate::seed::Draws,
+    /// What seeds the local repairs of the stream's items (see
+    /// [`Checks::seed`]); `None` when they are random.
+    repair_seed: Option<u64>,
 }
 
 impl StreamState {
+    /// The checks of the item being emitted: its repairs seeded by the
+    /// stream's seed and its position.
+    fn item_checks(&self) -> Checks<'static> {
+        Checks {
+            seed: self.repair_seed.map(|seed| {
+                crate::seed::derive(seed, &["item"], &[&serde_json::Value::from(self.emitted)])
+            }),
+            ..Checks::default()
+        }
+    }
+
     async fn next_item(&mut self) -> Option<StreamItem> {
         if self.emitted >= self.items {
             self.release();
@@ -407,7 +423,7 @@ impl StreamState {
     /// `cut` last line of a stream stopped at `max_tokens`, salvaged) →
     /// `Patched`; otherwise one repair call → `Repaired`, else a faker item.
     async fn accept(&mut self, provider: &dyn Provider, line: &str, cut: bool) -> (Value, Source) {
-        let checks = Checks::default();
+        let checks = self.item_checks();
         let checked = match self.engine.check_output(&self.validator, line, &checks).0 {
             Checked::Invalid(errors) if cut => {
                 match self
@@ -494,7 +510,7 @@ impl StreamState {
             Err(_) => return Err("LLM repair timed out".into()),
         };
         match engine
-            .check_output(&self.validator, &text, &Checks::default())
+            .check_output(&self.validator, &text, &self.item_checks())
             .0
         {
             Checked::Valid(value) | Checked::Patched(value) => Ok(value),

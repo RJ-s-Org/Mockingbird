@@ -1002,12 +1002,23 @@ impl Engine {
                     name: crate::format_name(&op.id),
                     schema: crate::compact::response_prompt_schema(bundle, schema),
                 };
+                // Kept per operation, status and cause, whatever the call:
+                // its repairs are seeded by those alone.
+                let error_call = OperationCall {
+                    operation_id: call.operation_id.clone(),
+                    ..OperationCall::default()
+                };
                 let checks = Checks {
                     fill: None,
                     echoes: Echoes::of(std::iter::empty()),
                     items_envelope: false,
                     effects_envelope: false,
                     refusals: &[],
+                    seed: self.repair_seed(
+                        bundle,
+                        &format!("{}:{status}:{cause:?}", op.id),
+                        [&error_call],
+                    ),
                 };
                 let answer = self
                     .generate_with_llm(

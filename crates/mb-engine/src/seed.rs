@@ -9,6 +9,14 @@
 //! [`SEED_HEADER`] (see [`request_seed`]). Without a seed the draws are
 //! random.
 //!
+//! The same seed draws the engine's local repairs of an LLM answer (values
+//! refilled for breaking their pattern or format, or filled in where the
+//! answer left them out), mixed with the operation, the request and the
+//! value repaired; the declared response headers' values, mixed with the
+//! operation, status and request; and PII replacements, mixed with the
+//! string replaced. Identical runs with identical LLM answers then answer
+//! alike.
+//!
 //! Generated dates and times are drawn back from [`SEEDED_NOW`] instead of
 //! the clock, so a seeded answer does not change from one day to the next.
 //! The values are reproducible with the same Mockingbird version: a new
@@ -56,16 +64,8 @@ impl Draws {
     /// identifies the answer), hashed with a fixed function so that they
     /// do not vary between processes.
     pub(crate) fn seeded(seed: u64, labels: &[&str], parts: &[&Value]) -> Self {
-        let mut h = Fnv::new();
-        h.bytes(&seed.to_le_bytes());
-        for label in labels {
-            h.str(label);
-        }
-        for part in parts {
-            h.value(part);
-        }
         Self {
-            rng: StdRng::seed_from_u64(h.finish()),
+            rng: StdRng::seed_from_u64(derive(seed, labels, parts)),
             seeded: true,
         }
     }
@@ -81,6 +81,44 @@ impl Draws {
     /// Seeded by `seed` as [`Draws::seeded`], else random.
     pub(crate) fn new(seed: Option<u64>, labels: &[&str], parts: &[&Value]) -> Self {
         seed.map_or_else(Self::random, |s| Self::seeded(s, labels, parts))
+    }
+}
+
+/// `seed` mixed with `labels` and `parts`, hashed with a fixed function so
+/// that the result does not vary between processes.
+pub(crate) fn derive(seed: u64, labels: &[&str], parts: &[&Value]) -> u64 {
+    let mut h = Fnv::new();
+    h.bytes(&seed.to_le_bytes());
+    for label in labels {
+        h.str(label);
+    }
+    for part in parts {
+        h.value(part);
+    }
+    h.finish()
+}
+
+/// A generator for one local repair of an answer (a value refilled, a
+/// header drawn, PII replaced): seeded by `seed` mixed with `label` and
+/// `text` (what is repaired) when there is a seed, else random.
+pub(crate) fn repair_rng(seed: Option<u64>, label: &str, text: &str) -> StdRng {
+    match seed {
+        Some(seed) => {
+            let mut h = Fnv::new();
+            h.bytes(&seed.to_le_bytes());
+            h.str(label);
+            h.str(text);
+            StdRng::seed_from_u64(h.finish())
+        }
+        None => rand::make_rng::<StdRng>(),
+    }
+}
+
+/// A generator for one local repair of `value`, as [`repair_rng`].
+pub(crate) fn repair_rng_for(seed: Option<u64>, label: &str, value: &Value) -> StdRng {
+    match seed {
+        Some(seed) => StdRng::seed_from_u64(derive(seed, &[label], &[value])),
+        None => rand::make_rng::<StdRng>(),
     }
 }
 

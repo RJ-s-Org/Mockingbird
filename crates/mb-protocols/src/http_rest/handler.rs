@@ -433,6 +433,16 @@ async fn serve(
         key_verified: false,
         admitted: None,
     };
+    // Built before the plan: a refused call's declared headers are drawn
+    // from it as an answered one's are.
+    let call = OperationCall {
+        operation_id: op.id.clone(),
+        path_params,
+        query,
+        headers: forwarded_headers(rt, headers),
+        body,
+    };
+
     let plan = match call::plan(rt, op, headers, presented).await {
         Ok(mut plan) => {
             plan.page_url = Some(format!(
@@ -456,7 +466,7 @@ async fn serve(
                     Some(generated) => {
                         let mut resp = log.answered(rt, op, as_xml(rt, op, generated));
                         set_retry_after(&mut resp, r.retry_after);
-                        add_headers(&mut resp, rt, op, None);
+                        add_headers(&mut resp, rt, op, None, &call);
                         resp
                     }
                     None => log.rejected(r),
@@ -479,14 +489,6 @@ async fn serve(
     };
     log.tenancy = Some(plan.tenancy.clone());
     log.session = plan.session.session.clone();
-
-    let call = OperationCall {
-        operation_id: op.id.clone(),
-        path_params,
-        query,
-        headers: forwarded_headers(rt, headers),
-        body,
-    };
 
     // An injected error the contract declares no status for: 503.
     if plan.native_chaos_error() {
@@ -548,7 +550,7 @@ async fn serve(
                     op.id
                 ),
             );
-            add_headers(&mut resp, rt, op, plan.scenario);
+            add_headers(&mut resp, rt, op, plan.scenario, &call);
             return resp;
         }
         Err(EngineError::UndeclaredStatus(code)) => {
@@ -578,7 +580,7 @@ async fn serve(
             resp.headers_mut().insert(name, value);
         }
     }
-    add_headers(&mut resp, rt, op, plan.scenario);
+    add_headers(&mut resp, rt, op, plan.scenario, &call);
     // The record's concurrency token, and a ranged page's next range, over the faker's
     // values (a scenario's stand).
     for (name, value) in [entity_tag, next_range].into_iter().flatten() {
@@ -598,17 +600,19 @@ async fn serve(
 }
 
 /// The headers the contract declares for the response's status (each
-/// unless already set, as a rate limiter's `Retry-After` is), then the
+/// unless already set, as a rate limiter's `Retry-After` is; drawn from the
+/// engine's faker seed and `call` when there is a seed), then the
 /// scenario's, which replace them.
 fn add_headers(
     resp: &mut Response,
     rt: &MockRuntime,
     op: &Operation,
     scenario: Option<&ScenarioRuntime>,
+    call: &OperationCall,
 ) {
     let status = resp.status().as_u16();
     let headers = resp.headers_mut();
-    for (name, value) in mb_engine::headers::declared_headers(&rt.bundle, op, status) {
+    for (name, value) in rt.engine.declared_headers(&rt.bundle, op, status, call) {
         if let (Ok(name), Ok(value)) = (
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(&value),

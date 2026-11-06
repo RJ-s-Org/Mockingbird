@@ -705,6 +705,61 @@ impl Engine {
         )
     }
 
+    /// The seed of the local repairs of `op_id`'s answer to `calls` (values
+    /// the faker refills in an LLM answer, see [`guards`]): the calls'
+    /// [`SEED_HEADER`], else the engine's seed, mixed with the contract,
+    /// the operation and each call's path parameters, query and body, so
+    /// identical calls repair alike and different calls differ. `None`
+    /// without a seed: the repairs are random.
+    fn repair_seed<'c>(
+        &self,
+        bundle: &Bundle,
+        op_id: &str,
+        calls: impl IntoIterator<Item = &'c OperationCall> + Clone,
+    ) -> Option<u64> {
+        let seed = calls
+            .clone()
+            .into_iter()
+            .find_map(seed::request_seed)
+            .or(self.faker_seed)?;
+        let parts: Vec<Value> = calls
+            .into_iter()
+            .flat_map(|call| {
+                let [path, query, body] = seed::call_parts(call);
+                [Value::from(call.operation_id.as_str()), path, query, body]
+            })
+            .collect();
+        let parts: Vec<&Value> = parts.iter().collect();
+        Some(seed::derive(
+            seed,
+            &[&bundle.source_digest, op_id, "repair"],
+            &parts,
+        ))
+    }
+
+    /// The headers `op` declares for `status`, each with a value (see
+    /// [`headers::declared_headers`]), drawn as the answer's faker values
+    /// are: seeded by the call's [`SEED_HEADER`], else the engine's seed,
+    /// mixed with the contract, operation, status and request, so identical
+    /// calls get identical headers; random without a seed.
+    #[must_use]
+    pub fn declared_headers(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        status: u16,
+        call: &OperationCall,
+    ) -> Vec<(String, String)> {
+        let [path, query, body] = seed::call_parts(call);
+        let status_label = status.to_string();
+        let mut draws = seed::Draws::new(
+            seed::request_seed(call).or(self.faker_seed),
+            &[&bundle.source_digest, &op.id, &status_label, "headers"],
+            &[&path, &query, &body],
+        );
+        headers::declared_headers_with(bundle, op, status, &mut draws.rng)
+    }
+
     /// The faker draws of a value that answers no call (an event message,
     /// a request value): always random.
     fn unseeded_draws() -> seed::Draws {
@@ -938,6 +993,7 @@ impl Engine {
                             items_envelope,
                             effects_envelope,
                             refusals: &refusals,
+                            seed: self.repair_seed(bundle, &op.id, [call]),
                         },
                         &mut usage,
                     )
@@ -1095,6 +1151,7 @@ impl Engine {
                     items_envelope: false,
                     effects_envelope: false,
                     refusals: &[],
+                    seed: self.repair_seed(bundle, "query", parts.iter().map(|p| p.call)),
                 },
                 &mut usage,
             )
