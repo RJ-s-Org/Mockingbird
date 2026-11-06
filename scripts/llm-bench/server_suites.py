@@ -9734,6 +9734,11 @@ def zotero_steps(j):
     found = titled("c")
     j.check("a write token sent again is refused with 412 and writes nothing", refused == 412 and found == [kc],
             status_code=refused, titled=found, expected=[kc])
+    for extra in [k for k in found if k != kc]:
+        # The repeated write made an item (the check before's miss): it is deleted, so the
+        # tag lists the checks after it judge hold only the run's three items.
+        version = version_of(extra)
+        sending(j, version_header(version if is_int(version) else 0), "DELETE", f"{lib}/items/{extra}")
     before = version_of(ka)
     held = {k: data(read(ka)).get(k) for k in ("title", "itemType", "publisher")}
     sending(j, version_header(before if is_int(before) else 0), "PATCH", f"{lib}/items/{ka}", body={"date": "2021"})
@@ -9909,6 +9914,10 @@ def fhir_steps(j):
     now = family(read(p1))
     j.check("an update with a stale If-Match is refused with 412 and changes nothing",
             refused == 412 and isinstance(held, str) and eq(now, held), status_code=refused, held=held, read=now)
+    if isinstance(held, str) and not eq(now, held):
+        # The stale update held (the check before's miss): the family is put back without a
+        # condition, so the searches after it judge their own calls.
+        send("PUT", f"/Patient/{p1}", patient(1, held, "Ana", pid=p1))
     old = obj(j.call("GET", f"/Patient/{p1}/_history/{v1}"))
     j.check("vread answers the first version", eq(old.get("id"), p1) and eq(family(old), "Rivera"),
             version=v1, read={k: old.get(k) for k in ("id", "name", "meta")})
@@ -10088,6 +10097,10 @@ def openstreetmap_steps(j):
     now = obj(node(n1).get("tags"))
     j.check("an update with a stale version is refused with 409 and changes nothing",
             refused == 409 and bool(held) and now == held, status_code=refused, held=held, read=now)
+    if held and now != held:
+        # The stale update held (the check before's miss): the tags are put back, so the
+        # history check after it judges its own call.
+        update(n1, version_of(n1), held)
     old = node(n1, "/1")
     j.check("version 1 still reads with its first tags",
             eq(old.get("version"), 1) and obj(old.get("tags")) == first_tags,
