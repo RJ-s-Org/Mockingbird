@@ -409,7 +409,7 @@ fn holds_status_text(parts: &[&Value], status: u16) -> bool {
 /// [`MESSAGE_FIELDS`] it declares), nor one naming the violated field
 /// ([`with_reasons`]' path-like, parameter and pointer members), nor one holding the
 /// HTTP status as text ([`with_status_text`]), nor one at a dotted path of `named`,
-/// those the contract names a value for ([`crate::contract_values::named_paths`]).
+/// those the contract names a value for (`contract_values::named_paths`).
 /// JSON:API's `title` beside its `detail` is one: the faker's word there says nothing.
 #[must_use]
 pub fn writes_text(
@@ -479,7 +479,7 @@ pub fn writes_text(
 }
 
 /// `body`, an error body declared by `schema` (its definitions in `defs`), with each
-/// string member that holds the HTTP status as text ([`holds_status_text`]) saying
+/// string member that holds the HTTP status as text (`holds_status_text`) saying
 /// `status`: at the top level, or in each item of an array member (JSON:API's
 /// `errors[].status`). Each change is kept only while the body still validates
 /// against `validator`.
