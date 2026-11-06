@@ -482,7 +482,10 @@ class ParallelStopTest(Reset):
         # window in which the budget suite could trip before that snapshot.
         real_run_suite = server_suites.run_suite
 
+        wrapped = []
+
         def run_suite(suite, args_):
+            wrapped.append(suite)
             try:
                 return real_run_suite(suite, args_)
             finally:
@@ -527,6 +530,8 @@ class ParallelStopTest(Reset):
                 contextlib.redirect_stderr(io.StringIO()):
             failed = server_suites.run_suites(["journeys", "journeys_blind", "journeys_blind2"], args)
         self.assertTrue(failed)
+        self.assertIn("journeys", wrapped)  # the ordering wrapper ran
+        self.assertTrue(server_suites.STOP.is_set())  # the refusal stopped the run
         self.assertEqual(server_suites.exit_code(failed), server_suites.EXIT_BUDGET)
         rows = self.written()
         self.assertNotIn("suite_error", [r["case"] for r in rows])
