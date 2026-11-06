@@ -279,7 +279,7 @@ impl Engine {
         let value = match take_refusal(value, checks.refusals) {
             Ok((status, mut body)) => {
                 if let Some(body) = body.as_mut() {
-                    self.scrub(body);
+                    self.scrub_seeded(body, checks.pii_seed("refusal", 0));
                 }
                 let refused = AnswerEffects {
                     refused: Some(status),
@@ -302,9 +302,9 @@ impl Engine {
             (value, None)
         };
         let mut effects = list.map_or_else(AnswerEffects::default, parse_effects);
-        for effect in &mut effects.kept {
+        for (i, effect) in effects.kept.iter_mut().enumerate() {
             let mut set = Value::Object(std::mem::take(&mut effect.set));
-            self.scrub(&mut set);
+            self.scrub_seeded(&mut set, checks.pii_seed("effect", i));
             if let Value::Object(scrubbed) = set {
                 effect.set = scrubbed;
             }
@@ -343,10 +343,21 @@ impl Engine {
         effects
     }
 
-    /// Replaces the PII in `value`, counting it. Nothing without a scrubber.
+    /// Replaces the PII in `value` with values drawn at random, whatever the
+    /// seed, counting it. Nothing without a scrubber. A request body kept or
+    /// shown as context is scrubbed so: a seeded replacement there would
+    /// give one real value the same fake one in every request, linking them.
     pub fn scrub(&self, value: &mut Value) {
+        self.scrub_seeded(value, None);
+    }
+
+    /// [`Engine::scrub`] with the replacements drawn from `seed` and each
+    /// value's place in `value` (see [`crate::pii::Scrubber::scrub_value_seeded`]);
+    /// at random with `None`. `seed` names the call answered (see
+    /// [`Checks::pii_seed`]), never the values replaced.
+    pub(crate) fn scrub_seeded(&self, value: &mut Value, seed: Option<u64>) {
         if let Some(scrubber) = &self.guards.scrubber {
-            for (pattern, n) in scrubber.scrub_value_seeded(value, self.faker_seed) {
+            for (pattern, n) in scrubber.scrub_value_seeded(value, seed) {
                 metrics::counter!(PII_REPLACEMENTS_METRIC, "pattern" => pattern)
                     .increment(n as u64);
             }
@@ -376,7 +387,7 @@ impl Engine {
                 ));
             }
         }
-        self.scrub(&mut value);
+        self.scrub_seeded(&mut value, checks.pii_seed("answer", 0));
         validator.mend_member_names(&mut value);
         if let Some(fill) = fill
             && let Some(filled) = self.fill(validator, &value, fill, checks.seed)
@@ -494,6 +505,18 @@ pub(crate) struct Checks<'a> {
     /// the call (see [`crate::Engine::repair_seed`]). `None` draws them at
     /// random.
     pub seed: Option<u64>,
+}
+
+impl Checks<'_> {
+    /// The seed of the PII replacements in `part` (`answer`, `refusal`, or
+    /// the `index`th `effect`) of the answer: [`Checks::seed`], which is
+    /// derived from the call with the request's own PII masked, mixed with
+    /// the part. Never derived from the values replaced; `None` (random)
+    /// without a seed.
+    pub(crate) fn pii_seed(&self, part: &str, index: usize) -> Option<u64> {
+        self.seed
+            .map(|seed| crate::seed::derive(seed, &["pii", part], &[&Value::from(index)]))
+    }
 }
 
 /// The member an array answer is asked for under (see [`items_envelope`]).

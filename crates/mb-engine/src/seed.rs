@@ -13,9 +13,13 @@
 //! refilled for breaking their pattern or format, or filled in where the
 //! answer left them out), mixed with the operation, the request and the
 //! value repaired; the declared response headers' values, mixed with the
-//! operation, status and request; and PII replacements, mixed with the
-//! string replaced. Identical runs with identical LLM answers then answer
-//! alike.
+//! operation, status and request; and the PII replacements in an answer,
+//! mixed with the operation, the request with its own PII masked and the
+//! place of the value in the answer, never the value replaced (so a
+//! replacement can neither be tested against candidate originals by anyone
+//! knowing the seed nor link one original across calls). Identical runs
+//! with identical LLM answers then answer alike. Request bodies kept as
+//! context are scrubbed at random.
 //!
 //! Generated dates and times are drawn back from [`SEEDED_NOW`] instead of
 //! the clock, so a seeded answer does not change from one day to the next.
@@ -98,23 +102,20 @@ pub(crate) fn derive(seed: u64, labels: &[&str], parts: &[&Value]) -> u64 {
     h.finish()
 }
 
-/// A generator for one local repair of an answer (a value refilled, a
-/// header drawn, PII replaced): seeded by `seed` mixed with `label` and
-/// `text` (what is repaired) when there is a seed, else random.
-pub(crate) fn repair_rng(seed: Option<u64>, label: &str, text: &str) -> StdRng {
+/// A generator seeded by `seed` mixed with `label` alone when there is a
+/// seed, else random. PII replacements draw from it with a seed naming the
+/// call and the place replaced, never the text replaced (see
+/// [`crate::pii::Scrubber::scrub_str_seeded`]).
+pub(crate) fn label_rng(seed: Option<u64>, label: &str) -> StdRng {
     match seed {
-        Some(seed) => {
-            let mut h = Fnv::new();
-            h.bytes(&seed.to_le_bytes());
-            h.str(label);
-            h.str(text);
-            StdRng::seed_from_u64(h.finish())
-        }
+        Some(seed) => StdRng::seed_from_u64(derive(seed, &[label], &[])),
         None => rand::make_rng::<StdRng>(),
     }
 }
 
-/// A generator for one local repair of `value`, as [`repair_rng`].
+/// A generator for one local repair of `value` (a value refilled): seeded
+/// by `seed` mixed with `label` and `value` when there is a seed, else
+/// random.
 pub(crate) fn repair_rng_for(seed: Option<u64>, label: &str, value: &Value) -> StdRng {
     match seed {
         Some(seed) => StdRng::seed_from_u64(derive(seed, &[label], &[value])),

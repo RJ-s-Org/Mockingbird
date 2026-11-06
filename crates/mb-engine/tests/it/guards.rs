@@ -501,3 +501,123 @@ async fn stream_spends_estimated_tokens() {
     let expected = (prompt_bytes(&provider) + line.len()).div_ceil(4) as u64;
     assert_eq!(budget.spent.load(Ordering::SeqCst), expected);
 }
+
+/// A seeded engine with the scrubber, answering every call with `answers`.
+fn seeded_scrubbing_engine(answers: Vec<String>) -> Arc<Engine> {
+    let guards = EngineGuards {
+        scrubber: Some(scrubber()),
+        ..EngineGuards::default()
+    };
+    let provider: Arc<dyn Provider> =
+        Arc::new(ScriptedProvider::new(answers.into_iter().map(Ok).collect()));
+    let config = EngineConfig {
+        timeout: Duration::from_secs(3),
+        ..EngineConfig::default()
+    };
+    Arc::new(
+        Engine::new(Some(provider), config)
+            .with_guards(guards)
+            .with_faker_seed(7),
+    )
+}
+
+/// The scrubbed `email` and `ssn` of the answer to `call`.
+async fn scrubbed_pair(engine: &Engine, bundle: &Bundle, call: &OperationCall) -> (String, String) {
+    let op = bundle.operation("getContact").unwrap();
+    let body = engine
+        .generate(bundle, op, call, GenerationContext::default())
+        .await
+        .unwrap()
+        .body
+        .unwrap();
+    let field = |k: &str| body[k].as_str().unwrap().to_owned();
+    (field("email"), field("ssn"))
+}
+
+fn call_with(query: serde_json::Value, seed: Option<&str>) -> OperationCall {
+    let mut call = call();
+    call.query = query.as_object().cloned().unwrap_or_default();
+    if let Some(seed) = seed {
+        call.headers
+            .insert("X-Mockingbird-Seed".into(), json!(seed));
+    }
+    call
+}
+
+#[tokio::test]
+async fn seeded_answer_scrubbing_follows_the_call_not_the_original() {
+    let bundle = bundle();
+    let answer =
+        |email: &str, ssn: &str| json!({"email": email, "ssn": ssn, "note": "hello"}).to_string();
+    let engine = seeded_scrubbing_engine(vec![
+        answer("jane@corp.com", "123-45-6789"),
+        answer("jane@corp.com", "123-45-6789"),
+        answer("bob@else.org", "234-56-7890"),
+        answer("jane@corp.com", "123-45-6789"),
+    ]);
+    let first = call_with(json!({"page": 1}), None);
+    let a = scrubbed_pair(&engine, &bundle, &first).await;
+    assert!(
+        a.0.ends_with("@example.com") && a.1.starts_with('9'),
+        "{a:?}"
+    );
+    assert_eq!(
+        a,
+        scrubbed_pair(&engine, &bundle, &first).await,
+        "same call, same seed"
+    );
+    assert_eq!(
+        a,
+        scrubbed_pair(&engine, &bundle, &first).await,
+        "another original in the same call and place gets the same replacement"
+    );
+    let second = call_with(json!({"page": 2}), None);
+    let b = scrubbed_pair(&engine, &bundle, &second).await;
+    assert_ne!(a.0, b.0, "the same original in another call is not linked");
+    assert_ne!(a.1, b.1);
+}
+
+#[tokio::test]
+async fn seeded_answer_scrubbing_ignores_the_requests_pii() {
+    let bundle = bundle();
+    let answer = contact("jane@corp.com");
+    let engine = seeded_scrubbing_engine(vec![answer.clone(), answer]);
+    let a = scrubbed_pair(
+        &engine,
+        &bundle,
+        &call_with(json!({"q": "jane@corp.com"}), None),
+    )
+    .await;
+    let b = scrubbed_pair(
+        &engine,
+        &bundle,
+        &call_with(json!({"q": "bob@else.org"}), None),
+    )
+    .await;
+    assert_eq!(a, b, "the request's PII does not seed the replacements");
+}
+
+#[tokio::test]
+async fn seeded_answer_scrubbing_honours_the_seed_header() {
+    let bundle = bundle();
+    let answer = contact("jane@corp.com");
+    let engine = seeded_scrubbing_engine(vec![answer.clone(), answer.clone(), answer]);
+    let one = call_with(json!({}), Some("11"));
+    let a = scrubbed_pair(&engine, &bundle, &one).await;
+    assert_eq!(a, scrubbed_pair(&engine, &bundle, &one).await);
+    let b = scrubbed_pair(&engine, &bundle, &call_with(json!({}), Some("12"))).await;
+    assert_ne!(a, b, "X-Mockingbird-Seed seeds the replacements");
+}
+
+#[test]
+fn request_scrubbing_stays_random_with_a_seed() {
+    let engine = seeded_scrubbing_engine(Vec::new());
+    let runs: std::collections::HashSet<String> = (0..4)
+        .map(|_| {
+            let mut body = json!({"email": "jane@corp.com"});
+            engine.scrub(&mut body);
+            body["email"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert!(runs.len() > 1, "{runs:?}");
+}
