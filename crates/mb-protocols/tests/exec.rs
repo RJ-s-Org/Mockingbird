@@ -963,3 +963,409 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
     assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(body, json!({"success": true, "data": {"id": 7}}));
 }
+
+/// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),
+/// nothing (`starItem`), an acknowledgement (`renameItem`), the item in an envelope
+/// (`pinItem`, and `boostItem` whose envelope requires what the mock does not hold),
+/// and one the description says nothing of (`pingItem`).
+const ACTIONS: &str = r##"
+openapi: 3.0.0
+info: {title: Actions, version: "1"}
+paths:
+  /items:
+    post:
+      operationId: createItem
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /items/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getItem
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}, "404": {description: missing}}
+  /items/{id}/archive:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: archiveItem
+      responses: {"200": {description: archived, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /items/{id}/star:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: starItem
+      responses: {"204": {description: starred}}
+  /items/{id}/rename:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: renameItem
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "200":
+          description: renamed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, id]
+                properties: {ok: {type: boolean}, id: {type: string}, rev: {type: integer}}
+  /items/{id}/pin:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: pinItem
+      requestBody: {content: {application/json: {schema: {type: object, properties: {rank: {}}}}}}
+      responses:
+        "200":
+          description: pinned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties: {item: {$ref: "#/components/schemas/Item"}}
+  /items/{id}/boost:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: boostItem
+      responses:
+        "200":
+          description: boosted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item, receipt]
+                properties: {item: {$ref: "#/components/schemas/Item"}, receipt: {type: string}}
+  /items/{id}/ping:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: pingItem
+      responses: {"200": {description: pinged, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [ACTIVE, ARCHIVED]}
+        starred: {type: boolean}
+        pinned: {type: boolean}
+        rank: {type: integer}
+"##;
+
+/// The description of [`ACTIONS`]: what each action sets.
+fn actions_world() -> serde_json::Value {
+    let target = json!({"path_param": "id"});
+    json!({
+        "types": {"items": {"lifecycle": {
+            "member": "status", "states": ["ACTIVE", "ARCHIVED"], "initial": "ACTIVE"
+        }}},
+        "operations": {
+            "archiveItem": {"kind": "action", "target": target, "transition": {"status": "ARCHIVED"}},
+            "starItem": {"kind": "action", "target": target, "changes": {"starred": {"value": true}}},
+            "renameItem": {"kind": "action", "target": target, "changes": {"name": {"from_request": "/name"}}},
+            "pinItem": {
+                "kind": "action", "target": target, "answer": {"record": "/item"},
+                "changes": {"pinned": {"value": true}, "rank": {"from_request": "/rank"}}
+            },
+            "boostItem": {
+                "kind": "action", "target": target, "answer": {"record": "/item"},
+                "changes": {"pinned": {"value": true}}
+            },
+            "pingItem": {"kind": "action", "target": target}
+        }
+    })
+}
+
+/// A harness of [`ACTIONS`] whose LLM answers `script`.
+fn actions(script: Vec<serde_json::Value>) -> support::DescribedHarness {
+    support::harness(ACTIONS, script, &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, actions_world(), false)
+    })
+}
+
+fn item_i1() -> serde_json::Value {
+    json!({"id": "i1", "name": "a", "status": "ACTIVE"})
+}
+
+/// The line the executor logs for an action `operation`.
+fn action_line(operation: &str, fallback: Option<&str>) -> ExecLine {
+    ExecLine {
+        operation: operation.into(),
+        exec: "action".into(),
+        exec_fallback: fallback.map(str::to_owned),
+    }
+}
+
+/// Creates item `i1` (the LLM's first answer).
+async fn create_i1(h: &support::DescribedHarness) {
+    let (status, _, body) = h
+        .send("POST", "/items", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn a_transition_is_applied_to_the_held_target_with_no_llm_call() {
+    let (capture, _guard) = Capture::install();
+    // A second answer a reconciling path could take for the action: never used.
+    let h = actions(vec![
+        item_i1(),
+        json!({"id": "i1", "name": "decoy", "status": "ACTIVE", "rank": 9}),
+    ]);
+    assert_eq!(
+        type_of(&h, "getItem"),
+        "items",
+        "the world above names this type"
+    );
+    create_i1(&h).await;
+    let (status, headers, body) = h.send("POST", "/items/i1/archive", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let archived = json!({"id": "i1", "name": "a", "status": "ARCHIVED"});
+    assert_eq!(body, archived);
+    assert_eq!(
+        h.provider.requests().len(),
+        1,
+        "the action made no LLM call"
+    );
+    assert_eq!(h.stored("items", "i1").await, Some(archived.clone()));
+    assert_eq!(
+        capture.of("archiveItem"),
+        vec![action_line("archiveItem", None)]
+    );
+    let (status, headers, body) = h.send("GET", "/items/i1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, archived);
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_bodiless_action_answers_its_declared_status_and_stores_the_change() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![item_i1(), json!({"effects": []})]);
+    create_i1(&h).await;
+    let (status, headers, body) = h.send("POST", "/items/i1/star", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source(&headers), "state");
+    assert_eq!(body, serde_json::Value::Null);
+    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(
+        h.stored("items", "i1").await,
+        Some(json!({"id": "i1", "name": "a", "status": "ACTIVE", "starred": true}))
+    );
+    assert_eq!(capture.of("starItem"), vec![action_line("starItem", None)]);
+}
+
+#[tokio::test]
+async fn an_acknowledging_action_answers_its_own_schema_with_the_records_values() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![
+        item_i1(),
+        json!({"ok": false, "id": "decoy", "rev": 1}),
+    ]);
+    create_i1(&h).await;
+    let (status, headers, body) = h
+        .send("POST", "/items/i1/rename", Some(json!({"name": "b"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["id"], json!("i1"), "{body}");
+    assert!(body["ok"].is_boolean(), "{body}");
+    assert!(
+        body.get("name").is_none(),
+        "only the answer's own members: {body}"
+    );
+    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(
+        h.stored("items", "i1").await,
+        Some(json!({"id": "i1", "name": "b", "status": "ACTIVE"}))
+    );
+    assert_eq!(
+        capture.of("renameItem"),
+        vec![action_line("renameItem", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_action_answering_its_record_in_an_envelope_answers_it_there() {
+    let (_capture, _guard) = Capture::install();
+    let h = actions(vec![item_i1(), json!({"item": item_i1()})]);
+    create_i1(&h).await;
+    // `rank` does not fit its member: dropped, and the rest still set.
+    let (status, headers, body) = h
+        .send("POST", "/items/i1/pin", Some(json!({"rank": "high"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let pinned = json!({"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true});
+    assert_eq!(body, json!({"item": pinned}));
+    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.stored("items", "i1").await, Some(pinned));
+}
+
+#[tokio::test]
+async fn an_action_the_description_sets_nothing_for_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![item_i1(), item_i1()]);
+    create_i1(&h).await;
+    let (status, headers, body) = h.send("POST", "/items/i1/ping", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("pingItem"),
+        vec![action_line("pingItem", Some("undescribed"))]
+    );
+}
+
+#[tokio::test]
+async fn an_action_on_an_unheld_target_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![json!({"id": "i9", "name": "x", "status": "ARCHIVED"})]);
+    let (status, headers, body) = h.send("POST", "/items/i9/archive", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("archiveItem"),
+        vec![action_line("archiveItem", Some("not_held"))]
+    );
+}
+
+#[tokio::test]
+async fn an_action_whose_record_does_not_render_falls_back() {
+    let (capture, _guard) = Capture::install();
+    // `boostItem` answers the item in an envelope that also requires a `receipt`,
+    // which nothing the mock holds gives.
+    let h = actions(vec![
+        item_i1(),
+        json!({"item": {"id": "i1", "name": "a", "status": "ACTIVE", "pinned": true}, "receipt": "r1"}),
+    ]);
+    create_i1(&h).await;
+    let (status, headers, body) = h.send("POST", "/items/i1/boost", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("boostItem"),
+        vec![action_line("boostItem", Some("render_failed"))]
+    );
+}
+
+#[tokio::test]
+async fn with_no_llm_answer_an_action_still_changes_state() {
+    let (_capture, _guard) = Capture::install();
+    // No answers: the create is the faker's.
+    let h = actions(vec![]);
+    let (status, _, made) = h
+        .send("POST", "/items", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    let id = made["id"].as_str().unwrap().to_owned();
+    let (status, headers, body) = h
+        .send("POST", &format!("/items/{id}/archive"), None, &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["status"], json!("ARCHIVED"));
+    assert_eq!(body["id"], json!(id));
+    assert_eq!(h.stored("items", &id).await, Some(body));
+}
+
+/// A described action on GraphQL: a mutation setting a member of its target is executed.
+#[cfg(feature = "graphql")]
+mod graphql {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mb_engine::{Engine, EngineConfig};
+    use mb_llm::{Provider, ScriptedProvider};
+    use mb_protocols::MockRuntime;
+    use mb_state::MemoryStore;
+    use serde_json::{Value, json};
+
+    use super::{Capture, ExecLine};
+
+    const SDL: &str = r#"
+type Widget { id: ID! name: String! starred: Boolean }
+type Query { widget(id: ID!): Widget }
+type Mutation {
+  createWidget(name: String!): Widget
+  starWidget(id: ID!): Widget
+}
+"#;
+
+    async fn post(router: &axum::Router, query: &str) -> Value {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/graphql")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({"query": query}).to_string()))
+            .unwrap();
+        super::support::send_to(router, req).await.2
+    }
+
+    #[tokio::test]
+    async fn a_graphql_action_mutation_is_executed() {
+        let (capture, _guard) = Capture::install();
+        let bundle = mb_import::compile(SDL.as_bytes()).unwrap();
+        let t = bundle
+            .operation("Query.widget")
+            .and_then(|o| o.resource_type.clone())
+            .unwrap();
+        let world = json!({"operations": {"Mutation.starWidget": {
+            "kind": "action", "type": t, "target": {"member": "id"},
+            "changes": {"starred": {"value": true}}
+        }}});
+        let provider = Arc::new(ScriptedProvider::new(
+            [
+                json!({"__typename": "Widget", "id": "w1", "name": "a", "starred": false}),
+                json!({"__typename": "Widget", "id": "w1", "name": "decoy", "starred": false}),
+            ]
+            .into_iter()
+            .map(|v| Ok(v.to_string()))
+            .collect(),
+        ));
+        let rt = MockRuntime::new(
+            "described",
+            Arc::new(bundle),
+            Arc::new(Engine::new(
+                Some(Arc::clone(&provider) as Arc<dyn Provider>),
+                EngineConfig::default(),
+            )),
+            Arc::new(MemoryStore::new(Duration::from_secs(3600))),
+        );
+        let rt = super::support::with_effective(rt, world, false);
+        let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
+        let made = post(
+            &router,
+            "mutation { createWidget(name: \"a\") { id name starred } }",
+        )
+        .await;
+        assert!(made.get("errors").is_none(), "{made}");
+        let starred = post(
+            &router,
+            "mutation { starWidget(id: \"w1\") { id name starred } }",
+        )
+        .await;
+        assert!(starred.get("errors").is_none(), "{starred}");
+        assert_eq!(
+            starred["data"]["starWidget"],
+            json!({"id": "w1", "name": "a", "starred": true})
+        );
+        assert_eq!(
+            provider.requests().len(),
+            1,
+            "the mutation made no LLM call"
+        );
+        assert!(
+            capture.of("Mutation.starWidget").contains(&ExecLine {
+                operation: "Mutation.starWidget".into(),
+                exec: "action".into(),
+                exec_fallback: None,
+            }),
+            "{:?}",
+            capture.of("Mutation.starWidget")
+        );
+        let read = post(&router, "{ widget(id: \"w1\") { id name starred } }").await;
+        assert_eq!(read["data"]["widget"]["starred"], json!(true), "{read}");
+    }
+}
