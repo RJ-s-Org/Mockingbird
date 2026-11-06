@@ -1427,12 +1427,13 @@ impl Engine {
             None => None,
         };
         let declared = declared.map(|response| {
-            self.with_facts(
+            let response = self.with_facts(
                 bundle,
                 op,
                 response,
                 &error_body::RefusalFacts::message(detail),
-            )
+            );
+            self.with_own_status(bundle, op, response)
         });
         let mut response = declared.unwrap_or_else(|| GeneratedResponse {
             status: 404,
@@ -1537,7 +1538,8 @@ impl Engine {
         let response = self
             .error_answer_repeating(bundle, op, call, (code, cause), facts.members())
             .await?;
-        let mut response = self.with_facts(bundle, op, response, facts);
+        let response = self.with_facts(bundle, op, response, facts);
+        let mut response = self.with_own_status(bundle, op, response);
         tracing::info!(operation = %op.id, status = code, cause = ?cause, "the call was refused from state with a declared error");
         response.source = if response.fallback_reason.is_some() {
             Source::Fallback
@@ -1545,6 +1547,27 @@ impl Engine {
             Source::State
         };
         Some(response)
+    }
+
+    /// `response`, an error body the mock answers itself, saying its own HTTP status
+    /// where its schema shows a member holds it ([`with_http_status`]): a body the model
+    /// wrote once serves every later status it is kept for.
+    fn with_own_status(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        response: GeneratedResponse,
+    ) -> GeneratedResponse {
+        let schema = op
+            .output_for_status(response.status)
+            .filter(|variant| !media::is_non_json(op, variant))
+            .and_then(|variant| variant.schema.as_ref());
+        match (schema, self.error_validator(bundle, op, response.status)) {
+            (Some(schema), Some(validator)) => {
+                with_http_status(&validator, bundle, schema, response)
+            }
+            _ => response,
+        }
     }
 
     /// `response`, an error body the mock answers itself, with `facts` laid over it:
@@ -2715,12 +2738,39 @@ fn encode_base64(
     response
 }
 
-/// An error body whose schema declares an integer or number `status` member that may hold the HTTP
-/// status, with that member set to it: a problem body (RFC 9457) says its own status, and
-/// a faker's or a model's otherwise says another. Kept only if the body still validates.
-/// The schema decides, not the name alone: a string `status`, or one whose bounds or enum
-/// leave the HTTP status out, is the API's own.
+/// An error body saying its own HTTP status where its schema shows a member holds it: a
+/// problem body (RFC 9457) says its own status, and a faker's or a model's otherwise says
+/// another. Two kinds: an integer or number `status` member that may hold the HTTP status
+/// ([`with_integer_status`]), and a string member, at the top level or in the items of an
+/// array of error objects, whose schema shows it holds the status as text, whatever its
+/// name ([`error_body::with_status_text`]). Each change is kept only if the body still
+/// validates.
 fn with_http_status(
+    validator: &SchemaValidator,
+    bundle: &Bundle,
+    schema: &Value,
+    response: GeneratedResponse,
+) -> GeneratedResponse {
+    let status = response.status;
+    if status < 400 {
+        return response;
+    }
+    let mut response = with_integer_status(validator, bundle, schema, response);
+    if let Some(body) = response.body.take() {
+        response.body = Some(error_body::with_status_text(
+            validator,
+            (schema, &bundle.defs),
+            body,
+            status,
+        ));
+    }
+    response
+}
+
+/// An error body whose schema declares an integer or number `status` member that may hold
+/// the HTTP status, with that member set to it. The schema decides, not the name alone: a
+/// string `status`, or one whose bounds or enum leave the HTTP status out, is not set here.
+fn with_integer_status(
     validator: &SchemaValidator,
     bundle: &Bundle,
     schema: &Value,
@@ -2731,7 +2781,7 @@ fn with_http_status(
     let Some(Value::Object(members)) = &response.body else {
         return response;
     };
-    if status < 400 || members.get(MEMBER).and_then(Value::as_u64) == Some(u64::from(status)) {
+    if members.get(MEMBER).and_then(Value::as_u64) == Some(u64::from(status)) {
         return response;
     }
     let allowed = consistency::property_schema(bundle, schema, MEMBER)

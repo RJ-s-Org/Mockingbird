@@ -45,7 +45,7 @@ use std::collections::{HashMap, HashSet};
 use mb_mcm::{Bundle, StatusSelector};
 use serde_json::Value;
 
-use crate::consistency::{deref, example_value, property_schema};
+use crate::consistency::{declared_members, deref, example_value, property_schema};
 use crate::validate::SchemaValidator;
 
 /// How deep a body or a schema is walked.
@@ -93,22 +93,11 @@ pub(crate) fn fill(
     if !validator.is_valid(&body) {
         return body;
     }
-    let said = prose.description.map(sentenced_tokens).unwrap_or_default();
-    let info = prose
-        .info
-        .map(|text| {
-            stating(
-                sentenced_tokens(text),
-                status,
-                (prose.repeated, prose.resource, prose.request),
-            )
-        })
-        .unwrap_or_default();
     let mut names = HashSet::new();
     property_names(bundle, schema, 0, &mut HashSet::new(), &mut names);
     let mut walk = Walk {
         bundle,
-        said: [Said::new(said), Said::new(info)],
+        said: said(prose, status),
         repeated: prose.repeated,
         names: &names,
         status,
@@ -129,6 +118,49 @@ pub(crate) fn fill(
             out = candidate;
         }
     }
+    out
+}
+
+/// What the status's description says (source 2), then what the sentences of the
+/// API-level description that state this refusal say (source 3).
+fn said(prose: Prose<'_>, status: u16) -> [Said; 2] {
+    let described = prose.description.map(sentenced_tokens).unwrap_or_default();
+    let info = prose
+        .info
+        .map(|text| {
+            stating(
+                sentenced_tokens(text),
+                status,
+                (prose.repeated, prose.resource, prose.request),
+            )
+        })
+        .unwrap_or_default();
+    [Said::new(described), Said::new(info)]
+}
+
+/// The dotted paths of the scalar members of `schema`, the response for `status`, that
+/// the contract names a value for (see the module's documentation), whatever value a
+/// body holds there: the members [`fill`] gives a value. A member in an array's items
+/// has the array's path (`errors.title`).
+pub(crate) fn named_paths(
+    bundle: &Bundle,
+    (schema, status): (&Value, u16),
+    prose: Prose<'_>,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    property_names(bundle, schema, 0, &mut HashSet::new(), &mut names);
+    let mut walk = Walk {
+        bundle,
+        said: said(prose, status),
+        repeated: prose.repeated,
+        names: &names,
+        status,
+        shared: None,
+        changes: Vec::new(),
+    };
+    let alone = !walk.enters_shared(schema);
+    let mut out = HashSet::new();
+    walk.schema_paths(schema, "", alone, 0, &mut out);
     out
 }
 
@@ -508,6 +540,45 @@ impl Walk<'_> {
                     self.changes.push((pointer.clone(), named));
                 }
             }
+        }
+    }
+
+    /// Into `out`, the dotted paths below `dotted` of the members of `schema` the
+    /// contract names a value for, under examples this status alone uses when `alone`
+    /// ([`named_paths`]).
+    fn schema_paths(
+        &mut self,
+        schema: &Value,
+        dotted: &str,
+        alone: bool,
+        depth: usize,
+        out: &mut HashSet<String>,
+    ) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let mut members: Vec<String> = declared_members(self.bundle, schema)
+            .into_iter()
+            .flatten()
+            .collect();
+        members.sort();
+        for key in members {
+            let Some(inner) = property_schema(self.bundle, schema, &key) else {
+                continue;
+            };
+            let path = match dotted {
+                "" => key.clone(),
+                _ => format!("{dotted}.{key}"),
+            };
+            let alone = alone && !self.enters_shared(&inner);
+            if self.named(&inner, (&key, &path), alone).is_some() {
+                out.insert(path.clone());
+            }
+            self.schema_paths(&inner, &path, alone, depth + 1, out);
+        }
+        if let Some(items) = deref(self.bundle, schema).get("items").cloned() {
+            let alone = alone && !self.enters_shared(&items);
+            self.schema_paths(&items, dotted, alone, depth + 1, out);
         }
     }
 
