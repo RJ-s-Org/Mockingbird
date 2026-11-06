@@ -1,0 +1,337 @@
+openapi: 3.0.3
+info:
+  title: Apache CouchDB HTTP API (databases, documents, _all_docs and _find)
+  version: "3.5"
+  description: |
+    A subset of the Apache CouchDB 3 HTTP API, written from its public reference
+    (docs.couchdb.org/en/stable/api). Requests authenticate with HTTP Basic. Bodies and
+    answers are JSON documents with no envelope.
+
+    A database is named by the client: `PUT /{db}` creates it and answers 201
+    `{"ok": true}`; a name already taken answers 412
+    `{"error": "file_exists", "reason": "The database could not be created, the file already exists."}`.
+    A name starts with a lowercase letter and holds only lowercase letters, digits and
+    `_ $ ( ) + - /`. `GET /{db}` answers the database's information: `db_name`,
+    `doc_count` (documents that are not deleted) and `doc_del_count` (deleted ones).
+
+    A document is a JSON object with an `_id` and a revision `_rev`. `PUT /{db}/{docid}`
+    stores a document under the id the client chose; `POST /{db}` stores one under an
+    id the server makes (a UUID, 32 lowercase hex digits by default) unless the body
+    has an `_id`. Both answer 201 (or 202 when the write is accepted but not yet on
+    disk) with `{"ok": true, "id", "rev"}` and an `ETag` header holding the new
+    revision in double quotes. A revision is `N-<32 hex digits>`: N is 1 for a new
+    document and grows by one with each change.
+
+    Every change is checked against the current revision (multi-version concurrency
+    control): a PUT that changes an existing document must give its current revision,
+    in the body's `_rev`, the `rev` query parameter or the `If-Match` header. A PUT of an
+    existing id without a revision, or with one that is not the latest, changes nothing
+    and answers 409 `{"error": "conflict", "reason": "Document update conflict."}`.
+
+    `DELETE /{db}/{docid}?rev=<current>` deletes a document: it answers 200 (or 202)
+    with `{"ok": true, "id", "rev"}`, `rev` being the next revision, and leaves a
+    tombstone (`_deleted: true`). A deleted document reads 404
+    `{"error": "not_found", "reason": "deleted"}`; an id that never existed reads 404
+    (the reference gives no reason for it). A deleted document is not listed by
+    `_all_docs` or found by `_find`, and is counted in `doc_del_count`, not `doc_count`.
+
+    `GET /{db}/_all_docs` lists the database's documents sorted by id: `total_rows` is
+    the number of documents in the database (whatever `skip` and `limit` answer), `offset`
+    the number of rows before the first one answered, and each row is
+    `{id, key, value: {rev}}`, plus the document as `doc` with `include_docs=true`.
+    `startkey` and `endkey` (JSON-encoded, so a string key is sent in double quotes)
+    bound the ids, `endkey` included unless `inclusive_end=false`; `limit` caps the
+    rows, `skip` skips that many rows first, and `descending=true` reverses the order.
+
+    `POST /{db}/_find` finds documents with a Mango `selector`: `{"field": value}`
+    matches equal values, and operators such as `$eq`, `$ne`, `$gt`, `$gte`, `$lt`,
+    `$lte` and `$in` compare; fields at the same level must all match. It answers
+    `{docs, bookmark, warning?}`; `limit` (default 25) caps the documents and `fields`
+    keeps only the named fields of each. Without an index for the query it reads every
+    document, which is slow, and says so in `warning`.
+
+    Errors answer `{error, reason}`: 400 `bad_request`, 401 `unauthorized`, 404
+    `not_found`, 409 `conflict` and 412 `file_exists`.
+servers:
+  - url: http://localhost:5984
+security:
+  - basicAuth: []
+tags:
+  - name: Databases
+  - name: Documents
+  - name: Queries
+paths:
+  /{db}:
+    parameters:
+      - $ref: "#/components/parameters/db"
+    put:
+      tags: [Databases]
+      operationId: createDatabase
+      summary: Create a database
+      parameters:
+        - {name: q, in: query, description: Shards; default 2., schema: {type: integer}}
+        - {name: n, in: query, description: Replicas; default 3., schema: {type: integer}}
+        - {name: partitioned, in: query, schema: {type: boolean, default: false}}
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ok"}
+        "202":
+          description: Created on at least one node but not yet on a quorum.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ok"}
+        "400": {$ref: "#/components/responses/Error"}
+        "412":
+          description: "A database with this name already exists: `{error: file_exists}`."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+              example: {error: file_exists, reason: "The database could not be created, the file already exists."}
+    get:
+      tags: [Databases]
+      operationId: getDatabase
+      summary: Read a database's information
+      responses:
+        "200":
+          description: The database's information.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DatabaseInfo"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Databases]
+      operationId: deleteDatabase
+      summary: Delete a database
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ok"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Documents]
+      operationId: createDocument
+      summary: Create a document with an id the server makes
+      description: "The id is a UUID made by the server, unless the body has an `_id`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Document"}
+      responses:
+        "201": {$ref: "#/components/responses/Written"}
+        "202": {$ref: "#/components/responses/Written"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Conflict"}
+  /{db}/_all_docs:
+    parameters:
+      - $ref: "#/components/parameters/db"
+    get:
+      tags: [Queries]
+      operationId: allDocs
+      summary: List the documents by id
+      parameters:
+        - {name: include_docs, in: query, description: Add each document as `doc`., schema: {type: boolean, default: false}}
+        - {name: startkey, in: query, description: "JSON-encoded; the first id to answer (a string in double quotes).", schema: {type: string}}
+        - {name: endkey, in: query, description: "JSON-encoded; the last id to answer, included unless inclusive_end is false.", schema: {type: string}}
+        - {name: inclusive_end, in: query, schema: {type: boolean, default: true}}
+        - {name: limit, in: query, description: At most this many rows., schema: {type: integer, minimum: 0}}
+        - {name: skip, in: query, description: Skip this many rows first., schema: {type: integer, minimum: 0, default: 0}}
+        - {name: descending, in: query, description: Highest id first., schema: {type: boolean, default: false}}
+      responses:
+        "200":
+          description: "Rows sorted by id; `total_rows` counts the database's documents."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AllDocs"}
+        "404": {$ref: "#/components/responses/Error"}
+  /{db}/_find:
+    parameters:
+      - $ref: "#/components/parameters/db"
+    post:
+      tags: [Queries]
+      operationId: find
+      summary: Find documents with a Mango selector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [selector]
+              properties:
+                selector: {type: object, additionalProperties: true, description: "Fields and operators that every answered document matches."}
+                limit: {type: integer, default: 25}
+                skip: {type: integer, default: 0}
+                fields: {type: array, items: {type: string}, description: Keep only these fields of each document.}
+                bookmark: {type: string, description: "From an earlier answer: the next page."}
+                execution_stats: {type: boolean, default: false}
+      responses:
+        "200":
+          description: The matching documents.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  docs: {type: array, items: {$ref: "#/components/schemas/Document"}}
+                  bookmark: {type: string}
+                  warning: {type: string}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /{db}/{docid}:
+    parameters:
+      - $ref: "#/components/parameters/db"
+      - {name: docid, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Documents]
+      operationId: getDocument
+      summary: Read a document
+      parameters:
+        - {name: rev, in: query, description: "An earlier revision; default the latest.", schema: {type: string}}
+      responses:
+        "200":
+          description: "The document with its `_id` and `_rev`; the `ETag` header holds the revision."
+          headers:
+            ETag: {description: "The revision in double quotes.", schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Document"}
+        "404":
+          description: "`{error: not_found, reason}`; `reason: deleted` for a deleted document."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+              example: {error: not_found, reason: deleted}
+    put:
+      tags: [Documents]
+      operationId: putDocument
+      summary: Create a document, or a new revision of one
+      description: "An existing document changes only when its current revision is given, as `_rev`, `rev` or `If-Match`."
+      parameters:
+        - {name: rev, in: query, description: The current revision., schema: {type: string}}
+        - {name: If-Match, in: header, description: The current revision., schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Document"}
+      responses:
+        "201": {$ref: "#/components/responses/Written"}
+        "202": {$ref: "#/components/responses/Written"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Conflict"}
+    delete:
+      tags: [Documents]
+      operationId: deleteDocument
+      summary: Delete a document
+      description: Leaves a tombstone; the document then reads 404 with reason deleted.
+      parameters:
+        - {name: rev, in: query, description: The current revision., schema: {type: string}}
+        - {name: If-Match, in: header, description: The current revision., schema: {type: string}}
+      responses:
+        "200":
+          description: Deleted; `rev` is the tombstone's revision.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WriteResult"}
+        "202":
+          description: Accepted but not yet on disk.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WriteResult"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Conflict"}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+  parameters:
+    db:
+      name: db
+      in: path
+      required: true
+      description: "The database name: a lowercase letter, then lowercase letters, digits and _$()+-/."
+      schema: {type: string, pattern: '^[a-z][a-z0-9_$()+/-]*$'}
+  responses:
+    Written:
+      description: "Stored; `rev` is the new revision."
+      headers:
+        ETag: {description: "The new revision in double quotes.", schema: {type: string}}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/WriteResult"}
+    Conflict:
+      description: "The id exists and no current revision was given, or the revision given is not the latest."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: conflict, reason: Document update conflict.}
+    Error:
+      description: "`{error, reason}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Ok:
+      type: object
+      properties:
+        ok: {type: boolean, example: true}
+    Error:
+      type: object
+      properties:
+        error: {type: string, example: not_found}
+        reason: {type: string, example: deleted}
+    WriteResult:
+      type: object
+      properties:
+        ok: {type: boolean, example: true}
+        id: {type: string}
+        rev: {type: string, pattern: '^[0-9]+-[0-9a-f]{32}$', example: 1-917fa2381192822767f010b95b45325b}
+    Document:
+      type: object
+      additionalProperties: true
+      description: "Any JSON object; `_id` and `_rev` are the document's identity and revision."
+      properties:
+        _id: {type: string}
+        _rev: {type: string, pattern: '^[0-9]+-[0-9a-f]{32}$'}
+        _deleted: {type: boolean}
+    DatabaseInfo:
+      type: object
+      properties:
+        db_name: {type: string}
+        doc_count: {type: integer, description: Documents that are not deleted.}
+        doc_del_count: {type: integer, description: Deleted documents.}
+        update_seq: {type: string}
+        purge_seq: {type: string}
+        compact_running: {type: boolean}
+        instance_start_time: {type: string, example: "0"}
+        sizes:
+          type: object
+          properties:
+            active: {type: integer}
+            external: {type: integer}
+            file: {type: integer}
+        props: {type: object, properties: {partitioned: {type: boolean}}}
+    AllDocs:
+      type: object
+      properties:
+        total_rows: {type: integer, description: "The database's documents, deleted ones not counted."}
+        offset: {type: integer, description: Rows before the first one answered.}
+        rows:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              key: {type: string, description: The id.}
+              value: {type: object, properties: {rev: {type: string}}}
+              doc: {$ref: "#/components/schemas/Document"}

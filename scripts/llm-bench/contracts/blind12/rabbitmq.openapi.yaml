@@ -1,0 +1,483 @@
+openapi: 3.0.3
+info:
+  title: RabbitMQ management HTTP API (virtual hosts, queues, exchanges, bindings, messages)
+  version: "4.1"
+  description: |
+    A subset of the RabbitMQ management plugin's HTTP API, written from its public
+    reference (rabbitmq.com/docs/http-api-reference and /docs/management). Requests
+    authenticate with HTTP Basic. Bodies and answers are JSON with no envelope.
+
+    Objects are named, not numbered: a virtual host by its name, and a queue or an
+    exchange by its virtual host and its name, both in the path
+    (`/api/queues/{vhost}/{name}`; the default virtual host `/` is written `%2F`).
+    `PUT` of a virtual host, a queue or an exchange declares it. The reference's example
+    of creating a virtual host answers `201 Created` and its example of a delete answers
+    `204 No Content`; it states no other status codes, and says no body is answered to a
+    `PUT` or `DELETE` unless it fails. Declaring a queue that exists with the same
+    properties changes nothing. AMQP 0-9-1, which the HTTP API declares through, refuses
+    a declaration of an existing queue with other `durable`, `exclusive`, `auto_delete`
+    or `arguments` (such as `x-max-length`) and leaves the queue as it was; the HTTP
+    reference gives no code for that refusal.
+
+    A binding routes an exchange's messages to a queue:
+    `POST /api/bindings/{vhost}/e/{exchange}/q/{queue}` with a `routing_key` (and
+    optional `arguments`) creates one, and the response holds a `Location` header with
+    the URI of the new binding: `/api/bindings/{vhost}/e/{exchange}/q/{queue}/{props}`,
+    `{props}` being the binding's `properties_key` from a bindings listing. `GET` on the
+    same path lists the bindings between that exchange and that queue. A `topic`
+    exchange routes a message to every queue bound with a pattern its routing key
+    matches (`*` one word, `#` zero or more words).
+
+    `POST /api/exchanges/{vhost}/{name}/publish` publishes one message, with
+    `properties`, `routing_key`, `payload` and `payload_encoding` (`string` or
+    `base64`), all mandatory. It answers `{"routed": true}`: `routed` is true if the
+    message was sent to at least one queue. The endpoint is for development and
+    troubleshooting. Every virtual host has the default exchange, which the HTTP API
+    names `amq.default` in the path: it routes a message to the queue named by its
+    routing key, with no binding declared.
+
+    `POST /api/queues/{vhost}/{name}/get` gets up to `count` messages from the queue and
+    answers them as an array, each with its `payload` (with `encoding` `auto`, a string
+    when it is valid UTF-8, else base64). A queue hands out its messages in the order
+    they were put on it, oldest first. `ackmode` decides what happens to them:
+    `ack_requeue_true` and `reject_requeue_true` requeue them, and `ack_requeue_false`
+    and `reject_requeue_false` remove them. A message that was delivered before and
+    requeued is delivered again with `redelivered` true (as AMQP's basic.get-ok marks
+    it). The queue's own `messages` counters are statistics refreshed every few
+    seconds, not at once.
+
+    `DELETE /api/queues/{vhost}/{name}` deletes a queue. `if-empty=true` and
+    `if-unused=true` make the delete conditional: they prevent it from succeeding if the
+    queue holds messages, or has consumers. `DELETE .../contents` purges a queue (removes
+    its messages in the Ready state).
+
+    `GET /api/queues/{vhost}` lists the virtual host's queues. `sort` names a field to
+    sort by (one field only) and `sort_reverse=true` reverses the order; `columns`
+    restricts the fields answered. The pagination parameters are `page`, `page_size`
+    (default 100, at most 500), `name` (a filter by name) and `use_regex` (read `name` as
+    a regular expression); the reference does not document the paginated answer.
+
+    The reference does not document error bodies (the server answers `{error, reason}`).
+servers:
+  - url: http://localhost:15672
+security:
+  - basicAuth: []
+tags:
+  - name: Virtual hosts
+  - name: Queues
+  - name: Exchanges
+  - name: Bindings
+paths:
+  /api/vhosts/{vhost}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+    get:
+      tags: [Virtual hosts]
+      operationId: getVhost
+      summary: Read a virtual host
+      responses:
+        "200":
+          description: The virtual host.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Vhost"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Virtual hosts]
+      operationId: putVhost
+      summary: Create a virtual host, or update its metadata
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: {type: string}
+                tags: {type: string, description: Comma-separated.}
+                default_queue_type: {type: string, enum: [classic, quorum, stream]}
+                tracing: {type: boolean}
+      responses:
+        "201": {description: Created.}
+        "204": {description: It existed; its metadata were updated.}
+        "400": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Virtual hosts]
+      operationId: deleteVhost
+      summary: Delete a virtual host and everything in it
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/permissions/{vhost}/{user}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - {name: user, in: path, required: true, schema: {type: string}}
+    put:
+      tags: [Virtual hosts]
+      operationId: putPermissions
+      summary: Set a user's permissions in a virtual host
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [configure, write, read]
+              properties:
+                configure: {type: string, description: "A regular expression; \".*\" is everything."}
+                write: {type: string}
+                read: {type: string}
+      responses:
+        "201": {description: Set.}
+        "204": {description: Updated.}
+        "400": {$ref: "#/components/responses/Error"}
+  /api/queues/{vhost}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+    get:
+      tags: [Queues]
+      operationId: listQueues
+      summary: List a virtual host's queues
+      description: "A bare array, or with `page` one page of the queues. Ordered by `sort` when it is given."
+      parameters:
+        - {name: page, in: query, description: "From 1; asks for a page instead of every queue.", schema: {type: integer, minimum: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: name, in: query, description: "Filter by name.", schema: {type: string}}
+        - {name: use_regex, in: query, description: Read name as a regular expression., schema: {type: boolean, default: false}}
+        - {name: sort, in: query, description: "The field to sort by, e.g. name.", schema: {type: string}}
+        - {name: sort_reverse, in: query, schema: {type: boolean, default: false}}
+      responses:
+        "200":
+          description: The queues, or one page of them.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: {$ref: "#/components/schemas/Queue"}
+                  - $ref: "#/components/schemas/QueuePage"
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/queues/{vhost}/{name}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - $ref: "#/components/parameters/name"
+    get:
+      tags: [Queues]
+      operationId: getQueue
+      summary: Read a queue
+      responses:
+        "200":
+          description: The queue.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Queue"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Queues]
+      operationId: declareQueue
+      summary: Declare a queue
+      description: "Declares it. One that exists with the same properties is unchanged; AMQP refuses a declaration with other ones and leaves it unchanged."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                durable: {type: boolean, default: true}
+                auto_delete: {type: boolean, default: false}
+                arguments: {type: object, additionalProperties: true, description: "x-max-length, x-message-ttl, x-queue-type and others."}
+                node: {type: string}
+      responses:
+        "201": {description: Created.}
+        "204": {description: It already existed with these properties; nothing changed.}
+        "400": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Queues]
+      operationId: deleteQueue
+      summary: Delete a queue
+      parameters:
+        - {name: if-empty, in: query, description: Delete only when the queue holds no messages., schema: {type: boolean}}
+        - {name: if-unused, in: query, description: Delete only when the queue has no consumers., schema: {type: boolean}}
+      responses:
+        "204": {description: Deleted.}
+        "400":
+          description: "Kept: a condition asked for does not hold, so the delete does not succeed."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/queues/{vhost}/{name}/contents:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - $ref: "#/components/parameters/name"
+    delete:
+      tags: [Queues]
+      operationId: purgeQueue
+      summary: Purge a queue
+      description: Removes the queue's ready messages.
+      responses:
+        "204": {description: Purged.}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/queues/{vhost}/{name}/get:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - $ref: "#/components/parameters/name"
+    post:
+      tags: [Queues]
+      operationId: getMessages
+      summary: Get messages from a queue
+      description: "Up to `count` messages from the head of the queue, oldest first; `ackmode` decides whether they stay."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [count, ackmode, encoding]
+              properties:
+                count: {type: integer, minimum: 1}
+                ackmode: {type: string, enum: [ack_requeue_true, ack_requeue_false, reject_requeue_true, reject_requeue_false]}
+                encoding: {type: string, enum: [auto, base64]}
+                truncate: {type: integer, description: Cut payloads longer than this many bytes.}
+      responses:
+        "200":
+          description: The messages; [] for an empty queue.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Message"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/exchanges/{vhost}/{name}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - $ref: "#/components/parameters/name"
+    get:
+      tags: [Exchanges]
+      operationId: getExchange
+      summary: Read an exchange
+      responses:
+        "200":
+          description: The exchange.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Exchange"}
+        "404": {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Exchanges]
+      operationId: declareExchange
+      summary: Declare an exchange
+      description: "Declares it. One that exists with the same properties is unchanged; AMQP refuses a declaration with other ones and leaves it unchanged."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: {type: string, enum: [direct, fanout, topic, headers]}
+                durable: {type: boolean, default: true}
+                auto_delete: {type: boolean, default: false}
+                internal: {type: boolean, default: false}
+                arguments: {type: object, additionalProperties: true}
+      responses:
+        "201": {description: Created.}
+        "204": {description: It already existed with these properties.}
+        "400": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Exchanges]
+      operationId: deleteExchange
+      summary: Delete an exchange
+      parameters:
+        - {name: if-unused, in: query, schema: {type: boolean}}
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/exchanges/{vhost}/{name}/publish:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - $ref: "#/components/parameters/name"
+    post:
+      tags: [Exchanges]
+      operationId: publish
+      summary: Publish a message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [properties, routing_key, payload, payload_encoding]
+              properties:
+                properties: {type: object, additionalProperties: true, description: "AMQP properties: content_type, delivery_mode, headers and others."}
+                routing_key: {type: string}
+                payload: {type: string}
+                payload_encoding: {type: string, enum: [string, base64]}
+      responses:
+        "200":
+          description: "`routed` is true when the message reached at least one queue."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  routed: {type: boolean}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/bindings/{vhost}/e/{exchange}/q/{queue}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - {name: exchange, in: path, required: true, schema: {type: string}}
+      - {name: queue, in: path, required: true, schema: {type: string}}
+    get:
+      tags: [Bindings]
+      operationId: listBindingsBetween
+      summary: List the bindings between an exchange and a queue
+      responses:
+        "200":
+          description: The bindings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Binding"}
+        "404": {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Bindings]
+      operationId: createBinding
+      summary: Bind a queue to an exchange
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                routing_key: {type: string, default: ""}
+                arguments: {type: object, additionalProperties: true}
+      responses:
+        "201":
+          description: Bound.
+          headers:
+            Location: {description: "The new binding's URI, ending in its properties_key.", schema: {type: string}}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+  /api/bindings/{vhost}/e/{exchange}/q/{queue}/{props}:
+    parameters:
+      - $ref: "#/components/parameters/vhost"
+      - {name: exchange, in: path, required: true, schema: {type: string}}
+      - {name: queue, in: path, required: true, schema: {type: string}}
+      - {name: props, in: path, required: true, description: The binding's properties_key., schema: {type: string}}
+    get:
+      tags: [Bindings]
+      operationId: getBinding
+      summary: Read a binding
+      responses:
+        "200":
+          description: The binding.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Binding"}
+        "404": {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Bindings]
+      operationId: deleteBinding
+      summary: Delete a binding
+      responses:
+        "204": {description: Deleted.}
+        "404": {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+  parameters:
+    vhost:
+      name: vhost
+      in: path
+      required: true
+      description: "The virtual host's name, percent-encoded (`%2F` for `/`)."
+      schema: {type: string}
+    name:
+      name: name
+      in: path
+      required: true
+      schema: {type: string}
+  responses:
+    Error:
+      description: "`{error, reason}`."
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: {type: string, example: bad_request}
+        reason: {type: string}
+    Vhost:
+      type: object
+      properties:
+        name: {type: string}
+        description: {type: string}
+        tags: {type: array, items: {type: string}}
+        default_queue_type: {type: string}
+        tracing: {type: boolean}
+    Queue:
+      type: object
+      properties:
+        name: {type: string}
+        vhost: {type: string}
+        type: {type: string, enum: [classic, quorum, stream]}
+        durable: {type: boolean}
+        auto_delete: {type: boolean}
+        exclusive: {type: boolean}
+        arguments: {type: object, additionalProperties: true}
+        node: {type: string}
+        state: {type: string, example: running}
+        consumers: {type: integer}
+        messages: {type: integer, description: "Ready plus unacknowledged; a statistic refreshed every few seconds."}
+        messages_ready: {type: integer}
+        messages_unacknowledged: {type: integer}
+    QueuePage:
+      type: object
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/Queue"}}
+        page: {type: integer}
+        page_size: {type: integer}
+        page_count: {type: integer, description: Pages of the queues the filter kept.}
+        item_count: {type: integer, description: Queues on this page.}
+        filtered_count: {type: integer, description: Queues the name filter kept.}
+        total_count: {type: integer, description: Every queue of the virtual host.}
+    Exchange:
+      type: object
+      properties:
+        name: {type: string}
+        vhost: {type: string}
+        type: {type: string, enum: [direct, fanout, topic, headers]}
+        durable: {type: boolean}
+        auto_delete: {type: boolean}
+        internal: {type: boolean}
+        arguments: {type: object, additionalProperties: true}
+    Binding:
+      type: object
+      properties:
+        source: {type: string, description: The exchange.}
+        vhost: {type: string}
+        destination: {type: string, description: The queue.}
+        destination_type: {type: string, enum: [queue, exchange]}
+        routing_key: {type: string}
+        arguments: {type: object, additionalProperties: true}
+        properties_key: {type: string, description: "The binding's name: its routing key, plus ~ and a hash when it has arguments."}
+    Message:
+      type: object
+      properties:
+        payload: {type: string}
+        payload_bytes: {type: integer}
+        payload_encoding: {type: string, enum: [string, base64]}
+        redelivered: {type: boolean, description: It was got and put back before.}
+        exchange: {type: string}
+        routing_key: {type: string}
+        message_count: {type: integer}
+        properties: {type: object, additionalProperties: true}
