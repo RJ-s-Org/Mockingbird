@@ -40,8 +40,8 @@ use serde_json::{Map, Value, json};
 use tracing::Instrument;
 
 use super::{
-    Fallback, Held, Ran, Stop, Write, answered, commit, create, fell_back, fell_back_on, patches,
-    render,
+    Fallback, Held, Ran, Stop, Write, answered, commit, create, embedded, fell_back, fell_back_on,
+    patches, render,
 };
 use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
@@ -87,7 +87,11 @@ async fn update(
         fell_back(rt, plan, kind, "action_route");
         return Ran::Generate(None);
     }
-    let (Some(stored), Some(id)) = (held.target, held.target_id) else {
+    let within = embedded::current(state, plan, call, &held).await;
+    let (Some(stored), Some(id)) = (
+        held.target.or(within.as_ref().map(|e| &e.child)),
+        held.target_id,
+    ) else {
         fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
         return Ran::Generate(None);
     };
@@ -183,11 +187,25 @@ async fn update(
         return Ran::Generate(None);
     };
     answer.usage = usage;
-    let write = Write::Put {
-        id: id.to_owned(),
-        data,
+    let answer = match &within {
+        Some(e) => {
+            let write = Write::Within {
+                id: e.parent.id.clone(),
+                data: e.with(data),
+                child: e.child.clone(),
+                removed: false,
+            };
+            let held = (e.parent.resource_type.as_str(), Some(&e.parent));
+            commit(state, plan, call, held, write, answer).await
+        }
+        None => {
+            let write = Write::Put {
+                id: id.to_owned(),
+                data,
+            };
+            commit(state, plan, call, (t, Some(stored)), write, answer).await
+        }
     };
-    let answer = commit(state, plan, call, (t, Some(stored)), write, answer).await;
     // The tokens it moved are confirmed: a later write sending an old value is stale.
     if let Some(advancing) = &advancing {
         tokens::after_update(state, &plan.session, stored, advancing, None)
@@ -525,12 +543,35 @@ async fn delete(
     kind: OpKind,
 ) -> Ran {
     let rt = state.rt;
-    let (Some(stored), Some(id)) = (held.target, held.target_id) else {
+    let within = embedded::current(state, plan, call, &held).await;
+    let (Some(stored), Some(id)) = (
+        held.target.or(within.as_ref().map(|e| &e.child)),
+        held.target_id,
+    ) else {
         fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
         return Ran::Generate(None);
     };
     let t = stored.resource_type.as_str();
     let mut data = stored.data.clone();
+    if let Some(e) = &within {
+        // Removed from its parent's array, which is stored; a soft delete keeps it there
+        // in its deleted state.
+        let soft = lifecycle::delete_softly(rt, t, &mut data);
+        let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
+            fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
+            return Ran::Generate(None);
+        };
+        let write = Write::Within {
+            id: e.parent.id.clone(),
+            data: if soft { e.with(data) } else { e.without() },
+            child: e.child.clone(),
+            removed: !soft,
+        };
+        let held = (e.parent.resource_type.as_str(), Some(&e.parent));
+        let answer = commit(state, plan, call, held, write, answer).await;
+        answered(rt, plan, kind);
+        return Ran::Answered(Box::new(answer));
+    }
     let soft = lifecycle::delete_softly(rt, t, &mut data);
     let Some(answer) = delete_answer(rt, plan, call, (id, &data), response_schema) else {
         fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());

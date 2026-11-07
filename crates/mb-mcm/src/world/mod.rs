@@ -151,6 +151,11 @@ pub struct ParentDesc {
     /// How the parent's id is embedded, holding exactly one `{id}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// The parent's (dotted) array member a record lives in, when records of the
+    /// type are held inside their parent rather than on their own, e.g. an
+    /// incident's `incident_updates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded: Option<String>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
@@ -296,6 +301,10 @@ pub struct OpDesc {
     /// How a list pages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paging: Option<PagingDesc>,
+    /// The request parameters (or body pointers) that ask nothing of a list's
+    /// items, e.g. an API version or a detail level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignores: Vec<String>,
     /// The header that makes a replay answer as the first call did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<HeaderRef>,
@@ -540,9 +549,27 @@ pub struct ScopeDesc {
     pub param: String,
     /// The record member it matches.
     pub member: String,
+    /// How the member matches the parameter; `eq` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ScopeKind>,
+    /// With `kind: prefix`, the request parameter whose `true` asks for every
+    /// record below the path, not only those directly under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<String>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// How a scope's member matches its parameter.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeKind {
+    /// The member holds the parameter's value.
+    Eq,
+    /// The member is a `/`-separated path directly under the parameter's path
+    /// (`/a/b` under `/a`; any path under the root, `""` or `/`).
+    Prefix,
 }
 
 /// A filter a list takes.
@@ -900,6 +927,7 @@ fn overlay_op(mut b: OpDesc, t: &OpDesc) -> OpDesc {
     set_vec(&mut b.filters, &t.filters);
     set(&mut b.order, &t.order);
     set(&mut b.paging, &t.paging);
+    set_vec(&mut b.ignores, &t.ignores);
     set(&mut b.idempotency, &t.idempotency);
     set(&mut b.not_found, &t.not_found);
     merge_extra(&mut b.extra, &t.extra);
