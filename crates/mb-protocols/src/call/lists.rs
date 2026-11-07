@@ -631,11 +631,9 @@ pub(super) fn narrow(
             .serve_stored(bundle, op, candidate, None)
             .is_some()
     };
-    // A described paging whose place for a token is guessed is cut as an undescribed
-    // one is ([`list_query::PageAsk::places`]).
     let unnarrowed = q
         .as_ref()
-        .filter(|q| q.page.as_ref().is_some_and(list_query::PageAsk::places))
+        .filter(|q| q.page.is_some())
         .map(|_| body.clone());
     if !filters.is_empty() || q.is_some() {
         let mut kept = body.clone();

@@ -110,8 +110,8 @@ impl PageAsk {
     /// Whether the description says where a token goes and comes back, or the position
     /// is a page number or an offset: a token paging naming its `request` parameter and
     /// its `response` member or header. One naming only one side (a `next_url` the
-    /// client only follows, a `request` with nothing answering it) leaves the place to
-    /// the heuristics, and its page is cut to the size asked as an undescribed one is.
+    /// client only follows, a `request` with nothing answering it) leaves the other side
+    /// to the heuristics ([`super::pages::slot`]).
     pub(super) fn places(&self) -> bool {
         self.counts()
             || (self.request.is_some()

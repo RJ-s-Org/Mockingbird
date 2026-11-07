@@ -938,68 +938,107 @@ fn token_slots(
     found
 }
 
-/// The place the world describes for the next page's token of list `op`: `Some(None)`
-/// for a page number or an offset, `None` when it does not describe the paging, or
-/// describes one side of a token's place only ([`list_query::PageAsk::places`]: a
-/// `next_url` paging whose client only follows the URL, a `request` with nothing
-/// answering it), which is then guessed as with no description. A described
-/// `response_header` carries the token in that header, a described `response` member
-/// carries it in the body (the next page's URL for a `next_url` paging).
-fn described_slot(
-    rt: &MockRuntime,
-    (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
-) -> Option<Option<Slot>> {
-    let ask = list_query::of(rt, op, call)?.page?;
+/// The place the world describes for the next page's token, for a paging that names
+/// both sides of it ([`list_query::PageAsk::places`]): a described `response_header`
+/// carries the token in that header, a described `response` member carries it in the
+/// body (the next page's URL for a `next_url` paging). `None` when it is a page number
+/// or an offset, or a `next_url` paging with no URL of the call to build on.
+fn described_slot(ask: &list_query::PageAsk, page_url: Option<&str>) -> Option<Slot> {
     if ask.counts() {
-        return Some(None);
-    }
-    if !ask.places() {
         return None;
     }
     let param = ask.request.clone()?;
-    if let Some(header) = ask.response_header {
-        return Some(Some(Slot {
+    on_described(ask, param, page_url)
+}
+
+/// The slot for token parameter `param` at the place `ask` describes (its
+/// `response_header`, else its `response` member); `None` when it describes none, or a
+/// `next_url` paging has no URL of the call to build on.
+fn on_described(ask: &list_query::PageAsk, param: String, page_url: Option<&str>) -> Option<Slot> {
+    if let Some(header) = &ask.response_header {
+        return Some(Slot {
             path: Vec::new(),
             param,
             url: None,
-            header: Some(header),
-        }));
+            header: Some(header.clone()),
+        });
     }
-    let Some(response) = ask.response else {
-        return Some(None);
-    };
+    let response = ask.response.as_ref()?;
     let url = match ask.style {
-        mb_mcm::world::PagingStyle::NextUrl => match page_url {
-            Some(url) => Some(url.to_string()),
-            None => return Some(None),
-        },
+        mb_mcm::world::PagingStyle::NextUrl => Some(page_url?.to_string()),
         _ => None,
     };
-    Some(Some(Slot {
+    Some(Slot {
         path: response.split('.').map(str::to_string).collect(),
         param,
         url,
         header: None,
-    }))
+    })
 }
 
 /// The one place answer `body` to `call` has for a token (see the module's doc): the
-/// described one where the world describes the list's paging ([`described_slot`]).
+/// described one where the world describes the list's paging whole
+/// ([`described_slot`]); for a token paging describing one side of it only (its
+/// `request` parameter, or its `response` place), that side as described and the
+/// other as the heuristics find it, each described key replacing only its own guess;
+/// else the heuristics'. `None` for a page number or an offset, or where no place is
+/// found: the page is then served whole.
 pub(super) fn slot(
     rt: &MockRuntime,
     (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
     body: &Value,
     size_param: &str,
 ) -> Option<Slot> {
-    if let Some(described) = described_slot(rt, (op, call, page_url)) {
-        return described;
+    let ask = list_query::of(rt, op, call).and_then(|q| q.page);
+    let Some(ask) = ask else {
+        return guessed_slot(rt, (op, call, page_url), body, size_param, None);
+    };
+    if ask.counts() {
+        return None;
     }
+    if ask.places() {
+        return described_slot(&ask, page_url);
+    }
+    let guessed = guessed_slot(
+        rt,
+        (op, call, page_url),
+        body,
+        size_param,
+        ask.request.as_deref(),
+    )?;
+    if ask.response.is_some() || ask.response_header.is_some() {
+        return on_described(&ask, guessed.param, page_url);
+    }
+    Some(guessed)
+}
+
+/// The place the heuristics find in answer `body` for a token: a member named for a
+/// token parameter, else the one next-page URL member. Only `param` is a candidate when
+/// the description names it.
+fn guessed_slot(
+    rt: &MockRuntime,
+    (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
+    body: &Value,
+    size_param: &str,
+    param: Option<&str>,
+) -> Option<Slot> {
     let bundle = rt.bundle();
     let list = list_member(body)?;
     let schema = op.success_output()?.schema.as_ref()?;
     let mut held = None;
     let (_, item_parts) = lists::list_parts(bundle, schema, body, &mut held)?;
-    let candidates = token_candidates(bundle, op, &item_parts, size_param, Some(call));
+    let candidates = match param {
+        Some(param) => op
+            .input
+            .query
+            .as_ref()
+            .and_then(|q| q.get("properties"))
+            .and_then(Value::as_object)
+            .and_then(|props| props.get_key_value(param))
+            .map(|(name, schema)| vec![(name.as_str(), schema)])
+            .unwrap_or_default(),
+        None => token_candidates(bundle, op, &item_parts, size_param, Some(call)),
+    };
     let params: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
     let echoed = request_values(call);
     let mut found = token_slots(bundle, (schema, list), body, &params, &echoed);

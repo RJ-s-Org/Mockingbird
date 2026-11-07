@@ -637,7 +637,7 @@ pub(super) async fn page(
         },
     };
     let all: Option<Vec<Value>> = match &cut {
-        Some((rest, _, _)) if served_anyway && ask.is_some_and(list_query::PageAsk::places) => {
+        Some((rest, _, _)) if served_anyway && ask.is_some() => {
             Some(page.iter().chain(rest).cloned().collect())
         }
         _ => None,

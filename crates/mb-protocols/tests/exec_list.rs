@@ -917,17 +917,11 @@ components:
         body: {type: string}
 "##;
 
-/// A next-page URL whose token parameter the description leaves out (the client only
-/// follows the URL): the page is cut to its size all the same, the parameter guessed
-/// as with no description.
-#[tokio::test]
-async fn a_next_url_with_no_described_parameter_cuts_the_page_to_its_size() {
+/// Walks [`MESSAGES`] described with `paging` from a page of one: the first page holds
+/// the first message and a next link carrying `PageToken`, which reaches the second.
+async fn walk_messages(paging: Value) {
     let (capture, _guard) = Capture::install();
-    let world = json!({
-        "operations": {"listMessages": {"paging": {
-            "style": "next_url", "response": "next_page_uri", "size": "PageSize"
-        }}}
-    });
+    let world = json!({"operations": {"listMessages": {"paging": paging}}});
     let h = support::described(MESSAGES, world, Vec::new());
     let held: Vec<Value> = (1..=2)
         .map(|i| json!({"id": format!("SM{i}"), "body": format!("text {i}")}))
@@ -943,12 +937,28 @@ async fn a_next_url_with_no_described_parameter_cuts_the_page_to_its_size() {
     };
     assert_eq!(sids(&first), [json!("SM1")], "{first}");
     let next = first["next_page_uri"].as_str().expect("a next link");
+    assert!(next.contains("PageToken="), "{next}");
     let at = next.find("/v2/messages").expect("the route's URL");
     let (source, last) = get(&h, &next[at..]).await;
     assert_eq!(source, "state", "{last}");
     assert_eq!(sids(&last), [json!("SM2")], "{last}");
     assert_eq!(capture.of("listMessages"), [None, None]);
     assert!(h.provider.requests().is_empty());
+}
+
+/// A next-page URL whose token parameter the description leaves out (the client only
+/// follows the URL): the described member holds the link, its parameter guessed.
+#[tokio::test]
+async fn a_next_url_with_no_described_parameter_cuts_the_page_to_its_size() {
+    walk_messages(json!({"style": "next_url", "response": "next_page_uri", "size": "PageSize"}))
+        .await;
+}
+
+/// A token paging naming its parameter and no place answering it: the parameter as
+/// described, the place (the one next-page URL member) guessed.
+#[tokio::test]
+async fn a_token_paging_naming_only_its_parameter_guesses_its_place() {
+    walk_messages(json!({"style": "next_url", "request": "PageToken", "size": "PageSize"})).await;
 }
 
 /// SendGrid's templates: the list answers a lean schema of the record the read answers
@@ -1017,10 +1027,11 @@ async fn the_only_unscoped_list_of_a_described_type_lists_its_records() {
     assert_eq!(ids(&page["result"]), [json!("t1"), json!("t2")]);
 }
 
-/// A token paging naming its request parameter and no place answering it still cuts
-/// the page to the size asked, as an undescribed one does.
+/// A token paging naming its request parameter, whose answer has no place the
+/// heuristics find for a token either: the page is served whole rather than cut with
+/// the rest out of reach.
 #[tokio::test]
-async fn a_token_paging_naming_only_its_parameter_cuts_the_page_to_its_size() {
+async fn a_token_paging_with_no_place_found_serves_the_page_whole() {
     let (capture, _guard) = Capture::install();
     let world = json!({
         "types": {"templates": {"identity": {"member": "id"}}},
@@ -1037,7 +1048,7 @@ async fn a_token_paging_naming_only_its_parameter_cuts_the_page_to_its_size() {
     let (source, page) = get(&h, "/v3/templates?page_size=1").await;
     assert_eq!(capture.of("listTemplates"), [None]);
     assert_eq!(source, "state", "{page}");
-    assert_eq!(ids(&page["result"]), [json!("t1")], "{page}");
+    assert_eq!(ids(&page["result"]), [json!("t1"), json!("t2")], "{page}");
 }
 
 /// GitHub's repository search: a query with qualifiers, answered by the model.
