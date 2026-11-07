@@ -3138,8 +3138,9 @@ async fn a_not_found_refusal_from_state_keeps_the_model_s_code() {
 
 /// Pipelines are read with their owner as an object, but created naming it by id;
 /// orders are read with an id on every line, created without; accounts default some
-/// members their create may leave out. Each create answers an acknowledgement (`{id}`),
-/// which renders whatever the record holds.
+/// members their create may leave out, in their record's schema or in the create's
+/// request schema. Pipelines and orders answer their create with an acknowledgement
+/// (`{id}`), which renders whatever the record holds.
 const GATED: &str = r##"
 openapi: 3.0.0
 info: {title: Gated, version: "1"}
@@ -3167,7 +3168,7 @@ paths:
   /accounts:
     post:
       operationId: createAccount
-      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, settings: {type: object, properties: {theme: {type: string}}}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, plan: {type: string, default: free}, settings: {type: object, properties: {theme: {type: string}}}}}}}}
       responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}}}
   /accounts/{id}:
     get:
@@ -3200,6 +3201,7 @@ components:
         id: {type: string}
         name: {type: string}
         is_active: {type: boolean, default: true}
+        plan: {type: string}
         object: {type: string, enum: [account]}
         settings:
           type: object
@@ -3271,6 +3273,7 @@ async fn an_unsent_member_takes_its_schema_s_default_at_any_depth() {
         "id": id,
         "name": "acme",
         "is_active": true,
+        "plan": "free",
         "object": "account",
         "settings": {"theme": "dark", "notify": false}
     });

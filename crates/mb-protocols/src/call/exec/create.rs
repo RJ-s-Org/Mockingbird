@@ -175,6 +175,9 @@ pub(super) async fn run(
     for schema in &shape.schemas {
         preset(rt.bundle(), schema, &mut data, &owned, GAP_DEPTH);
     }
+    // So does one whose request schema gives the value the server assumes when it is
+    // left out (harvest's `is_active: {default: true}`), where the record holds it.
+    preset_from_request(rt, op, &shape, &mut data, &owned);
     let missing = gaps(rt, &shape.schemas, &data, &owned);
     let mut usage = mb_llm::Usage::default();
     if !missing.is_empty()
@@ -752,6 +755,57 @@ fn preset(
             }
         }
         _ => {}
+    }
+}
+
+/// Sets in `record` what `op`'s request schema (at the described `request.record`)
+/// decides of the members the request left out ([`preset`]): a member the type's records
+/// declare (`shape`) whose value, so set, fits the record's own schema of it.
+fn preset_from_request(
+    rt: &crate::MockRuntime,
+    op: &Operation,
+    shape: &Shape,
+    record: &mut Value,
+    owned: &[String],
+) {
+    let bundle = rt.bundle();
+    let Some(body) = op.input.body.as_ref() else {
+        return;
+    };
+    let pointer = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.request.as_ref())
+        .and_then(|r| r.record.as_ref())
+        .map(|p| p.as_str().to_owned());
+    let schema = match pointer.as_deref() {
+        None | Some("") => body.clone(),
+        Some(at) => {
+            let steps = at.trim_start_matches('/').replace('/', ".");
+            match property_schema(bundle, body, &steps) {
+                Some(schema) => schema,
+                None => return,
+            }
+        }
+    };
+    let mut preset_copy = record.clone();
+    preset(bundle, &schema, &mut preset_copy, owned, GAP_DEPTH);
+    let (Value::Object(set), Value::Object(held)) = (preset_copy, record) else {
+        return;
+    };
+    for (name, value) in set {
+        if held.get(&name) == Some(&value) {
+            continue;
+        }
+        let fits = shape
+            .members
+            .iter()
+            .find(|(m, _)| *m == name)
+            .and_then(|(_, member)| rt.engine.schema_violations(bundle, member, &value))
+            .is_some_and(|v| v.is_empty());
+        if fits {
+            held.insert(name, value);
+        }
     }
 }
 
