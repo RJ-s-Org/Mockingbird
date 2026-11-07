@@ -1019,6 +1019,62 @@ async fn a_token_paging_naming_only_its_parameter_cuts_the_page_to_its_size() {
     assert_eq!(ids(&page["result"]), [json!("t1")], "{page}");
 }
 
+/// GitHub's repository search: a query with qualifiers, answered by the model.
+const SEARCH: &str = r##"
+openapi: 3.0.0
+info: {title: Search, version: "1"}
+paths:
+  /search/repositories:
+    get:
+      operationId: searchRepos
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Repo"}}
+  /repositories/{id}:
+    get:
+      operationId: getRepo
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Repo"}}}}}
+components:
+  schemas:
+    Repo:
+      type: object
+      required: [id, full_name]
+      properties: {id: {type: string}, full_name: {type: string}}
+"##;
+
+/// A text filter naming no member says nothing the model's items can be checked
+/// against (`language:rust` is in none of their members): the answered items stay.
+#[tokio::test]
+async fn a_text_filter_naming_no_member_keeps_the_model_s_items() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"searchRepos": {
+        "type": "repositories", "kind": "list", "answer": {"records": "/items"},
+        "filters": [{"kind": "text", "param": "q"}]
+    }}, "types": {"repositories": {"identity": {"member": "id"}}}});
+    let answered = json!({"items": [
+        {"id": "r1", "full_name": "octo/one"},
+        {"id": "r2", "full_name": "octo/two"}
+    ]});
+    let h = support::described(SEARCH, world, vec![answered]);
+    let (source, page) = get(&h, "/search/repositories?q=language:rust").await;
+    assert_eq!(source, "llm", "{page}");
+    assert_eq!(ids(&page["items"]), [json!("r1"), json!("r2")], "{page}");
+    assert_eq!(
+        capture.of("searchRepos"),
+        [Some("never_written".to_owned())]
+    );
+}
+
 /// Heroku's apps: paged by the `Range` request header, a `206` with a `Next-Range`
 /// while more remain.
 const APPS: &str = r##"

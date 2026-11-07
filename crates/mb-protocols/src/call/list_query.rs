@@ -477,6 +477,10 @@ fn holds(filter: &Filter, item: &Value, source: Source) -> bool {
                 return true;
             };
             match filter.member.as_str() {
+                // Naming no member, the filter says nothing a model's item can be
+                // checked against (a query with qualifiers, `language:rust`): kept, as
+                // an item lacking a filtered member is.
+                "" if absent => true,
                 "" => holds_text(item, &wanted, 0),
                 member => match mb_mcm::member_at(item, member).filter(|h| !h.is_null()) {
                     None => absent,
