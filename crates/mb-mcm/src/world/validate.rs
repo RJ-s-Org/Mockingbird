@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FilterDesc, HeaderRef,
-    IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc, LifecycleDesc, LongRunning,
-    MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc, ParamValue, ParentDesc, Pointer,
-    RecordsAt, ScopeDesc, SoftDelete, TargetDesc, TypeDesc, UniqueDesc, VERSION, World,
+    AnswerDesc, ChangeDesc, ConcurrencyDesc, DerivedDesc, Extra, FilterDesc, FilterGrammar,
+    HeaderRef, IdentityDesc, IdentityHeader, InstructionDesc, InstructionsDesc, LifecycleDesc,
+    LongRunning, MAX_BYTES, MAX_DEPTH, OpDesc, OpKind, OrderDesc, PagingDesc, ParamValue,
+    ParentDesc, Pointer, RecordsAt, ScopeDesc, SoftDelete, TargetDesc, TypeDesc, UniqueDesc,
+    VERSION, World,
 };
 use crate::{Binding, Bundle, Operation, RecordAt, StatusSelector};
 
@@ -496,6 +497,29 @@ impl<'a> Ctx<'a> {
             format!("`{state}` is not one of the lifecycle's states {states:?}"),
         );
         false
+    }
+
+    /// Whether filter `f` sets one of `kind` and `grammar`, a `member` only with a
+    /// `kind` and a `member_prefix` only with a `grammar`; refuses it otherwise.
+    fn check_filter_shape(&mut self, f: &FilterDesc, path: &Path) -> bool {
+        let problem = match (f.kind, f.grammar) {
+            (None, None) => Some("a filter sets `kind` or `grammar`"),
+            (Some(_), Some(_)) => Some("a filter sets `kind` or `grammar`, not both"),
+            (_, Some(_)) if f.member.is_some() => Some(
+                "a `grammar` filter's expression names its members: set `member_prefix`, not `member`",
+            ),
+            (Some(_), _) if f.member_prefix.is_some() => {
+                Some("`member_prefix` applies to a `grammar` filter only")
+            }
+            _ => None,
+        };
+        match problem {
+            Some(message) => {
+                self.refuse(path, RefusalCode::Invalid, message.to_string());
+                false
+            }
+            None => true,
+        }
     }
 
     fn check_param(&mut self, op: &Operation, param: &str, path: &Path) -> bool {
@@ -1434,16 +1458,37 @@ impl<'a> Ctx<'a> {
         for (i, f) in d.filters.iter().enumerate() {
             let p = path.join("filters").join(i);
             self.unknown(&p, &f.extra);
-            let param = self.check_param(op, &f.param, &p.join("param"));
+            if !self.check_filter_shape(f, &p) {
+                continue;
+            }
+            let param = match f.grammar {
+                // A deepObject root may be declared whole (`filter`) or as its
+                // bracketed keys (`filter[status]`).
+                Some(FilterGrammar::DeepObject)
+                    if has_property(self.bundle, op.input.query.as_ref(), |k| {
+                        k.strip_prefix(f.param.as_str())
+                            .is_some_and(|rest| rest.starts_with('['))
+                    }) =>
+                {
+                    true
+                }
+                _ => self.check_param(op, &f.param, &p.join("param")),
+            };
             let member = f
                 .member
                 .as_ref()
                 .is_none_or(|m| self.check_member(record, ty, m, &p.join("member")));
-            if param && member {
+            let prefix = f
+                .member_prefix
+                .as_ref()
+                .is_none_or(|m| self.check_member(record, ty, m, &p.join("member_prefix")));
+            if param && member && prefix {
                 out.filters.push(FilterDesc {
                     param: f.param.clone(),
                     member: f.member.clone(),
                     kind: f.kind,
+                    grammar: f.grammar,
+                    member_prefix: f.member_prefix.clone(),
                     extra: Extra::new(),
                 });
             }
@@ -2429,6 +2474,51 @@ mod tests {
         assert_eq!(get.target, None);
         assert!(get.answer.is_none());
         assert!(v.applied.operations["CreateFolder"].request.is_none());
+    }
+
+    #[test]
+    fn validate_checks_grammar_filters() {
+        let mut b = folders();
+        op(&mut b, "ListFolders").input.query = Some(json!({"type": "object", "properties": {
+            "filter": {"type": "string"},
+            "where[state]": {"type": "string"}
+        }}));
+        let w = world(json!({
+            "operations": {
+                "ListFolders": {
+                    "filters": [
+                        {"param": "filter", "grammar": "scim"},
+                        // A deepObject root declared as its bracketed keys.
+                        {"param": "where", "grammar": "deep_object", "member_prefix": "meta"},
+                        {"param": "filter", "grammar": "odata", "member_prefix": "nope"},
+                        {"param": "missing", "grammar": "field_value"},
+                        {"param": "filter"},
+                        {"param": "filter", "kind": "eq", "grammar": "scim"},
+                        {"param": "filter", "grammar": "scim", "member": "state"},
+                        {"param": "filter", "kind": "eq", "member_prefix": "meta"}
+                    ]
+                }
+            }
+        }));
+        let v = validate(&w, &b);
+        let refused: Vec<(String, RefusalCode)> =
+            v.refused.iter().map(|r| (r.path.clone(), r.code)).collect();
+        let at = |i: usize, key: &str| format!("/operations/ListFolders/filters/{i}{key}");
+        assert_eq!(
+            refused,
+            vec![
+                (at(2, "/member_prefix"), RefusalCode::Unresolved),
+                (at(3, "/param"), RefusalCode::Unresolved),
+                (at(4, ""), RefusalCode::Invalid),
+                (at(5, ""), RefusalCode::Invalid),
+                (at(6, ""), RefusalCode::Invalid),
+                (at(7, ""), RefusalCode::Invalid),
+            ]
+        );
+        let kept = &v.applied.operations["ListFolders"].filters;
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].grammar, Some(FilterGrammar::Scim));
+        assert_eq!(kept[1].member_prefix.as_deref(), Some("meta"));
     }
 
     #[test]

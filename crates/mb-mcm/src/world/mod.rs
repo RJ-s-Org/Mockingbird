@@ -550,14 +550,38 @@ pub struct ScopeDesc {
 pub struct FilterDesc {
     /// The request parameter.
     pub param: String,
-    /// The record member it tests; the parameter's name when absent.
+    /// The record member it tests; the parameter's name when absent. Not with a
+    /// `grammar`, whose expression names its members.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
-    /// How it tests the member.
-    pub kind: FilterKind,
+    /// How it tests the member; one of `kind` and `grammar` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<FilterKind>,
+    /// The expression grammar the parameter's value is written in: the value is
+    /// parsed and its comparisons test the members it names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<FilterGrammar>,
+    /// With a `grammar`, the (dotted) member the expression's attribute paths are
+    /// below (`metadata` for `metadata[run]=x`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_prefix: Option<String>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// The grammar of a filter parameter's expression.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterGrammar {
+    /// SCIM (RFC 7644 section 3.4.2.2): `userName eq "x" and active eq true`.
+    Scim,
+    /// OData `$filter`: `status eq 'open' and contains(name,'x')`.
+    Odata,
+    /// `field:value` pairs joined by commas, each an equality, all of them holding.
+    FieldValue,
+    /// deepObject brackets below the parameter: `filter[a][b][_gte]=v`.
+    DeepObject,
 }
 
 /// How a filter tests a member.
@@ -1154,5 +1178,13 @@ mod tests {
             json!("replace")
         );
         assert_eq!(serde_json::to_value(FilterKind::Gte).unwrap(), json!("gte"));
+        assert_eq!(
+            serde_json::to_value(FilterGrammar::DeepObject).unwrap(),
+            json!("deep_object")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterGrammar::FieldValue).unwrap(),
+            json!("field_value")
+        );
     }
 }

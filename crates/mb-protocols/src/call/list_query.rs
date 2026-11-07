@@ -33,6 +33,17 @@
 //! disagrees leaves it out. Where the store fills the page from stored records
 //! ([`keeps`]), a record that does not hold the member does not match it.
 //!
+//! A filter with a `grammar` ([`expr`]) parses its parameter's value (for
+//! `deep_object`, every key bracketed below it) into an expression of comparisons,
+//! each tested as above: `eq` by value, `gt`/`ge`/`lt`/`le` on numbers and RFC 3339
+//! date-times (other sides say nothing), `contains` as `contains` does. A missing
+//! member does not match a stored record (but for `ne`, which it does) and says
+//! nothing of an answered item, and a value that is not of its member's declared type
+//! says nothing; an item is left out only when the expression is false. SCIM's member
+//! names and text compare in any case. A value that does not parse, or a parameter
+//! given more than once ([`ListQuery::unparsed`]), narrows nothing; the executor's
+//! list falls back on it (`unparsed_filter`).
+//!
 //! Paging: the position is an offset into the matched, ordered items. A page number is
 //! 1-based unless its parameter's `minimum` is 0. The size is the request's size
 //! parameter, else its declared `default`, else there is no cut. Cursor, next-URL and
@@ -42,9 +53,11 @@ use std::cmp::Ordering;
 
 use chrono::DateTime;
 use mb_engine::budget::PageLimit;
-use mb_mcm::world::{FilterKind, PagingStyle};
+use mb_mcm::world::{FilterGrammar, FilterKind, PagingStyle};
 
 use super::*;
+
+mod expr;
 
 /// How deep a `text` filter over every string member looks.
 const MAX_TEXT_DEPTH: usize = 8;
@@ -54,6 +67,15 @@ const MAX_TEXT_DEPTH: usize = 8;
 pub(super) struct ListQuery {
     /// The described filters; empty when the description gives none.
     pub(super) filters: Vec<Filter>,
+    /// The expressions the request gives the described `grammar` filters.
+    expressions: Vec<Expression>,
+    /// Whether the description sets a `grammar` filter (the request may not use it).
+    grammar_described: bool,
+    /// A `grammar` filter's parameter whose value does not parse, when one does not.
+    pub(super) unparsed: Option<String>,
+    /// The described `deep_object` filters' parameters: each key bracketed below one
+    /// (`filter[status]`) is one of theirs.
+    deep_roots: Vec<String>,
     /// The scope's member and the value the request gives its parameter.
     pub(super) scope: Option<(String, String)>,
     /// The member the list is ordered by, and whether largest first.
@@ -79,6 +101,14 @@ pub(super) struct Filter {
     /// The request's values, typed as the member declares; empty when the request
     /// gives none (or none of the member's type), which narrows nothing.
     pub(super) values: Vec<Value>,
+}
+
+/// A described `grammar` filter's expression, as the request gives it.
+#[derive(Debug, Clone)]
+struct Expression {
+    expr: expr::Expr,
+    /// Member names and text compare in any case (SCIM).
+    fold: bool,
 }
 
 /// A described paging, with what the request gives it.
@@ -156,16 +186,23 @@ impl ListQuery {
     /// Whether the description sets any of `filters` (non-empty), `scope`, `order` or
     /// `paging` for the list.
     pub(super) fn describes_query(&self) -> bool {
-        !self.filters.is_empty()
-            || self.scope_described
-            || self.order.is_some()
-            || self.page.is_some()
+        self.filtered() || self.scope_described || self.order.is_some() || self.page.is_some()
     }
 
     /// Whether request parameter `param` is one the description names (a filter's,
     /// the scope's, or the paging's).
     pub(super) fn knows(&self, param: &str) -> bool {
         self.params.iter().any(|p| p == param)
+            || self.deep_roots.iter().any(|root| {
+                param
+                    .strip_prefix(root.as_str())
+                    .is_some_and(|rest| rest.starts_with('['))
+            })
+    }
+
+    /// Whether the description sets filters: a `kind` or a `grammar` one.
+    fn filtered(&self) -> bool {
+        !self.filters.is_empty() || self.grammar_described
     }
 
     /// Whether `param` is one of the described paging's parameters.
@@ -281,17 +318,23 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         params.push(param.clone());
     }
     let lifecycle = gone.filter(|g| !g.lifted_by(&call.query));
+    let mut grammars = Grammars::default();
     let filters = d
         .filters
         .iter()
-        .map(|f| {
+        .filter_map(|f| {
             params.push(f.param.clone());
-            let member = match (&f.member, f.kind) {
+            if let Some(grammar) = f.grammar {
+                grammars.add(bundle, item.as_ref(), call, (f, grammar));
+                return None;
+            }
+            let kind = f.kind?;
+            let member = match (&f.member, kind) {
                 (Some(m), _) => m.clone(),
                 (None, FilterKind::Text) => String::new(),
                 (None, _) => f.param.clone(),
             };
-            let ty = match f.kind {
+            let ty = match kind {
                 FilterKind::Text | FilterKind::Contains => None,
                 _ => member_type(bundle, item.as_ref(), &member),
             };
@@ -299,13 +342,13 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
                 .map(|raw| texts(&raw))
                 .unwrap_or_default()
                 .iter()
-                .filter_map(|t| typed(ty.as_deref(), f.kind, t))
+                .filter_map(|t| typed(ty.as_deref(), kind, t))
                 .collect();
-            Filter {
+            Some(Filter {
                 member,
-                kind: f.kind,
+                kind,
                 values,
-            }
+            })
         })
         .collect();
     let scope = d.scope.as_ref().and_then(|s| {
@@ -356,6 +399,10 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
     });
     Some(ListQuery {
         filters,
+        expressions: grammars.expressions,
+        grammar_described: grammars.described,
+        unparsed: grammars.unparsed,
+        deep_roots: grammars.deep_roots,
         scope,
         order: d.order.as_ref().map(|o| (o.member.clone(), o.descending)),
         page,
@@ -363,6 +410,112 @@ pub(super) fn of(rt: &MockRuntime, op: &Operation, call: &OperationCall) -> Opti
         params,
         lifecycle,
     })
+}
+
+/// What the request gives the described `grammar` filters.
+#[derive(Default)]
+struct Grammars {
+    expressions: Vec<Expression>,
+    described: bool,
+    unparsed: Option<String>,
+    deep_roots: Vec<String>,
+}
+
+impl Grammars {
+    /// Reads `call`'s value of filter `f` in `grammar`, its members typed as `item`
+    /// declares them.
+    fn add(
+        &mut self,
+        bundle: &mb_mcm::Bundle,
+        item: Option<&Value>,
+        call: &OperationCall,
+        (f, grammar): (&mb_mcm::world::FilterDesc, FilterGrammar),
+    ) {
+        self.described = true;
+        let parsed = if grammar == FilterGrammar::DeepObject {
+            self.deep_roots.push(f.param.clone());
+            match deep_leaves(call, &f.param) {
+                Ok(leaves) if leaves.is_empty() => return,
+                Ok(leaves) => expr::deep(&leaves),
+                Err(()) => None,
+            }
+        } else {
+            let values = request_value(call, &f.param)
+                .map(|raw| texts(&raw))
+                .unwrap_or_default();
+            match values.as_slice() {
+                [] => return,
+                [text] => expr::parse(grammar, text),
+                // A repeated parameter: which one counts is no part of the grammar.
+                _ => None,
+            }
+        };
+        let Some(mut e) = parsed else {
+            self.unparsed.get_or_insert_with(|| f.param.clone());
+            return;
+        };
+        if let Some(prefix) = f.member_prefix.as_deref() {
+            e = e.below(prefix);
+        }
+        let ty = |path: &str| member_type(bundle, item, path);
+        self.expressions.push(Expression {
+            expr: expr::retype(e, &ty),
+            fold: grammar == FilterGrammar::Scim,
+        });
+    }
+}
+
+/// The keys `call`'s query brackets below deepObject parameter `root`, each with its
+/// value: those the query nests under it (`root[a][b]=v` read as `{root: {a: {b: v}}}`)
+/// and those it keeps flat (a key the contract declares literally). `Err` when the
+/// parameter itself holds a value that asks something.
+fn deep_leaves(call: &OperationCall, root: &str) -> Result<Vec<(Vec<String>, Value)>, ()> {
+    fn flatten(at: &Value, keys: &mut Vec<String>, out: &mut Vec<(Vec<String>, Value)>) {
+        match at {
+            Value::Object(members) if keys.len() < 16 => {
+                for (k, v) in members {
+                    keys.push(k.clone());
+                    flatten(v, keys, out);
+                    keys.pop();
+                }
+            }
+            Value::String(s) if s.trim().is_empty() => {}
+            other => out.push((keys.clone(), other.clone())),
+        }
+    }
+    let mut out = Vec::new();
+    for (key, value) in &call.query {
+        let keys: Vec<String> = if key == root {
+            Vec::new()
+        } else {
+            let Some(rest) = key.strip_prefix(root).filter(|r| r.starts_with('[')) else {
+                continue;
+            };
+            let Some(keys) = bracketed(rest) else {
+                return Err(());
+            };
+            keys
+        };
+        let mut keys = keys;
+        let before = out.len();
+        flatten(value, &mut keys, &mut out);
+        if out[before..].iter().any(|(keys, _)| keys.is_empty()) {
+            return Err(());
+        }
+    }
+    Ok(out)
+}
+
+/// `[a][b]` as `[a, b]`; `None` when malformed.
+fn bracketed(mut rest: &str) -> Option<Vec<String>> {
+    let mut keys = Vec::new();
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('[')?;
+        let close = inner.find(']')?;
+        keys.push(inner[..close].to_string());
+        rest = &inner[close + 1..];
+    }
+    Some(keys)
 }
 
 /// The page size list `op`'s request `call` asks for, with its parameter: the
@@ -496,11 +649,7 @@ fn holds(filter: &Filter, item: &Value, source: Source) -> bool {
     };
     filter.values.iter().any(|wanted| match filter.kind {
         FilterKind::Eq | FilterKind::Flag => same(held, wanted),
-        FilterKind::Contains => match held {
-            Value::Array(elements) => elements.iter().any(|e| element_is(e, wanted)),
-            Value::String(s) => wanted.as_str().is_some_and(|w| s.contains(w)),
-            _ => false,
-        },
+        FilterKind::Contains => expr::contains(held, wanted, false),
         FilterKind::Gte => compare(held, wanted).is_none_or(|o| o != Ordering::Less),
         FilterKind::Lte => compare(held, wanted).is_none_or(|o| o != Ordering::Greater),
         FilterKind::Text => true,
@@ -524,7 +673,12 @@ fn soft_deleted(q: &ListQuery, item: &Value) -> bool {
 /// Whether `item`, from `source`, matches the described keys of `q`: its filters (when
 /// non-empty), its scope, and its soft delete.
 fn matches_from(q: &ListQuery, item: &Value, source: Source) -> bool {
-    q.filters.iter().all(|f| holds(f, item, source)) && in_scope(q, item) && !soft_deleted(q, item)
+    q.filters.iter().all(|f| holds(f, item, source))
+        && q.expressions
+            .iter()
+            .all(|x| expr::eval(&x.expr, item, source == Source::Answered, x.fold) != Some(false))
+        && in_scope(q, item)
+        && !soft_deleted(q, item)
 }
 
 /// [`keeps`] for `item` from `source`.
@@ -536,9 +690,7 @@ fn keeps_from(
 ) -> bool {
     match q {
         None => heuristic(item),
-        Some(q) if q.filters.is_empty() => {
-            heuristic(item) && in_scope(q, item) && !soft_deleted(q, item)
-        }
+        Some(q) if !q.filtered() => heuristic(item) && in_scope(q, item) && !soft_deleted(q, item),
         Some(q) => matches_from(q, item, source),
     }
 }

@@ -1254,3 +1254,363 @@ async fn a_list_left_with_nothing_answers_its_declared_204() {
     assert_eq!(capture.of("listOrders"), [None, None]);
     assert!(h.provider.requests().is_empty());
 }
+
+/// Users listed with a filter expression in each grammar a description can name: a
+/// SCIM `filter`, an OData `$filter`, `field:value` pairs, deepObject brackets below
+/// `where` (one of its keys declared literally) and a map member's keys below `meta`.
+const USERS: &str = r##"
+openapi: 3.0.0
+info: {title: Users, version: "1"}
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      parameters:
+        - {name: filter, in: query, schema: {type: string}}
+        - {name: $filter, in: query, schema: {type: string}}
+        # Repeatable, so a repeated value reaches the list as an array.
+        - {name: q, in: query, explode: true, schema: {type: array, items: {type: string}}}
+        - {name: where, in: query, style: deepObject, explode: true, schema: {type: object}}
+        - {name: "where[active]", in: query, schema: {type: boolean}}
+        - {name: meta, in: query, style: deepObject, explode: true,
+           schema: {type: object, additionalProperties: {type: string}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [Resources]
+                properties:
+                  Resources: {type: array, items: {$ref: "#/components/schemas/User"}}
+  /users/{id}:
+    get:
+      operationId: getUser
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}}
+components:
+  schemas:
+    User:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        userName: {type: string}
+        active: {type: boolean}
+        age: {type: integer}
+        emails:
+          type: array
+          items: {type: object, properties: {value: {type: string}, type: {type: string}}}
+        meta: {type: object, additionalProperties: {type: string}}
+"##;
+
+fn users_world() -> Value {
+    json!({"operations": {"listUsers": {"filters": [
+        {"param": "filter", "grammar": "scim"},
+        {"param": "$filter", "grammar": "odata"},
+        {"param": "q", "grammar": "field_value"},
+        {"param": "where", "grammar": "deep_object"},
+        {"param": "meta", "grammar": "deep_object", "member_prefix": "meta"}
+    ]}}, "types": {"users": {"identity": {"member": "id"}}}})
+}
+
+fn user(id: &str, name: &str, active: bool, age: i64, email: &str, run: &str) -> Value {
+    json!({"id": id, "userName": name, "active": active, "age": age,
+        "emails": [{"value": email, "type": "work"}], "meta": {"run": run}})
+}
+
+async fn users(script: Vec<Value>) -> DescribedHarness {
+    let h = support::described(USERS, users_world(), script);
+    h.hold(
+        "users",
+        &[
+            user("u1", "ann", true, 31, "ann@acme.io", "r1"),
+            user("u2", "Anna", false, 25, "anna@else.io", "r1"),
+            user("u3", "bob", true, 40, "bob@acme.io", "r2"),
+            // Holds neither an age nor emails.
+            json!({"id": "u4", "userName": "dee", "active": true, "meta": {"run": "r2"}}),
+        ],
+    )
+    .await;
+    h
+}
+
+/// The query string of `pairs`, each value percent-encoded.
+fn query(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| {
+            let enc = |s: &str| {
+                s.bytes()
+                    .map(|b| match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                            (b as char).to_string()
+                        }
+                        b => format!("%{b:02X}"),
+                    })
+                    .collect::<String>()
+            };
+            format!("{}={}", enc(k), enc(v))
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// The ids a list of users answers from state for `pairs`, no model call made.
+async fn listed(h: &DescribedHarness, pairs: &[(&str, &str)]) -> Vec<Value> {
+    let (source, body) = get(h, &format!("/users?{}", query(pairs))).await;
+    assert_eq!(source, "state", "{pairs:?}: {body}");
+    ids(&body["Resources"])
+}
+
+#[tokio::test]
+async fn a_scim_filter_keeps_the_held_records_it_matches() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    // Operators and attribute names in any case, and text compared in any case.
+    assert_eq!(
+        listed(&h, &[("filter", r#"USERNAME eq "ANN" and active Eq true"#)]).await,
+        [json!("u1")]
+    );
+    assert_eq!(
+        listed(
+            &h,
+            &[("filter", r#"emails.value co "@ACME" or userName sw "dee""#)]
+        )
+        .await,
+        [json!("u1"), json!("u3"), json!("u4")]
+    );
+    assert_eq!(
+        listed(&h, &[("filter", "not (emails pr)")]).await,
+        [json!("u4")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn an_odata_filter_keeps_the_held_records_it_matches() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    assert_eq!(
+        listed(&h, &[("$filter", "age ge 30 and contains(userName,'n')")]).await,
+        [json!("u1")]
+    );
+    assert_eq!(
+        listed(
+            &h,
+            &[(
+                "$filter",
+                "userName in ('bob', 'dee') or startswith(userName,'An')"
+            )]
+        )
+        .await,
+        [json!("u2"), json!("u3"), json!("u4")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None]);
+}
+
+#[tokio::test]
+async fn field_value_pairs_keep_the_records_holding_every_one() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    assert_eq!(
+        listed(&h, &[("q", "active:true,meta.run:r2")]).await,
+        [json!("u3"), json!("u4")]
+    );
+    assert_eq!(capture.of("listUsers"), [None]);
+}
+
+#[tokio::test]
+async fn deep_object_brackets_are_the_filter_s_own_parameters() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    // Operators after the member's keys, nested and literally declared keys alike.
+    assert_eq!(
+        listed(
+            &h,
+            &[("where[meta][run][_eq]", "r1"), ("where[age][_gt]", "26")]
+        )
+        .await,
+        [json!("u1")]
+    );
+    assert_eq!(
+        listed(
+            &h,
+            &[
+                ("where[active]", "true"),
+                ("where[userName][_in]", "bob,ann")
+            ]
+        )
+        .await,
+        [json!("u1"), json!("u3")]
+    );
+    // A map member's keys, below its `member_prefix`.
+    assert_eq!(
+        listed(&h, &[("meta[run]", "r2")]).await,
+        [json!("u3"), json!("u4")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None, None]);
+}
+
+#[tokio::test]
+async fn a_filter_expression_that_does_not_parse_is_generated() {
+    let (capture, _guard) = Capture::install();
+    let generated = json!({"Resources": [user("u1", "ann", true, 31, "ann@acme.io", "r1")]});
+    let h = users(vec![generated.clone(), generated]).await;
+    for pairs in [
+        [("filter", r#"emails[type eq "work"]"#)],
+        [("where[_or][0][age][_eq]", "1")],
+    ] {
+        let (source, body) = get(&h, &format!("/users?{}", query(&pairs))).await;
+        assert_eq!(source, "llm", "{body}");
+    }
+    assert_eq!(
+        capture.of("listUsers"),
+        [
+            Some("unparsed_filter".to_owned()),
+            Some("unparsed_filter".to_owned())
+        ]
+    );
+    assert_eq!(
+        capture.causes("listUsers"),
+        [Some("filter".to_owned()), Some("where".to_owned())]
+    );
+    assert_eq!(h.provider.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn a_held_record_lacking_an_expression_s_member_does_not_match() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    // `u4` holds no age: it is not below 100.
+    assert_eq!(
+        listed(&h, &[("$filter", "age lt 100")]).await,
+        [json!("u1"), json!("u2"), json!("u3")]
+    );
+    // `ne` holds of it: a member not held is not 31 (`null ne 31`).
+    assert_eq!(
+        listed(&h, &[("$filter", "age ne 31")]).await,
+        [json!("u2"), json!("u3"), json!("u4")]
+    );
+    // Under `not`, the comparison is false, so its negation holds.
+    assert_eq!(
+        listed(&h, &[("$filter", "not (age lt 100)")]).await,
+        [json!("u4")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None, None]);
+}
+
+#[tokio::test]
+async fn an_expression_value_of_the_wrong_type_narrows_nothing() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    // `age` is an integer: `'abc'` says nothing, so only the other side narrows.
+    assert_eq!(
+        listed(&h, &[("$filter", "age eq 'abc'")]).await,
+        [json!("u1"), json!("u2"), json!("u3"), json!("u4")]
+    );
+    assert_eq!(
+        listed(&h, &[("q", "age:old,active:false")]).await,
+        [json!("u2")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None]);
+}
+
+#[tokio::test]
+async fn the_model_s_items_lacking_an_expression_s_member_are_kept() {
+    let (capture, _guard) = Capture::install();
+    let answered = json!({"Resources": [
+        {"id": "m1", "userName": "ann"},
+        {"id": "m2"},
+        {"id": "m3", "userName": "bob"}
+    ]});
+    // No record held: the model answers, and its items are kept unless they disagree.
+    let h = support::described(USERS, users_world(), vec![answered]);
+    let (source, body) = get(
+        &h,
+        &format!("/users?{}", query(&[("filter", r#"userName eq "ann""#)])),
+    )
+    .await;
+    assert_eq!(source, "llm", "{body}");
+    assert_eq!(
+        ids(&body["Resources"]),
+        [json!("m1"), json!("m2")],
+        "{body}"
+    );
+    assert_eq!(capture.of("listUsers"), [Some("never_written".to_owned())]);
+}
+
+#[tokio::test]
+async fn eq_null_keeps_the_held_records_without_the_member() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    assert_eq!(
+        listed(&h, &[("$filter", "age eq null")]).await,
+        [json!("u4")]
+    );
+    assert_eq!(
+        listed(&h, &[("$filter", "age ne null and active eq true")]).await,
+        [json!("u1"), json!("u3")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None]);
+}
+
+#[tokio::test]
+async fn scim_folds_case_and_odata_does_not() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    assert_eq!(
+        listed(&h, &[("filter", r#"USERNAME EQ "ANNA""#)]).await,
+        [json!("u2")]
+    );
+    assert_eq!(
+        listed(&h, &[("$filter", "userName eq 'ANNA'")]).await,
+        Vec::<Value>::new()
+    );
+    assert_eq!(capture.of("listUsers"), [None, None]);
+}
+
+/// What does not parse, or is not one value, is generated rather than guessed: a
+/// repeated parameter, a field name that names no member, nesting past the limit, a
+/// long run of parentheses, and too many comparisons.
+#[tokio::test]
+async fn filters_past_the_grammar_s_limits_are_generated() {
+    let (capture, _guard) = Capture::install();
+    let deep_parens = format!("{}age eq 1{}", "(".repeat(33), ")".repeat(33));
+    let deep_nots = format!("{}age eq 1", "not ".repeat(33));
+    let many = vec!["age eq 1"; 257].join(" or ");
+    let cases: Vec<Vec<(&str, &str)>> = vec![
+        vec![("q", "active:true"), ("q", "age:40")],
+        vec![("q", "-status:open")],
+        vec![("q", "foo bar:x")],
+        vec![("$filter", deep_parens.as_str())],
+        vec![("$filter", deep_nots.as_str())],
+        vec![("$filter", many.as_str())],
+    ];
+    let generated = json!({"Resources": [user("u1", "ann", true, 31, "ann@acme.io", "r1")]});
+    let h = users(vec![generated; cases.len() + 1]).await;
+    let mut uris: Vec<String> = cases
+        .iter()
+        .map(|pairs| format!("/users?{}", query(pairs)))
+        .collect();
+    // A long run of parentheses, unescaped to fit a URI's limit (the parser's own test
+    // takes 100k).
+    uris.push(format!("/users?%24filter={}", "(".repeat(60_000)));
+    for uri in &uris {
+        let (source, body) = get(&h, uri).await;
+        assert_eq!(source, "llm", "{body}");
+    }
+    let reasons = capture.of("listUsers");
+    assert_eq!(reasons.len(), uris.len());
+    assert!(
+        reasons
+            .iter()
+            .all(|r| r.as_deref() == Some("unparsed_filter")),
+        "{reasons:?}"
+    );
+    let causes = capture.causes("listUsers");
+    assert_eq!(causes[0].as_deref(), Some("q"));
+    assert_eq!(causes[3].as_deref(), Some("$filter"));
+}
