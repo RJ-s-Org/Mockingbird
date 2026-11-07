@@ -51,6 +51,9 @@ pub(super) enum Fallback {
     Behind,
     /// The rendered record does not fit the response schema.
     RenderFailed,
+    /// A create's record would not render into one of its type's reads, or its answer
+    /// does not render: nothing is stored.
+    RecordInvalid,
 }
 
 impl Fallback {
@@ -65,6 +68,7 @@ impl Fallback {
             Fallback::NotHeld => "not_held",
             Fallback::Behind => "behind",
             Fallback::RenderFailed => "render_failed",
+            Fallback::RecordInvalid => "record_invalid",
         }
     }
 }
