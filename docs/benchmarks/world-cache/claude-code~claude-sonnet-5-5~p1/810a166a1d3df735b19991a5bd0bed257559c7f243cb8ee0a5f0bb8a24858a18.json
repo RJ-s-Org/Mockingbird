@@ -1,0 +1,310 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:15:54Z",
+  "authors": {
+    "/operations/orders.authorize/idempotency": "agent",
+    "/operations/orders.authorize/not_found": "agent",
+    "/operations/orders.capture/idempotency": "agent",
+    "/operations/orders.capture/not_found": "agent",
+    "/operations/orders.create/idempotency": "agent",
+    "/operations/orders.get/not_found": "agent",
+    "/operations/orders.patch/not_found": "agent",
+    "/operations/orders.patch/target": "agent",
+    "/types/orders/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/paypal/paypal-orders.openapi.yaml",
+  "contract_sha256": "810a166a1d3df735b19991a5bd0bed257559c7f243cb8ee0a5f0bb8a24858a18",
+  "cost_usd": 0.09098880000000001,
+  "document": {
+    "operations": {
+      "orders.authorize": {
+        "idempotency": {
+          "header": "PayPal-Request-Id"
+        },
+        "not_found": 404
+      },
+      "orders.capture": {
+        "idempotency": {
+          "header": "PayPal-Request-Id"
+        },
+        "not_found": 404
+      },
+      "orders.create": {
+        "idempotency": {
+          "header": "PayPal-Request-Id"
+        }
+      },
+      "orders.get": {
+        "not_found": 404
+      },
+      "orders.patch": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      }
+    },
+    "types": {
+      "orders": {
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "CREATED",
+            "SAVED",
+            "APPROVED",
+            "VOIDED",
+            "COMPLETED",
+            "PAYER_ACTION_REQUIRED"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 17284,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `orders.patch` (Update) acts on one `orders` record but no target says where the request names it",
+      "operation": "orders.patch",
+      "type": "orders"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "paypal-orders",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 15776,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 15776,
+      "cacheReadInputTokens": 98908,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.09098880000000001,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 1797,
+      "provider": "firstParty",
+      "thinkingTokens": 179,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:15:46.095134Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 15776,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 15776,
+    "cache_read_input_tokens": 98908,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 296,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 296,
+        "cache_read_input_tokens": 23066,
+        "input_tokens": 2,
+        "output_tokens": 598,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 1797,
+    "output_tokens_details": {
+      "thinking_tokens": 179
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 17833,
+  "world": {
+    "operations": {
+      "orders.authorize": {
+        "idempotency": {
+          "header": "PayPal-Request-Id"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "orders"
+      },
+      "orders.capture": {
+        "idempotency": {
+          "header": "PayPal-Request-Id"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "orders"
+      },
+      "orders.confirm": {
+        "kind": "update",
+        "target": {
+          "path_param": "id"
+        },
+        "type": "orders"
+      },
+      "orders.create": {
+        "idempotency": {
+          "header": "PayPal-Request-Id"
+        },
+        "kind": "create",
+        "type": "orders"
+      },
+      "orders.get": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "orders"
+      },
+      "orders.patch": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "orders"
+      }
+    },
+    "types": {
+      "orders": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "CREATED",
+            "SAVED",
+            "APPROVED",
+            "VOIDED",
+            "COMPLETED",
+            "PAYER_ACTION_REQUIRED"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

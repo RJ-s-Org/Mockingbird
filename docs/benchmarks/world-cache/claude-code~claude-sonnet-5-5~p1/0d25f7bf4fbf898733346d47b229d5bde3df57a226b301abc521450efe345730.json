@@ -1,0 +1,321 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:16:43Z",
+  "authors": {
+    "/operations/cancelBooking/transition": "agent",
+    "/operations/createBooking/answer": "agent",
+    "/operations/getBooking/not_found": "agent",
+    "/operations/getOffer/not_found": "agent",
+    "/operations/listHotels/answer": "agent",
+    "/operations/listHotels/paging": "agent",
+    "/operations/searchFlights/answer": "agent",
+    "/types/bookings/lifecycle": "agent",
+    "/types/hotels/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "docs/benchmarks/contracts/travel.openapi.yaml",
+  "contract_sha256": "0d25f7bf4fbf898733346d47b229d5bde3df57a226b301abc521450efe345730",
+  "cost_usd": 0.10438439999999999,
+  "document": {
+    "operations": {
+      "cancelBooking": {
+        "transition": {
+          "status": "cancelled"
+        }
+      },
+      "createBooking": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "getBooking": {
+        "not_found": 404
+      },
+      "getOffer": {
+        "not_found": 404
+      },
+      "listHotels": {
+        "answer": {
+          "records": "/data"
+        },
+        "paging": {
+          "request": "page",
+          "size": "pageSize",
+          "style": "page"
+        }
+      },
+      "searchFlights": {
+        "answer": {
+          "records": "/offers"
+        }
+      }
+    },
+    "types": {
+      "bookings": {
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "pending",
+            "confirmed",
+            "ticketed",
+            "cancelled",
+            "failed"
+          ]
+        }
+      },
+      "hotels": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 17285,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "travel",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 19973,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 19973,
+      "cacheReadInputTokens": 60764,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.10438439999999999,
+      "inputTokens": 8,
+      "maxOutputTokens": 128000,
+      "outputTokens": 1840,
+      "provider": "firstParty",
+      "thinkingTokens": 491,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 7,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:16:36.686568Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 19973,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 19973,
+    "cache_read_input_tokens": 60764,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 8,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1143,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1143,
+        "cache_read_input_tokens": 26416,
+        "input_tokens": 2,
+        "output_tokens": 575,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 1840,
+    "output_tokens_details": {
+      "thinking_tokens": 491
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 17867,
+  "world": {
+    "operations": {
+      "cancelBooking": {
+        "kind": "action",
+        "target": {
+          "path_param": "bookingId"
+        },
+        "transition": {
+          "status": "cancelled"
+        },
+        "type": "bookings"
+      },
+      "createBooking": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "bookings"
+      },
+      "getBooking": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "bookingId"
+        },
+        "type": "bookings"
+      },
+      "getOffer": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "offerId"
+        },
+        "type": "offers"
+      },
+      "listHotels": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "pageSize",
+          "style": "page"
+        },
+        "type": "hotels"
+      },
+      "searchFlights": {
+        "answer": {
+          "records": "/offers"
+        },
+        "kind": "list",
+        "type": "offers"
+      }
+    },
+    "types": {
+      "bookings": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "pending",
+            "confirmed",
+            "ticketed",
+            "cancelled",
+            "failed"
+          ]
+        }
+      },
+      "hotels": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "offers": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

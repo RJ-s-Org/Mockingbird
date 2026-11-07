@@ -1,0 +1,508 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:11:20Z",
+  "authors": {
+    "/operations/addProfilesToList/not_found": "agent",
+    "/operations/addProfilesToList/request": "agent",
+    "/operations/createList/request": "agent",
+    "/operations/createProfile/request": "agent",
+    "/operations/deleteList/not_found": "agent",
+    "/operations/deleteList/target": "agent",
+    "/operations/getList/not_found": "agent",
+    "/operations/getLists/answer": "agent",
+    "/operations/getLists/paging": "agent",
+    "/operations/getProfile/not_found": "agent",
+    "/operations/getProfiles/answer": "agent",
+    "/operations/getProfiles/paging": "agent",
+    "/operations/getProfilesForList/answer": "agent",
+    "/operations/getProfilesForList/paging": "agent",
+    "/operations/removeProfilesFromList/kind": "agent",
+    "/operations/removeProfilesFromList/not_found": "agent",
+    "/operations/removeProfilesFromList/request": "agent",
+    "/operations/removeProfilesFromList/target": "agent",
+    "/operations/removeProfilesFromList/type": "agent",
+    "/operations/updateList/not_found": "agent",
+    "/operations/updateList/request": "agent",
+    "/operations/updateProfile/not_found": "agent",
+    "/operations/updateProfile/request": "agent",
+    "/types/profiles/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind6/klaviyo.openapi.yaml",
+  "contract_sha256": "09fdbc4619cd5b221b4422c997b8a7aaa276c1daa0aacb9e07d7de99ee89c9af",
+  "cost_usd": 0.14434280000000002,
+  "document": {
+    "operations": {
+      "addProfilesToList": {
+        "not_found": 404,
+        "request": {
+          "records": "/data"
+        }
+      },
+      "createList": {
+        "request": {
+          "record": "/data"
+        }
+      },
+      "createProfile": {
+        "request": {
+          "record": "/data"
+        }
+      },
+      "deleteList": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "getList": {
+        "not_found": 404
+      },
+      "getLists": {
+        "answer": {
+          "records": "/data"
+        },
+        "paging": {
+          "request": "page[cursor]",
+          "response": "links.next",
+          "style": "next_url"
+        }
+      },
+      "getProfile": {
+        "not_found": 404
+      },
+      "getProfiles": {
+        "answer": {
+          "records": "/data"
+        },
+        "paging": {
+          "request": "page[cursor]",
+          "response": "links.next",
+          "size": "page[size]",
+          "style": "next_url"
+        }
+      },
+      "getProfilesForList": {
+        "answer": {
+          "records": "/data"
+        },
+        "paging": {
+          "request": "page[cursor]",
+          "response": "links.next",
+          "size": "page[size]",
+          "style": "next_url"
+        }
+      },
+      "removeProfilesFromList": {
+        "kind": "action",
+        "not_found": 404,
+        "request": {
+          "records": "/data"
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "lists"
+      },
+      "updateList": {
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      },
+      "updateProfile": {
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        }
+      }
+    },
+    "types": {
+      "profiles": {
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "attributes.email"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 27036,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteList` (Delete) acts on one `lists` record but no target says where the request names it",
+      "operation": "deleteList",
+      "type": "lists"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `removeProfilesFromList` (Delete) acts on one `profiles` record but no target says where the request names it",
+      "operation": "removeProfilesFromList",
+      "type": "profiles"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "klaviyo",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 22658,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 22658,
+      "cacheReadInputTokens": 220308,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.14434280000000002,
+      "inputTokens": 20,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3164,
+      "provider": "firstParty",
+      "thinkingTokens": 329,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:11:06.458927Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:11:08.230218Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 22658,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 22658,
+    "cache_read_input_tokens": 220308,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 20,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 382,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 382,
+        "cache_read_input_tokens": 29862,
+        "input_tokens": 2,
+        "output_tokens": 806,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3164,
+    "output_tokens_details": {
+      "thinking_tokens": 329
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 27622,
+  "world": {
+    "operations": {
+      "addProfilesToList": {
+        "kind": "action",
+        "not_found": 404,
+        "request": {
+          "records": "/data"
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "lists"
+      },
+      "createList": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/data"
+        },
+        "type": "lists"
+      },
+      "createProfile": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "request": {
+          "record": "/data"
+        },
+        "type": "profiles"
+      },
+      "deleteList": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "lists"
+      },
+      "getList": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "lists"
+      },
+      "getLists": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page[cursor]",
+          "response": "links.next",
+          "style": "next_url"
+        },
+        "type": "lists"
+      },
+      "getListsForProfile": {
+        "kind": "list",
+        "type": "lists"
+      },
+      "getProfile": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "profiles"
+      },
+      "getProfileIdsForList": {
+        "kind": "list",
+        "type": "profiles"
+      },
+      "getProfiles": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page[cursor]",
+          "response": "links.next",
+          "size": "page[size]",
+          "style": "next_url"
+        },
+        "type": "profiles"
+      },
+      "getProfilesForList": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page[cursor]",
+          "response": "links.next",
+          "size": "page[size]",
+          "style": "next_url"
+        },
+        "type": "profiles"
+      },
+      "removeProfilesFromList": {
+        "kind": "action",
+        "not_found": 404,
+        "request": {
+          "records": "/data"
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "lists"
+      },
+      "updateList": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "lists"
+      },
+      "updateProfile": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": "/data"
+        },
+        "target": {
+          "path_param": "id"
+        },
+        "type": "profiles"
+      }
+    },
+    "types": {
+      "lists": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "profiles": {
+        "identity": {
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "attributes.email"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`/links/next` is not a member of operation `getLists`'s answer",
+          "path": "/operations/getLists/paging/response"
+        },
+        {
+          "code": "unresolved",
+          "message": "`/links/next` is not a member of operation `getProfiles`'s answer",
+          "path": "/operations/getProfiles/paging/response"
+        },
+        {
+          "code": "unresolved",
+          "message": "`/links/next` is not a member of operation `getProfilesForList`'s answer",
+          "path": "/operations/getProfilesForList/paging/response"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

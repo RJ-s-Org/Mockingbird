@@ -1,0 +1,549 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:10:23Z",
+  "authors": {
+    "/operations/createComment/answer": "agent",
+    "/operations/createRecords/answer": "agent",
+    "/operations/createRecords/kind": "agent",
+    "/operations/createRecords/request": "agent",
+    "/operations/createRecords/type": "agent",
+    "/operations/createTable/answer": "agent",
+    "/operations/deleteRecord/not_found": "agent",
+    "/operations/deleteRecords/answer": "agent",
+    "/operations/getBaseSchema/answer": "agent",
+    "/operations/getRecord/answer": "agent",
+    "/operations/getRecord/not_found": "agent",
+    "/operations/listComments/answer": "agent",
+    "/operations/listComments/order": "agent",
+    "/operations/listComments/paging": "agent",
+    "/operations/listRecords/answer": "agent",
+    "/operations/listRecords/paging": "agent",
+    "/operations/replaceRecord/answer": "agent",
+    "/operations/replaceRecord/not_found": "agent",
+    "/operations/replaceRecord/request": "agent",
+    "/operations/replaceRecords/answer": "agent",
+    "/operations/replaceRecords/request": "agent",
+    "/operations/updateRecord/answer": "agent",
+    "/operations/updateRecord/not_found": "agent",
+    "/operations/updateRecord/request": "agent",
+    "/operations/updateRecords/answer": "agent",
+    "/operations/updateRecords/request": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind5/airtable.openapi.yaml",
+  "contract_sha256": "add7af93d45b46557073b92012816340bd18eb397e9eca9e52b04ecca2ce84e6",
+  "cost_usd": 0.13398559999999998,
+  "document": {
+    "operations": {
+      "createComment": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "createRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "kind": "create",
+        "request": {
+          "records": "/records"
+        },
+        "type": "v0"
+      },
+      "createTable": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "deleteRecord": {
+        "not_found": 404
+      },
+      "deleteRecords": {
+        "answer": {
+          "records": "/records"
+        }
+      },
+      "getBaseSchema": {
+        "answer": {
+          "records": "/tables"
+        }
+      },
+      "getRecord": {
+        "answer": {
+          "record": ""
+        },
+        "not_found": 404
+      },
+      "listComments": {
+        "answer": {
+          "records": "/comments"
+        },
+        "order": {
+          "descending": true,
+          "member": "createdTime"
+        },
+        "paging": {
+          "request": "offset",
+          "response": "offset",
+          "size": "pageSize",
+          "style": "cursor"
+        }
+      },
+      "listRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "paging": {
+          "request": "offset",
+          "response": "offset",
+          "size": "pageSize",
+          "style": "cursor"
+        }
+      },
+      "replaceRecord": {
+        "answer": {
+          "record": ""
+        },
+        "not_found": 404,
+        "request": {
+          "record": ""
+        }
+      },
+      "replaceRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "request": {
+          "records": "/records"
+        }
+      },
+      "updateRecord": {
+        "answer": {
+          "record": ""
+        },
+        "not_found": 404,
+        "request": {
+          "record": ""
+        }
+      },
+      "updateRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "request": {
+          "records": "/records"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 23913,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `replaceRecords` (Update) acts on one `v0` record but no target says where the request names it",
+      "operation": "replaceRecords",
+      "type": "v0"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteRecords` (Delete) acts on one `v0` record but no target says where the request names it",
+      "operation": "deleteRecords",
+      "type": "v0"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `updateRecords` (Update) acts on one `v0` record but no target says where the request names it",
+      "operation": "updateRecords",
+      "type": "v0"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `replaceRecords` (Update) acts on one `v0` record but no target says where the request names it",
+      "operation": "replaceRecords",
+      "type": "v0"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `createRecords` (Action) acts on one `v0` record but no target says where the request names it",
+      "operation": "createRecords",
+      "type": "v0"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteRecords` (Delete) acts on one `v0` record but no target says where the request names it",
+      "operation": "deleteRecords",
+      "type": "v0"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `updateRecords` (Update) acts on one `v0` record but no target says where the request names it",
+      "operation": "updateRecords",
+      "type": "v0"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "airtable",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 23445,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 23445,
+      "cacheReadInputTokens": 138076,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.13398559999999998,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2637,
+      "provider": "firstParty",
+      "thinkingTokens": 448,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:10:10.828459Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:10:13.065473Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 23445,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 23445,
+    "cache_read_input_tokens": 138076,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1541,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1541,
+        "cache_read_input_tokens": 29490,
+        "input_tokens": 2,
+        "output_tokens": 861,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2637,
+    "output_tokens_details": {
+      "thinking_tokens": 448
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 24446,
+  "world": {
+    "operations": {
+      "createComment": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "comments"
+      },
+      "createField": {
+        "kind": "action",
+        "target": {
+          "path_param": "tableId"
+        },
+        "type": "tables"
+      },
+      "createRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "kind": "create",
+        "request": {
+          "records": "/records"
+        },
+        "type": "v0"
+      },
+      "createTable": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "tables"
+      },
+      "deleteRecord": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "recordId"
+        },
+        "type": "v0"
+      },
+      "deleteRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "kind": "delete",
+        "type": "v0"
+      },
+      "getBaseSchema": {
+        "answer": {
+          "records": "/tables"
+        },
+        "kind": "list",
+        "type": "tables"
+      },
+      "getRecord": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "recordId"
+        },
+        "type": "v0"
+      },
+      "listComments": {
+        "answer": {
+          "records": "/comments"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "createdTime"
+        },
+        "paging": {
+          "request": "offset",
+          "response": "offset",
+          "size": "pageSize",
+          "style": "cursor"
+        },
+        "type": "comments"
+      },
+      "listRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "response": "offset",
+          "size": "pageSize",
+          "style": "cursor"
+        },
+        "type": "v0"
+      },
+      "replaceRecord": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        },
+        "target": {
+          "path_param": "recordId"
+        },
+        "type": "v0"
+      },
+      "replaceRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "kind": "update",
+        "request": {
+          "records": "/records"
+        },
+        "type": "v0"
+      },
+      "updateRecord": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "not_found": 404,
+        "request": {
+          "record": ""
+        },
+        "target": {
+          "path_param": "recordId"
+        },
+        "type": "v0"
+      },
+      "updateRecords": {
+        "answer": {
+          "records": "/records"
+        },
+        "kind": "update",
+        "request": {
+          "records": "/records"
+        },
+        "type": "v0"
+      }
+    },
+    "types": {
+      "comments": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "tables": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "v0": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "operation `deleteRecords` declares no path parameter `records[]`",
+          "path": "/operations/deleteRecords/target/path_param"
+        },
+        {
+          "code": "unresolved",
+          "message": "`id` is not a member of operation `replaceRecords`'s request body",
+          "path": "/operations/replaceRecords/target/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "`id` is not a member of operation `updateRecords`'s request body",
+          "path": "/operations/updateRecords/target/member"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`records.id` is not a member of operation `replaceRecords`'s request body",
+          "path": "/operations/replaceRecords/target/member"
+        },
+        {
+          "code": "unresolved",
+          "message": "`records.id` is not a member of operation `updateRecords`'s request body",
+          "path": "/operations/updateRecords/target/member"
+        }
+      ],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

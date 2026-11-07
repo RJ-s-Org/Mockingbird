@@ -1,0 +1,433 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:10:44Z",
+  "authors": {
+    "/operations/attachTagToConversation/not_found": "agent",
+    "/operations/deleteContact/not_found": "agent",
+    "/operations/getContact/not_found": "agent",
+    "/operations/getConversation/not_found": "agent",
+    "/operations/listAdmins/answer": "agent",
+    "/operations/listConversations/answer": "agent",
+    "/operations/listConversations/order": "agent",
+    "/operations/listConversations/paging": "agent",
+    "/operations/manageConversation/not_found": "agent",
+    "/operations/replyConversation/not_found": "agent",
+    "/operations/searchContacts/answer": "agent",
+    "/operations/searchConversations/answer": "agent",
+    "/operations/updateConversation/not_found": "agent",
+    "/types/admins/identity": "agent",
+    "/types/contacts/unique": "agent",
+    "/types/conversations/lifecycle": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind5/intercom.openapi.yaml",
+  "contract_sha256": "c81ac72b2445aec14982d0996db90ae3633353b3dfe954337ea54b20c64990f2",
+  "cost_usd": 0.12131940000000001,
+  "document": {
+    "operations": {
+      "attachTagToConversation": {
+        "not_found": 404
+      },
+      "deleteContact": {
+        "not_found": 404
+      },
+      "getContact": {
+        "not_found": 404
+      },
+      "getConversation": {
+        "not_found": 404
+      },
+      "listAdmins": {
+        "answer": {
+          "records": "/admins"
+        }
+      },
+      "listConversations": {
+        "answer": {
+          "records": "/conversations"
+        },
+        "order": {
+          "descending": true,
+          "member": "updated_at"
+        },
+        "paging": {
+          "request": "starting_after",
+          "response": "pages.next.starting_after",
+          "size": "per_page",
+          "style": "cursor"
+        }
+      },
+      "manageConversation": {
+        "not_found": 404
+      },
+      "replyConversation": {
+        "not_found": 404
+      },
+      "searchContacts": {
+        "answer": {
+          "records": "/data"
+        }
+      },
+      "searchConversations": {
+        "answer": {
+          "records": "/conversations"
+        }
+      },
+      "updateConversation": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "admins": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "contacts": {
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "email"
+            ]
+          },
+          {
+            "conflict": 409,
+            "members": [
+              "external_id"
+            ]
+          }
+        ]
+      },
+      "conversations": {
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "open",
+            "closed",
+            "snoozed"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 21380,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "intercom",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 22339,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 22339,
+      "cacheReadInputTokens": 81334,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.12131940000000001,
+      "inputTokens": 10,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2381,
+      "provider": "firstParty",
+      "thinkingTokens": 600,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 7,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:10:36.975800Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 22339,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 22339,
+    "cache_read_input_tokens": 81334,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 10,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1573,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1573,
+        "cache_read_input_tokens": 28352,
+        "input_tokens": 2,
+        "output_tokens": 714,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2381,
+    "output_tokens_details": {
+      "thinking_tokens": 600
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 21999,
+  "world": {
+    "operations": {
+      "attachTagToConversation": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversation_id"
+        },
+        "type": "conversations"
+      },
+      "createContact": {
+        "kind": "create",
+        "type": "contacts"
+      },
+      "createConversation": {
+        "kind": "create",
+        "type": "conversations"
+      },
+      "createTag": {
+        "kind": "create",
+        "type": "tags"
+      },
+      "deleteContact": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "contact_id"
+        },
+        "type": "contacts"
+      },
+      "getContact": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "contact_id"
+        },
+        "type": "contacts"
+      },
+      "getConversation": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversation_id"
+        },
+        "type": "conversations"
+      },
+      "listAdmins": {
+        "answer": {
+          "records": "/admins"
+        },
+        "kind": "list",
+        "type": "admins"
+      },
+      "listConversations": {
+        "answer": {
+          "records": "/conversations"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "updated_at"
+        },
+        "paging": {
+          "request": "starting_after",
+          "response": "pages.next.starting_after",
+          "size": "per_page",
+          "style": "cursor"
+        },
+        "type": "conversations"
+      },
+      "manageConversation": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversation_id"
+        },
+        "type": "conversations"
+      },
+      "replyConversation": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversation_id"
+        },
+        "type": "conversations"
+      },
+      "searchContacts": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "type": "contacts"
+      },
+      "searchConversations": {
+        "answer": {
+          "records": "/conversations"
+        },
+        "kind": "list",
+        "type": "conversations"
+      },
+      "updateConversation": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "conversation_id"
+        },
+        "type": "conversations"
+      }
+    },
+    "types": {
+      "admins": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "contacts": {
+        "identity": {
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "email"
+            ]
+          },
+          {
+            "conflict": 409,
+            "members": [
+              "external_id"
+            ]
+          }
+        ]
+      },
+      "conversations": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "member": "state",
+          "states": [
+            "open",
+            "closed",
+            "snoozed"
+          ]
+        }
+      },
+      "tags": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

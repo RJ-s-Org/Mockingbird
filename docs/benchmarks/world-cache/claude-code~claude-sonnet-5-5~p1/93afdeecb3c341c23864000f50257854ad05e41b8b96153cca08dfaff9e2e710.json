@@ -1,0 +1,537 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:09:57Z",
+  "authors": {
+    "/operations/activateContentType/kind": "agent",
+    "/operations/activateContentType/not_found": "agent",
+    "/operations/activateContentType/target": "agent",
+    "/operations/activateContentType/type": "agent",
+    "/operations/createContentType/answer": "agent",
+    "/operations/createEntry/answer": "agent",
+    "/operations/deleteEntry/not_found": "agent",
+    "/operations/deleteEntry/target": "agent",
+    "/operations/getContentType/kind": "agent",
+    "/operations/getContentType/not_found": "agent",
+    "/operations/getContentType/target": "agent",
+    "/operations/getContentType/type": "agent",
+    "/operations/getContentTypes/paging": "agent",
+    "/operations/getEntries/filters": "agent",
+    "/operations/getEntries/paging": "agent",
+    "/operations/getEntry/kind": "agent",
+    "/operations/getEntry/not_found": "agent",
+    "/operations/getEntry/target": "agent",
+    "/operations/getEntry/type": "agent",
+    "/operations/publishEntry/kind": "agent",
+    "/operations/publishEntry/not_found": "agent",
+    "/operations/publishEntry/target": "agent",
+    "/operations/publishEntry/type": "agent",
+    "/operations/putContentType/answer": "agent",
+    "/operations/putContentType/kind": "agent",
+    "/operations/putContentType/target": "agent",
+    "/operations/putContentType/type": "agent",
+    "/operations/putEntry/answer": "agent",
+    "/operations/putEntry/kind": "agent",
+    "/operations/putEntry/not_found": "agent",
+    "/operations/putEntry/target": "agent",
+    "/operations/putEntry/type": "agent",
+    "/operations/unpublishEntry/kind": "agent",
+    "/operations/unpublishEntry/not_found": "agent",
+    "/operations/unpublishEntry/target": "agent",
+    "/operations/unpublishEntry/type": "agent",
+    "/types/content_types/concurrency": "agent",
+    "/types/content_types/identity": "agent",
+    "/types/entries/concurrency": "agent",
+    "/types/entries/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind4/contentful.openapi.yaml",
+  "contract_sha256": "93afdeecb3c341c23864000f50257854ad05e41b8b96153cca08dfaff9e2e710",
+  "cost_usd": 0.1604114,
+  "document": {
+    "operations": {
+      "activateContentType": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "content_type_id"
+        },
+        "type": "content_types"
+      },
+      "createContentType": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "createEntry": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "deleteEntry": {
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        }
+      },
+      "getContentType": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "content_type_id"
+        },
+        "type": "content_types"
+      },
+      "getContentTypes": {
+        "paging": {
+          "request": "skip",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "getEntries": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "sys.contentType.sys.id",
+            "param": "content_type"
+          },
+          {
+            "kind": "text",
+            "param": "query"
+          }
+        ],
+        "paging": {
+          "request": "skip",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "getEntry": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "publishEntry": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "putContentType": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "target": {
+          "path_param": "content_type_id"
+        },
+        "type": "content_types"
+      },
+      "putEntry": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "unpublishEntry": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      }
+    },
+    "types": {
+      "content_types": {
+        "concurrency": {
+          "conflict": 409,
+          "header": "X-Contentful-Version",
+          "member": "sys.version"
+        },
+        "identity": {
+          "member": "sys.id"
+        }
+      },
+      "entries": {
+        "concurrency": {
+          "conflict": 409,
+          "header": "X-Contentful-Version",
+          "member": "sys.version"
+        },
+        "identity": {
+          "member": "sys.id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 31315,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `content_types` is written by `createContentType`, `putContentType` but has no identity: no member is known to name a record",
+      "type": "content_types"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `entries` is written by `createEntry`, `putEntry`, `deleteEntry` but has no identity: no member is known to name a record",
+      "type": "entries"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `published` is written by `activateContentType`, `publishEntry`, `unpublishEntry` but has no identity: no member is known to name a record",
+      "type": "published"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `putContentType` (Update) acts on one `content_types` record but no target says where the request names it",
+      "operation": "putContentType",
+      "type": "content_types"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `activateContentType` (Update) acts on one `published` record but no target says where the request names it",
+      "operation": "activateContentType",
+      "type": "published"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `putEntry` (Update) acts on one `entries` record but no target says where the request names it",
+      "operation": "putEntry",
+      "type": "entries"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteEntry` (Delete) acts on one `entries` record but no target says where the request names it",
+      "operation": "deleteEntry",
+      "type": "entries"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `publishEntry` (Update) acts on one `published` record but no target says where the request names it",
+      "operation": "publishEntry",
+      "type": "published"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `unpublishEntry` (Delete) acts on one `published` record but no target says where the request names it",
+      "operation": "unpublishEntry",
+      "type": "published"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "contentful",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 25870,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 25870,
+      "cacheReadInputTokens": 238014,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1604114,
+      "inputTokens": 20,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3309,
+      "provider": "firstParty",
+      "thinkingTokens": 339,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:09:40.541928Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 25870,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 25870,
+    "cache_read_input_tokens": 238014,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 20,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 650,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 650,
+        "cache_read_input_tokens": 32806,
+        "input_tokens": 2,
+        "output_tokens": 964,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3309,
+    "output_tokens_details": {
+      "thinking_tokens": 339
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 31932,
+  "world": {
+    "operations": {
+      "activateContentType": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "content_type_id"
+        },
+        "type": "content_types"
+      },
+      "createContentType": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "content_types"
+      },
+      "createEntry": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "entries"
+      },
+      "deleteEntry": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "getContentType": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "content_type_id"
+        },
+        "type": "content_types"
+      },
+      "getContentTypes": {
+        "kind": "list",
+        "paging": {
+          "request": "skip",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "content_types"
+      },
+      "getEntries": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "sys.contentType.sys.id",
+            "param": "content_type"
+          },
+          {
+            "kind": "text",
+            "param": "query"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "skip",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "entries"
+      },
+      "getEntry": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "getEnvironment": {
+        "kind": "list",
+        "type": "environments"
+      },
+      "publishEntry": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "putContentType": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "target": {
+          "path_param": "content_type_id"
+        },
+        "type": "content_types"
+      },
+      "putEntry": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      },
+      "unpublishEntry": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "entry_id"
+        },
+        "type": "entries"
+      }
+    },
+    "types": {
+      "content_types": {
+        "concurrency": {
+          "conflict": 409,
+          "header": "X-Contentful-Version",
+          "member": "sys.version"
+        },
+        "identity": {
+          "member": "sys.id"
+        }
+      },
+      "entries": {
+        "concurrency": {
+          "conflict": 409,
+          "header": "X-Contentful-Version",
+          "member": "sys.version"
+        },
+        "identity": {
+          "member": "sys.id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

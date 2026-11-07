@@ -1,0 +1,360 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:07:46Z",
+  "authors": {
+    "/operations/CreateTemplate/answer": "agent",
+    "/operations/GetTemplate/not_found": "agent",
+    "/operations/ListStat/paging": "agent",
+    "/operations/ListSuppressionBounces/filters": "agent",
+    "/operations/ListSuppressionBounces/paging": "agent",
+    "/operations/ListTemplate/answer": "agent",
+    "/operations/ListTemplate/paging": "agent",
+    "/operations/SendMail/answer": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/sendgrid/sendgrid.openapi.yaml",
+  "contract_sha256": "9d454819985d5db199ffe6a6d217791614d57c2892cdc96efbed4b0887b7b894",
+  "cost_usd": 0.12157530000000001,
+  "document": {
+    "operations": {
+      "CreateTemplate": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "GetTemplate": {
+        "not_found": 404
+      },
+      "ListStat": {
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "ListSuppressionBounces": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "email",
+            "param": "email"
+          },
+          {
+            "kind": "gte",
+            "member": "created",
+            "param": "start_time"
+          },
+          {
+            "kind": "lte",
+            "member": "created",
+            "param": "end_time"
+          }
+        ],
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "ListTemplate": {
+        "answer": {
+          "records": "/result"
+        },
+        "paging": {
+          "request": "page_token",
+          "size": "page_size",
+          "style": "cursor"
+        }
+      },
+      "SendMail": {
+        "answer": {
+          "identity_header": "X-Message-Id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 26597,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `send` is written by `SendMail` but has no identity: no member is known to name a record",
+      "type": "send"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `send` is written by `SendMail` but has no identity: no member is known to name a record",
+      "type": "send"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "sendgrid",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 20117,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 20117,
+      "cacheReadInputTokens": 129093,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.12157530000000001,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2817,
+      "provider": "firstParty",
+      "thinkingTokens": 495,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 10,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:07:36.362413Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 20117,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 20117,
+    "cache_read_input_tokens": 129093,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1163,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1163,
+        "cache_read_input_tokens": 26540,
+        "input_tokens": 2,
+        "output_tokens": 754,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2817,
+    "output_tokens_details": {
+      "thinking_tokens": 495
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 27215,
+  "world": {
+    "operations": {
+      "CreateTemplate": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "templates"
+      },
+      "DeleteSuppressionBounce": {
+        "kind": "delete",
+        "target": {
+          "path_param": "email"
+        },
+        "type": "bounces"
+      },
+      "GetSuppressionBounces": {
+        "answer": {
+          "record": "/0"
+        },
+        "kind": "read",
+        "target": {
+          "path_param": "email"
+        },
+        "type": "bounces"
+      },
+      "GetTemplate": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "template_id"
+        },
+        "type": "templates"
+      },
+      "ListStat": {
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "stats"
+      },
+      "ListSuppressionBounces": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "email",
+            "param": "email"
+          },
+          {
+            "kind": "gte",
+            "member": "created",
+            "param": "start_time"
+          },
+          {
+            "kind": "lte",
+            "member": "created",
+            "param": "end_time"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "bounces"
+      },
+      "ListTemplate": {
+        "answer": {
+          "records": "/result"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page_token",
+          "size": "page_size",
+          "style": "cursor"
+        },
+        "type": "templates"
+      },
+      "SendMail": {
+        "answer": {
+          "identity_header": "X-Message-Id"
+        },
+        "kind": "create",
+        "type": "send"
+      }
+    },
+    "types": {
+      "bounces": {
+        "identity": {
+          "member": "email"
+        }
+      },
+      "templates": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": false,
+      "problem": "Admin API answered 422 Unprocessable Entity: {\"code\":\"invalid\",\"detail\":\"`` is not a JSON pointer: a JSON pointer may not be empty\",\"path\":\"/operations/ListSuppressionBounces/answer/records\",\"status\":422,\"title\":\"Invalid world description\",\"type\":\"about:blank\"}",
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

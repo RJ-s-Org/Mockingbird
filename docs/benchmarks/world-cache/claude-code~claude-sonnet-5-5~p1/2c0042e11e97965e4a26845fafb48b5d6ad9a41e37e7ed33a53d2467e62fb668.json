@@ -1,0 +1,367 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:06:39Z",
+  "authors": {
+    "/operations/create_message/answer": "agent",
+    "/operations/delete_message/not_found": "agent",
+    "/operations/delete_message/target": "agent",
+    "/operations/get_guild/not_found": "agent",
+    "/operations/get_message/not_found": "agent",
+    "/operations/list_guild_channels/scope": "agent",
+    "/operations/list_messages/order": "agent",
+    "/operations/list_messages/scope": "agent",
+    "/types/channels/identity": "agent",
+    "/types/channels/parent": "agent",
+    "/types/messages/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/discord/discord.openapi.yaml",
+  "contract_sha256": "2c0042e11e97965e4a26845fafb48b5d6ad9a41e37e7ed33a53d2467e62fb668",
+  "cost_usd": 0.1450664,
+  "document": {
+    "operations": {
+      "create_message": {
+        "answer": {
+          "record": ""
+        }
+      },
+      "delete_message": {
+        "not_found": 404,
+        "target": {
+          "path_param": "message_id"
+        }
+      },
+      "get_guild": {
+        "not_found": 404
+      },
+      "get_message": {
+        "not_found": 404
+      },
+      "list_guild_channels": {
+        "scope": {
+          "member": "guild_id",
+          "param": "guild_id"
+        }
+      },
+      "list_messages": {
+        "order": {
+          "descending": true,
+          "member": "timestamp"
+        },
+        "scope": {
+          "member": "channel_id",
+          "param": "channel_id"
+        }
+      }
+    },
+    "types": {
+      "channels": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "guild_id",
+          "path_param": "guild_id",
+          "type": "guilds"
+        }
+      },
+      "messages": {
+        "parent": {
+          "member": "channel_id",
+          "path_param": "channel_id",
+          "type": "channels"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 20714,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `callback` is written by `create_interaction_response` but has no identity: no member is known to name a record",
+      "type": "callback"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `get_my_user` (Read) acts on one `@me` record but no target says where the request names it",
+      "operation": "get_my_user",
+      "type": "@me"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `callback` is written by `create_interaction_response` but has no identity: no member is known to name a record",
+      "type": "callback"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `delete_message` (Delete) acts on one `messages` record but no target says where the request names it",
+      "operation": "delete_message",
+      "type": "messages"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `get_my_user` (Read) acts on one `@me` record but no target says where the request names it",
+      "operation": "get_my_user",
+      "type": "@me"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "discord",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 27834,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 27834,
+      "cacheReadInputTokens": 126924,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1450664,
+      "inputTokens": 14,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2101,
+      "provider": "firstParty",
+      "thinkingTokens": 310,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:06:29.461007Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 27834,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 27834,
+    "cache_read_input_tokens": 126924,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 14,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 633,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 633,
+        "cache_read_input_tokens": 27201,
+        "input_tokens": 2,
+        "output_tokens": 607,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2101,
+    "output_tokens_details": {
+      "thinking_tokens": 310
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 21462,
+  "world": {
+    "operations": {
+      "create_interaction_response": {
+        "kind": "create",
+        "type": "callback"
+      },
+      "create_message": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "type": "messages"
+      },
+      "delete_message": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "message_id"
+        },
+        "type": "messages"
+      },
+      "get_guild": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "guild_id"
+        },
+        "type": "guilds"
+      },
+      "get_message": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "message_id"
+        },
+        "type": "messages"
+      },
+      "get_my_user": {
+        "kind": "read",
+        "type": "@me"
+      },
+      "list_guild_channels": {
+        "kind": "list",
+        "scope": {
+          "member": "guild_id",
+          "param": "guild_id"
+        },
+        "type": "channels"
+      },
+      "list_messages": {
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "timestamp"
+        },
+        "scope": {
+          "member": "channel_id",
+          "param": "channel_id"
+        },
+        "type": "messages"
+      }
+    },
+    "types": {
+      "@me": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "channels": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "guild_id",
+          "path_param": "guild_id",
+          "type": "guilds"
+        }
+      },
+      "guilds": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "messages": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "member": "channel_id",
+          "path_param": "channel_id",
+          "type": "channels"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

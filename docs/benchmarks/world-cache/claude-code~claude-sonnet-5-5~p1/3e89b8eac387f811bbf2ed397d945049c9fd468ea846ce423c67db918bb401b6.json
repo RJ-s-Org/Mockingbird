@@ -1,0 +1,639 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:11:49Z",
+  "authors": {
+    "/operations/addInvoiceComment/target": "agent",
+    "/operations/deleteInvoice/not_found": "agent",
+    "/operations/deleteInvoice/target": "agent",
+    "/operations/getContact/not_found": "agent",
+    "/operations/getCustomerPayment/not_found": "agent",
+    "/operations/getInvoice/not_found": "agent",
+    "/operations/listContacts/paging": "agent",
+    "/operations/listInvoiceComments/not_found": "agent",
+    "/operations/listInvoiceComments/scope": "agent",
+    "/operations/listInvoicePayments/not_found": "agent",
+    "/operations/listInvoices/filters": "agent",
+    "/operations/listInvoices/paging": "agent",
+    "/operations/markInvoiceDraft/kind": "agent",
+    "/operations/markInvoiceDraft/not_found": "agent",
+    "/operations/markInvoiceDraft/target": "agent",
+    "/operations/markInvoiceDraft/transition": "agent",
+    "/operations/markInvoiceDraft/type": "agent",
+    "/operations/markInvoiceSent/kind": "agent",
+    "/operations/markInvoiceSent/not_found": "agent",
+    "/operations/markInvoiceSent/target": "agent",
+    "/operations/markInvoiceSent/transition": "agent",
+    "/operations/markInvoiceSent/type": "agent",
+    "/operations/markInvoiceVoid/kind": "agent",
+    "/operations/markInvoiceVoid/not_found": "agent",
+    "/operations/markInvoiceVoid/target": "agent",
+    "/operations/markInvoiceVoid/transition": "agent",
+    "/operations/markInvoiceVoid/type": "agent",
+    "/operations/updateInvoice/not_found": "agent",
+    "/types/comments/parent": "agent",
+    "/types/contacts/unique": "agent",
+    "/types/invoices/lifecycle": "agent",
+    "/types/invoices/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind6/zohobooks.openapi.yaml",
+  "contract_sha256": "3e89b8eac387f811bbf2ed397d945049c9fd468ea846ce423c67db918bb401b6",
+  "cost_usd": 0.1516934,
+  "document": {
+    "operations": {
+      "addInvoiceComment": {
+        "target": {
+          "path_param": "invoice_id"
+        }
+      },
+      "deleteInvoice": {
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        }
+      },
+      "getContact": {
+        "not_found": 404
+      },
+      "getCustomerPayment": {
+        "not_found": 404
+      },
+      "getInvoice": {
+        "not_found": 404
+      },
+      "listContacts": {
+        "paging": {
+          "request": "page",
+          "response": "page_context.has_more_page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "listInvoiceComments": {
+        "not_found": 404,
+        "scope": {
+          "member": "invoice_id",
+          "param": "invoice_id"
+        }
+      },
+      "listInvoicePayments": {
+        "not_found": 404
+      },
+      "listInvoices": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "customer_id",
+            "param": "customer_id"
+          },
+          {
+            "kind": "eq",
+            "member": "status",
+            "param": "status"
+          },
+          {
+            "kind": "eq",
+            "member": "invoice_number",
+            "param": "invoice_number"
+          },
+          {
+            "kind": "eq",
+            "member": "reference_number",
+            "param": "reference_number"
+          },
+          {
+            "kind": "gte",
+            "member": "date",
+            "param": "date_start"
+          },
+          {
+            "kind": "lte",
+            "member": "date",
+            "param": "date_end"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "response": "page_context.has_more_page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "markInvoiceDraft": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "transition": {
+          "status": "draft"
+        },
+        "type": "invoices"
+      },
+      "markInvoiceSent": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "transition": {
+          "status": "sent"
+        },
+        "type": "invoices"
+      },
+      "markInvoiceVoid": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "transition": {
+          "status": "void"
+        },
+        "type": "invoices"
+      },
+      "updateInvoice": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "comments": {
+        "parent": {
+          "member": "invoice_id",
+          "path_param": "invoice_id",
+          "type": "invoices"
+        }
+      },
+      "contacts": {
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "contact_name"
+            ]
+          }
+        ]
+      },
+      "invoices": {
+        "lifecycle": {
+          "initial": "draft",
+          "member": "status",
+          "states": [
+            "draft",
+            "sent",
+            "overdue",
+            "paid",
+            "void",
+            "unpaid",
+            "partially_paid",
+            "viewed"
+          ]
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "invoice_number"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 25906,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `draft` is written by `markInvoiceDraft` but has no identity: no member is known to name a record",
+      "type": "draft"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `sent` is written by `markInvoiceSent` but has no identity: no member is known to name a record",
+      "type": "sent"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `void` is written by `markInvoiceVoid` but has no identity: no member is known to name a record",
+      "type": "void"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteInvoice` (Delete) acts on one `invoices` record but no target says where the request names it",
+      "operation": "deleteInvoice",
+      "type": "invoices"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "zohobooks",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 26795,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 26795,
+      "cacheReadInputTokens": 115194,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1516934,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3297,
+      "provider": "firstParty",
+      "thinkingTokens": 649,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:11:38.114646Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 26795,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 26795,
+    "cache_read_input_tokens": 115194,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 2383,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 2383,
+        "cache_read_input_tokens": 31998,
+        "input_tokens": 2,
+        "output_tokens": 936,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3297,
+    "output_tokens_details": {
+      "thinking_tokens": 649
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 26489,
+  "world": {
+    "operations": {
+      "addInvoiceComment": {
+        "answer": {
+          "record": "/comment"
+        },
+        "kind": "create",
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "type": "comments"
+      },
+      "createContact": {
+        "answer": {
+          "record": "/contact"
+        },
+        "kind": "create",
+        "type": "contacts"
+      },
+      "createCustomerPayment": {
+        "answer": {
+          "record": "/payment"
+        },
+        "kind": "create",
+        "type": "customerpayments"
+      },
+      "createInvoice": {
+        "answer": {
+          "record": "/invoice"
+        },
+        "kind": "create",
+        "type": "invoices"
+      },
+      "deleteInvoice": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "type": "invoices"
+      },
+      "getContact": {
+        "answer": {
+          "record": "/contact"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "contact_id"
+        },
+        "type": "contacts"
+      },
+      "getCustomerPayment": {
+        "answer": {
+          "record": "/payment"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "payment_id"
+        },
+        "type": "customerpayments"
+      },
+      "getInvoice": {
+        "answer": {
+          "record": "/invoice"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "type": "invoices"
+      },
+      "listContacts": {
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "response": "page_context.has_more_page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "contacts"
+      },
+      "listInvoiceComments": {
+        "kind": "list",
+        "not_found": 404,
+        "scope": {
+          "member": "invoice_id",
+          "param": "invoice_id"
+        },
+        "type": "comments"
+      },
+      "listInvoicePayments": {
+        "kind": "list",
+        "not_found": 404,
+        "type": "payments"
+      },
+      "listInvoices": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "customer_id",
+            "param": "customer_id"
+          },
+          {
+            "kind": "eq",
+            "member": "status",
+            "param": "status"
+          },
+          {
+            "kind": "eq",
+            "member": "invoice_number",
+            "param": "invoice_number"
+          },
+          {
+            "kind": "eq",
+            "member": "reference_number",
+            "param": "reference_number"
+          },
+          {
+            "kind": "gte",
+            "member": "date",
+            "param": "date_start"
+          },
+          {
+            "kind": "lte",
+            "member": "date",
+            "param": "date_end"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "response": "page_context.has_more_page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "invoices"
+      },
+      "markInvoiceDraft": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "transition": {
+          "status": "draft"
+        },
+        "type": "invoices"
+      },
+      "markInvoiceSent": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "transition": {
+          "status": "sent"
+        },
+        "type": "invoices"
+      },
+      "markInvoiceVoid": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "transition": {
+          "status": "void"
+        },
+        "type": "invoices"
+      },
+      "updateInvoice": {
+        "answer": {
+          "record": "/invoice"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "invoice_id"
+        },
+        "type": "invoices"
+      }
+    },
+    "types": {
+      "comments": {
+        "identity": {
+          "member": "comment_id"
+        },
+        "parent": {
+          "member": "invoice_id",
+          "path_param": "invoice_id",
+          "type": "invoices"
+        }
+      },
+      "contacts": {
+        "identity": {
+          "member": "contact_id"
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "contact_name"
+            ]
+          }
+        ]
+      },
+      "customerpayments": {
+        "identity": {
+          "member": "payment_id"
+        }
+      },
+      "invoices": {
+        "identity": {
+          "member": "invoice_id"
+        },
+        "lifecycle": {
+          "initial": "draft",
+          "member": "status",
+          "states": [
+            "draft",
+            "sent",
+            "overdue",
+            "paid",
+            "void",
+            "unpaid",
+            "partially_paid",
+            "viewed"
+          ]
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "invoice_number"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [
+        {
+          "code": "unresolved",
+          "message": "`invoice_id` is not a member of a `payments` record",
+          "path": "/operations/listInvoicePayments/scope/member"
+        }
+      ],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

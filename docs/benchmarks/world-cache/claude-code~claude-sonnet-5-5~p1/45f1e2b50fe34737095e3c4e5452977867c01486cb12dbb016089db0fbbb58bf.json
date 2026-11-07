@@ -1,0 +1,521 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:12:44Z",
+  "authors": {
+    "/operations/createRepository/answer": "agent",
+    "/operations/createRepository/kind": "agent",
+    "/operations/createRepository/target": "agent",
+    "/operations/declinePullRequest/kind": "agent",
+    "/operations/declinePullRequest/not_found": "agent",
+    "/operations/declinePullRequest/transition": "agent",
+    "/operations/deletePullRequestComment/changes": "agent",
+    "/operations/deletePullRequestComment/kind": "agent",
+    "/operations/deletePullRequestComment/not_found": "agent",
+    "/operations/deletePullRequestComment/target": "agent",
+    "/operations/deleteRepository/not_found": "agent",
+    "/operations/deleteRepository/target": "agent",
+    "/operations/getPullRequest/not_found": "agent",
+    "/operations/getPullRequestComment/not_found": "agent",
+    "/operations/getRepository/not_found": "agent",
+    "/operations/listPullRequestComments/order": "agent",
+    "/operations/listPullRequestComments/paging": "agent",
+    "/operations/listPullRequests/filters": "agent",
+    "/operations/listPullRequests/order": "agent",
+    "/operations/listPullRequests/paging": "agent",
+    "/operations/mergePullRequest/kind": "agent",
+    "/operations/mergePullRequest/not_found": "agent",
+    "/operations/mergePullRequest/transition": "agent",
+    "/operations/updatePullRequest/not_found": "agent",
+    "/operations/updatePullRequestComment/not_found": "agent",
+    "/types/comments/parent": "agent",
+    "/types/pullrequests/lifecycle": "agent",
+    "/types/pullrequests/parent": "agent",
+    "/types/repositories/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind7/bitbucket.openapi.yaml",
+  "contract_sha256": "45f1e2b50fe34737095e3c4e5452977867c01486cb12dbb016089db0fbbb58bf",
+  "cost_usd": 0.1383759,
+  "document": {
+    "operations": {
+      "createRepository": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "target": {
+          "path_param": "repo_slug"
+        }
+      },
+      "declinePullRequest": {
+        "kind": "action",
+        "not_found": 404,
+        "transition": {
+          "state": "DECLINED"
+        }
+      },
+      "deletePullRequestComment": {
+        "changes": {
+          "deleted": {
+            "value": true
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "comment_id"
+        }
+      },
+      "deleteRepository": {
+        "not_found": 404,
+        "target": {
+          "path_param": "repo_slug"
+        }
+      },
+      "getPullRequest": {
+        "not_found": 404
+      },
+      "getPullRequestComment": {
+        "not_found": 404
+      },
+      "getRepository": {
+        "not_found": 404
+      },
+      "listPullRequestComments": {
+        "order": {
+          "member": "created_on"
+        },
+        "paging": {
+          "request": "page",
+          "size": "pagelen",
+          "style": "page"
+        }
+      },
+      "listPullRequests": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "state",
+            "param": "state"
+          }
+        ],
+        "order": {
+          "descending": true,
+          "member": "created_on"
+        },
+        "paging": {
+          "request": "page",
+          "size": "pagelen",
+          "style": "page"
+        }
+      },
+      "mergePullRequest": {
+        "kind": "action",
+        "not_found": 404,
+        "transition": {
+          "state": "MERGED"
+        }
+      },
+      "updatePullRequest": {
+        "not_found": 404
+      },
+      "updatePullRequestComment": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "comments": {
+        "parent": {
+          "path_param": "pull_request_id",
+          "type": "pullrequests"
+        }
+      },
+      "pullrequests": {
+        "lifecycle": {
+          "initial": "OPEN",
+          "member": "state",
+          "states": [
+            "OPEN",
+            "MERGED",
+            "DECLINED",
+            "SUPERSEDED"
+          ]
+        },
+        "parent": {
+          "path_param": "repo_slug",
+          "type": "repositories"
+        }
+      },
+      "repositories": {
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "slug"
+            ],
+            "scope": "workspace.slug"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 27639,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteRepository` (Delete) acts on one `repositories` record but no target says where the request names it",
+      "operation": "deleteRepository",
+      "type": "repositories"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deletePullRequestComment` (Delete) acts on one `comments` record but no target says where the request names it",
+      "operation": "deletePullRequestComment",
+      "type": "comments"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "bitbucket",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 23672,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 23672,
+      "cacheReadInputTokens": 111439,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1383759,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3252,
+      "provider": "firstParty",
+      "thinkingTokens": 851,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 9,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:12:33.442397Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 23672,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 23672,
+    "cache_read_input_tokens": 111439,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1076,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1076,
+        "cache_read_input_tokens": 30182,
+        "input_tokens": 2,
+        "output_tokens": 950,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3252,
+    "output_tokens_details": {
+      "thinking_tokens": 851
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 28184,
+  "world": {
+    "operations": {
+      "createPullRequest": {
+        "kind": "create",
+        "type": "pullrequests"
+      },
+      "createPullRequestComment": {
+        "kind": "create",
+        "type": "comments"
+      },
+      "createRepository": {
+        "answer": {
+          "record": ""
+        },
+        "kind": "create",
+        "target": {
+          "path_param": "repo_slug"
+        },
+        "type": "repositories"
+      },
+      "declinePullRequest": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "pull_request_id"
+        },
+        "transition": {
+          "state": "DECLINED"
+        },
+        "type": "pullrequests"
+      },
+      "deletePullRequestComment": {
+        "changes": {
+          "deleted": {
+            "value": true
+          }
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "comment_id"
+        },
+        "type": "comments"
+      },
+      "deleteRepository": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "repo_slug"
+        },
+        "type": "repositories"
+      },
+      "getPullRequest": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "pull_request_id"
+        },
+        "type": "pullrequests"
+      },
+      "getPullRequestComment": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "comment_id"
+        },
+        "type": "comments"
+      },
+      "getRepository": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "repo_slug"
+        },
+        "type": "repositories"
+      },
+      "listPullRequestComments": {
+        "kind": "list",
+        "order": {
+          "member": "created_on"
+        },
+        "paging": {
+          "request": "page",
+          "size": "pagelen",
+          "style": "page"
+        },
+        "type": "comments"
+      },
+      "listPullRequests": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "state",
+            "param": "state"
+          }
+        ],
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "created_on"
+        },
+        "paging": {
+          "request": "page",
+          "size": "pagelen",
+          "style": "page"
+        },
+        "type": "pullrequests"
+      },
+      "mergePullRequest": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "pull_request_id"
+        },
+        "transition": {
+          "state": "MERGED"
+        },
+        "type": "pullrequests"
+      },
+      "updatePullRequest": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "pull_request_id"
+        },
+        "type": "pullrequests"
+      },
+      "updatePullRequestComment": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "comment_id"
+        },
+        "type": "comments"
+      }
+    },
+    "types": {
+      "comments": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "pull_request_id",
+          "type": "pullrequests"
+        }
+      },
+      "pullrequests": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "OPEN",
+          "member": "state",
+          "states": [
+            "OPEN",
+            "MERGED",
+            "DECLINED",
+            "SUPERSEDED"
+          ]
+        },
+        "parent": {
+          "path_param": "repo_slug",
+          "type": "repositories"
+        }
+      },
+      "repositories": {
+        "identity": {
+          "member": "slug"
+        },
+        "unique": [
+          {
+            "conflict": 400,
+            "members": [
+              "slug"
+            ],
+            "scope": "workspace.slug"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

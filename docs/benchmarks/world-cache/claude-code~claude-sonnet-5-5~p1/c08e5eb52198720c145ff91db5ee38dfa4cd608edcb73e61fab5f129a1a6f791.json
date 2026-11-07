@@ -1,0 +1,486 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:09:28Z",
+  "authors": {
+    "/operations/deleteIssue/not_found": "agent",
+    "/operations/deleteIssue/target": "agent",
+    "/operations/deleteProject/not_found": "agent",
+    "/operations/deleteProject/target": "agent",
+    "/operations/listIssueEvents/order": "agent",
+    "/operations/listIssueEvents/paging": "agent",
+    "/operations/listIssueEvents/scope": "agent",
+    "/operations/listOrganizationIssues/paging": "agent",
+    "/operations/listOrganizationProjects/paging": "agent",
+    "/operations/listOrganizationTeams/paging": "agent",
+    "/operations/listProjectKeys/paging": "agent",
+    "/operations/retrieveIssue/not_found": "agent",
+    "/operations/retrieveProject/not_found": "agent",
+    "/operations/updateIssue/not_found": "agent",
+    "/operations/updateProject/not_found": "agent",
+    "/types/keys/parent": "agent",
+    "/types/projects/identity": "agent",
+    "/types/projects/unique": "agent",
+    "/types/teams/identity": "agent",
+    "/types/teams/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind4/sentry.openapi.yaml",
+  "contract_sha256": "c08e5eb52198720c145ff91db5ee38dfa4cd608edcb73e61fab5f129a1a6f791",
+  "cost_usd": 0.1535043,
+  "document": {
+    "operations": {
+      "deleteIssue": {
+        "not_found": 404,
+        "target": {
+          "path_param": "issue_id"
+        }
+      },
+      "deleteProject": {
+        "not_found": 404,
+        "target": {
+          "path_param": "project_id_or_slug"
+        }
+      },
+      "listIssueEvents": {
+        "order": {
+          "descending": true,
+          "member": "dateCreated"
+        },
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        },
+        "scope": {
+          "member": "groupID",
+          "param": "issue_id"
+        }
+      },
+      "listOrganizationIssues": {
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "header_cursor"
+        }
+      },
+      "listOrganizationProjects": {
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        }
+      },
+      "listOrganizationTeams": {
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        }
+      },
+      "listProjectKeys": {
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        }
+      },
+      "retrieveIssue": {
+        "not_found": 404
+      },
+      "retrieveProject": {
+        "not_found": 404
+      },
+      "updateIssue": {
+        "not_found": 404
+      },
+      "updateProject": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "keys": {
+        "parent": {
+          "path_param": "project_id_or_slug",
+          "type": "projects"
+        }
+      },
+      "projects": {
+        "identity": {
+          "alternates": [
+            "slug"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "slug"
+            ]
+          }
+        ]
+      },
+      "teams": {
+        "identity": {
+          "alternates": [
+            "slug"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "slug"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 29629,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteIssue` (Delete) acts on one `issues` record but no target says where the request names it",
+      "operation": "deleteIssue",
+      "type": "issues"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteProject` (Delete) acts on one `projects` record but no target says where the request names it",
+      "operation": "deleteProject",
+      "type": "projects"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "sentry",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 25736,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 25736,
+      "cacheReadInputTokens": 177783,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1535043,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3275,
+      "provider": "firstParty",
+      "thinkingTokens": 771,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 12,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:09:13.720920Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 25736,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 25736,
+    "cache_read_input_tokens": 177783,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1240,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1240,
+        "cache_read_input_tokens": 32082,
+        "input_tokens": 2,
+        "output_tokens": 831,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3275,
+    "output_tokens_details": {
+      "thinking_tokens": 771
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 30226,
+  "world": {
+    "operations": {
+      "createProject": {
+        "kind": "create",
+        "type": "projects"
+      },
+      "createProjectKey": {
+        "kind": "create",
+        "type": "keys"
+      },
+      "createTeam": {
+        "kind": "create",
+        "type": "teams"
+      },
+      "deleteIssue": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "issue_id"
+        },
+        "type": "issues"
+      },
+      "deleteProject": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "project_id_or_slug"
+        },
+        "type": "projects"
+      },
+      "listIssueEvents": {
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "dateCreated"
+        },
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        },
+        "scope": {
+          "member": "groupID",
+          "param": "issue_id"
+        },
+        "type": "events"
+      },
+      "listOrganizationIssues": {
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "size": "limit",
+          "style": "header_cursor"
+        },
+        "type": "issues"
+      },
+      "listOrganizationProjects": {
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        },
+        "type": "projects"
+      },
+      "listOrganizationTeams": {
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        },
+        "type": "teams"
+      },
+      "listProjectKeys": {
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response_header": "Link",
+          "style": "header_cursor"
+        },
+        "type": "keys"
+      },
+      "retrieveIssue": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "issue_id"
+        },
+        "type": "issues"
+      },
+      "retrieveProject": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "project_id_or_slug"
+        },
+        "type": "projects"
+      },
+      "updateIssue": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "issue_id"
+        },
+        "type": "issues"
+      },
+      "updateProject": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "project_id_or_slug"
+        },
+        "type": "projects"
+      }
+    },
+    "types": {
+      "issues": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "keys": {
+        "identity": {
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "project_id_or_slug",
+          "type": "projects"
+        }
+      },
+      "projects": {
+        "identity": {
+          "alternates": [
+            "slug"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "slug"
+            ]
+          }
+        ]
+      },
+      "teams": {
+        "identity": {
+          "alternates": [
+            "slug"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "slug"
+            ]
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

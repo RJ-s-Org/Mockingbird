@@ -1,0 +1,458 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:12:16Z",
+  "authors": {
+    "/operations/cancel-payment/kind": "agent",
+    "/operations/cancel-payment/not_found": "agent",
+    "/operations/cancel-payment/transition": "agent",
+    "/operations/delete-customer/not_found": "agent",
+    "/operations/delete-customer/target": "agent",
+    "/operations/get-customer/not_found": "agent",
+    "/operations/get-payment/not_found": "agent",
+    "/operations/list-customer-payments/answer": "agent",
+    "/operations/list-customer-payments/not_found": "agent",
+    "/operations/list-customer-payments/order": "agent",
+    "/operations/list-customer-payments/paging": "agent",
+    "/operations/list-customer-payments/scope": "agent",
+    "/operations/list-customers/answer": "agent",
+    "/operations/list-customers/order": "agent",
+    "/operations/list-customers/paging": "agent",
+    "/operations/list-payments/answer": "agent",
+    "/operations/list-payments/order": "agent",
+    "/operations/list-payments/paging": "agent",
+    "/operations/update-customer/not_found": "agent",
+    "/operations/update-payment/not_found": "agent",
+    "/types/payments/lifecycle": "agent",
+    "/types/payments/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind7/mollie.openapi.yaml",
+  "contract_sha256": "483aa908ecddb5967af9288f784b51005b20f0a060afe61b8cf063c719ab7f60",
+  "cost_usd": 0.1442626,
+  "document": {
+    "operations": {
+      "cancel-payment": {
+        "kind": "action",
+        "not_found": 404,
+        "transition": {
+          "status": "canceled"
+        }
+      },
+      "delete-customer": {
+        "not_found": 404,
+        "target": {
+          "path_param": "customerId"
+        }
+      },
+      "get-customer": {
+        "not_found": 404
+      },
+      "get-payment": {
+        "not_found": 404
+      },
+      "list-customer-payments": {
+        "answer": {
+          "records": "/_embedded/payments"
+        },
+        "not_found": 404,
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "from",
+          "response": "_links.next.href",
+          "size": "limit",
+          "style": "next_url"
+        },
+        "scope": {
+          "member": "customerId",
+          "param": "customerId"
+        }
+      },
+      "list-customers": {
+        "answer": {
+          "records": "/_embedded/customers"
+        },
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "from",
+          "response": "_links.next.href",
+          "size": "limit",
+          "style": "next_url"
+        }
+      },
+      "list-payments": {
+        "answer": {
+          "records": "/_embedded/payments"
+        },
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "from",
+          "response": "_links.next.href",
+          "size": "limit",
+          "style": "next_url"
+        }
+      },
+      "update-customer": {
+        "not_found": 404
+      },
+      "update-payment": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "payments": {
+        "lifecycle": {
+          "initial": "open",
+          "member": "status",
+          "states": [
+            "open",
+            "pending",
+            "authorized",
+            "paid",
+            "canceled",
+            "expired",
+            "failed"
+          ]
+        },
+        "parent": {
+          "member": "customerId",
+          "path_param": "customerId",
+          "type": "customers"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 26043,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `delete-customer` (Delete) acts on one `customers` record but no target says where the request names it",
+      "operation": "delete-customer",
+      "type": "customers"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "mollie",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 23630,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 23630,
+      "cacheReadInputTokens": 191566,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1442626,
+      "inputTokens": 18,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3055,
+      "provider": "firstParty",
+      "thinkingTokens": 529,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 13,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:12:00.991032Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 23630,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 23630,
+    "cache_read_input_tokens": 191566,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 18,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 2032,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 2032,
+        "cache_read_input_tokens": 29184,
+        "input_tokens": 2,
+        "output_tokens": 767,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3055,
+    "output_tokens_details": {
+      "thinking_tokens": 529
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 26584,
+  "world": {
+    "operations": {
+      "cancel-payment": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "paymentId"
+        },
+        "transition": {
+          "status": "canceled"
+        },
+        "type": "payments"
+      },
+      "create-customer": {
+        "kind": "create",
+        "type": "customers"
+      },
+      "create-customer-payment": {
+        "kind": "create",
+        "type": "payments"
+      },
+      "create-payment": {
+        "kind": "create",
+        "type": "payments"
+      },
+      "delete-customer": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "customerId"
+        },
+        "type": "customers"
+      },
+      "get-customer": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "customerId"
+        },
+        "type": "customers"
+      },
+      "get-payment": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "paymentId"
+        },
+        "type": "payments"
+      },
+      "list-customer-payments": {
+        "answer": {
+          "records": "/_embedded/payments"
+        },
+        "kind": "list",
+        "not_found": 404,
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "from",
+          "response": "_links.next.href",
+          "size": "limit",
+          "style": "next_url"
+        },
+        "scope": {
+          "member": "customerId",
+          "param": "customerId"
+        },
+        "type": "payments"
+      },
+      "list-customers": {
+        "answer": {
+          "records": "/_embedded/customers"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "from",
+          "response": "_links.next.href",
+          "size": "limit",
+          "style": "next_url"
+        },
+        "type": "customers"
+      },
+      "list-payments": {
+        "answer": {
+          "records": "/_embedded/payments"
+        },
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "createdAt"
+        },
+        "paging": {
+          "request": "from",
+          "response": "_links.next.href",
+          "size": "limit",
+          "style": "next_url"
+        },
+        "type": "payments"
+      },
+      "update-customer": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "customerId"
+        },
+        "type": "customers"
+      },
+      "update-payment": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "paymentId"
+        },
+        "type": "payments"
+      }
+    },
+    "types": {
+      "customers": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "payments": {
+        "identity": {
+          "member": "id"
+        },
+        "lifecycle": {
+          "initial": "open",
+          "member": "status",
+          "states": [
+            "open",
+            "pending",
+            "authorized",
+            "paid",
+            "canceled",
+            "expired",
+            "failed"
+          ]
+        },
+        "parent": {
+          "member": "customerId",
+          "path_param": "customerId",
+          "type": "customers"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

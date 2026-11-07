@@ -1,0 +1,454 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:13:39Z",
+  "authors": {
+    "/operations/deleteDocument/target": "agent",
+    "/operations/getDocument/kind": "agent",
+    "/operations/getDocument/not_found": "agent",
+    "/operations/getDocument/target": "agent",
+    "/operations/getDocument/type": "agent",
+    "/operations/getDocuments/not_found": "agent",
+    "/operations/getDocuments/paging": "agent",
+    "/operations/getIndex/not_found": "agent",
+    "/operations/getSettings/not_found": "agent",
+    "/operations/getTask/not_found": "agent",
+    "/operations/getTasks/order": "agent",
+    "/operations/getTasks/paging": "agent",
+    "/operations/listIndexes/paging": "agent",
+    "/operations/searchWithPost/not_found": "agent",
+    "/operations/searchWithPost/type": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind8/meilisearch.openapi.yaml",
+  "contract_sha256": "9147236214f3786451d8643126946f64ecb9643fec6f05785e05d645de6e8ce9",
+  "cost_usd": 0.1167046,
+  "document": {
+    "operations": {
+      "deleteDocument": {
+        "target": {
+          "path_param": "document_id"
+        }
+      },
+      "getDocument": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "document_id"
+        },
+        "type": "documents"
+      },
+      "getDocuments": {
+        "not_found": 404,
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "getIndex": {
+        "not_found": 404
+      },
+      "getSettings": {
+        "not_found": 404
+      },
+      "getTask": {
+        "not_found": 404
+      },
+      "getTasks": {
+        "order": {
+          "descending": true,
+          "member": "uid"
+        },
+        "paging": {
+          "request": "from",
+          "response": "next",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "listIndexes": {
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        }
+      },
+      "searchWithPost": {
+        "not_found": 404,
+        "type": "documents"
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 22749,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `delete-batch` is written by `deleteDocumentsByBatch` but has no identity: no member is known to name a record",
+      "type": "delete-batch"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `documents` is written by `addOrUpdateDocuments`, `addOrReplaceDocuments`, `deleteAllDocuments`, 1 more but has no identity: no member is known to name a record",
+      "type": "documents"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `settings` is written by `updateSettings` but has no identity: no member is known to name a record",
+      "type": "settings"
+    },
+    {
+      "code": "no_record",
+      "message": "operation `createIndex` answers an object with no `uid` and no member holding a `indexes` record; set answer.record to where it is",
+      "operation": "createIndex",
+      "type": "indexes"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `addOrUpdateDocuments` (Update) acts on one `documents` record but no target says where the request names it",
+      "operation": "addOrUpdateDocuments",
+      "type": "documents"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteAllDocuments` (Delete) acts on one `documents` record but no target says where the request names it",
+      "operation": "deleteAllDocuments",
+      "type": "documents"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `updateSettings` (Update) acts on one `settings` record but no target says where the request names it",
+      "operation": "updateSettings",
+      "type": "settings"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `delete-batch` is written by `deleteDocumentsByBatch` but has no identity: no member is known to name a record",
+      "type": "delete-batch"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `documents` is written by `addOrUpdateDocuments`, `addOrReplaceDocuments`, `deleteAllDocuments`, 1 more but has no identity: no member is known to name a record",
+      "type": "documents"
+    },
+    {
+      "code": "no_identity",
+      "message": "type `settings` is written by `updateSettings` but has no identity: no member is known to name a record",
+      "type": "settings"
+    },
+    {
+      "code": "no_record",
+      "message": "operation `createIndex` answers an object with no `uid` and no member holding a `indexes` record; set answer.record to where it is",
+      "operation": "createIndex",
+      "type": "indexes"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `addOrUpdateDocuments` (Update) acts on one `documents` record but no target says where the request names it",
+      "operation": "addOrUpdateDocuments",
+      "type": "documents"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteAllDocuments` (Delete) acts on one `documents` record but no target says where the request names it",
+      "operation": "deleteAllDocuments",
+      "type": "documents"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `deleteDocument` (Delete) acts on one `documents` record but no target says where the request names it",
+      "operation": "deleteDocument",
+      "type": "documents"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `updateSettings` (Update) acts on one `settings` record but no target says where the request names it",
+      "operation": "updateSettings",
+      "type": "settings"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "meilisearch",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 21244,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 21244,
+      "cacheReadInputTokens": 81486,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1167046,
+      "inputTokens": 10,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2356,
+      "provider": "firstParty",
+      "thinkingTokens": 622,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 7,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:13:30.872142Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 21244,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 21244,
+    "cache_read_input_tokens": 81486,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 10,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1385,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1385,
+        "cache_read_input_tokens": 27445,
+        "input_tokens": 2,
+        "output_tokens": 718,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2356,
+    "output_tokens_details": {
+      "thinking_tokens": 622
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 23307,
+  "world": {
+    "operations": {
+      "addOrReplaceDocuments": {
+        "kind": "create",
+        "type": "documents"
+      },
+      "addOrUpdateDocuments": {
+        "kind": "update",
+        "type": "documents"
+      },
+      "createIndex": {
+        "kind": "create",
+        "type": "indexes"
+      },
+      "deleteAllDocuments": {
+        "kind": "delete",
+        "type": "documents"
+      },
+      "deleteDocument": {
+        "kind": "delete",
+        "target": {
+          "path_param": "document_id"
+        },
+        "type": "documents"
+      },
+      "deleteDocumentsByBatch": {
+        "kind": "create",
+        "type": "delete-batch"
+      },
+      "deleteIndex": {
+        "kind": "delete",
+        "target": {
+          "path_param": "index_uid"
+        },
+        "type": "indexes"
+      },
+      "getDocument": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "document_id"
+        },
+        "type": "documents"
+      },
+      "getDocuments": {
+        "kind": "list",
+        "not_found": 404,
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "documents"
+      },
+      "getIndex": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "index_uid"
+        },
+        "type": "indexes"
+      },
+      "getSettings": {
+        "kind": "list",
+        "not_found": 404,
+        "type": "settings"
+      },
+      "getTask": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "task_uid"
+        },
+        "type": "tasks"
+      },
+      "getTasks": {
+        "kind": "list",
+        "order": {
+          "descending": true,
+          "member": "uid"
+        },
+        "paging": {
+          "request": "from",
+          "response": "next",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "tasks"
+      },
+      "listIndexes": {
+        "kind": "list",
+        "paging": {
+          "request": "offset",
+          "size": "limit",
+          "style": "offset"
+        },
+        "type": "indexes"
+      },
+      "searchWithPost": {
+        "kind": "list",
+        "not_found": 404,
+        "type": "documents"
+      },
+      "updateSettings": {
+        "kind": "update",
+        "type": "settings"
+      }
+    },
+    "types": {
+      "indexes": {
+        "identity": {
+          "member": "uid"
+        }
+      },
+      "tasks": {
+        "identity": {
+          "member": "uid"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

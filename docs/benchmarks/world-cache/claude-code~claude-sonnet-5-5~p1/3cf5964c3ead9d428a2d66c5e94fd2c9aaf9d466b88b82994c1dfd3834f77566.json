@@ -1,0 +1,423 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:15:06Z",
+  "authors": {
+    "/operations/app-delete/not_found": "agent",
+    "/operations/app-info/not_found": "agent",
+    "/operations/app-update/not_found": "agent",
+    "/operations/config-vars-info-for-app/not_found": "agent",
+    "/operations/config-vars-update/not_found": "agent",
+    "/operations/config-vars-update/target": "agent",
+    "/operations/domain-delete/not_found": "agent",
+    "/operations/domain-info/not_found": "agent",
+    "/operations/release-info/not_found": "agent",
+    "/types/apps/identity": "agent",
+    "/types/apps/unique": "agent",
+    "/types/domains/identity": "agent",
+    "/types/domains/parent": "agent",
+    "/types/releases/identity": "agent",
+    "/types/releases/parent": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind10/heroku.openapi.yaml",
+  "contract_sha256": "3cf5964c3ead9d428a2d66c5e94fd2c9aaf9d466b88b82994c1dfd3834f77566",
+  "cost_usd": 0.1050455,
+  "document": {
+    "operations": {
+      "app-delete": {
+        "not_found": 404
+      },
+      "app-info": {
+        "not_found": 404
+      },
+      "app-update": {
+        "not_found": 404
+      },
+      "config-vars-info-for-app": {
+        "not_found": 404
+      },
+      "config-vars-update": {
+        "not_found": 404,
+        "target": {
+          "path_param": "app_id_or_name"
+        }
+      },
+      "domain-delete": {
+        "not_found": 404
+      },
+      "domain-info": {
+        "not_found": 404
+      },
+      "release-info": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "apps": {
+        "identity": {
+          "alternates": [
+            "name"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "name"
+            ]
+          }
+        ]
+      },
+      "domains": {
+        "identity": {
+          "alternates": [
+            "hostname"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "app_id_or_name",
+          "type": "apps"
+        }
+      },
+      "releases": {
+        "identity": {
+          "alternates": [
+            "version"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "app_id_or_name",
+          "type": "apps"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 21369,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `config-vars` is written by `config-vars-update` but has no identity: no member is known to name a record",
+      "type": "config-vars"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `config-vars` is written by `config-vars-update` but has no identity: no member is known to name a record",
+      "type": "config-vars"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `config-vars-update` (Update) acts on one `config-vars` record but no target says where the request names it",
+      "operation": "config-vars-update",
+      "type": "config-vars"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "heroku",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 17985,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 17985,
+      "cacheReadInputTokens": 104415,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1050455,
+      "inputTokens": 12,
+      "maxOutputTokens": 128000,
+      "outputTokens": 2264,
+      "provider": "firstParty",
+      "thinkingTokens": 367,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 8,
+  "refused": [],
+  "revision": 2,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:14:56.745038Z",
+      "revision": 1
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:14:59.044691Z",
+      "revision": 2
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 17985,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 17985,
+    "cache_read_input_tokens": 104415,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 12,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 640,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 640,
+        "cache_read_input_tokens": 24931,
+        "input_tokens": 2,
+        "output_tokens": 667,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 2264,
+    "output_tokens_details": {
+      "thinking_tokens": 367
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 21949,
+  "world": {
+    "operations": {
+      "app-create": {
+        "kind": "create",
+        "type": "apps"
+      },
+      "app-delete": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "app_id_or_name"
+        },
+        "type": "apps"
+      },
+      "app-info": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "app_id_or_name"
+        },
+        "type": "apps"
+      },
+      "app-list": {
+        "kind": "list",
+        "type": "apps"
+      },
+      "app-update": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "app_id_or_name"
+        },
+        "type": "apps"
+      },
+      "config-vars-info-for-app": {
+        "kind": "list",
+        "not_found": 404,
+        "type": "config-vars"
+      },
+      "config-vars-update": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "app_id_or_name"
+        },
+        "type": "config-vars"
+      },
+      "domain-create": {
+        "kind": "create",
+        "type": "domains"
+      },
+      "domain-delete": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "domain_id_or_hostname"
+        },
+        "type": "domains"
+      },
+      "domain-info": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "domain_id_or_hostname"
+        },
+        "type": "domains"
+      },
+      "domain-list": {
+        "kind": "list",
+        "type": "domains"
+      },
+      "release-info": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "release_id_or_version"
+        },
+        "type": "releases"
+      },
+      "release-list": {
+        "kind": "list",
+        "type": "releases"
+      },
+      "release-rollback": {
+        "kind": "create",
+        "type": "releases"
+      }
+    },
+    "types": {
+      "apps": {
+        "identity": {
+          "alternates": [
+            "name"
+          ],
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 422,
+            "members": [
+              "name"
+            ]
+          }
+        ]
+      },
+      "domains": {
+        "identity": {
+          "alternates": [
+            "hostname"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "app_id_or_name",
+          "type": "apps"
+        }
+      },
+      "releases": {
+        "identity": {
+          "alternates": [
+            "version"
+          ],
+          "member": "id"
+        },
+        "parent": {
+          "path_param": "app_id_or_name",
+          "type": "apps"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    },
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 2,
+      "tool": "patch_world"
+    }
+  ]
+}

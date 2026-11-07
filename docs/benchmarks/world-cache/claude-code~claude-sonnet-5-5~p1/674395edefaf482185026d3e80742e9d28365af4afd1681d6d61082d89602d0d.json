@@ -1,0 +1,392 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:06:39Z",
+  "authors": {
+    "/operations/delete_users_by_id/not_found": "agent",
+    "/operations/delete_users_by_id/target": "agent",
+    "/operations/get_roles/answer": "agent",
+    "/operations/get_roles/filters": "agent",
+    "/operations/get_roles/paging": "agent",
+    "/operations/get_user_roles/answer": "agent",
+    "/operations/get_user_roles/not_found": "agent",
+    "/operations/get_user_roles/paging": "agent",
+    "/operations/get_users-by-email/filters": "agent",
+    "/operations/get_users/answer": "agent",
+    "/operations/get_users/paging": "agent",
+    "/operations/get_users_by_id/not_found": "agent",
+    "/operations/patch_users_by_id/not_found": "agent",
+    "/operations/post_user_roles/not_found": "agent",
+    "/types/roles/identity": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "examples/apis/auth0-management/auth0-management.openapi.yaml",
+  "contract_sha256": "674395edefaf482185026d3e80742e9d28365af4afd1681d6d61082d89602d0d",
+  "cost_usd": 0.13196950000000002,
+  "document": {
+    "operations": {
+      "delete_users_by_id": {
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        }
+      },
+      "get_roles": {
+        "answer": {
+          "records": "/roles"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "name_filter"
+          }
+        ],
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "get_user_roles": {
+        "answer": {
+          "records": "/roles"
+        },
+        "not_found": 404,
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "get_users": {
+        "answer": {
+          "records": "/users"
+        },
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        }
+      },
+      "get_users-by-email": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "email",
+            "param": "email"
+          }
+        ]
+      },
+      "get_users_by_id": {
+        "not_found": 404
+      },
+      "patch_users_by_id": {
+        "not_found": 404
+      },
+      "post_user_roles": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "roles": {
+        "identity": {
+          "member": "id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 19901,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `token` is written by `oauth_token` but has no identity: no member is known to name a record",
+      "type": "token"
+    }
+  ],
+  "heuristic_gaps": [
+    {
+      "code": "no_identity",
+      "message": "type `token` is written by `oauth_token` but has no identity: no member is known to name a record",
+      "type": "token"
+    },
+    {
+      "code": "no_target",
+      "message": "operation `delete_users_by_id` (Delete) acts on one `users` record but no target says where the request names it",
+      "operation": "delete_users_by_id",
+      "type": "users"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "auth0-management",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 26311,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 26311,
+      "cacheReadInputTokens": 69855,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.13196950000000002,
+      "inputTokens": 10,
+      "maxOutputTokens": 128000,
+      "outputTokens": 1972,
+      "provider": "firstParty",
+      "thinkingTokens": 307,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 7,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:06:31.273931Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 26311,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 26311,
+    "cache_read_input_tokens": 69855,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 10,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 1158,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 1158,
+        "cache_read_input_tokens": 25153,
+        "input_tokens": 2,
+        "output_tokens": 698,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 1972,
+    "output_tokens_details": {
+      "thinking_tokens": 307
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 20524,
+  "world": {
+    "operations": {
+      "delete_users_by_id": {
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "get_roles": {
+        "answer": {
+          "records": "/roles"
+        },
+        "filters": [
+          {
+            "kind": "contains",
+            "member": "name",
+            "param": "name_filter"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "roles"
+      },
+      "get_user_roles": {
+        "answer": {
+          "records": "/roles"
+        },
+        "kind": "list",
+        "not_found": 404,
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "roles"
+      },
+      "get_users": {
+        "answer": {
+          "records": "/users"
+        },
+        "kind": "list",
+        "paging": {
+          "request": "page",
+          "size": "per_page",
+          "style": "page"
+        },
+        "type": "users"
+      },
+      "get_users-by-email": {
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "email",
+            "param": "email"
+          }
+        ],
+        "kind": "list",
+        "type": "users"
+      },
+      "get_users_by_id": {
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "oauth_token": {
+        "kind": "create",
+        "type": "token"
+      },
+      "patch_users_by_id": {
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "post_user_roles": {
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "id"
+        },
+        "type": "users"
+      },
+      "post_users": {
+        "kind": "create",
+        "type": "users"
+      }
+    },
+    "types": {
+      "roles": {
+        "identity": {
+          "member": "id"
+        }
+      },
+      "users": {
+        "identity": {
+          "member": "user_id"
+        }
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}

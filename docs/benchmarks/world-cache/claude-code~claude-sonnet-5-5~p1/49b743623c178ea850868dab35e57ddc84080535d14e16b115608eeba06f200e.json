@@ -1,0 +1,480 @@
+{
+  "author": {
+    "id": "claude-code~claude-sonnet-5-5~p1",
+    "isolation": "restricted",
+    "kind": "claude",
+    "model": "claude-sonnet-5-5",
+    "model_requested": "claude-sonnet-5-5",
+    "prompt_version": 1
+  },
+  "authored_at": "2026-11-07T02:10:51Z",
+  "authors": {
+    "/operations/cancelBooking/kind": "agent",
+    "/operations/cancelBooking/not_found": "agent",
+    "/operations/cancelBooking/transition": "agent",
+    "/operations/deleteEventType/answer": "agent",
+    "/operations/deleteEventType/kind": "agent",
+    "/operations/deleteEventType/not_found": "agent",
+    "/operations/deleteEventType/target": "agent",
+    "/operations/deleteEventType/type": "agent",
+    "/operations/getBooking/not_found": "agent",
+    "/operations/getBookings/answer": "agent",
+    "/operations/getBookings/filters": "agent",
+    "/operations/getBookings/paging": "agent",
+    "/operations/getEventTypeById/not_found": "agent",
+    "/operations/getEventTypes/answer": "agent",
+    "/operations/markNoShow/not_found": "agent",
+    "/operations/rescheduleBooking/not_found": "agent",
+    "/operations/updateEventType/not_found": "agent",
+    "/types/bookings/identity": "agent",
+    "/types/bookings/lifecycle": "agent",
+    "/types/event-types/unique": "agent"
+  },
+  "builtin_plugins": [
+    "cc-plugin-agents-md",
+    "cc-plugin-plugin-authoring",
+    "cc-plugin-telemetry"
+  ],
+  "contract": "scripts/llm-bench/contracts/blind5/calcom.openapi.yaml",
+  "contract_sha256": "49b743623c178ea850868dab35e57ddc84080535d14e16b115608eeba06f200e",
+  "cost_usd": 0.1451195,
+  "document": {
+    "operations": {
+      "cancelBooking": {
+        "kind": "action",
+        "not_found": 404,
+        "transition": {
+          "status": "cancelled"
+        }
+      },
+      "deleteEventType": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventTypeId"
+        },
+        "type": "event-types"
+      },
+      "getBooking": {
+        "not_found": 404
+      },
+      "getBookings": {
+        "answer": {
+          "records": "/data"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "eventTypeId",
+            "param": "eventTypeId"
+          },
+          {
+            "kind": "gte",
+            "member": "start",
+            "param": "afterStart"
+          },
+          {
+            "kind": "lte",
+            "member": "end",
+            "param": "beforeEnd"
+          }
+        ],
+        "paging": {
+          "request": "cursor",
+          "response": "pagination.nextCursor",
+          "size": "limit",
+          "style": "cursor"
+        }
+      },
+      "getEventTypeById": {
+        "not_found": 404
+      },
+      "getEventTypes": {
+        "answer": {
+          "records": "/data"
+        }
+      },
+      "markNoShow": {
+        "not_found": 404
+      },
+      "rescheduleBooking": {
+        "not_found": 404
+      },
+      "updateEventType": {
+        "not_found": 404
+      }
+    },
+    "types": {
+      "bookings": {
+        "identity": {
+          "alternates": [
+            "id"
+          ],
+          "member": "uid"
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "cancelled",
+            "accepted",
+            "rejected",
+            "pending",
+            "awaiting_host"
+          ]
+        }
+      },
+      "event-types": {
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "slug"
+            ],
+            "scope": "ownerId"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "duration_ms": 27759,
+  "error": null,
+  "exit_code": 0,
+  "gaps": [],
+  "heuristic_gaps": [
+    {
+      "code": "no_target",
+      "message": "operation `deleteEventType` (Delete) acts on one `event-types` record but no target says where the request names it",
+      "operation": "deleteEventType",
+      "type": "event-types"
+    }
+  ],
+  "inputs": {
+    "skills_sha256": "ab31687aeb3054d5cffa765a273dbdd5d788a890a9a12c435738600b60d1b215",
+    "world_schema_sha256": "922f4dd97e015c139f8529ec5e2a43b2cc271b1c23025078d4d48dfd2a3e173c"
+  },
+  "is_error": false,
+  "mock": "calcom",
+  "model_usage": {
+    "claude-sonnet-5-5": {
+      "cacheCreationEphemeral1hInputTokens": 23968,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationInputTokens": 23968,
+      "cacheReadInputTokens": 172955,
+      "canonicalModel": "claude-sonnet-5-5",
+      "contextWindow": 1000000,
+      "costBasis": "list",
+      "costUSD": 0.1451195,
+      "inputTokens": 16,
+      "maxOutputTokens": 128000,
+      "outputTokens": 3192,
+      "provider": "firstParty",
+      "thinkingTokens": 509,
+      "webSearchRequests": 0
+    }
+  },
+  "num_turns": 11,
+  "refused": [],
+  "revision": 1,
+  "revisions": [
+    {
+      "author": "agent",
+      "created_at": "2026-11-07T02:10:40.717111Z",
+      "revision": 1
+    }
+  ],
+  "session": {
+    "claude_code_version": "2.1.316",
+    "mcp_servers": [
+      {
+        "name": "mockingbird",
+        "source": "dynamic",
+        "status": "connected"
+      }
+    ],
+    "plugins": [
+      {
+        "name": "cc-plugin-agents-md",
+        "path": "builtin",
+        "source": "cc-plugin-agents-md@builtin"
+      },
+      {
+        "name": "cc-plugin-telemetry",
+        "path": "builtin",
+        "source": "cc-plugin-telemetry@builtin"
+      },
+      {
+        "name": "cc-plugin-plugin-authoring",
+        "path": "builtin",
+        "source": "cc-plugin-plugin-authoring@builtin"
+      }
+    ],
+    "skills": [
+      "deep-research",
+      "design",
+      "slides",
+      "design-sync",
+      "dataviz",
+      "artifact-diagramming",
+      "artifact-capabilities",
+      "update-config",
+      "verify",
+      "debug",
+      "code-review",
+      "simplify",
+      "batch",
+      "fewer-permission-prompts",
+      "doctor",
+      "loop",
+      "schedule",
+      "claude-api",
+      "workflow-authoring",
+      "run",
+      "run-skill-generator",
+      "plugin-authoring"
+    ],
+    "tools": [
+      "Glob",
+      "Grep",
+      "Read",
+      "mcp__mockingbird__call_mock",
+      "mcp__mockingbird__diff_world",
+      "mcp__mockingbird__get_mock",
+      "mcp__mockingbird__get_request",
+      "mcp__mockingbird__get_world",
+      "mcp__mockingbird__get_world_revision",
+      "mcp__mockingbird__get_world_schema",
+      "mcp__mockingbird__list_contract_versions",
+      "mcp__mockingbird__list_mocks",
+      "mcp__mockingbird__list_requests",
+      "mcp__mockingbird__list_world_revisions",
+      "mcp__mockingbird__patch_world",
+      "mcp__mockingbird__put_world",
+      "mcp__mockingbird__restore_world_revision"
+    ]
+  },
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 23968,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 23968,
+    "cache_read_input_tokens": 172955,
+    "fallback_credit": null,
+    "inference_geo": "global",
+    "input_tokens": 16,
+    "iterations": [
+      {
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 326,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "cache_creation_input_tokens": 326,
+        "cache_read_input_tokens": 31228,
+        "input_tokens": 2,
+        "output_tokens": 870,
+        "type": "message"
+      }
+    ],
+    "output_tokens": 3192,
+    "output_tokens_details": {
+      "thinking_tokens": 509
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": "standard",
+    "speed": "standard"
+  },
+  "wall_ms": 28291,
+  "world": {
+    "operations": {
+      "cancelBooking": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "action",
+        "not_found": 404,
+        "target": {
+          "path_param": "bookingUid"
+        },
+        "transition": {
+          "status": "cancelled"
+        },
+        "type": "bookings"
+      },
+      "createBooking": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "type": "bookings"
+      },
+      "createEventType": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "create",
+        "type": "event-types"
+      },
+      "deleteEventType": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "delete",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventTypeId"
+        },
+        "type": "event-types"
+      },
+      "getAvailableSlots": {
+        "kind": "list",
+        "type": "slots"
+      },
+      "getBooking": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "bookingUid"
+        },
+        "type": "bookings"
+      },
+      "getBookings": {
+        "answer": {
+          "records": "/data"
+        },
+        "filters": [
+          {
+            "kind": "eq",
+            "member": "eventTypeId",
+            "param": "eventTypeId"
+          },
+          {
+            "kind": "gte",
+            "member": "start",
+            "param": "afterStart"
+          },
+          {
+            "kind": "lte",
+            "member": "end",
+            "param": "beforeEnd"
+          }
+        ],
+        "kind": "list",
+        "paging": {
+          "request": "cursor",
+          "response": "pagination.nextCursor",
+          "size": "limit",
+          "style": "cursor"
+        },
+        "type": "bookings"
+      },
+      "getEventTypeById": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "read",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventTypeId"
+        },
+        "type": "event-types"
+      },
+      "getEventTypes": {
+        "answer": {
+          "records": "/data"
+        },
+        "kind": "list",
+        "type": "event-types"
+      },
+      "getMe": {
+        "kind": "list",
+        "type": "me"
+      },
+      "markNoShow": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "bookingUid"
+        },
+        "type": "bookings"
+      },
+      "rescheduleBooking": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "bookingUid"
+        },
+        "type": "bookings"
+      },
+      "updateEventType": {
+        "answer": {
+          "record": "/data"
+        },
+        "kind": "update",
+        "not_found": 404,
+        "target": {
+          "path_param": "eventTypeId"
+        },
+        "type": "event-types"
+      }
+    },
+    "types": {
+      "bookings": {
+        "identity": {
+          "alternates": [
+            "id"
+          ],
+          "member": "uid"
+        },
+        "lifecycle": {
+          "member": "status",
+          "states": [
+            "cancelled",
+            "accepted",
+            "rejected",
+            "pending",
+            "awaiting_host"
+          ]
+        }
+      },
+      "event-types": {
+        "identity": {
+          "member": "id"
+        },
+        "unique": [
+          {
+            "conflict": 409,
+            "members": [
+              "slug"
+            ],
+            "scope": "ownerId"
+          }
+        ]
+      }
+    },
+    "version": 1
+  },
+  "writes": [
+    {
+      "ok": true,
+      "refused": [],
+      "revision": 1,
+      "tool": "patch_world"
+    }
+  ]
+}
