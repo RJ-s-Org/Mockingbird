@@ -1107,6 +1107,28 @@ async fn a_text_filter_naming_no_member_keeps_the_model_s_items() {
     );
 }
 
+/// Pipedrive's deals: a search beside the list, path-less too, answering hits that
+/// hold the record one level down; the description gives both the record's type.
+#[tokio::test]
+async fn a_search_beside_the_list_leaves_it_the_type_s_only_list() {
+    let (capture, _guard) = Capture::install();
+    let contract = ITEMS.replace(
+        "  /v1/items/{id}:",
+        "  /v1/items/search:\n    get:\n      operationId: searchItems\n      parameters: [{name: term, in: query, schema: {type: string}}]\n      responses: {\"200\": {description: ok, content: {application/json: {schema: {type: object, properties: {data: {type: object, properties: {items: {type: array, items: {type: object, properties: {result_score: {type: number}, item: {$ref: \"#/components/schemas/Item\"}}}}}}}}}}}}\n  /v1/items/{id}:",
+    );
+    let mut world = items_world();
+    world["operations"]["searchItems"] = json!({"kind": "list", "type": "items"});
+    let h = support::described(&contract, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("it_{i}"), "amount": i * 100}))
+        .collect();
+    h.hold("items", &held).await;
+    let (source, page) = get(&h, "/v1/items").await;
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page["data"]), [json!("it_1"), json!("it_2")]);
+    assert_eq!(capture.of("listItems"), [None]);
+}
+
 /// Heroku's apps: paged by the `Range` request header, a `206` with a `Next-Range`
 /// while more remain.
 const APPS: &str = r##"

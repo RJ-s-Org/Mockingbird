@@ -286,16 +286,15 @@ async fn answer(
 }
 
 /// Whether the list at `path`, of items of type `t`, is the type's one list with no path
-/// parameter: the only one the description gives type `t`, and, where the contract's
-/// schemas name its items' type (`BundleIndex::unscoped_lists`), the only one of that
-/// type too. A list answering a lean schema of the record (SendGrid's
-/// `TemplateLean` under `result`) is one the schemas may not name.
+/// parameter: where the contract's schemas name its items' type
+/// (`BundleIndex::unscoped_lists`), the only such list of that type, which is `t`;
+/// where they name none (a lean schema of the record, SendGrid's `TemplateLean` under
+/// `result`), the only one the description gives type `t`.
 fn only_unscoped(rt: &MockRuntime, path: &str, t: &str) -> bool {
     let index = rt.index();
-    let alone = index
-        .unscoped_paths
-        .get(path)
-        .is_none_or(|indexed| index.unscoped_lists.get(indexed) == Some(&1));
+    if let Some(indexed) = index.unscoped_paths.get(path) {
+        return indexed == t && index.unscoped_lists.get(t) == Some(&1);
+    }
     let described = rt
         .bundle()
         .operations
@@ -311,7 +310,7 @@ fn only_unscoped(rt: &MockRuntime, path: &str, t: &str) -> bool {
                 && item_type(rt, op) == Some(t)
         })
         .count();
-    alone && described == 1
+    described == 1
 }
 
 /// Whether stored `r`, of type `t`, names the parent the call's path names: its type's
