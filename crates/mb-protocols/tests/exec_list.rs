@@ -184,20 +184,6 @@ async fn sites(script: Vec<Value>) -> DescribedHarness {
 }
 
 #[tokio::test]
-async fn an_empty_session_lists_nothing_with_no_model_call() {
-    let (capture, _guard) = Capture::install();
-    let h = support::described(SITES, sites_world(), Vec::new());
-    let (source, body) = get(&h, "/api/dcim/sites/").await;
-    assert_eq!(source, "state", "{body}");
-    assert_eq!(
-        body,
-        json!({"count": 0, "next": null, "previous": null, "results": []})
-    );
-    assert_eq!(capture.of("listSites"), [None]);
-    assert!(h.provider.requests().is_empty());
-}
-
-#[tokio::test]
 async fn an_offset_page_lists_the_held_records_its_filter_keeps() {
     let (capture, _guard) = Capture::install();
     let h = sites(Vec::new()).await;
@@ -551,6 +537,177 @@ async fn a_list_of_part_of_its_type_s_records_is_generated() {
     );
 }
 
+/// A type the session never held a record of (a catalog the model makes up, such as a
+/// flight search's offers) is generated: the store does not know it is empty.
+#[tokio::test]
+async fn a_list_of_a_type_the_session_never_held_is_generated() {
+    let (capture, _guard) = Capture::install();
+    let generated = json!([{"name": "orders", "vhost": "/", "durable": true}]);
+    let contract = QUEUES.replace(
+        "  /api/queues/durable:\n    get:\n      operationId: listDurableQueues\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/Queue\"}}}}}\n",
+        "",
+    );
+    assert!(!contract.contains("durable:\n    get"));
+    let h = support::described(&contract, queues_world(), vec![generated.clone()]);
+    let (source, body) = get(&h, "/api/queues").await;
+    assert_eq!(source, "llm", "{body}");
+    assert_eq!(body, generated);
+    assert_eq!(capture.of("listQueues"), [Some("never_written".to_owned())]);
+}
+
+/// The contract of [`QUEUES`] with its one list of every queue, and a delete.
+fn one_queue_list() -> String {
+    let contract = QUEUES
+        .replace(
+            "  /api/queues/durable:\n    get:\n      operationId: listDurableQueues\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/Queue\"}}}}}\n",
+            "",
+        )
+        .replace(
+            "    put:\n      operationId: putQueue\n",
+            "    delete:\n      operationId: deleteQueue\n      responses: {\"204\": {description: deleted}}\n    put:\n      operationId: putQueue\n",
+        );
+    assert!(contract.contains("deleteQueue") && !contract.contains("listDurableQueues"));
+    contract
+}
+
+/// A session whose seeded records were all deleted held the type: it lists nothing, from
+/// state, where one that never held the type is generated.
+#[tokio::test]
+async fn a_list_whose_held_records_were_all_deleted_lists_nothing() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(&one_queue_list(), queues_world(), Vec::new());
+    h.hold_by(
+        "queues",
+        "name",
+        &[json!({"name": "orders", "vhost": "v", "durable": true})],
+    )
+    .await;
+    let (status, _, body) = h.send("DELETE", "/api/queues/v/orders", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (source, body) = get(&h, "/api/queues").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(body, json!([]));
+    assert_eq!(capture.of("listQueues"), [None]);
+    assert!(h.provider.requests().is_empty());
+}
+
+/// A nested list whose route nothing ties its type's held records to (no described
+/// `parent`, no create on its path, no member named for its parameter), never listed,
+/// is generated: its records may sit under another route.
+#[tokio::test]
+async fn a_nested_list_no_held_record_is_tied_to_is_generated() {
+    let (capture, _guard) = Capture::install();
+    let generated = json!({"tasks": [{"id": "t9", "title": "made up"}], "request_id": "r"});
+    // Tasks are created elsewhere (`/teams/{teamId}/tasks`): not on the list's path.
+    let contract = TASKS.replace(
+        "    post:
+      operationId: createTask
+",
+        "    put:
+      operationId: putTasks
+",
+    );
+    assert!(!contract.contains("createTask"));
+    let h = support::described(&contract, json!({}), vec![generated.clone()]);
+    h.hold(
+        "tasks",
+        &[json!({"id": "t1", "owner": "p1", "title": "t1"})],
+    )
+    .await;
+    let (source, body) = get(&h, "/projects/p1/tasks").await;
+    assert_eq!(source, "llm", "{body}");
+    assert_eq!(body, generated);
+    assert_eq!(
+        capture.of("listTasks"),
+        [Some("scope_unresolved".to_owned())]
+    );
+}
+
+/// A nested collection its route places records in (a create of the type on its path)
+/// holds none of the held records of another: it is empty, from state, though never
+/// listed.
+#[tokio::test]
+async fn a_nested_list_its_route_places_records_in_is_empty_from_state() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(TASKS, json!({}), Vec::new());
+    h.hold(
+        "tasks",
+        &[json!({"id": "t1", "owner": "p1", "title": "t1"})],
+    )
+    .await;
+    let (source, body) = get(&h, "/projects/p2/tasks").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(body["tasks"], json!([]));
+    assert_eq!(capture.of("listTasks"), [None]);
+}
+
+/// A held record holding a member named for the route's parameter ties it: another
+/// collection of the route is empty, from state.
+#[tokio::test]
+async fn a_member_named_for_the_route_s_parameter_ties_its_collections() {
+    let (capture, _guard) = Capture::install();
+    let contract = TASKS.replace(
+        "    post:\n      operationId: createTask\n",
+        "    put:\n      operationId: putTasks\n",
+    );
+    assert!(!contract.contains("createTask"));
+    let h = support::described(&contract, json!({}), Vec::new());
+    h.hold(
+        "tasks",
+        &[json!({"id": "t1", "projectId": "p1", "title": "t1"})],
+    )
+    .await;
+    let (source, body) = get(&h, "/projects/p2/tasks").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(body["tasks"], json!([]));
+    assert_eq!(capture.of("listTasks"), [None]);
+}
+
+/// A list asked by a POST (Notion's `query` of a data source) reads its filter from the
+/// body: a body member that is no described parameter falls back as a query parameter
+/// does (`undescribed_param`), and a body that asks nothing lists the held records.
+#[tokio::test]
+async fn a_body_filter_the_executor_does_not_read_is_generated() {
+    let (capture, _guard) = Capture::install();
+    let contract = QUEUES
+        .replace(
+            "  /api/queues/durable:\n    get:\n      operationId: listDurableQueues\n      responses:\n        \"200\": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: \"#/components/schemas/Queue\"}}}}}\n",
+            "",
+        )
+        .replace(
+            "  /api/queues:\n    get:\n      operationId: listQueues\n",
+            "  /api/queues/query:\n    post:\n      operationId: queryQueues\n      requestBody: {content: {application/json: {schema: {type: object, properties: {filter: {type: object}}}}}}\n",
+        );
+    assert!(contract.contains("queryQueues") && !contract.contains("listQueues"));
+    let mut world = queues_world();
+    world["operations"] = json!({"queryQueues": {"kind": "list", "type": "queues"}});
+    let generated = json!([{"name": "emails", "vhost": "/", "durable": true}]);
+    let h = support::described(&contract, world, vec![generated.clone(), generated.clone()]);
+    let queue = |name: &str| json!({"name": name, "vhost": "/", "durable": name == "emails"});
+    h.hold_by("queues", "name", &[queue("orders"), queue("emails")])
+        .await;
+    let query = |body: Value| h.send("POST", "/api/queues/query", Some(body), &[]);
+    let (status, headers, body) = query(json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!([queue("orders"), queue("emails")]));
+    let (status, headers, body) = query(json!({"filter": {"durable": true}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(body, generated);
+    // A cursor in the body is not read either: it is not served the first page again.
+    let (_, headers, body) = query(json!({"start_cursor": "abc"})).await;
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("queryQueues"),
+        [
+            None,
+            Some("undescribed_param".to_owned()),
+            Some("undescribed_param".to_owned())
+        ]
+    );
+}
+
 /// With no LLM at all, a list is still the session's records.
 #[tokio::test]
 async fn with_no_llm_a_list_is_the_session_s_records() {
@@ -787,6 +944,27 @@ components:
         status_id: {type: integer}
 "##;
 
+/// A record the store holds lacking a filtered member is not set there: a filter
+/// leaves it out (Pipedrive's deals of a person, one deal naming no person).
+#[tokio::test]
+async fn a_held_record_lacking_a_filtered_member_is_left_out() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"listOrders": {
+        "filters": [{"param": "status_id", "member": "status_id", "kind": "eq"}]
+    }}});
+    let h = support::described(ORDERS, world, Vec::new());
+    h.hold(
+        "orders",
+        &[json!({"id": 1, "status_id": 11}), json!({"id": 2})],
+    )
+    .await;
+    let (status, headers, body) = h.send("GET", "/v2/orders?status_id=11", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(ids(&body), [json!(1)]);
+    assert_eq!(capture.of("listOrders"), [None]);
+}
+
 #[tokio::test]
 async fn a_list_left_with_nothing_answers_its_declared_204() {
     let (capture, _guard) = Capture::install();
@@ -794,15 +972,13 @@ async fn a_list_left_with_nothing_answers_its_declared_204() {
         "filters": [{"param": "status_id", "member": "status_id", "kind": "eq"}]
     }}});
     let h = support::described(ORDERS, world, Vec::new());
-    let (status, headers, body) = h.send("GET", "/v2/orders", None, &[]).await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(source(&headers), "state");
     h.hold("orders", &[json!({"id": 1, "status_id": 11})]).await;
     let (status, _, body) = h.send("GET", "/v2/orders?status_id=11", None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(ids(&body), [json!(1)]);
-    let (status, _, body) = h.send("GET", "/v2/orders?status_id=5", None, &[]).await;
+    let (status, headers, body) = h.send("GET", "/v2/orders?status_id=5", None, &[]).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(capture.of("listOrders"), [None, None, None]);
+    assert_eq!(source(&headers), "state");
+    assert_eq!(capture.of("listOrders"), [None, None]);
     assert!(h.provider.requests().is_empty());
 }
