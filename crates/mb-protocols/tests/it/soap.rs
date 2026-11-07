@@ -796,3 +796,45 @@ async fn wsdl_serves_imported_wsdls() {
     assert_eq!(status, 200);
     assert!(note.contains(r#"name="Note""#), "{note}");
 }
+
+/// An eBay Trading-style create answers an acknowledgement, not the record it sends:
+/// `{Ack, ItemID}` is never stored as the item, so a later `GetItem` answers no `Ack`
+/// inside its `Item`.
+#[tokio::test]
+async fn a_create_acknowledgement_is_not_read_back_as_the_record() {
+    let bundle = fixture("trading.wsdl");
+    let provider = scripted(vec![
+        json!({"Ack": "Success", "ItemID": "I1"}),
+        json!({"Ack": "Success", "Item": {"ItemID": "I1", "Title": "FROM_LLM"}}),
+    ]);
+    let base = serve(runtime(Arc::clone(&bundle), &provider), "").await;
+    let session = ("X-Mockingbird-Session", "s1");
+    let add = r#"<AddFixedPriceItemRequest xmlns="urn:trading"><Item><Title>Lamp</Title></Item></AddFixedPriceItemRequest>"#;
+    let r = post(
+        &base,
+        "/ws/api.dll",
+        "text/xml",
+        &[session, ("SOAPAction", "AddFixedPriceItem")],
+        envelope11(add),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    let get = r#"<GetItemRequest xmlns="urn:trading"><ItemID>I1</ItemID></GetItemRequest>"#;
+    let r = post(
+        &base,
+        "/ws/api.dll",
+        "text/xml",
+        &[session, ("SOAPAction", "GetItem")],
+        envelope11(get),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let got = envelope_body_to_json(&r.body, &schema(&bundle, "GetItem", 200)).unwrap();
+    assert_eq!(
+        got["Item"],
+        json!({"ItemID": "I1", "Title": "FROM_LLM"}),
+        "{}",
+        r.body
+    );
+}

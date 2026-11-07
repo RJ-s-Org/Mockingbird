@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<wsdl:definitions name="Trading"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:ns="urn:trading"
+    targetNamespace="urn:trading">
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:trading" elementFormDefault="qualified">
+      <xs:complexType name="ItemType">
+        <xs:sequence>
+          <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+          <xs:element name="Title" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:element name="AddFixedPriceItemRequest">
+        <xs:complexType><xs:sequence><xs:element name="Item" type="ns:ItemType"/></xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="AddFixedPriceItemResponse">
+        <xs:complexType><xs:sequence>
+          <xs:element name="Ack" type="xs:string"/>
+          <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+        </xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="GetItemRequest">
+        <xs:complexType><xs:sequence><xs:element name="ItemID" type="xs:string" minOccurs="0"/></xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="GetItemResponse">
+        <xs:complexType><xs:sequence>
+          <xs:element name="Ack" type="xs:string"/>
+          <xs:element name="Item" type="ns:ItemType" minOccurs="0"/>
+        </xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="ReviseFixedPriceItemRequest">
+        <xs:complexType><xs:sequence><xs:element name="Item" type="ns:ItemType"/></xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="ReviseFixedPriceItemResponse">
+        <xs:complexType><xs:sequence><xs:element name="ItemID" type="xs:string" minOccurs="0"/></xs:sequence></xs:complexType>
+      </xs:element>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="AddFixedPriceItemRequest"><wsdl:part name="body" element="ns:AddFixedPriceItemRequest"/></wsdl:message>
+  <wsdl:message name="AddFixedPriceItemResponse"><wsdl:part name="body" element="ns:AddFixedPriceItemResponse"/></wsdl:message>
+  <wsdl:message name="GetItemRequest"><wsdl:part name="body" element="ns:GetItemRequest"/></wsdl:message>
+  <wsdl:message name="GetItemResponse"><wsdl:part name="body" element="ns:GetItemResponse"/></wsdl:message>
+  <wsdl:message name="ReviseFixedPriceItemRequest"><wsdl:part name="body" element="ns:ReviseFixedPriceItemRequest"/></wsdl:message>
+  <wsdl:message name="ReviseFixedPriceItemResponse"><wsdl:part name="body" element="ns:ReviseFixedPriceItemResponse"/></wsdl:message>
+  <wsdl:portType name="TradingPort">
+    <wsdl:operation name="AddFixedPriceItem">
+      <wsdl:input message="ns:AddFixedPriceItemRequest"/><wsdl:output message="ns:AddFixedPriceItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="GetItem">
+      <wsdl:input message="ns:GetItemRequest"/><wsdl:output message="ns:GetItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="ReviseFixedPriceItem">
+      <wsdl:input message="ns:ReviseFixedPriceItemRequest"/><wsdl:output message="ns:ReviseFixedPriceItemResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="TradingBinding" type="ns:TradingPort">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="AddFixedPriceItem"><soap:operation soapAction="AddFixedPriceItem"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output></wsdl:operation>
+    <wsdl:operation name="GetItem"><soap:operation soapAction="GetItem"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output></wsdl:operation>
+    <wsdl:operation name="ReviseFixedPriceItem"><soap:operation soapAction="ReviseFixedPriceItem"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output></wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="TradingService">
+    <wsdl:port name="TradingPort" binding="ns:TradingBinding"><soap:address location="https://api.example.com/ws/api.dll"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>

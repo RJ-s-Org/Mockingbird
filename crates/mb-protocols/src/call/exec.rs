@@ -17,7 +17,7 @@
 use mb_engine::GeneratedResponse;
 use mb_engine::consistency::property_schema;
 use mb_mcm::world::OpKind;
-use mb_mcm::{Effect, OperationKind};
+use mb_mcm::{Binding, Effect, OperationKind};
 use mb_state::StoredResource;
 use serde_json::{Map, Value};
 use tracing::Instrument;
@@ -25,9 +25,9 @@ use tracing::Instrument;
 use super::write_memory::Earlier;
 use super::writes::store_one;
 use super::{
-    CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes,
-    graphql_marks, minted, plain, records, replays, serve_held, state_lists, state_span, target_id,
-    tokens, world, write_memory,
+    CallPlan, OperationCall, StateAccess, collection_of, deleted, derived, envelopes, minted,
+    plain, records, replays, serve_held, state_lists, state_span, target_id, tokens, world,
+    write_memory,
 };
 
 /// Why a classified call goes on to generation.
@@ -491,7 +491,10 @@ pub(super) async fn commit(
                 if let Some(gone) = held {
                     rt.collections().forget(session, gone);
                 }
-                if state.tracks_deleted || graphql_marks(rt, plan, t, &id, &answer) {
+                // The executor removed it, so its own answer, whatever members the faker
+                // gave it, is no evidence it stayed: a GraphQL delete marks it as REST's does.
+                let graphql = matches!(op.binding, Binding::Graphql { .. });
+                if state.tracks_deleted || (graphql && deleted::marks_by_id(rt, plan)) {
                     deleted::mark(state, session, (op, call), t, &id, held).await;
                 }
                 tokens::forget(state, session, t, &id).await;

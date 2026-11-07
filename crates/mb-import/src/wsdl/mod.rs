@@ -9,13 +9,13 @@
 mod xml;
 mod xsd;
 
-use crate::heuristics::{kind_from_name, resource_from_name};
+use crate::heuristics::{id_owner, kind_from_name, name_stem, resource_from_name};
 use crate::openapi3::{invalid, slug};
 use crate::proto::hex_digest;
 use crate::{Ctx, ImportError, SourceFile, SourceFormat};
 use mb_mcm::{
     Binding, Bundle, EMBEDDED_SCHEMAS_NS, Identity, InputSchemas, Operation, OperationKind,
-    OutputVariant, Protocol, ProtocolPayload, SoapVersion, StatusSelector,
+    OutputVariant, Protocol, ProtocolPayload, RecordAt, SoapVersion, StatusSelector,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -746,6 +746,83 @@ fn id_field(schema: Option<&Value>, defs: &Map<String, Value>) -> Option<String>
         .map(str::to_owned)
 }
 
+/// Whether a member holds one value: neither an object with members nor a list.
+fn is_value(schema: &Value, defs: &Map<String, Value>) -> bool {
+    top_properties(schema, defs).is_none()
+        && !matches!(
+            schema.get("type").and_then(Value::as_str),
+            Some("array" | "object")
+        )
+}
+
+/// The one single-value member of `props` named as the key of a record of
+/// `resource_type`: `<Type>ID`, `<Type>Id` or `<type>_id` ([`id_owner`]).
+fn type_key(
+    props: &Map<String, Value>,
+    resource_type: &str,
+    defs: &Map<String, Value>,
+) -> Option<String> {
+    let own = name_stem(resource_type);
+    let mut keys = props
+        .iter()
+        .filter(|(name, schema)| {
+            id_owner(name).as_deref() == Some(own.as_str()) && is_value(schema, defs)
+        })
+        .map(|(name, _)| name.clone());
+    match (keys.next(), keys.next()) {
+        (Some(key), None) => Some(key),
+        _ => None,
+    }
+}
+
+/// The identity of an answer with no `id` of its own that holds a record of
+/// `resource_type` keyed for the type: the one member named for the type
+/// ([`name_stem`]) holding an object with an `id`, `@id` or [`type_key`] (eBay's
+/// `GetItemResponse` holding `Item` keyed by `ItemID`), else, for a read, a
+/// [`type_key`] of the answer itself (`GetItemStatusResponse` answering `ItemID` and
+/// its status). A write's answer with only the key at its top (`AddItemResponse`
+/// answering `{Ack, ItemID}`) is an acknowledgement, not the record, so it gives no
+/// identity: storing it would put `Ack` in the record. The request names the record by
+/// the member of the key's name at its top, when it has one.
+fn type_keyed_identity(
+    kind: &OperationKind,
+    input: Option<&Value>,
+    output: Option<&Value>,
+    resource_type: &str,
+    defs: &Map<String, Value>,
+) -> Option<Identity> {
+    let props = top_properties(output?, defs)?;
+    let own = name_stem(resource_type);
+    let mut held = props
+        .iter()
+        .filter(|(name, _)| name_stem(name) == own)
+        .filter_map(|(name, schema)| {
+            let record = top_properties(schema, defs)?;
+            let key = ["id", "@id"]
+                .into_iter()
+                .find(|k| record.contains_key(*k))
+                .map(str::to_owned)
+                .or_else(|| type_key(record, resource_type, defs))?;
+            Some((name.clone(), key))
+        });
+    let (record, field) = match (held.next(), held.next()) {
+        (Some((member, key)), None) => (Some(RecordAt::Member(member)), key),
+        (None, _) if *kind == OperationKind::Query => (None, type_key(props, resource_type, defs)?),
+        _ => return None,
+    };
+    let input_field = input
+        .and_then(|i| top_properties(i, defs))
+        .filter(|p| p.contains_key(&field))
+        .map(|_| field.clone());
+    Some(Identity {
+        path_param: None,
+        field,
+        input_field,
+        path_field: None,
+        record,
+    })
+}
+
 /// Which side of an operation a message is on.
 #[derive(Clone, Copy)]
 enum Side {
@@ -999,13 +1076,25 @@ impl<'a> Wsdl<'a> {
         let output_msg = self.message(op.child(WSDL_NS, "output"))?;
         let input = self.body(&ctx, Side::Input, input_msg)?;
         let output = self.body(&ctx, Side::Output, output_msg)?;
-        let identity = id_field(output.as_ref(), defs).map(|field| Identity {
-            path_param: None,
-            field,
-            input_field: id_field(input.as_ref(), defs),
-            path_field: None,
-            record: None,
-        });
+        let resource_type = resource_from_name(name);
+        let kind = kind_from_name(name, OperationKind::Query);
+        let identity = id_field(output.as_ref(), defs)
+            .map(|field| Identity {
+                path_param: None,
+                field,
+                input_field: id_field(input.as_ref(), defs),
+                path_field: None,
+                record: None,
+            })
+            .or_else(|| {
+                type_keyed_identity(
+                    &kind,
+                    input.as_ref(),
+                    output.as_ref(),
+                    resource_type.as_deref()?,
+                    defs,
+                )
+            });
         let mut outputs = vec![OutputVariant {
             status: StatusSelector::Code(200),
             content_type: Some(CONTENT_TYPE.into()),
@@ -1033,7 +1122,7 @@ impl<'a> Wsdl<'a> {
                 version: service.version,
                 address_path: service.address_path.clone(),
             },
-            kind: kind_from_name(name, OperationKind::Query),
+            kind,
             summary: joined([documentation(op), binding_op.and_then(documentation)], " "),
             input: InputSchemas {
                 path: None,
@@ -1044,7 +1133,7 @@ impl<'a> Wsdl<'a> {
                 bodies: Vec::new(),
             },
             outputs,
-            resource_type: resource_from_name(name),
+            resource_type,
             identity,
             semantic_hints: Vec::new(),
             security: Vec::new(),

@@ -181,7 +181,27 @@ const READ_VERBS: [&str; 13] = [
 
 /// The resource and the read verb of an RPC-style last segment: `get` and
 /// no resource for `get_by_id`, `users` and `list` for `users.list`.
-fn rpc_read(segment: &str) -> Option<(Option<&str>, &str)> {
+fn rpc_read(segment: &str) -> Option<(Option<&str>, &'static str)> {
+    rpc_verb(segment, &READ_VERBS)
+}
+
+/// Verbs that make an RPC-style `POST` with no path parameter the write they name
+/// (Slack's `conversations.create`, Dropbox's `/files/delete_v2`, Plaid's
+/// `/link/token/create`): the write verbs of [`mb_mcm::write_nouns`].
+const WRITE_VERBS: [&str; 3] = ["create", "update", "delete"];
+
+/// The [`READ_VERBS`] that read one record, not a list, a search, a count or a sync:
+/// only these take a request body member as their target ([`apply_rpc_targets`]).
+const ONE_READ_VERBS: [&str; 6] = ["get", "info", "retrieve", "read", "fetch", "lookup"];
+
+/// The resource and the verb of `verbs` an RPC-style last segment starts its action
+/// with. The action is what follows the last `.` (`users.list`), else the segment;
+/// its verb is what comes before its first uppercase letter, `_` or `-` (`get_by_id`,
+/// `create_folder_v2`, `getItem`).
+fn rpc_verb<'s>(
+    segment: &'s str,
+    verbs: &[&'static str],
+) -> Option<(Option<&'s str>, &'static str)> {
     let (resource, action) = match segment.rsplit_once('.') {
         Some((resource, action)) => (Some(resource).filter(|r| !r.is_empty()), action),
         None => (None, segment),
@@ -193,7 +213,7 @@ fn rpc_read(segment: &str) -> Option<(Option<&str>, &str)> {
         .find(|(_, c)| c.is_ascii_uppercase() || matches!(c, '_' | '-'))
         .map_or(action.len(), |(i, _)| i);
     let verb = &action[..end];
-    READ_VERBS
+    verbs
         .iter()
         .find(|v| verb.eq_ignore_ascii_case(v))
         .map(|v| (resource, *v))
@@ -206,10 +226,52 @@ fn ends_in_read(path: &str) -> bool {
         .is_some_and(|s| !is_param(s) && rpc_read(s).is_some())
 }
 
+/// The write an RPC-style path names ([`WRITE_VERBS`]): a path with no parameter
+/// whose last segment's action starts with a write verb. A path with a parameter
+/// names its record there, and a write verb ending it is [`tail_write`]'s.
+fn ends_in_write(path: &str) -> Option<Effect> {
+    let segs = segments(path);
+    if segs.iter().any(|s| is_param(s)) || ends_in_read(path) {
+        return None;
+    }
+    let (_, verb) = rpc_verb(without_format(segs.last()?), &WRITE_VERBS)?;
+    Some(write_effect(verb))
+}
+
+/// The effect of a [`WRITE_VERBS`] verb.
+fn write_effect(verb: &str) -> Effect {
+    match verb {
+        "create" => Effect::Create,
+        "update" => Effect::Update,
+        _ => Effect::Delete,
+    }
+}
+
+/// The write a route on a record names by its one static segment after the record's
+/// parameter, when that segment is exactly `update` or `delete` (Chargebee's
+/// `POST /customers/{customer_id}/delete`).
+fn tail_write(path: &str) -> Option<Effect> {
+    let segs = segments(path);
+    let [.., param, last] = segs.as_slice() else {
+        return None;
+    };
+    let last = without_format(last);
+    if !is_param(param) || is_param(last) {
+        return None;
+    }
+    ["update", "delete"]
+        .into_iter()
+        .find(|verb| last.eq_ignore_ascii_case(verb))
+        .map(write_effect)
+}
+
 pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
     match method {
         HttpMethod::Get | HttpMethod::Head | HttpMethod::Options => OperationKind::Query,
         HttpMethod::Post if ends_in_read(path) => OperationKind::Query,
+        HttpMethod::Post if let Some(effect) = ends_in_write(path) => {
+            OperationKind::Command(effect)
+        }
         HttpMethod::Post => {
             let ends_static = segments(path).last().is_none_or(|s| !is_param(s));
             OperationKind::Command(if ends_static {
@@ -224,9 +286,9 @@ pub(crate) fn infer_kind(method: HttpMethod, path: &str) -> OperationKind {
 }
 
 /// The last static segment before any trailing `{param}`; for an
-/// RPC-style read (`/accounts/get`, `users.list`), what it reads. A version
-/// segment ([`version_at`]) is never the type: `/3.0/search-members` is
-/// `search-members`.
+/// RPC-style read or write (`/accounts/get`, `users.list`, `/files/delete_v2`),
+/// what it reads or writes. A version segment ([`version_at`]) is never the
+/// type: `/3.0/search-members` is `search-members`.
 pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
     let segs: Vec<&str> = segments(path).into_iter().map(without_format).collect();
     let mut statics = (0..segs.len())
@@ -234,16 +296,19 @@ pub(crate) fn infer_resource_type(path: &str) -> Option<String> {
         .filter(|&at| !is_param(segs[at]) && !version_at(&segs, at))
         .map(|at| &segs[at]);
     let last = statics.next()?;
-    if ends_in_read(path) {
-        match rpc_read(last) {
-            Some((Some(resource), _)) => return Some(resource.to_owned()),
-            Some((None, _)) => {
-                if let Some(before) = statics.next() {
-                    return Some((*before).to_owned());
-                }
+    let rpc = if ends_in_read(path) {
+        rpc_read(last)
+    } else {
+        ends_in_write(path).and_then(|_| rpc_verb(last, &WRITE_VERBS))
+    };
+    match rpc {
+        Some((Some(resource), _)) => return Some(resource.to_owned()),
+        Some((None, _)) => {
+            if let Some(before) = statics.next() {
+                return Some((*before).to_owned());
             }
-            None => {}
         }
+        None => {}
     }
     Some((*last).to_owned())
 }
@@ -1110,13 +1175,13 @@ fn wrapped_member(
 }
 
 /// The [`mb_mcm::stem`] of a name, separators and case aside.
-fn name_stem(name: &str) -> String {
+pub(crate) fn name_stem(name: &str) -> String {
     mb_mcm::stem(&mb_mcm::joined_name(name))
 }
 
 /// The [`name_stem`] of the words of `name` before a last `id` (`invoice_id`,
 /// `invoiceId`, `InvoiceID`: `invoice`), when it ends in one after other words.
-fn id_owner(name: &str) -> Option<String> {
+pub(crate) fn id_owner(name: &str) -> Option<String> {
     let words = mb_mcm::words(name);
     let (last, owner) = words.split_last()?;
     (last.eq_ignore_ascii_case("id") && !owner.is_empty()).then(|| name_stem(&owner.concat()))
@@ -2084,7 +2149,7 @@ fn parent_read<'a>(
 /// Points the operation at `index` at its parent resource. Its kind is an
 /// update when it answers the very schema of the parent's `GET`, and that
 /// schema declares something; otherwise it stores nothing and the resource is
-/// only its context.
+/// only its context. A route named for a write ([`tail_write`]) is that write.
 fn act_on_parent(
     index: usize,
     target: ParentTarget,
@@ -2093,6 +2158,7 @@ fn act_on_parent(
     keys: &Keys,
 ) {
     let op = &operations[index];
+    let named_write = http_path(op).and_then(|(_, path)| tail_write(path));
     let read = http_path(op).and_then(|(_, path)| parent_read(operations, path, target.tail));
     let answered = answer(op);
     let replaces = !is_opaque(answered, defs) && answered == read.and_then(answer);
@@ -2150,6 +2216,8 @@ fn act_on_parent(
         };
         (Effect::Other, identity)
     };
+    // A route named for a write is that write on its parent, whatever it answers.
+    let effect = named_write.unwrap_or(effect);
     let op = &mut operations[index];
     op.kind = OperationKind::Command(effect);
     op.resource_type = Some(target.resource_type);
@@ -2386,7 +2454,103 @@ pub(crate) fn apply_action_routes(
     apply_lookups(operations, hints, defs);
     apply_wrapped_records(operations, defs);
     apply_nested_identities(operations, defs);
+    apply_rpc_targets(operations, defs);
     drop_untyped_identities(operations, hints, ctx);
+}
+
+/// Gives a route with no path parameter that acts on one record (an RPC-style call)
+/// the request body member that names its target: a one-record read
+/// ([`ONE_READ_VERBS`]) whose answer gave it an identity, or an update or a delete its
+/// verb names ([`ends_in_write`]). The key is the identity's field, else the one every
+/// identified operation of its type agrees on; the member is [`body_target`]. With no
+/// such key or member, the route stays as it was.
+fn apply_rpc_targets(operations: &mut [Operation], defs: &Map<String, Value>) {
+    for index in 0..operations.len() {
+        let op = &operations[index];
+        let Some((HttpMethod::Post, path)) = http_path(op) else {
+            continue;
+        };
+        let segs = segments(path);
+        let Some(last) = segs.last().map(|s| without_format(s)) else {
+            continue;
+        };
+        let names_one = !segs.iter().any(|s| is_param(s))
+            && match op.kind {
+                OperationKind::Query => {
+                    op.identity.is_some() && rpc_verb(last, &ONE_READ_VERBS).is_some()
+                }
+                OperationKind::Command(Effect::Update | Effect::Delete) => {
+                    ends_in_write(path).is_some()
+                }
+                _ => false,
+            };
+        let (true, None, Some(t)) = (
+            names_one,
+            op.identity.as_ref().and_then(|i| i.input_field.as_ref()),
+            op.resource_type.as_deref(),
+        ) else {
+            continue;
+        };
+        let field = match &op.identity {
+            Some(identity) => identity.field.clone(),
+            None => {
+                let mut fields = operations
+                    .iter()
+                    .filter(|o| o.resource_type.as_deref() == Some(t))
+                    .filter_map(|o| o.identity.as_ref().map(|i| i.field.as_str()));
+                let Some(first) = fields.next() else {
+                    continue;
+                };
+                if !fields.all(|f| f == first) {
+                    continue;
+                }
+                first.to_owned()
+            }
+        };
+        let Some(member) = body_target(op, t, &field, defs) else {
+            continue;
+        };
+        let op = &mut operations[index];
+        match &mut op.identity {
+            Some(identity) => identity.input_field = Some(member),
+            None => {
+                op.identity = Some(Identity {
+                    path_param: None,
+                    field,
+                    input_field: Some(member),
+                    path_field: None,
+                    record: None,
+                });
+            }
+        }
+    }
+}
+
+/// The one single-value top-level member of `op`'s request body named as the key of
+/// a record of `resource_type`: the key `field` itself (`id`), the type's key
+/// ([`id_owner`]: `widget_id`, `widgetId` on `widgets`), or the type (`widget`, as
+/// Slack's `users.info` takes `user`). None, or two, name nothing.
+fn body_target(
+    op: &Operation,
+    resource_type: &str,
+    field: &str,
+    defs: &Map<String, Value>,
+) -> Option<String> {
+    let props = schema_properties(op.input.body.as_ref(), defs)?;
+    let own = name_stem(resource_type);
+    let mut named = props
+        .iter()
+        .filter(|(name, schema)| {
+            holds_value(schema, defs)
+                && (name.as_str() == field
+                    || id_owner(name).as_deref() == Some(own.as_str())
+                    || name_stem(name) == own)
+        })
+        .map(|(name, _)| name.clone());
+    match (named.next(), named.next()) {
+        (Some(member), None) => Some(member),
+        _ => None,
+    }
 }
 
 /// Takes the identity off every operation that, once every other rule has run, has
@@ -3279,6 +3443,53 @@ mod tests {
             Some("orders")
         );
         assert_eq!(infer_resource_type("/search").as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn rpc_style_posts_that_write_are_the_write_they_name() {
+        for (path, effect, resource) in [
+            ("/api/conversations.create", Effect::Create, "conversations"),
+            ("/api/conversations.delete", Effect::Delete, "conversations"),
+            ("/2/files/delete_v2", Effect::Delete, "files"),
+            ("/2/files/create_folder_v2", Effect::Create, "files"),
+            ("/items/update", Effect::Update, "items"),
+            ("/link/token/create", Effect::Create, "token"),
+        ] {
+            assert_eq!(
+                infer_kind(HttpMethod::Post, path),
+                OperationKind::Command(effect),
+                "{path}"
+            );
+            assert_eq!(
+                infer_resource_type(path).as_deref(),
+                Some(resource),
+                "{path}"
+            );
+        }
+        // No verb at a word boundary, or a path naming its record: as before.
+        for path in [
+            "/updates",
+            "/deleted_items",
+            "/v1/orders/{id}/update_status",
+        ] {
+            assert_ne!(
+                infer_kind(HttpMethod::Post, path),
+                OperationKind::Command(Effect::Update),
+                "{path}"
+            );
+            assert_ne!(
+                infer_kind(HttpMethod::Post, path),
+                OperationKind::Command(Effect::Delete),
+                "{path}"
+            );
+        }
+        assert_eq!(tail_write("/customers/{id}/delete"), Some(Effect::Delete));
+        assert_eq!(
+            tail_write("/customers/{id}/Update.json"),
+            Some(Effect::Update)
+        );
+        assert_eq!(tail_write("/customers/{id}/delete_all"), None);
+        assert_eq!(tail_write("/customers/delete"), None);
     }
 
     #[test]

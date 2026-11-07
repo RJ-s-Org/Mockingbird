@@ -2449,7 +2449,6 @@ async fn a_noun_first_delete_removes_the_stored_record() {
     let (provider, rt) = noun_first(scripted(vec![
         json!({"__typename": "CommentPayload", "success": true,
                "comment": {"__typename": "Comment", "id": "c-1", "body": "Hi"}}),
-        json!({"__typename": "DeletePayload", "success": true, "entityId": "c-1"}),
         json!({"__typename": "Comment", "id": "c-1", "body": "Made up"}),
     ]));
     let base = serve(rt).await;
@@ -2483,7 +2482,8 @@ async fn a_noun_first_delete_removes_the_stored_record() {
         "{}",
         after.body
     );
-    assert_eq!(provider.requests().len(), 2);
+    // The executor deleted it: no generation.
+    assert_eq!(provider.requests().len(), 1);
     // Another session never deleted it: its read is generated.
     let other = post(&base, read_comment, &[("x-mockingbird-session", "s2")]).await;
     assert_eq!(
@@ -2491,11 +2491,12 @@ async fn a_noun_first_delete_removes_the_stored_record() {
         "{}",
         other.body
     );
-    assert_eq!(provider.requests().len(), 3);
+    assert_eq!(provider.requests().len(), 2);
 }
 
-/// A delete whose payload names another id leaves no marker: the record is
-/// gone from the store, and a later read is generated, not refused.
+/// A generated delete whose payload names another id leaves no marker: the
+/// record is gone from the store, and a later read is generated, not refused.
+/// (The seed keeps the delete off the executor, whose own answer is final.)
 #[tokio::test]
 async fn a_delete_whose_payload_contradicts_it_leaves_no_marker() {
     let (provider, rt) = noun_first(scripted(vec![
@@ -2515,7 +2516,7 @@ async fn a_delete_whose_payload_contradicts_it_leaves_no_marker() {
     post(
         &base,
         json!({"query": "mutation { commentDelete(id: \"c-1\") { success deletedId } }"}),
-        &session,
+        &[("x-mockingbird-session", "s1"), ("x-mockingbird-seed", "7")],
     )
     .await;
     let read = post(

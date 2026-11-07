@@ -627,6 +627,70 @@ fn record_type(schema: &Schema, noun: &str) -> Option<String> {
     })
 }
 
+/// The argument of `f` that names the record it is about: `id`, else
+/// `<resource type>Id` (`orderId`), case aside.
+fn id_argument(f: &Field, resource_type: Option<&str>) -> Option<String> {
+    let resource_id = resource_type.map(|r| format!("{r}id"));
+    f.args
+        .iter()
+        .find(|a| a.name == "id")
+        .or_else(|| {
+            f.args.iter().find(|a| {
+                resource_id
+                    .as_deref()
+                    .is_some_and(|r| a.name.eq_ignore_ascii_case(r))
+            })
+        })
+        .map(|a| a.name.clone())
+}
+
+/// The identity of a create or a delete of `record`, as its name says
+/// ([`write_verb`]: `issueCreate`, `commentDelete`), that answers `payload`, a type
+/// other than the record: the record's `id`; for a delete, the argument that names the
+/// record ([`id_argument`]); and the one member of the payload that holds the record,
+/// not as a list (`IssuePayload`'s `issue`). A create whose payload holds it in no one
+/// member, or a delete with no such argument, has none: nothing then says where its
+/// record is.
+///
+/// An update has none either: its arguments are not the record (`issueUpdate(id:,
+/// input:)`): the runtime's GraphQL resolver applies an update's `input` members to the
+/// record its `id` names (`graphql::state::by_id` in `mockingbird-protocols`), where an
+/// identity would have the whole arguments taken for the record.
+fn write_identity(
+    schema: &Schema,
+    f: &Field,
+    effect: Effect,
+    record: &str,
+    payload: &str,
+) -> Option<Identity> {
+    if effect == Effect::Update || payload.to_lowercase() == record {
+        return None;
+    }
+    let holding: Vec<&Field> = schema
+        .object_fields(payload)?
+        .iter()
+        .filter(|x| {
+            matches!(x.ty.base, BaseType::Named(_)) && named_type(&x.ty).to_lowercase() == record
+        })
+        .collect();
+    let held = match holding.as_slice() {
+        [one] => Some(mb_mcm::RecordAt::Member(one.name.clone())),
+        _ if effect == Effect::Delete => None,
+        _ => return None,
+    };
+    let input_field = match effect {
+        Effect::Delete => Some(id_argument(f, Some(record))?),
+        _ => None,
+    };
+    Some(Identity {
+        path_param: None,
+        field: "id".into(),
+        input_field,
+        path_field: None,
+        record: held,
+    })
+}
+
 fn operation(
     schema: &Schema,
     operation_type: GraphqlOperationType,
@@ -654,7 +718,9 @@ fn operation(
     };
     let named = named_type(&f.ty);
     let object_fields = schema.object_fields(named);
+    let write_effect = write.as_ref().map(|(effect, _)| *effect);
     let record = write.map(|(_, record)| record);
+    let record_of_write = record.clone();
     let resource_type = match object_fields {
         // A write's payload with no `id` of its own (`IssuePayload`,
         // `DeletePayload`) stands for the record its name names.
@@ -667,27 +733,16 @@ fn operation(
     let returns_one = matches!(f.ty.base, BaseType::Named(_));
     let identity = object_fields
         .filter(|fields| returns_one && fields.iter().any(|x| x.name == "id"))
-        .map(|_| {
-            let resource_id = resource_type.as_ref().map(|r| format!("{r}id"));
-            let input_field = f
-                .args
-                .iter()
-                .find(|a| a.name == "id")
-                .or_else(|| {
-                    f.args.iter().find(|a| {
-                        resource_id
-                            .as_deref()
-                            .is_some_and(|r| a.name.eq_ignore_ascii_case(r))
-                    })
-                })
-                .map(|a| a.name.clone());
-            Identity {
-                path_param: None,
-                field: "id".into(),
-                input_field,
-                path_field: None,
-                record: None,
-            }
+        .map(|_| Identity {
+            path_param: None,
+            field: "id".into(),
+            input_field: id_argument(f, resource_type.as_deref()),
+            path_field: None,
+            record: None,
+        })
+        .or_else(|| {
+            let effect = write_effect.filter(|e| kind == OperationKind::Command(*e))?;
+            write_identity(schema, f, effect, record_of_write.as_deref()?, named)
         });
     let (body, body_required) = input_values_schema(&f.args);
     Operation {

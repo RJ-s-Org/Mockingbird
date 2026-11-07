@@ -17,6 +17,7 @@ mod nested_identity;
 mod openapi3;
 mod perf;
 mod proto;
+mod rpc_shapes;
 mod security;
 mod swagger2;
 mod world_tier0;
