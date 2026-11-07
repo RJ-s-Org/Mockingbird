@@ -12,8 +12,9 @@
 //!   `startswith(...)`, `endswith(...)`; `a/b` is the dotted `a.b`.
 //! - `field_value`: `status:open,priority:high`, each pair an equality, all holding.
 //! - `deep_object`: the parameter's bracketed keys, `filter[a][b][_gte]=v`; a last key
-//!   `_eq`, `_ne` (`_neq`), `_gt`, `_lt`, `_gte`, `_lte`, `_in` or `_contains` (or the
-//!   same after `$`) is the operator, none is `eq`, and every key holds.
+//!   `_eq`, `_ne` (`_neq`), `_gt`, `_lt`, `_gte`, `_lte`, `_in`, `_contains`,
+//!   `_starts_with` or `_ends_with` (or the same after `$`, in any case) is the
+//!   operator, none is `eq`, and every key holds.
 //!
 //! Anything else (another function, a property compared with a property, `_or`
 //! brackets) does not parse: the caller falls back rather than guess.
@@ -181,7 +182,8 @@ pub(in crate::call) fn deep(leaves: &[(Vec<String>, Value)]) -> Option<Expr> {
 /// `Some(None)` for one it does not know (`_or`), `None` for a member's key.
 fn operator(key: &str) -> Option<Option<Op>> {
     let name = key.strip_prefix('_').or_else(|| key.strip_prefix('$'))?;
-    Some(match name.to_ascii_lowercase().as_str() {
+    // `_starts_with`, `$startsWith` and `_startswith` alike.
+    Some(match name.to_ascii_lowercase().replace('_', "").as_str() {
         "eq" => Some(Op::Eq),
         "ne" | "neq" => Some(Op::Ne),
         "gt" => Some(Op::Gt),
@@ -190,6 +192,8 @@ fn operator(key: &str) -> Option<Option<Op>> {
         "lte" => Some(Op::Le),
         "in" => Some(Op::In),
         "contains" => Some(Op::Contains),
+        "startswith" => Some(Op::StartsWith),
+        "endswith" => Some(Op::EndsWith),
         _ => None,
     })
 }
@@ -840,6 +844,7 @@ mod tests {
                 leaf(&["price", "$gte"], json!("5")),
                 leaf(&["id", "_in"], json!("a,b")),
                 leaf(&["tag"], json!(["x", "y"])),
+                leaf(&["sku", "$startsWith"], json!("ab")),
             ]),
             Some(Expr::And(vec![
                 cmp("status", Op::Eq, json!("open")),
@@ -847,6 +852,7 @@ mod tests {
                 cmp("price", Op::Ge, json!("5")),
                 cmp("id", Op::In, json!(["a", "b"])),
                 cmp("tag", Op::In, json!(["x", "y"])),
+                cmp("sku", Op::StartsWith, json!("ab")),
             ]))
         );
         assert_eq!(deep(&[]), None);
