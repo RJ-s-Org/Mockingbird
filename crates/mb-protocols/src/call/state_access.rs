@@ -160,11 +160,16 @@ impl<'a> StateAccess<'a> {
             return false;
         }
         let r = self.rt.state.delete(s, t, id).await;
-        let ok = self.settle(r).is_some();
+        let held = self.settle(r);
+        let ok = held.is_some();
         self.wrote |= ok;
         if ok {
             self.rt.value_index().forget(s, t, id);
             self.rt.collections().forget_id(s, t, id);
+        }
+        // A record the store held is gone: the session wrote its type.
+        if held == Some(true) && t != mb_state::INTERNAL_TYPE {
+            state_lists::note_deleted(self, s, t).await;
         }
         ok
     }

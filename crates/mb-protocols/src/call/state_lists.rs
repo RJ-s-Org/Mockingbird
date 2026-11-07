@@ -221,6 +221,49 @@ pub(super) async fn marked(
     }
 }
 
+/// Whether the collection `call`'s path names was listed from state: it has a mark,
+/// though the mark may hold no id.
+pub(super) async fn listed(
+    state: &mut StateAccess<'_>,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    t: &str,
+) -> bool {
+    let Some(key) = collection_key(plan.op, collection_of(plan.op, call).as_ref()) else {
+        return false;
+    };
+    read_mark(state, &plan.session, &mark_id(t, &key))
+        .await
+        .is_some()
+}
+
+/// The id of the note that the session deleted a record of type `t`.
+const DELETED_PREFIX: &str = "#deleted/";
+
+/// Notes that the session deleted a record of type `t`, so the executor's lists know it
+/// held the type ([`deleted_some`]) once its records are gone. Only with `consistency:
+/// on`, for a type the executor lists ([`exec::lists`]).
+pub(super) async fn note_deleted(state: &mut StateAccess<'_>, session: &SessionKey, t: &str) {
+    let rt = state.rt;
+    if !rt.consistency || !exec::lists(rt, t) {
+        return;
+    }
+    let key = format!("{DELETED_PREFIX}{t}");
+    if read_mark(state, session, &key).await.is_none() {
+        write_mark(state, session, key, &Mark::default()).await;
+    }
+}
+
+/// Whether the session deleted a record of type `t` ([`note_deleted`]).
+pub(super) async fn deleted_some(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+) -> bool {
+    read_mark(state, session, &format!("{DELETED_PREFIX}{t}"))
+        .await
+        .is_some()
+}
+
 /// The id prefix of a type's creation order.
 const CREATED_PREFIX: &str = "#created/";
 

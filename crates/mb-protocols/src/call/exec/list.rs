@@ -15,7 +15,15 @@
 //!   beside `/tasks`) shows a part of them only, and falls back (`unscoped_list`)
 //!   unless the request gives the described scope.
 //!
-//! An empty session lists nothing. Each answer marks the collection listed
+//! A session that never wrote a record of the type (holds none, created none, deleted
+//! none) falls back (`never_written`): the type may be a catalog the model makes up,
+//! such as a search's offers. One whose records were all deleted lists nothing. A
+//! route with path parameters whose collection holds none of the type's held records
+//! falls back too (`scope_unresolved`) unless it was listed, the type's described
+//! `parent` link names it, a create of the type is on its path, or a held record holds
+//! a member named for each of its parameters: the records may sit under another route,
+//! as a project created under its team and listed under its organization. Each answer
+//! marks the collection listed
 //! ([`state_lists::mark_listed`]), so it survives a rebuild of the runtime.
 //!
 //! The query then narrows them as [`list_query`] says: the described scope and filters,
@@ -36,7 +44,10 @@
 //! It falls back, and the call is generated as before, for:
 //! - `undescribed_param`: a query parameter that is no described filter, scope or
 //!   paging parameter, no name-matched filter and no page size, unless its value asks
-//!   nothing (blank, its declared `default`, or the first page of a page position);
+//!   nothing (blank, its declared `default`, or the first page of a page position); or
+//!   any member of a request body (a list asked by a POST, which reads none of it, a
+//!   filter or a cursor alike), unless it is `null`, blank or empty;
+//! - `never_written`, `scope_unresolved`: see above;
 //! - `unknown_token`: a described cursor no kept cut of this session minted;
 //! - `unscoped_list`: see above;
 //! - `over_cap`: more than [`MAX_SCAN`] records of the type;
@@ -158,7 +169,14 @@ async fn answer(
             && !filters.iter().any(|(name, _)| name == param)
             && !asks_nothing(bundle, op, (param, raw), &paging)
     });
-    if undescribed {
+    // A list asked by a body (a POST query) reads no member of it, a filter or a
+    // cursor alike: one that asks something is undescribed.
+    let body_asks = call
+        .body
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|members| members.values().any(asks));
+    if undescribed || body_asks {
         return Err("undescribed_param");
     }
     let unscoped = call.path_params.is_empty()
@@ -182,6 +200,14 @@ async fn answer(
         .map(|(at, id)| (id.as_str(), at))
         .collect();
     let created = state_lists::created_order(state, &plan.session, t).await;
+    // A type the session never wrote a record of, a catalog the model makes up: the
+    // store cannot say it is empty.
+    if records.is_empty()
+        && created.is_empty()
+        && !state_lists::deleted_some(state, &plan.session, t).await
+    {
+        return Err("never_written");
+    }
     let created: HashMap<&str, usize> = created
         .iter()
         .enumerate()
@@ -194,6 +220,7 @@ async fn answer(
     });
     let field = item_identity(bundle, op, &envelope);
     let mut items = Vec::new();
+    let mut in_scope = false;
     for r in &records {
         if !(placed.contains_key(r.id.as_str())
             || lists::in_collection(rt, (plan, call), t, &field, r)
@@ -201,6 +228,7 @@ async fn answer(
         {
             continue;
         }
+        in_scope = true;
         let item = lists::projected(bundle, Some(&shape.items), &r.data, 0);
         // The described keys, else the name-matched filters; and those the description
         // does not name besides.
@@ -212,6 +240,19 @@ async fn answer(
         if kept {
             items.push(item);
         }
+    }
+    // Records of the type are held, none in this collection, which was never listed and
+    // which no described parent link names: they may sit under another route (a project
+    // created under its team, listed under its organization), so an empty page would be
+    // a guess.
+    if !records.is_empty()
+        && !call.path_params.is_empty()
+        && !in_scope
+        && !parent_named(rt, call, t)
+        && !route_ties(rt, op, call, t, &records)
+        && !state_lists::listed(state, (plan, call), t).await
+    {
+        return Err("scope_unresolved");
     }
     let ids: Vec<String> = items
         .iter()
@@ -265,6 +306,59 @@ fn under_parent(
     mb_mcm::member_at(&r.data, member)
         .and_then(id_string)
         .is_some_and(|held| held == wanted)
+}
+
+/// Whether body member value `value` asks something of the list: not `null`, blank,
+/// or an empty object or array.
+fn asks(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(members) => !members.is_empty(),
+        _ => true,
+    }
+}
+
+/// Whether the call's path names the parent of type `t` by its described link: the
+/// type's `parent.member` and `parent.path_param`, a parameter the path holds.
+fn parent_named(rt: &MockRuntime, call: &OperationCall, t: &str) -> bool {
+    rt.described()
+        .type_desc(t)
+        .and_then(|d| d.parent.as_ref())
+        .is_some_and(|parent| {
+            parent.member.is_some()
+                && parent
+                    .path_param
+                    .as_ref()
+                    .is_some_and(|param| call.path_params.contains_key(param))
+        })
+}
+
+/// Whether the list's route places the type's records itself: a create of type `t` on
+/// the same path, or a held record holding a member named for each of its path
+/// parameters. Then a collection of it that holds none of them is empty.
+fn route_ties(
+    rt: &MockRuntime,
+    op: &Operation,
+    call: &OperationCall,
+    t: &str,
+    records: &[mb_state::StoredResource],
+) -> bool {
+    let Binding::Http { path, .. } = &op.binding else {
+        return false;
+    };
+    let created_here = rt.bundle().operations.iter().any(|other| {
+        other.kind == OperationKind::Command(mb_mcm::Effect::Create)
+            && matches!(&other.binding, Binding::Http { path: p, .. } if p == path)
+            && item_type(rt, other) == Some(t)
+    });
+    created_here
+        || records.iter().any(|r| {
+            call.path_params
+                .keys()
+                .all(|param| mb_mcm::member_at(&r.data, param).is_some())
+        })
 }
 
 /// Whether query value `raw` of `param` asks nothing of the list: blank, the parameter's
