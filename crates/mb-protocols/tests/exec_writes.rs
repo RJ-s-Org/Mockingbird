@@ -28,6 +28,7 @@ struct ExecLine {
     operation: String,
     exec: String,
     exec_fallback: Option<String>,
+    exec_fallback_on: Option<String>,
 }
 
 impl Visit for ExecLine {
@@ -40,8 +41,10 @@ impl Visit for ExecLine {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "operation" {
-            self.operation = format!("{value:?}");
+        match field.name() {
+            "operation" => self.operation = format!("{value:?}"),
+            "exec_fallback_on" => self.exec_fallback_on = Some(format!("{value:?}")),
+            _ => {}
         }
     }
 }
@@ -85,6 +88,7 @@ fn line(operation: &str, kind: &str, fallback: Option<&str>) -> ExecLine {
         operation: operation.into(),
         exec: kind.into(),
         exec_fallback: fallback.map(str::to_owned),
+        exec_fallback_on: None,
     }
 }
 
@@ -338,7 +342,10 @@ async fn an_update_keeps_the_identity_and_read_only_members() {
         capture.of("updateItem"),
         vec![
             line("updateItem", "update", None),
-            line("updateItem", "update", Some("read_only_member")),
+            ExecLine {
+                exec_fallback_on: Some("created".to_owned()),
+                ..line("updateItem", "update", Some("read_only_member"))
+            },
         ]
     );
 }
@@ -440,10 +447,12 @@ async fn an_update_sending_a_member_the_record_does_not_declare_falls_back() {
         )
         .await;
     assert!(status.is_success(), "{body}");
-    assert_eq!(
-        capture.of("updateItem"),
-        vec![line("updateItem", "update", Some("undeclared_member"))]
-    );
+    // The line names the member.
+    let undeclared = ExecLine {
+        exec_fallback_on: Some("extra".to_owned()),
+        ..line("updateItem", "update", Some("undeclared_member"))
+    };
+    assert_eq!(capture.of("updateItem"), vec![undeclared]);
 }
 
 #[tokio::test]

@@ -7,7 +7,9 @@
 //! [`run`] is the seam [`super::prepare`] calls once the call's target, refusals and
 //! tokens are settled. A classified call is logged at `info` with the field `exec` (its
 //! kind) when the executor answers it, and with `exec_fallback` (a [`Fallback`]) when it
-//! goes on to generation, a read's `render_failed` with `render_error` saying why; executor
+//! goes on to generation, with `exec_fallback_on` naming the query parameter or body
+//! member that caused it where one did (`undescribed_param`, `undeclared_member`,
+//! `read_only_member`), a read's `render_failed` with `render_error` saying why; executor
 //! answers are tagged `state`, as stored answers are.
 //!
 //! An executor answer is final: a write is stored through [`commit`], which keeps only
@@ -418,13 +420,51 @@ fn answered(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind) {
 /// from state where it can): a [`Fallback`]'s name, or a reason
 /// of one kind's executor (`undescribed_param`).
 fn fell_back(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, reason: &str) {
-    tracing::info!(
-        mock = %rt.name,
-        operation = %plan.op.id,
-        exec = kind_name(kind),
-        exec_fallback = reason,
-        "not answered by the executor"
-    );
+    fell_back_on(rt, plan, kind, &Stop::from(reason));
+}
+
+/// Why one kind's executor did not answer a call: its reason (`exec_fallback`), and the
+/// one query parameter or body member that caused it, when one did (`exec_fallback_on`).
+pub(super) struct Stop<'r> {
+    reason: &'r str,
+    on: Option<String>,
+}
+
+impl<'r> From<&'r str> for Stop<'r> {
+    fn from(reason: &'r str) -> Self {
+        Self { reason, on: None }
+    }
+}
+
+impl<'r> Stop<'r> {
+    /// `reason`, caused by query parameter or body member `on`.
+    pub(super) fn on(reason: &'r str, on: &str) -> Self {
+        Self {
+            reason,
+            on: Some(on.to_owned()),
+        }
+    }
+}
+
+/// [`fell_back`] for `stop`, naming what caused it (`exec_fallback_on`) when it says.
+fn fell_back_on(rt: &crate::MockRuntime, plan: &CallPlan<'_>, kind: OpKind, stop: &Stop<'_>) {
+    match &stop.on {
+        Some(on) => tracing::info!(
+            mock = %rt.name,
+            operation = %plan.op.id,
+            exec = kind_name(kind),
+            exec_fallback = stop.reason,
+            exec_fallback_on = %super::log_capped(on),
+            "not answered by the executor"
+        ),
+        None => tracing::info!(
+            mock = %rt.name,
+            operation = %plan.op.id,
+            exec = kind_name(kind),
+            exec_fallback = stop.reason,
+            "not answered by the executor"
+        ),
+    }
 }
 
 /// The kind as the description writes it.

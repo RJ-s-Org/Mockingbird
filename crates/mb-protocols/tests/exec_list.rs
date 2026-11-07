@@ -34,6 +34,7 @@ struct ExecLine {
     operation: String,
     exec: String,
     exec_fallback: Option<String>,
+    exec_fallback_on: Option<String>,
 }
 
 impl Visit for ExecLine {
@@ -46,8 +47,10 @@ impl Visit for ExecLine {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "operation" {
-            self.operation = format!("{value:?}");
+        match field.name() {
+            "operation" => self.operation = format!("{value:?}"),
+            "exec_fallback_on" => self.exec_fallback_on = Some(format!("{value:?}")),
+            _ => {}
         }
     }
 }
@@ -83,6 +86,17 @@ impl Capture {
             .filter(|l| l.operation == operation)
             .inspect(|l| assert_eq!(l.exec, "list", "{l:?}"))
             .map(|l| l.exec_fallback.clone())
+            .collect()
+    }
+
+    /// What caused each fallback logged for `operation` (`exec_fallback_on`).
+    fn causes(&self, operation: &str) -> Vec<Option<String>> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.operation == operation && l.exec_fallback.is_some())
+            .map(|l| l.exec_fallback_on.clone())
             .collect()
     }
 }
@@ -254,6 +268,8 @@ async fn a_search_the_description_does_not_name_is_generated() {
         capture.of("listSites"),
         [Some("undescribed_param".to_owned())]
     );
+    // The line names the parameter.
+    assert_eq!(capture.causes("listSites"), [Some("q".to_owned())]);
     assert_eq!(h.provider.requests().len(), 1);
 }
 
@@ -705,6 +721,11 @@ async fn a_body_filter_the_executor_does_not_read_is_generated() {
             Some("undescribed_param".to_owned()),
             Some("undescribed_param".to_owned())
         ]
+    );
+    // Each line names the body member it could not read.
+    assert_eq!(
+        capture.causes("queryQueues"),
+        [Some("filter".to_owned()), Some("start_cursor".to_owned())]
     );
 }
 
