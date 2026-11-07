@@ -544,6 +544,7 @@ components:
         displayName: {type: string}
         members: {type: array, items: {type: object, properties: {value: {type: string}, display: {type: string}}}}
         name: {type: object, properties: {givenName: {type: string}, familyName: {type: string}}}
+        roles: {type: array, items: {type: string}}
 "##;
 
 /// The flag every patch test starts from.
@@ -781,6 +782,141 @@ async fn a_scim_patch_filtering_a_multi_valued_attribute_falls_back() {
     assert_eq!(
         capture.of("patchGroup"),
         vec![line("patchGroup", "update", Some("patch_filter"))]
+    );
+}
+
+#[tokio::test]
+async fn a_json_patch_adding_a_member_the_record_does_not_declare_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![made_up_flag()]).await;
+    let (status, _, body) = h
+        .send(
+            "PATCH",
+            "/flags/f1",
+            Some(json!([{"op": "add", "path": "/bogus", "value": 1}])),
+            &[],
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(
+        capture.of("patchFlag"),
+        vec![line("patchFlag", "update", Some("undeclared_member"))]
+    );
+}
+
+#[tokio::test]
+async fn a_scim_add_of_one_value_to_an_unheld_multi_valued_attribute_stores_a_list() {
+    let (capture, _guard) = Capture::install();
+    let h = with_flag(json!({}), vec![]).await;
+    // `Operations` is an attribute name, matched without case.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/groups/g1",
+            json!({"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                   "operations": [{"op": "add", "path": "roles", "value": "admin"}]}),
+            "application/scim+json",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["roles"], json!(["admin"]));
+    assert_eq!(
+        capture.of("patchGroup"),
+        vec![line("patchGroup", "update", None)]
+    );
+}
+
+/// Teams are named by their slug under the organization their path names.
+const OWNED: &str = r##"
+openapi: 3.0.0
+info: {title: Owned, version: "1"}
+paths:
+  /orgs/{org}/teams:
+    parameters: [{name: org, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: createTeam
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}}
+  /orgs/{org}/teams/{slug}:
+    parameters:
+      - {name: org, in: path, required: true, schema: {type: string}}
+      - {name: slug, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getTeam
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}, "404": {description: missing}}
+    patch:
+      operationId: patchTeam
+      requestBody: {content: {application/json-patch+json: {schema: {type: array, items: {type: object}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}}
+components:
+  schemas:
+    Team:
+      type: object
+      required: [slug, name]
+      properties: {slug: {type: string}, name: {type: string}, organization: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_patch_keeps_the_owner_the_path_names() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        OWNED,
+        vec![
+            json!({"slug": "core", "name": "Core"}),
+            json!({"slug": "web", "name": "Web", "organization": "octo"}),
+        ],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    for name in ["Core", "Web"] {
+        let (status, _, body) = h
+            .send("POST", "/orgs/octo/teams", Some(json!({"name": name})), &[])
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let patch = "application/json-patch+json";
+    // An owner member the record does not hold, naming another owner, is not added.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/orgs/octo/teams/core",
+            json!([
+                {"op": "add", "path": "/organization", "value": "acme"},
+                {"op": "replace", "path": "/name", "value": "Renamed"}
+            ]),
+            patch,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"slug": "core", "name": "Renamed"}));
+    // The owner member the record holds is not removed.
+    let (status, _, body) = h
+        .send_as(
+            "PATCH",
+            "/orgs/octo/teams/web",
+            json!([
+                {"op": "remove", "path": "/organization"},
+                {"op": "replace", "path": "/name", "value": "Site"}
+            ]),
+            patch,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"slug": "web", "name": "Site", "organization": "octo"})
+    );
+    assert_eq!(
+        h.provider.requests().len(),
+        2,
+        "the patches made no LLM call"
+    );
+    assert_eq!(
+        capture.of("patchTeam"),
+        vec![
+            line("patchTeam", "update", None),
+            line("patchTeam", "update", None)
+        ]
     );
 }
 

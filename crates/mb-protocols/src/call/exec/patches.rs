@@ -27,6 +27,9 @@ const UNDESCRIBED: &str = "undescribed_instruction";
 /// An instruction the description gives that does not apply to the record.
 const UNAPPLIED_INSTRUCTION: &str = "unapplied_instruction";
 
+/// Whether the record's member at a path (the keys leading to it) is declared an array.
+type Multi<'m> = &'m dyn Fn(&[String]) -> bool;
+
 /// The RFC 6902 operations.
 const JSON_PATCH_OPS: [&str; 6] = ["add", "remove", "replace", "move", "copy", "test"];
 
@@ -47,11 +50,13 @@ pub(super) fn media_type(call: &OperationCall) -> Option<String> {
 
 /// What the request leaves of `held` when its body is a patch document or the
 /// instructions `instructions` describes: `None` when it is neither, `Err` with the
-/// reason when it does not apply.
+/// reason when it does not apply. `multi` says whether the record's member at a path
+/// (its steps) is declared an array.
 pub(super) fn patched(
     call: &OperationCall,
     instructions: Option<&InstructionsDesc>,
     held: &Value,
+    multi: &dyn Fn(&[String]) -> bool,
 ) -> Option<Result<Value, &'static str>> {
     let body = call.body.as_ref()?;
     if let Some(described) = instructions
@@ -76,7 +81,7 @@ pub(super) fn patched(
     let mut out = held.clone();
     Some(
         ops.iter()
-            .try_for_each(|op| scim(&mut out, op))
+            .try_for_each(|op| scim(&mut out, op, multi))
             .map(|()| out),
     )
 }
@@ -96,7 +101,7 @@ fn is_json_patch(body: &Value) -> bool {
 }
 
 /// The `Operations` of a SCIM PatchOp body: one whose `schemas` names the PatchOp
-/// message and whose `Operations` each name their `op`.
+/// message and whose `Operations` (named without case) each name their `op`.
 fn scim_operations(body: &Value) -> Option<&Vec<Value>> {
     let patch_op = body
         .get("schemas")
@@ -106,7 +111,12 @@ fn scim_operations(body: &Value) -> Option<&Vec<Value>> {
                 .filter_map(Value::as_str)
                 .any(|s| s.to_ascii_lowercase().ends_with(":patchop"))
         });
-    let ops = body.get("Operations").and_then(Value::as_array)?;
+    let ops = body.as_object().and_then(|members| {
+        members
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("operations"))
+            .and_then(|(_, ops)| ops.as_array())
+    })?;
     (patch_op
         && ops
             .iter()
@@ -137,7 +147,11 @@ fn scim_steps(path: &str) -> Result<Vec<&str>, &'static str> {
 }
 
 /// Applies one SCIM PatchOp operation to `record`.
-fn scim(record: &mut Value, op: &Value) -> Result<(), &'static str> {
+fn scim(
+    record: &mut Value,
+    op: &Value,
+    multi: &dyn Fn(&[String]) -> bool,
+) -> Result<(), &'static str> {
     let name = op
         .get("op")
         .and_then(Value::as_str)
@@ -159,7 +173,7 @@ fn scim(record: &mut Value, op: &Value) -> Result<(), &'static str> {
     };
     let value = value.ok_or(UNAPPLIED)?;
     match path {
-        Some(path) => scim_set(record, &scim_steps(path)?, value, add),
+        Some(path) => scim_set(record, &scim_steps(path)?, value, (add, multi, &[])),
         // With no path, the value's members are the attributes to set.
         None => {
             let Value::Object(members) = value else {
@@ -171,7 +185,7 @@ fn scim(record: &mut Value, op: &Value) -> Result<(), &'static str> {
                     true => vec![key.as_str()],
                     false => scim_steps(key)?,
                 };
-                scim_set(record, &steps, value, add)?;
+                scim_set(record, &steps, value, (add, multi, &[]))?;
             }
             Ok(())
         }
@@ -181,12 +195,15 @@ fn scim(record: &mut Value, op: &Value) -> Result<(), &'static str> {
 /// Sets the attribute at `steps` of `record` to `value` (an `add`, with `add`): an
 /// `add` to a multi-valued attribute adds each value it does not hold, and an `add` or
 /// `replace` of a complex attribute sets the sub-attributes it sends and keeps the
-/// rest. The steps before the last are complex attributes, added where missing.
+/// rest. An `add` of a value to a multi-valued attribute the record does not hold
+/// (one `multi` says its schema declares an array, by the keys `at` that lead to the
+/// record) stores the value as its one item. The steps before the last are complex
+/// attributes, added where missing.
 fn scim_set(
     record: &mut Value,
     steps: &[&str],
     value: &Value,
-    add: bool,
+    (add, multi, at): (bool, Multi<'_>, &[String]),
 ) -> Result<(), &'static str> {
     let Value::Object(map) = record else {
         return Err(UNAPPLIED);
@@ -195,9 +212,11 @@ fn scim_set(
         return Err(UNAPPLIED);
     };
     let key = attribute(map, first);
+    let mut path = at.to_vec();
+    path.push(key.clone());
     if !rest.is_empty() {
         let below = map.entry(key).or_insert_with(|| Value::Object(Map::new()));
-        return scim_set(below, rest, value, add);
+        return scim_set(below, rest, value, (add, multi, &path));
     }
     match (map.get_mut(&key), value) {
         (Some(Value::Array(held)), _) if add => {
@@ -214,7 +233,11 @@ fn scim_set(
         }
         (Some(below @ Value::Object(_)), Value::Object(members)) => members
             .iter()
-            .try_for_each(|(name, value)| scim_set(below, &[name], value, add)),
+            .try_for_each(|(name, value)| scim_set(below, &[name], value, (add, multi, &path))),
+        (None | Some(Value::Null), one) if add && !one.is_array() && multi(&path) => {
+            map.insert(key, Value::Array(vec![one.clone()]));
+            Ok(())
+        }
         _ => {
             map.insert(key, value.clone());
             Ok(())

@@ -42,7 +42,7 @@ use tracing::Instrument;
 use super::{Fallback, Held, Ran, Write, answered, commit, create, fell_back, patches, render};
 use crate::call::bundle_index::schema_parts;
 use crate::call::entities::added_violation;
-use crate::call::write_memory::{self, read_only, read_schema, without_contradictions};
+use crate::call::write_memory::{self, keep_owner, read_only, read_schema, without_contradictions};
 use crate::call::{
     CallPlan, OperationCall, StateAccess, derived, id_string, lifecycle, records, state_span,
     tokens, transitions,
@@ -212,7 +212,8 @@ fn changed(
         .op(&op.id)
         .and_then(|d| d.request.as_ref())
         .and_then(|r| r.instructions.as_ref());
-    if let Some(patched) = patches::patched(call, instructions, &stored.data) {
+    let multi = |steps: &[String]| declared_array(rt, t, steps);
+    if !replace && let Some(patched) = patches::patched(call, instructions, &stored.data, &multi) {
         return guarded(rt, (plan, call), stored, patched?);
     }
     let empty = Value::Object(Map::new());
@@ -322,19 +323,9 @@ fn guarded(
     let (Value::Object(mut out), Value::Object(held)) = (patched, &stored.data) else {
         return Err("unmerged_body");
     };
-    let changed: Map<String, Value> = out
-        .iter()
-        .filter(|(name, value)| held.get(*name) != Some(*value))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-    let allowed = without_contradictions(rt, plan, call, stored, &Value::Object(changed.clone()));
-    for name in changed.keys() {
-        if allowed.get(name).is_none()
-            && let Some(value) = held.get(name)
-        {
-            out.insert(name.clone(), value.clone());
-        }
-    }
+    // A member saying the record is another owner's than the path names, added,
+    // changed or removed, is as held: the path wins.
+    keep_owner(rt, plan, call, stored, &mut out);
     let bundle = rt.bundle();
     let schema = read_schema(rt, t);
     let identity = identity_members(rt, op, t);
@@ -363,6 +354,27 @@ fn guarded(
     let mut out = Value::Object(out);
     keep_nested_identity(&identity, stored, &mut out);
     Ok(out)
+}
+
+/// Whether the record schema of type `t` declares the member at `steps` an array.
+fn declared_array(rt: &crate::MockRuntime, t: &str, steps: &[String]) -> bool {
+    let bundle = rt.bundle();
+    let Some(mut schema) = read_schema(rt, t).cloned() else {
+        return false;
+    };
+    for step in steps {
+        match property_schema(bundle, &schema, step) {
+            Some(below) => schema = below,
+            None => return false,
+        }
+    }
+    schema_parts(bundle, Some(&schema)).0.iter().any(|part| {
+        part.get("type").is_some_and(|ty| match ty {
+            Value::String(ty) => ty == "array",
+            Value::Array(tys) => tys.iter().any(|ty| ty == "array"),
+            _ => false,
+        })
+    })
 }
 
 /// How a request's members go onto a record.

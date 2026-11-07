@@ -2350,6 +2350,51 @@ pub(super) fn without_contradictions(
     Value::Object(kept.map(|(k, v)| (k.clone(), v.clone())).collect())
 }
 
+/// `patched`, the whole record a patch leaves of `held`, with each member that would
+/// make `held` say it is another owner's than the path names as `held` has it, as
+/// [`without_contradictions`] keeps a sent member: one it adds, changes, or removes
+/// (a removal that leaves `held` no longer showing the path's owner).
+pub(super) fn keep_owner(
+    rt: &MockRuntime,
+    plan: &CallPlan<'_>,
+    call: &OperationCall,
+    held: &StoredResource,
+    patched: &mut Map<String, Value>,
+) {
+    let (Some(owner), Value::Object(stored)) = (guarded(rt, plan.op, call), &held.data) else {
+        return;
+    };
+    if says_foreign(rt, held, &owner) {
+        return;
+    }
+    let shown = owner_evidence(rt, held, &owner) == Some(true);
+    let names: std::collections::BTreeSet<String> =
+        patched.keys().chain(stored.keys()).cloned().collect();
+    for name in names {
+        let after = patched.get(&name);
+        if after == stored.get(&name) {
+            continue;
+        }
+        let mut data = stored.clone();
+        match after {
+            Some(value) => data.insert(name.clone(), value.clone()),
+            None => data.remove(&name),
+        };
+        let candidate = StoredResource {
+            data: Value::Object(data),
+            ..held.clone()
+        };
+        let contradicts = says_foreign(rt, &candidate, &owner)
+            || (shown && owner_evidence(rt, &candidate, &owner) != Some(true));
+        if contradicts {
+            match stored.get(&name) {
+                Some(value) => patched.insert(name, value.clone()),
+                None => patched.remove(&name),
+            };
+        }
+    }
+}
+
 /// What a 204 update's `rest`, the part of its scrubbed request it could not apply to
 /// `t`'s stored copy, tells that copy's reads: as a list read is told of a write, only
 /// the members the read's or the request's schema declares (see [`declared_plainly`]),
