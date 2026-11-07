@@ -76,7 +76,7 @@ pub(super) async fn mint(
     for _ in 0..ATTEMPTS {
         let Some(id) = draw(
             rt,
-            declared.as_ref(),
+            (held.as_ref(), declared.as_ref()),
             &header.schema,
             string_identity,
             &checks,
@@ -311,13 +311,15 @@ impl IdChecks {
 /// by the id the header serves finds the record.
 fn draw(
     rt: &MockRuntime,
-    declared: Option<&Value>,
+    (strict, declared): (Option<&Value>, Option<&Value>),
     header: &Value,
     string_identity: bool,
     checks: &IdChecks,
 ) -> Option<Value> {
     let string = json!({"type": "string"});
-    let schemas = [declared, Some(header), Some(&string)];
+    // The strictest first: what every read declares together, when that is more.
+    let strict = strict.filter(|s| Some(*s) != declared);
+    let schemas = [strict, declared, Some(header), Some(&string)];
     let mut rng = rand::rng();
     let faker = Faker::default();
     schemas
@@ -349,7 +351,13 @@ pub(super) fn draw_record_id(rt: &MockRuntime, t: &str, field: &str) -> Option<V
         .and_then(Value::as_str)
         == Some("string");
     let checks = IdChecks::new(rt, held.as_ref(), &string, false)?;
-    let id = draw(rt, declared.as_ref(), &string, string_identity, &checks)?;
+    let id = draw(
+        rt,
+        (held.as_ref(), declared.as_ref()),
+        &string,
+        string_identity,
+        &checks,
+    )?;
     match id_string(&id).and_then(|text| records::in_pattern(rt, t, &text)) {
         Some(formed) => {
             let held = Value::String(formed);
@@ -366,7 +374,13 @@ pub(super) fn draw_id_as(rt: &MockRuntime, declared: &Value) -> Option<Value> {
     let string = json!({"type": "string"});
     let string_identity = declared.get("type").and_then(Value::as_str) == Some("string");
     let checks = IdChecks::new(rt, Some(declared), &string, false)?;
-    draw(rt, Some(declared), &string, string_identity, &checks)
+    draw(
+        rt,
+        (None, Some(declared)),
+        &string,
+        string_identity,
+        &checks,
+    )
 }
 
 /// Whether `id` can stand in a URL path segment as it is.

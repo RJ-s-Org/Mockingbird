@@ -3155,10 +3155,40 @@ paths:
       operationId: getPipeline
       parameters: [{name: id, in: path, required: true, schema: {type: string}}]
       responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Pipeline"}}}}}
+  /teams:
+    post:
+      operationId: createTeam
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, members: {type: array}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /teams/{id}:
+    get:
+      operationId: getTeam
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Team"}}}}}
+  /coupons:
+    post:
+      operationId: createCoupon
+      requestBody: {content: {application/json: {schema: {type: object, properties: {code: {type: string}, tier: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Ack"}}}}}
+  /coupons/{id}:
+    get:
+      operationId: getCoupon
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Coupon"}}}}}
+  /carts:
+    post:
+      operationId: createCart
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Cart"}}}}}
+  /carts/{id}:
+    get:
+      operationId: getCart
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Cart"}}}}}
   /deals:
     post:
       operationId: createDeal
-      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, org_id: {type: integer}}}}}}
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, org_id: {type: integer}, tag_ids: {type: array, items: {type: integer}}}}}}}
       responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}}
   /deals/{id}:
     get:
@@ -3238,7 +3268,19 @@ components:
     Deal:
       type: object
       required: [id, title]
-      properties: {id: {type: string}, title: {type: string}, org_id: {type: integer}, stage: {type: string}, probability: {type: integer}}
+      properties: {id: {type: string}, title: {type: string}, org_id: {type: integer}, tag_ids: {type: array, items: {type: integer}}, stage: {type: string}, probability: {type: integer}}
+    Team:
+      type: object
+      required: [id, name, members]
+      properties: {id: {type: string}, name: {type: string}, members: {type: array, items: {$ref: "#/components/schemas/User"}}}
+    Coupon:
+      type: object
+      required: [id, code, tier]
+      properties: {id: {type: string}, code: {type: string}, tier: {type: string, enum: [gold, silver]}}
+    Cart:
+      type: object
+      required: [id, name, version]
+      properties: {id: {type: string}, name: {type: string}, version: {type: integer}}
     User:
       type: object
       required: [id, name]
@@ -3257,6 +3299,7 @@ components:
         name: {type: string}
         is_active: {type: boolean, default: true}
         plan: {type: string}
+        password: {type: string, writeOnly: true}
         object: {type: string, enum: [account]}
         settings:
           type: object
@@ -3400,7 +3443,10 @@ async fn an_unsent_member_takes_its_schema_s_default_at_any_depth() {
         capture.of("createAccount"),
         vec![create_line("createAccount", None)]
     );
-    assert!(h.provider.requests().is_empty(), "nothing is filled");
+    assert!(
+        h.provider.requests().is_empty(),
+        "nothing is filled, the write-only `password` neither"
+    );
 }
 
 #[tokio::test]
@@ -3544,7 +3590,7 @@ async fn unsent_optional_members_are_filled_but_a_reference_the_request_could_se
     // The fill's answer: the optional members, and an `org_id` it never takes.
     let h = support::harness(
         GATED,
-        vec![json!({"stage": "open", "probability": 50, "org_id": 7})],
+        vec![json!({"stage": "open", "probability": 50, "org_id": 7, "tag_ids": [1]})],
         &HarnessOptions::default(),
         |rt| rt,
     );
@@ -3563,5 +3609,177 @@ async fn unsent_optional_members_are_filled_but_a_reference_the_request_could_se
         vec![create_line("createDeal", None)]
     );
     let prompt = &h.provider.requests()[0].messages[1].content;
-    assert!(!prompt.contains("org_id"), "{prompt}");
+    assert!(
+        !prompt.contains("org_id") && !prompt.contains("tag_ids"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn an_array_of_references_to_held_records_is_stored_as_those_records() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(GATED, vec![], &HarnessOptions::default(), |rt| rt);
+    let users = type_of(&h, "getUser");
+    h.hold(
+        &users,
+        &[
+            json!({"id": "u1", "name": "Ann"}),
+            json!({"id": "u2", "name": "Bo"}),
+        ],
+    )
+    .await;
+    let sent = json!({"name": "core", "members": ["u1", "u2"]});
+    let (status, _, body) = h.send("POST", "/teams", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createTeam"),
+        vec![create_line("createTeam", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored(&type_of(&h, "getTeam"), &id).await.unwrap();
+    assert_eq!(
+        stored["members"],
+        json!([{"id": "u1", "name": "Ann"}, {"id": "u2", "name": "Bo"}])
+    );
+}
+
+#[tokio::test]
+async fn an_embedded_record_of_another_type_gets_no_minted_id() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        GATED,
+        vec![json!({"id": "t-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    // A member is a user, whose id is not the team's to mint.
+    let sent = json!({"name": "core", "members": [{"name": "Ann"}]});
+    let (status, _, body) = h.send("POST", "/teams", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createTeam"),
+        vec![invalid_line("createTeam", "/members/0/id required")]
+    );
+}
+
+#[tokio::test]
+async fn a_value_lacking_only_required_members_is_kept_and_completed() {
+    let (capture, _guard) = Capture::install();
+    // The fill's answer: the owner's `name`, and an `id` it never takes.
+    let h = support::harness(
+        GATED,
+        vec![json!({"owner": {"id": "other", "name": "Kim"}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"name": "deploy", "owner": {"id": "u5"}});
+    let (status, _, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createPipeline"),
+        vec![create_line("createPipeline", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored(&type_of(&h, "getPipeline"), &id).await.unwrap();
+    assert_eq!(stored["owner"], json!({"id": "u5", "name": "Kim"}));
+}
+
+#[tokio::test]
+async fn a_sent_value_breaking_its_enum_is_never_replaced_and_the_create_generates() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        GATED,
+        vec![json!({"id": "c-gen"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"code": "SAVE", "tier": "Gold"});
+    let (status, headers, body) = h.send("POST", "/coupons", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("createCoupon"),
+        vec![invalid_line("createCoupon", "/tier enum")]
+    );
+    let t = type_of(&h, "getCoupon");
+    assert_eq!(h.stored_ids(&t).await, vec!["c-gen".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_reference_is_looked_up_by_its_patterned_id() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"users": {"identity": {"pattern": "users/{id}"}}}});
+    let h = support::described(GATED, world, Vec::new());
+    let users = type_of(&h, "getUser");
+    assert_eq!(users, "users");
+    h.hold(&users, &[json!({"id": "users/u1", "name": "Ann"})])
+        .await;
+    let sent = json!({"name": "deploy", "owner": "u1"});
+    let (status, _, body) = h.send("POST", "/pipelines", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createPipeline"),
+        vec![create_line("createPipeline", None)]
+    );
+    let id = body["id"].as_str().unwrap().to_owned();
+    let stored = h.stored(&type_of(&h, "getPipeline"), &id).await.unwrap();
+    assert_eq!(stored["owner"], json!({"id": "users/u1", "name": "Ann"}));
+}
+
+#[tokio::test]
+async fn a_described_concurrency_token_starts_minted_never_filled() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"types": {"carts": {"concurrency": {"member": "version"}}}});
+    // A fill's answer for `version`, never taken.
+    let h = support::described(GATED, world, vec![json!({"version": 7})]);
+    assert_eq!(type_of(&h, "getCart"), "carts");
+    let (status, _, body) = h
+        .send("POST", "/carts", Some(json!({"name": "c"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createCart"),
+        vec![create_line("createCart", None)]
+    );
+    assert_eq!(body["version"], json!(1), "{body}");
+    assert!(h.provider.requests().is_empty(), "nothing is filled");
+}
+
+/// Things are read by id with a text id, and listed with an integer one: no id is both.
+const CONFLICTING_IDS: &str = r##"
+openapi: 3.0.0
+info: {title: Conflicting, version: "1"}
+paths:
+  /things:
+    get:
+      operationId: listThings
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {type: object, required: [id], properties: {id: {type: integer}, name: {type: string}}}}}}}}
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {type: object, required: [ok], properties: {ok: {type: boolean}}}}}}}
+  /things/{id}:
+    get:
+      operationId: getThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}, name: {type: string}}}}}}}
+"##;
+
+#[tokio::test]
+async fn reads_declaring_conflicting_ids_mint_none_and_the_create_generates() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        CONFLICTING_IDS,
+        vec![json!({"ok": true})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/things", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createThing"),
+        vec![create_line("createThing", Some("no_id"))]
+    );
 }
