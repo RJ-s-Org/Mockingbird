@@ -30,6 +30,7 @@ jobs:
   # whenever it cannot tell what changed, so nothing merges untested.
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       packages: ${{ steps.c.outputs.packages }}
       protocols: ${{ steps.c.outputs.protocols }}
@@ -78,6 +79,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.packages != ''
     runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
+    timeout-minutes: 40
     env:
       MB_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
       MB_TEST_AMQP_URL: amqp://guest:guest@localhost:5672/%2f
@@ -181,6 +183,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.protocols == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     env:
       RUSTFLAGS: -D warnings
     steps:
@@ -216,6 +219,7 @@ jobs:
     # e2e and check, so the large runner would cost more for no shorter run
     # (audit CI-5, measured 2026-10-30).
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 25
     env:
       # check:api and the local e2e suite only run the binary: without
       # debuginfo it links faster and the cache is smaller.
@@ -255,6 +259,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.deps == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -264,6 +269,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.helm == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - run: scripts/check-helm.sh
@@ -273,6 +279,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ext == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
     env:
       # Pinned: a new release can change which lints fail. Bump it here; the
       # cache key follows.
@@ -324,6 +331,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.toolchain == 'true'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Is the MSRV older than the pinned toolchain?
@@ -352,6 +360,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ${{ vars.CI_RUNNER_LARGE || 'ubuntu-latest' }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       # Builds the full image once: it is smoke-tested and scanned here, and
