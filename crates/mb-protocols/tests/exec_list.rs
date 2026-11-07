@@ -1614,3 +1614,384 @@ async fn filters_past_the_grammar_s_limits_are_generated() {
     assert_eq!(causes[0].as_deref(), Some("q"));
     assert_eq!(causes[3].as_deref(), Some("$filter"));
 }
+
+/// A search asked by a `POST` (Meilisearch's `searchWithPost`): its query, filter and
+/// page are body members.
+const BOOK_SEARCH: &str = r##"
+openapi: 3.0.0
+info: {title: Books, version: "1"}
+paths:
+  /books/search:
+    post:
+      operationId: searchBooks
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                q: {type: string}
+                genre: {type: string}
+                limit: {type: integer, default: 20}
+                offset: {type: integer, default: 0}
+                showRankingScore: {type: boolean, default: false}
+                attributesToRetrieve: {type: array, items: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hits, offset, limit, estimatedTotalHits]
+                properties:
+                  hits: {type: array, items: {$ref: "#/components/schemas/Book"}}
+                  offset: {type: integer}
+                  limit: {type: integer}
+                  estimatedTotalHits: {type: integer}
+  /books/{id}:
+    get:
+      operationId: getBook
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Book"}}}}}
+components:
+  schemas:
+    Book:
+      type: object
+      required: [id, title, genre]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        genre: {type: string}
+"##;
+
+/// A `POST` list whose asking body members are all described is answered from state:
+/// a parameter names a body member by a pointer (`/q`) or by a name the body alone
+/// declares (`genre`, `limit`); one it does not name falls back, naming the member.
+#[tokio::test]
+async fn a_post_list_reads_the_body_members_its_description_names() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"searchBooks": {
+        "kind": "list",
+        "type": "books",
+        "filters": [
+            {"param": "/q", "member": "title", "kind": "text"},
+            {"param": "genre", "member": "genre", "kind": "eq"}
+        ],
+        "paging": {"style": "offset", "request": "/offset", "size": "limit"}
+    }}});
+    let generated = json!({"hits": [], "offset": 0, "limit": 20, "estimatedTotalHits": 0});
+    let h = support::described(BOOK_SEARCH, world, vec![generated]);
+    let book =
+        |id: &str, title: &str, genre: &str| json!({"id": id, "title": title, "genre": genre});
+    h.hold(
+        "books",
+        &[
+            book("b1", "Neuromancer", "scifi"),
+            book("b2", "Dune", "scifi"),
+            book("b3", "Emma", "classic"),
+            book("b4", "Hyperion", "scifi"),
+        ],
+    )
+    .await;
+    let search = |body: Value| h.send("POST", "/books/search", Some(body), &[]);
+    let (status, headers, body) = search(json!({"q": "neuro"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(ids(&body["hits"]), [json!("b1")]);
+    // A described filter and page, and a member at its declared default.
+    let (_, headers, body) = search(json!({
+        "genre": "scifi", "limit": 1, "offset": 1, "showRankingScore": false
+    }))
+    .await;
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(ids(&body["hits"]), [json!("b2")]);
+    // A member the description does not name is not read.
+    let (_, headers, body) = search(json!({"q": "dune", "attributesToRetrieve": ["title"]})).await;
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(
+        capture.of("searchBooks"),
+        [None, None, Some("undescribed_param".to_owned())]
+    );
+    assert_eq!(
+        capture.causes("searchBooks"),
+        [Some("attributesToRetrieve".to_owned())]
+    );
+}
+
+/// Dropbox's `list_folder`: entries named by a path, listed by the path of their folder.
+const FOLDERS: &str = r##"
+openapi: 3.0.0
+info: {title: Files, version: "1"}
+paths:
+  /files/list_folder:
+    post:
+      operationId: listFolder
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: {type: string}
+                recursive: {type: boolean, default: false}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, has_more]
+                properties:
+                  entries: {type: array, items: {$ref: "#/components/schemas/Entry"}}
+                  has_more: {type: boolean}
+  /files/search:
+    post:
+      operationId: search
+      requestBody: {content: {application/json: {schema: {type: object, properties: {query: {type: string}}}}}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: object, properties: {matches: {type: array, items: {$ref: "#/components/schemas/Entry"}}}}
+  /files/{id}:
+    get:
+      operationId: getFile
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Entry"}}}}}
+components:
+  schemas:
+    Entry:
+      type: object
+      required: [id, path_lower]
+      properties:
+        id: {type: string}
+        path_lower: {type: string}
+"##;
+
+/// A `prefix` scope lists the records whose path member sits directly under the
+/// requested path (the root when blank), or anywhere below it when its `recursive`
+/// parameter is `true`.
+#[tokio::test]
+async fn a_prefix_scope_lists_the_records_under_the_requested_path() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {
+        "listFolder": {
+            "kind": "list",
+            "type": "files",
+            "scope": {"param": "path", "member": "path_lower", "kind": "prefix", "recursive": "recursive"}
+        },
+        "search": {"kind": "list", "type": "files"}
+    }});
+    let h = support::described(FOLDERS, world, Vec::new());
+    let entry = |id: &str, path: &str| json!({"id": id, "path_lower": path});
+    h.hold(
+        "files",
+        &[
+            entry("top", "/reports"),
+            entry("a", "/reports/drafts"),
+            entry("b", "/reports/archive"),
+            entry("c", "/reports/drafts/q1"),
+            entry("other", "/reportsx"),
+        ],
+    )
+    .await;
+    let list = |body: Value| h.send("POST", "/files/list_folder", Some(body), &[]);
+    let listed = |body: Value| async {
+        let (status, headers, answer) = list(body).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(source(&headers), "state", "{answer}");
+        let mut got = ids(&answer["entries"]);
+        got.sort_by_key(Value::to_string);
+        got
+    };
+    assert_eq!(
+        listed(json!({"path": "/reports"})).await,
+        [json!("a"), json!("b")]
+    );
+    assert_eq!(
+        listed(json!({"path": "/reports/", "recursive": true})).await,
+        [json!("a"), json!("b"), json!("c")]
+    );
+    assert_eq!(
+        listed(json!({"path": ""})).await,
+        [json!("other"), json!("top")]
+    );
+    assert_eq!(capture.of("listFolder"), [None, None, None]);
+}
+
+/// eBay's `GetMyeBaySelling`, a SOAP list paged by members of its request.
+#[cfg(feature = "soap")]
+const SELLING: &str = r##"<?xml version="1.0"?>
+<wsdl:definitions name="Trading"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:ns="urn:trading"
+    targetNamespace="urn:trading">
+  <wsdl:types>
+    <xs:schema targetNamespace="urn:trading" elementFormDefault="qualified">
+      <xs:complexType name="SellingStatusType">
+        <xs:sequence><xs:element name="ListingStatus" type="xs:string" minOccurs="0"/></xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ItemType">
+        <xs:sequence>
+          <xs:element name="ItemID" type="xs:string" minOccurs="0"/>
+          <xs:element name="Title" type="xs:string" minOccurs="0"/>
+          <xs:element name="SellingStatus" type="ns:SellingStatusType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="PaginationType">
+        <xs:sequence>
+          <xs:element name="EntriesPerPage" type="xs:int" minOccurs="0"/>
+          <xs:element name="PageNumber" type="xs:int" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ItemListCustomizationType">
+        <xs:sequence>
+          <xs:element name="Include" type="xs:boolean" minOccurs="0"/>
+          <xs:element name="Sort" type="xs:string" minOccurs="0"/>
+          <xs:element name="Pagination" type="ns:PaginationType" minOccurs="0"/>
+        </xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="ItemArrayType">
+        <xs:sequence><xs:element name="Item" type="ns:ItemType" minOccurs="0" maxOccurs="unbounded"/></xs:sequence>
+      </xs:complexType>
+      <xs:complexType name="PaginatedItemArrayType">
+        <xs:sequence><xs:element name="ItemArray" type="ns:ItemArrayType" minOccurs="0"/></xs:sequence>
+      </xs:complexType>
+      <xs:element name="GetItemRequest">
+        <xs:complexType><xs:sequence><xs:element name="ItemID" type="xs:string" minOccurs="0"/></xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="GetItemResponse">
+        <xs:complexType><xs:sequence>
+          <xs:element name="Ack" type="xs:string"/>
+          <xs:element name="Item" type="ns:ItemType" minOccurs="0"/>
+        </xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="GetMyeBaySellingRequest">
+        <xs:complexType><xs:sequence>
+          <xs:element name="Version" type="xs:string" minOccurs="0"/>
+          <xs:element name="ActiveList" type="ns:ItemListCustomizationType" minOccurs="0"/>
+        </xs:sequence></xs:complexType>
+      </xs:element>
+      <xs:element name="GetMyeBaySellingResponse">
+        <xs:complexType><xs:sequence>
+          <xs:element name="Ack" type="xs:string"/>
+          <xs:element name="ActiveList" type="ns:PaginatedItemArrayType" minOccurs="0"/>
+        </xs:sequence></xs:complexType>
+      </xs:element>
+    </xs:schema>
+  </wsdl:types>
+  <wsdl:message name="GetItemRequest"><wsdl:part name="body" element="ns:GetItemRequest"/></wsdl:message>
+  <wsdl:message name="GetItemResponse"><wsdl:part name="body" element="ns:GetItemResponse"/></wsdl:message>
+  <wsdl:message name="GetMyeBaySellingRequest"><wsdl:part name="body" element="ns:GetMyeBaySellingRequest"/></wsdl:message>
+  <wsdl:message name="GetMyeBaySellingResponse"><wsdl:part name="body" element="ns:GetMyeBaySellingResponse"/></wsdl:message>
+  <wsdl:portType name="TradingPort">
+    <wsdl:operation name="GetItem">
+      <wsdl:input message="ns:GetItemRequest"/><wsdl:output message="ns:GetItemResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="GetMyeBaySelling">
+      <wsdl:input message="ns:GetMyeBaySellingRequest"/><wsdl:output message="ns:GetMyeBaySellingResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="TradingBinding" type="ns:TradingPort">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="GetItem"><soap:operation soapAction="GetItem"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output></wsdl:operation>
+    <wsdl:operation name="GetMyeBaySelling"><soap:operation soapAction="GetMyeBaySelling"/>
+      <wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output></wsdl:operation>
+  </wsdl:binding>
+  <wsdl:service name="TradingService">
+    <wsdl:port name="TradingPort" binding="ns:TradingBinding"><soap:address location="https://api.example.com/ws/api.dll"/></wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
+"##;
+
+/// A SOAP list is answered from state as an HTTP one is: paged by the members of its
+/// request the description points at, past those it `ignores`, and leaving out the
+/// records its soft delete's state holds; a request member it does not name falls back.
+#[cfg(feature = "soap")]
+#[tokio::test]
+async fn a_soap_list_pages_by_its_request_members() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"item": {
+            "identity": {"member": "ItemID"},
+            "lifecycle": {
+                "member": "SellingStatus.ListingStatus",
+                "states": ["Active", "Completed"],
+                "soft_delete": {"state": "Completed"}
+            }
+        }},
+        "operations": {"GetMyeBaySelling": {
+            "kind": "list",
+            "type": "item",
+            "answer": {"records": "/ActiveList/ItemArray/Item"},
+            "paging": {
+                "style": "page",
+                "request": "/ActiveList/Pagination/PageNumber",
+                "size": "/ActiveList/Pagination/EntriesPerPage"
+            },
+            "ignores": ["/Version", "/ActiveList/Include"]
+        }}
+    });
+    let h = support::described(SELLING, world, Vec::new());
+    let item = |id: &str, status: &str| json!({"ItemID": id, "Title": format!("item {id}"), "SellingStatus": {"ListingStatus": status}});
+    h.hold_by(
+        "item",
+        "ItemID",
+        &[
+            item("11", "Active"),
+            item("12", "Completed"),
+            item("13", "Active"),
+        ],
+    )
+    .await;
+    let router = mb_protocols::soap::try_router(Arc::clone(&h.rt)).unwrap();
+    let selling = |active: &str| {
+        let envelope = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><GetMyeBaySellingRequest xmlns="urn:trading"><Version>1311</Version><ActiveList>{active}</ActiveList></GetMyeBaySellingRequest></soap:Body></soap:Envelope>"#
+        );
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/ws/api.dll")
+            .header("content-type", "text/xml")
+            .header("SOAPAction", "\"GetMyeBaySelling\"")
+            .body(axum::body::Body::from(envelope))
+            .unwrap()
+    };
+    let item_ids = |xml: &Value| {
+        let text = xml.as_str().unwrap_or_default().to_owned();
+        // `<ns0:ItemID>11</ns0:ItemID>`: the text after each opening tag.
+        text.split("ItemID>")
+            .skip(1)
+            .step_by(2)
+            .filter_map(|rest| rest.split('<').next().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    let page = |n: u32| {
+        format!(
+            "<Include>true</Include><Pagination><EntriesPerPage>1</EntriesPerPage><PageNumber>{n}</PageNumber></Pagination>"
+        )
+    };
+    let (status, _, body) = support::send_to(&router, selling(&page(1))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(item_ids(&body), ["11"], "{body}");
+    let (_, _, body) = support::send_to(&router, selling(&page(2))).await;
+    assert_eq!(item_ids(&body), ["13"], "{body}");
+    // A member of the request the description does not name.
+    let sorted = format!("<Sort>StartTime</Sort>{}", page(1));
+    support::send_to(&router, selling(&sorted)).await;
+    assert_eq!(
+        capture.of("GetMyeBaySelling"),
+        [None, None, Some("undescribed_param".to_owned())]
+    );
+    assert_eq!(
+        capture.causes("GetMyeBaySelling"),
+        [Some("ActiveList/Sort".to_owned())]
+    );
+}

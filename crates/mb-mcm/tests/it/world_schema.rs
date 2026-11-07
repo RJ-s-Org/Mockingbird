@@ -41,6 +41,8 @@ fn schema_rejects_unknown_keys_and_bad_pointers() {
             "kinds": {"k": {"changes": {"m": {"append": "/v", "value": 1}}}}}}}}}),
         json!({"operations": {"o": {"paging": {"request": "p"}}}}),
         json!({"operations": {"o": {"filters": [{"param": "f"}]}}}),
+        json!({"operations": {"o": {"scope": {"param": "p", "member": "m", "kind": "under"}}}}),
+        json!({"operations": {"o": {"ignores": [""]}}}),
         json!({"operations": {"o": {"filters": [{"param": "f", "kind": "eq", "grammar": "scim"}]}}}),
         json!({"operations": {"o": {"filters": [{"param": "f", "grammar": "wiql"}]}}}),
         json!({"operations": {"o": {"filters": [{"param": "f", "grammar": "odata", "member": "m"}]}}}),
@@ -59,7 +61,7 @@ fn schema_accepts_every_serialized_field() {
         "types": {
             "account": {
                 "identity": {"member": "id", "pattern": "accounts/{id}", "alternates": ["email"]},
-                "parent": {"type": "org", "member": "org_id", "path_param": "org", "pattern": "orgs/{id}"},
+                "parent": {"type": "org", "member": "org_id", "path_param": "org", "pattern": "orgs/{id}", "embedded": "accounts"},
                 "lifecycle": {
                     "member": "status",
                     "states": ["open", "closed"],
@@ -92,13 +94,14 @@ fn schema_accepts_every_serialized_field() {
                 "answer": {"record": "/result", "records": "/results", "long_running": {"done": "done", "result": "response"}, "identity_header": "Location"},
                 "transition": {"status": "closed"},
                 "changes": {"name": {"from_request": "/name"}, "flag": {"value": false}},
-                "scope": {"param": "org", "member": "org_id"},
+                "scope": {"param": "/path", "member": "path", "kind": "prefix", "recursive": "/recursive"},
                 "filters": [
                     {"param": "q", "member": "name", "kind": "text"},
                     {"param": "filter", "grammar": "deep_object", "member_prefix": "meta"}
                 ],
                 "order": {"member": "created", "descending": true},
                 "paging": {"style": "header_cursor", "request": "cursor", "response": "next", "response_header": "Link", "size": "limit"},
+                "ignores": ["version", "/ActiveList/Include"],
                 "idempotency": {"header": "Idempotency-Key"},
                 "not_found": 404
             }

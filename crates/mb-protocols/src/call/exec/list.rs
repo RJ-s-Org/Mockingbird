@@ -45,17 +45,22 @@
 //!
 //! It falls back, and the call is generated as before, for:
 //! - `undescribed_param`: a query parameter that is no described filter, scope or
-//!   paging parameter, no name-matched filter and no page size, unless its value asks
-//!   nothing (blank, its declared `default`, or the first page of a page position); or
-//!   any member of a request body (a list asked by a POST, which reads none of it, a
-//!   filter or a cursor alike), unless it is `null`, blank or empty;
+//!   paging parameter, no name-matched filter, no page size and none the description
+//!   `ignores`, unless its value asks nothing (blank, its declared `default`, or the
+//!   first page of a page position); or a member of a request body (a list asked by a
+//!   POST, a SOAP or gRPC request) that no described parameter names or holds, looked
+//!   into where one names a member below it ([`list_query::body_pointer`]), unless it
+//!   is `null`, blank, empty or its declared `default`;
 //! - `unparsed_filter`: a described `grammar` filter's value that does not parse
 //!   ([`list_query`]), which the executor never guesses at;
 //! - `never_written`, `scope_unresolved`: see above;
 //! - `unknown_token`: a described cursor no kept cut of this session minted;
 //! - `unscoped_list`: see above;
 //! - `over_cap`: more than [`MAX_SCAN`] records of the type;
-//! - `not_http`: another binding than an HTTP route, or a list that is no read;
+//! - `not_http`: a GraphQL field (whose selection narrows its answer) or a stream, or a
+//!   list that is no read. A SOAP or gRPC list reads its request body as a `POST` list
+//!   does, and with no path it holds every record of its type when it is the type's
+//!   only list;
 //! - `render_failed`: a page that does not validate, or no envelope;
 //! - `no_next_place`: a page number or offset with a next page, no place to say where
 //!   it is, and a `next` member left `null`, which would say no page follows.
@@ -131,8 +136,12 @@ async fn answer(
     let rt = state.rt;
     let op = plan.op;
     let bundle = rt.bundle();
-    let Binding::Http { path, .. } = &op.binding else {
-        return Err("not_http".into());
+    // A SOAP or gRPC call decodes its request into a body as an HTTP one does; a
+    // GraphQL field's selection narrows its answer, which a page from state does not.
+    let path = match &op.binding {
+        Binding::Http { path, .. } => Some(path.as_str()),
+        Binding::Soap { .. } | Binding::Grpc { .. } => None,
+        _ => return Err("not_http".into()),
     };
     if !matches!(op.kind, OperationKind::Query) || response_schema.is_some() {
         return Err("not_http".into());
@@ -173,15 +182,17 @@ async fn answer(
             && !filters.iter().any(|(name, _)| name == *param)
             && !asks_nothing(bundle, op, (param, raw), &paging)
     });
-    // A list asked by a body (a POST query) reads no member of it, a filter or a
-    // cursor alike: one that asks something is undescribed.
+    // A list asked by a body (a POST query, a SOAP request) reads the members the
+    // description names; another that asks something is undescribed.
     let body_asks = call
         .body
         .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|members| members.iter().find(|(_, value)| asks(value)));
-    if let Some((on, _)) = undescribed.or(body_asks) {
+        .and_then(|body| unread(bundle, op, q.as_ref(), body, ""));
+    if let Some((on, _)) = undescribed {
         return Err(Stop::on("undescribed_param", on));
+    }
+    if let Some(on) = body_asks {
+        return Err(Stop::on("undescribed_param", &on));
     }
     // A described filter expression that does not parse: never a guess.
     if let Some(on) = q.as_ref().and_then(|q| q.unparsed.as_deref()) {
@@ -293,14 +304,15 @@ async fn answer(
     Ok(served)
 }
 
-/// Whether the list at `path`, of items of type `t`, is the type's one list with no path
-/// parameter: where the contract's schemas name its items' type
-/// (`BundleIndex::unscoped_lists`), the only such list of that type, which is `t`;
-/// where they name none (a lean schema of the record, SendGrid's `TemplateLean` under
-/// `result`), the only one the description gives type `t`.
-fn only_unscoped(rt: &MockRuntime, path: &str, t: &str) -> bool {
+/// Whether the list at `path` (none for a SOAP or gRPC operation), of items of type
+/// `t`, is the type's one list with no path parameter: where the contract's schemas
+/// name its items' type (`BundleIndex::unscoped_lists`), the only such list of that
+/// type, which is `t`; where they name none (a lean schema of the record, SendGrid's
+/// `TemplateLean` under `result`), and for an operation with no path, the only one the
+/// description gives type `t`.
+fn only_unscoped(rt: &MockRuntime, path: Option<&str>, t: &str) -> bool {
     let index = rt.index();
-    if let Some(indexed) = index.unscoped_paths.get(path) {
+    if let Some(indexed) = path.and_then(|path| index.unscoped_paths.get(path)) {
         return indexed == t && index.unscoped_lists.get(t) == Some(&1);
     }
     let described = rt
@@ -313,9 +325,12 @@ fn only_unscoped(rt: &MockRuntime, path: &str, t: &str) -> bool {
                 .op(&op.id)
                 .and_then(|d| d.kind)
                 .or_else(|| OpKind::of(op));
-            kind == Some(OpKind::List)
-                && matches!(&op.binding, Binding::Http { path, .. } if !path.contains('{'))
-                && item_type(rt, op) == Some(t)
+            let unscoped = match &op.binding {
+                Binding::Http { path, .. } => !path.contains('{'),
+                Binding::Soap { .. } | Binding::Grpc { .. } => true,
+                _ => false,
+            };
+            kind == Some(OpKind::List) && unscoped && item_type(rt, op) == Some(t)
         })
         .count();
     described == 1
@@ -341,6 +356,36 @@ fn under_parent(
     mb_mcm::member_at(&r.data, member)
         .and_then(id_string)
         .is_some_and(|held| held == wanted)
+}
+
+/// The first member of request `body` (an object, at body pointer `at`) that asks
+/// something of the list and that the description does not read, by its pointer
+/// without the leading `/` (`filter`, `ActiveList/Include`): an object member the
+/// description reads some member of is looked into. A member at its declared `default`
+/// asks nothing.
+fn unread(
+    bundle: &mb_mcm::Bundle,
+    op: &Operation,
+    q: Option<&list_query::ListQuery>,
+    body: &Value,
+    at: &str,
+) -> Option<String> {
+    let members = body.as_object()?;
+    members.iter().find_map(|(name, value)| {
+        let here = format!("{at}/{}", name.replace('~', "~0").replace('/', "~1"));
+        if !asks(value) || q.is_some_and(|q| q.reads_body(&here)) {
+            return None;
+        }
+        if value.is_object() && q.is_some_and(|q| q.reads_below(&here)) {
+            return unread(bundle, op, q, value, &here);
+        }
+        let declared = list_query::declared(bundle, op, &here);
+        let (parts, _) = schema_parts(bundle, declared.as_ref());
+        if parts.iter().any(|p| p.get("default") == Some(value)) {
+            return None;
+        }
+        Some(here.trim_start_matches('/').to_owned())
+    })
 }
 
 /// Whether body member value `value` asks something of the list: not `null`, blank,

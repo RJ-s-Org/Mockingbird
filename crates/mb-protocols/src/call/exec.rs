@@ -75,6 +75,7 @@ impl Fallback {
 
 mod action;
 mod create;
+mod embedded;
 mod list;
 mod patches;
 mod writes;
@@ -225,9 +226,18 @@ async fn read(
     kind: OpKind,
 ) -> Ran {
     let rt = state.rt;
+    // One held in its parent's array member is that item.
+    let within = match (held.target, held.target_id) {
+        (None, Some(id)) => {
+            embedded::find(state, plan, call, id)
+                .instrument(state_span())
+                .await
+        }
+        _ => None,
+    };
     // A missing record the session knows of (deleted, or unknown under
     // `unknown_ids: 404`) was refused before this; any other generates.
-    let Some(stored) = held.target else {
+    let Some(stored) = held.target.or(within.as_ref().map(|e| &e.child)) else {
         fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
         return Ran::Generate(None);
     };
@@ -504,9 +514,21 @@ pub(super) enum Write {
         /// The record's id.
         id: String,
     },
+    /// Stores `data`, the parent record held under `id` with the written record
+    /// `child` changed or removed in its array member ([`embedded`]): in the parent's
+    /// collection, as it was.
+    Within {
+        /// The parent's id.
+        id: String,
+        /// The parent record.
+        data: Value,
+        /// The written record's id.
+        child: String,
+    },
 }
 
-/// Applies a write the executor decided, with the side effects every write has, and
+/// Applies a write the executor decided (of a record of type `t`, or of its parent's
+/// record for a [`Write::Within`]), with the side effects every write has, and
 /// returns `answer` as it is: the session listed, the write noted as the session's
 /// latest and told to its list routes' memory, the record stored in its collection (a create noted as a
 /// member of its listed collection), a removal marked deleted under its route's parent
@@ -527,7 +549,15 @@ pub(super) async fn commit(
         let op = plan.op;
         let session = &plan.session;
         let collection = collection_of(op, call);
+        // The record the write was of: the child for a write within its parent.
+        let mut written = None;
         let id = match write {
+            Write::Within { id, data, child } => {
+                written = Some(child);
+                let place = (None, None, true);
+                store_one(state, session, (op, t), (id.clone(), data), place).await;
+                id
+            }
             Write::Put { id, data } => {
                 if op.kind == OperationKind::Command(Effect::Create) {
                     state_lists::mark_created(state, session, (op, t), collection.as_ref(), &id)
@@ -553,7 +583,13 @@ pub(super) async fn commit(
             }
         };
         // What earlier answers said of a deleted record goes, a soft-deleted one too.
-        world::after_delete(state, plan, Some(&id), &answer).await;
+        world::after_delete(
+            state,
+            plan,
+            Some(written.as_deref().unwrap_or(&id)),
+            &answer,
+        )
+        .await;
         // The session's latest write, and what its list routes remember of it.
         write_memory::after_route_write(state, plan, call, &answer, (false, false)).await;
         // A session only reads had written to is listed once a write lands.
