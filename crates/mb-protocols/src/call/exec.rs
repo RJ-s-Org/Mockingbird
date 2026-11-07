@@ -144,6 +144,22 @@ fn identified(rt: &crate::MockRuntime, op: &mb_mcm::Operation, t: &str) -> bool 
             .is_some_and(|read| read.identity.is_some())
 }
 
+/// Whether the executor answers some list of records of type `t`: a list whose items
+/// have an identity ([`list::identified`]).
+pub(super) fn lists(rt: &crate::MockRuntime, t: &str) -> bool {
+    list::EXECUTES
+        && rt.bundle().operations.iter().any(|op| {
+            let kind = rt
+                .described()
+                .op(&op.id)
+                .and_then(|d| d.kind)
+                .or_else(|| OpKind::of(op));
+            kind == Some(OpKind::List)
+                && list::identified(rt, op, OpKind::List)
+                && list::item_type(rt, op) == Some(t)
+        })
+}
+
 /// Whether the executor takes calls of `kind`.
 fn executes(kind: OpKind) -> bool {
     match kind {

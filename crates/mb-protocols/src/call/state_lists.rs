@@ -31,7 +31,10 @@
 //! store's; the described page, else the page size a parameter asks for. A next page
 //! of a cursor, next-URL or header-cursor paging is a [`pages`] token, kept with the
 //! rest; a page number or offset is answered from state again, and its next position
-//! is written at the described `response` member or `response_header` when it fits.
+//! is written at the described `response` member or `response_header` when it fits,
+//! else into the next page's URL in the answer's one member for it
+//! ([`pages::with_next_link`]); with none, and a `next` member beside the list left
+//! `null`, the page is not served, as it would say no page follows.
 //! A page with no next position (the last, or one not cut) never carries the value the
 //! envelope filled that `response` member with (its contract example, or a fixed
 //! value), which no client could follow: the member is left out, else `null`, else
@@ -218,8 +221,52 @@ pub(super) async fn marked(
     }
 }
 
+/// The id prefix of a type's creation order.
+const CREATED_PREFIX: &str = "#created/";
+
+/// Adds `id`, a record of type `t` a create stored, last to the type's creation order,
+/// which the executor's lists follow for records no collection mark places, so a
+/// later write of a record does not move it. At most [`MAX_SCAN`] ids, the oldest
+/// dropped first: an id that is no longer in it lists before those that are, as it was
+/// created before them. Only with `consistency: on`, for a type the executor lists
+/// ([`exec::lists`]).
+pub(super) async fn note_created(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+    id: &str,
+) {
+    let rt = state.rt;
+    if !rt.consistency || !exec::lists(rt, t) {
+        return;
+    }
+    let key = format!("{CREATED_PREFIX}{t}");
+    let mut order = read_mark(state, session, &key).await.unwrap_or_default();
+    if order.ids.iter().any(|held| held == id) {
+        return;
+    }
+    if order.ids.len() >= MAX_SCAN {
+        order.ids.drain(..=order.ids.len() - MAX_SCAN);
+    }
+    order.ids.push(id.to_string());
+    write_mark(state, session, key, &order).await;
+}
+
+/// The ids of type `t`'s records in the order creates stored them ([`note_created`]).
+pub(super) async fn created_order(
+    state: &mut StateAccess<'_>,
+    session: &SessionKey,
+    t: &str,
+) -> Vec<String> {
+    read_mark(state, session, &format!("{CREATED_PREFIX}{t}"))
+        .await
+        .map(|order| order.ids)
+        .unwrap_or_default()
+}
+
 /// Adds `id`, a record of type `t` that `op` created in `collection`, to that
-/// collection's mark, when it has one (see the module's doc).
+/// collection's mark, when it has one (see the module's doc), and last to the type's
+/// creation order ([`note_created`]).
 pub(super) async fn mark_created(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
@@ -227,6 +274,7 @@ pub(super) async fn mark_created(
     collection: Option<&Collection>,
     id: &str,
 ) {
+    note_created(state, session, t, id).await;
     let rt = state.rt;
     if !rt.consistency || !described_list_of(rt, t) {
         return;
@@ -597,6 +645,35 @@ pub(super) async fn page(
                 return Err(Unserved::Render);
             }
             header = Some((name.clone(), value));
+        }
+        // With no described place for it, a page number or offset goes in the next
+        // page's URL, where the answer has one member for it (NetBox's `next`); a
+        // `next` beside the list left `null` would say no page follows, so the page is
+        // not served then.
+        if at_next.is_none() && ask.response_header.is_none() {
+            let list = path.first();
+            let linked = match (ask.request.as_deref(), plan.page_url.as_deref(), list) {
+                (Some(param), Some(url), Some(list)) => pages::with_next_link(
+                    bundle,
+                    (op, call, url),
+                    (schema, list),
+                    &body,
+                    (param, &next.to_string()),
+                ),
+                _ => None,
+            };
+            match linked {
+                Some(candidates) => {
+                    body = candidates
+                        .into_iter()
+                        .find(|candidate| valid(candidate).is_some())
+                        .ok_or(Unserved::Render)?;
+                }
+                None if list.is_some_and(|list| pages::ends_by_next(&body, list)) => {
+                    return Err(Unserved::NoPlace);
+                }
+                None => {}
+            }
         }
         // The one flag beside the list saying more follow (`has_more`) says so.
         if let [flag] = pages::booleans_at(bundle, op, shape.parents()).as_slice()

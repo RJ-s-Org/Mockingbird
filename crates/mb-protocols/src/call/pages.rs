@@ -558,6 +558,41 @@ fn url_slot(
     })
 }
 
+/// The answers `body` to `call` may be with the URL of its next page, the one that
+/// carries `value` under `param` (a page number or an offset), in the one member of
+/// the answer `schema` that holds a next page's URL (see the module's doc on next-page
+/// URLs), in the order tried. `None` when the schema has no such member, or several.
+pub(super) fn with_next_link(
+    bundle: &mb_mcm::Bundle,
+    (op, call, page_url): (&Operation, &OperationCall, &str),
+    (schema, list): (&Value, &str),
+    body: &Value,
+    (param, value): (&str, &str),
+) -> Option<Vec<Value>> {
+    let mut found = Vec::new();
+    next_urls(bundle, schema, list, &mut Vec::new(), &mut found);
+    let [path] = found.as_slice() else {
+        return None;
+    };
+    let slot = Slot {
+        path: path.iter().map(|(name, _)| name.clone()).collect(),
+        param: param.to_string(),
+        url: Some(page_url.to_string()),
+        header: None,
+    };
+    Some(filled(body, &slot, (op, call), value))
+}
+
+/// Whether `body` says there is no next page by a member beside its list `list` that
+/// [`names_next`] names (`next`, `next_page_url`) holding `null`, at its top level.
+pub(super) fn ends_by_next(body: &Value, list: &str) -> bool {
+    body.as_object().is_some_and(|members| {
+        members
+            .iter()
+            .any(|(name, value)| name != list && names_next(name) && value.is_null())
+    })
+}
+
 /// The query of `call` as sorted text pairs, but those under `param`; `None` when a
 /// value is an object.
 fn call_pairs(call: &OperationCall, param: &str) -> Option<Vec<(String, String)>> {

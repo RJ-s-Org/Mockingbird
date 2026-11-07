@@ -133,8 +133,8 @@ paths:
                 required: [count, next, previous, results]
                 properties:
                   count: {type: integer}
-                  next: {type: string, nullable: true}
-                  previous: {type: string, nullable: true}
+                  next: {type: string, format: uri, nullable: true}
+                  previous: {type: string, format: uri, nullable: true}
                   results: {type: array, items: {$ref: "#/components/schemas/Site"}}
     post:
       operationId: createSite
@@ -206,12 +206,44 @@ async fn an_offset_page_lists_the_held_records_its_filter_keeps() {
     assert_eq!(ids(&first["results"]), [json!(1), json!(3)]);
     // Every page counts what the filter keeps.
     assert_eq!(first["count"], json!(3), "{first}");
-    let (_, second) = get(&h, "/api/dcim/sites/?status=active&limit=2&offset=2").await;
+    // The first page links the next, with the request's filter and size.
+    let next = first["next"].as_str().expect("a next link");
+    let at = next.find("/api/dcim/sites/").expect("the route's URL");
+    let next = &next[at..];
+    assert!(next.contains("offset=2"), "{next}");
+    assert!(
+        next.contains("status=active") && next.contains("limit=2"),
+        "{next}"
+    );
+    let (_, second) = get(&h, next).await;
     assert_eq!(ids(&second["results"]), [json!(4)]);
     assert_eq!(second["count"], json!(3), "{second}");
     assert_eq!(second["next"], Value::Null, "{second}");
     assert_eq!(capture.of("listSites"), [None, None]);
     assert!(h.provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn an_offset_page_with_no_place_for_its_next_link_is_generated() {
+    let (capture, _guard) = Capture::install();
+    // `next` holds no URL by its schema: a `null` there would say no page follows.
+    let contract = SITES.replace("format: uri, ", "");
+    let generated = json!({
+        "count": 3,
+        "next": "http://localhost/api/dcim/sites/?limit=2&offset=2&status=active",
+        "previous": null,
+        "results": [site(1, "active"), site(3, "active")]
+    });
+    let h = support::described(&contract, sites_world(), vec![generated]);
+    h.hold(
+        "sites",
+        &[site(1, "active"), site(3, "active"), site(4, "active")],
+    )
+    .await;
+    let (source, body) = get(&h, "/api/dcim/sites/?status=active&limit=2").await;
+    assert_eq!(source, "llm", "{body}");
+    assert_eq!(capture.of("listSites"), [Some("no_next_place".to_owned())]);
+    assert_eq!(h.provider.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -558,4 +590,219 @@ async fn with_no_llm_a_list_is_the_session_s_records() {
     assert_eq!(ids(&body["results"]), [json!(2)]);
     assert_eq!(body["count"], json!(1));
     assert_eq!(capture.of("listSites"), [None]);
+}
+
+#[tokio::test]
+async fn records_list_in_the_order_they_were_created_whatever_was_written_since() {
+    let (capture, _guard) = Capture::install();
+    let h = items(vec![
+        json!({"id": "it_4", "amount": 400}),
+        json!({"id": "it_5", "amount": 500}),
+    ])
+    .await;
+    for id in ["it_4", "it_5"] {
+        let (status, _, body) = h
+            .send(
+                "POST",
+                "/v1/items",
+                Some(json!({"id": id, "amount": 1})),
+                &[],
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    // A later write of `it_4` does not move it after `it_5`.
+    h.hold("items", &[json!({"id": "it_4", "amount": 450})])
+        .await;
+    let (source, body) = get(&h, "/v1/items").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(
+        ids(&body["data"]),
+        [
+            json!("it_1"),
+            json!("it_2"),
+            json!("it_3"),
+            json!("it_4"),
+            json!("it_5")
+        ]
+    );
+    assert_eq!(body["data"][3]["amount"], json!(450));
+    assert_eq!(capture.of("listItems"), [None]);
+}
+
+/// Links to the next page: a cursor carried in the next page's URL.
+const LINKED: &str = r##"
+openapi: 3.0.0
+info: {title: Linked, version: "1"}
+paths:
+  /v2/notes:
+    get:
+      operationId: listNotes
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next]
+                properties:
+                  data: {type: array, items: {$ref: "#/components/schemas/Note"}}
+                  next: {type: string, format: uri, nullable: true}
+    post:
+      operationId: createNote
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+  /v2/notes/{id}:
+    get:
+      operationId: getNote
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}}
+components:
+  schemas:
+    Note:
+      type: object
+      required: [id, text]
+      properties:
+        id: {type: string}
+        text: {type: string}
+"##;
+
+#[tokio::test]
+async fn a_next_url_walks_the_held_records() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"listNotes": {"paging": {
+        "style": "next_url", "request": "cursor", "response": "next", "size": "limit"
+    }}}});
+    let h = support::described(LINKED, world, Vec::new());
+    let held: Vec<Value> = (1..=3)
+        .map(|i| json!({"id": format!("n{i}"), "text": format!("note {i}")}))
+        .collect();
+    h.hold("notes", &held).await;
+    let (source, first) = get(&h, "/v2/notes?limit=2").await;
+    assert_eq!(source, "state", "{first}");
+    assert_eq!(ids(&first["data"]), [json!("n1"), json!("n2")]);
+    let next = first["next"].as_str().expect("a next link");
+    let at = next.find("/v2/notes").expect("the route's URL");
+    let next = &next[at..];
+    assert!(
+        next.contains("cursor=") && next.contains("limit=2"),
+        "{next}"
+    );
+    let (source, last) = get(&h, next).await;
+    assert_eq!(source, "state", "{last}");
+    assert_eq!(ids(&last["data"]), [json!("n3")]);
+    assert!(last["next"].is_null(), "{last}");
+    assert_eq!(capture.of("listNotes"), [None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
+/// Heroku's apps: paged by the `Range` request header, a `206` with a `Next-Range`
+/// while more remain.
+const APPS: &str = r##"
+openapi: 3.0.0
+info: {title: Apps, version: "1"}
+paths:
+  /apps:
+    get:
+      operationId: listApps
+      parameters: [{name: Range, in: header, schema: {type: string}}]
+      responses:
+        "200": {description: all, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/App"}}}}}
+        "206":
+          description: a page
+          headers: {Next-Range: {schema: {type: string}}}
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/App"}}}}
+  /apps/{appId}:
+    get:
+      operationId: getApp
+      parameters: [{name: appId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/App"}}}}}
+components:
+  schemas:
+    App:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+"##;
+
+#[tokio::test]
+async fn a_range_header_orders_and_cuts_the_held_records() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(APPS, json!({}), Vec::new());
+    let app = |id: &str, name: &str| json!({"id": id, "name": name});
+    h.hold(
+        "apps",
+        &[app("a1", "gamma"), app("a2", "alpha"), app("a3", "beta")],
+    )
+    .await;
+    let (status, headers, first) = h
+        .send("GET", "/apps", None, &[("Range", "name ..; max=2")])
+        .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "{first}");
+    assert_eq!(source(&headers), "state", "{first}");
+    assert_eq!(ids(&first), [json!("a2"), json!("a3")]);
+    let next = headers
+        .get("next-range")
+        .and_then(|v| v.to_str().ok())
+        .expect("a Next-Range")
+        .to_string();
+    assert_eq!(next, "name ]beta..; max=2;");
+    let (status, _, last) = h.send("GET", "/apps", None, &[("Range", &next)]).await;
+    assert_eq!(status, StatusCode::OK, "{last}");
+    assert_eq!(ids(&last), [json!("a1")]);
+    assert_eq!(capture.of("listApps"), [None, None]);
+    assert!(h.provider.requests().is_empty());
+}
+
+/// BigCommerce's orders: a list that declares a bodiless `204` for no match.
+const ORDERS: &str = r##"
+openapi: 3.0.0
+info: {title: Orders, version: "1"}
+paths:
+  /v2/orders:
+    get:
+      operationId: listOrders
+      parameters: [{name: status_id, in: query, schema: {type: integer}}]
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Order"}}}}}
+        "204": {description: No order matches}
+  /v2/orders/{id}:
+    get:
+      operationId: getOrder
+      parameters: [{name: id, in: path, required: true, schema: {type: integer}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Order"}}}}}
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, status_id]
+      properties:
+        id: {type: integer}
+        status_id: {type: integer}
+"##;
+
+#[tokio::test]
+async fn a_list_left_with_nothing_answers_its_declared_204() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"listOrders": {
+        "filters": [{"param": "status_id", "member": "status_id", "kind": "eq"}]
+    }}});
+    let h = support::described(ORDERS, world, Vec::new());
+    let (status, headers, body) = h.send("GET", "/v2/orders", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(source(&headers), "state");
+    h.hold("orders", &[json!({"id": 1, "status_id": 11})]).await;
+    let (status, _, body) = h.send("GET", "/v2/orders?status_id=11", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), [json!(1)]);
+    let (status, _, body) = h.send("GET", "/v2/orders?status_id=5", None, &[]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(capture.of("listOrders"), [None, None, None]);
+    assert!(h.provider.requests().is_empty());
 }

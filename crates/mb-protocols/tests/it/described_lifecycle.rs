@@ -268,10 +268,11 @@ async fn listed_with_lists_it_again() {
     create_space(&h, "Notes").await;
     // Executed from state: no model call.
     delete(&h, "/spaces/s1").await;
-    // From state, least recently written first: the soft delete wrote `s1` last.
+    // From state, in the order they were created: the soft delete, which wrote `s1`
+    // last, does not move it.
     let body = get(&h, "/spaces?showDeleted=true").await;
-    assert_eq!(ids(&body), ["s2", "s1"], "{body}");
-    assert_eq!(body["spaces"][1]["state"], "DELETE_REQUESTED", "{body}");
+    assert_eq!(ids(&body), ["s1", "s2"], "{body}");
+    assert_eq!(body["spaces"][0]["state"], "DELETE_REQUESTED", "{body}");
     assert_eq!(h.provider.requests().len(), 2);
 }
 

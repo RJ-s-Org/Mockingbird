@@ -3,7 +3,9 @@
 //!
 //! The records are the store's records of the type in the collection the route names,
 //! in the order the collection's [`state_lists`] mark placed them (each create's, once
-//! the collection was listed), then the rest least recently written first:
+//! the collection was listed), then those no create stored (seeded) least recently
+//! written first, then the created in the order they were created
+//! ([`state_lists::note_created`]), so a later write does not move a record:
 //! - a route with path parameters holds a record its mark holds, one this runtime
 //!   placed under it, or one whose member tied to each parameter holds its value
 //!   ([`lists::in_collection`]), or whose described `parent.member` holds the value of
@@ -25,7 +27,11 @@
 //! answers here). A page cut with nowhere to say where the rest is is served whole
 //! under a described paging (as a generated one is), and cut to the size a parameter
 //! the description does not name asks for. Envelope members beside the list come from
-//! what the schema fixes, else the faker.
+//! what the schema fixes, else the faker. A list paged by its `Range` header is then
+//! ordered and cut by it ([`ranges::serve`]: a `206` when more remain, whose
+//! `Next-Range` the HTTP handler sets), and a first page the query leaves nothing of
+//! answers the bodiless `204` the read declares beside its list
+//! ([`lists::no_content`]).
 //!
 //! It falls back, and the call is generated as before, for:
 //! - `undescribed_param`: a query parameter that is no described filter, scope or
@@ -35,7 +41,9 @@
 //! - `unscoped_list`: see above;
 //! - `over_cap`: more than [`MAX_SCAN`] records of the type;
 //! - `not_http`: another binding than an HTTP route, or a list that is no read;
-//! - `render_failed`: a page that does not validate, or no envelope.
+//! - `render_failed`: a page that does not validate, or no envelope;
+//! - `no_next_place`: a page number or offset with a next page, no place to say where
+//!   it is, and a `next` member left `null`, which would say no page follows.
 
 use std::collections::HashMap;
 
@@ -50,7 +58,7 @@ use crate::MockRuntime;
 use crate::call::state_lists::Shape;
 use crate::call::{
     CallPlan, MAX_SCAN, OperationCall, StateAccess, cursors, id_string, item_identity, list_query,
-    lists, pages, property_schema, runs, schema_parts, state_lists, state_span,
+    lists, pages, property_schema, ranges, runs, schema_parts, state_lists, state_span,
 };
 
 /// Whether the executor takes these calls.
@@ -67,7 +75,7 @@ pub(super) fn identified(rt: &MockRuntime, op: &Operation, kind: OpKind) -> bool
 }
 
 /// The type of `op`'s items: the described one, else the operation's.
-fn item_type<'a>(rt: &'a MockRuntime, op: &'a Operation) -> Option<&'a str> {
+pub(super) fn item_type<'a>(rt: &'a MockRuntime, op: &'a Operation) -> Option<&'a str> {
     rt.described()
         .op(&op.id)
         .and_then(|d| d.r#type.as_deref())
@@ -165,15 +173,25 @@ async fn answer(
     if records.len() > MAX_SCAN {
         return Err("over_cap");
     }
-    // As the collection's mark placed them, then the rest least recently written first.
+    // As the collection's mark placed them; then those no create noted, least recently
+    // written first; then the created, in the order they were created.
     let marked = state_lists::marked(state, (plan, call), t).await;
     let placed: HashMap<&str, usize> = marked
         .iter()
         .enumerate()
         .map(|(at, id)| (id.as_str(), at))
         .collect();
+    let created = state_lists::created_order(state, &plan.session, t).await;
+    let created: HashMap<&str, usize> = created
+        .iter()
+        .enumerate()
+        .map(|(at, id)| (id.as_str(), at))
+        .collect();
     records.reverse();
-    records.sort_by_key(|r| placed.get(r.id.as_str()).copied().unwrap_or(usize::MAX));
+    records.sort_by_key(|r| match placed.get(r.id.as_str()) {
+        Some(at) => (0, *at),
+        None => created.get(r.id.as_str()).map_or((1, 0), |at| (2, *at)),
+    });
     let field = item_identity(bundle, op, &envelope);
     let mut items = Vec::new();
     for r in &records {
@@ -199,7 +217,8 @@ async fn answer(
         .iter()
         .filter_map(|item| mb_mcm::member_at(item, &field).and_then(id_string))
         .collect();
-    let served = state_lists::page(
+    let none_kept = items.is_empty();
+    let mut served = state_lists::page(
         state,
         (plan, call),
         (t, q.as_ref()),
@@ -208,10 +227,20 @@ async fn answer(
         true,
     )
     .await
-    // Served anyway, a page is refused only when it does not render.
-    .map_err(|_| "render_failed")?;
+    // Served anyway, a page is refused only when it does not render, or says no page
+    // follows one that does.
+    .map_err(|unserved| match unserved {
+        state_lists::Unserved::Render => "render_failed",
+        state_lists::Unserved::NoPlace => "no_next_place",
+    })?;
     // The collection is marked listed: its creates are placed in it from now on.
     state_lists::mark_listed(state, (plan, call), t, &served, ids).await;
+    // A list paged by its `Range` header: ordered and cut by it.
+    ranges::serve(bundle, (plan, call), &mut served);
+    // A list the query leaves nothing of answers the bodiless status declared for that.
+    if none_kept {
+        lists::no_content(bundle, op, &mut served);
+    }
     cursors::after_answer(state, plan, &served).await;
     Ok(served)
 }
