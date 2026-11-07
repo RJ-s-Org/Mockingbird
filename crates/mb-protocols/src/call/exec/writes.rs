@@ -217,7 +217,7 @@ fn changed(
         .and_then(|r| r.instructions.as_ref());
     let multi = |steps: &[String]| declared_array(rt, t, steps);
     if !replace && let Some(patched) = patches::patched(call, instructions, &stored.data, &multi) {
-        return guarded(rt, (plan, call), stored, patched?);
+        return Ok(guarded(rt, (plan, call), stored, patched?)?);
     }
     let empty = Value::Object(Map::new());
     let sent = call
