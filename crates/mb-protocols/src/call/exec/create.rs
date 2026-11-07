@@ -9,15 +9,25 @@
 //! - Its id is the one the request asks for (a client-chosen id, a path value naming the
 //!   record), else one minted in the identity header the answer names it in, else one
 //!   drawn as the type declares its identity, in its pattern.
-//! - What the type's reads require (its read by id and every list of it, so that any
-//!   later read renders it), and what the create's answer requires when that is the
-//!   record, that nothing above gives is filled ([`gaps`]: a member, or what an object
-//!   member the request sent lacks), but the server's own members: the id,
-//!   the lifecycle member a described `initial` sets, the derived members. The
-//!   lifecycle's `initial` is then set. Before fill, a member the request did not send
-//!   whose schema decides its value (a `const`, a one-value `enum`: GraphQL's
-//!   `__typename`; a `default`) takes that value, at any depth the record holds
-//!   ([`preset`]), optional members included.
+//! - A request member that is a reference where the type's reads hold the record (a
+//!   text or number where they hold an object, an array of them for an array of
+//!   objects) is never stored as sent ([`reshape`]): it becomes the record the session
+//!   holds under that id (by its patterned form too), projected to the member's schema,
+//!   else it is removed for fill to write. Any other mismatch is left for the gate below.
+//! - A member the request did not send whose schema decides its value (a `const`, a
+//!   one-value `enum`: GraphQL's `__typename`; a `default`, of the record's schema or
+//!   the request's) takes that value, at any depth the record holds ([`preset`]),
+//!   optional members included. An array item declaring the type's id-shaped identity
+//!   member, and not another type's record, gets a minted id ([`mint_items`]).
+//! - Then fill writes ([`gaps`]) what the type's reads (its read by id and every list of
+//!   it) and the create's answer, when that is the record, require and nothing above
+//!   gives (a member, or what an object member the request sent lacks), and every other
+//!   member they declare that nothing set, optional ones too, but the server's own (the
+//!   id, the lifecycle member a described `initial` sets, the derived members, the
+//!   described concurrency token), a `writeOnly` member, and a reference to another
+//!   record the request could have sent ([`unsent_reference`]). The lifecycle's
+//!   `initial` is then set, and the concurrency token's first value minted
+//!   ([`initial_token`]).
 //! - Before it is stored, the record is checked against every read of its type
 //!   ([`read_schemas`]), as those reads render it: one a read would not render (a
 //!   reference where the read holds an object, an array item lacking a required id)
@@ -171,6 +181,13 @@ pub(super) async fn run(
 
     // The members nobody else decides, then the initial state.
     let owned = server_owned(rt, t, field, request);
+    // A request member that does not fit the record's is never stored as sent: the
+    // record it names, when the session holds it, else left for fill.
+    if let Value::Object(known) = &mut data {
+        reshape(state, &plan.session, t, known, &owned)
+            .instrument(state_span())
+            .await;
+    }
     // A member the request did not send whose schema decides its value (a `const`, a
     // one-value `enum`: GraphQL's `__typename`; a `default`) takes it, at any depth.
     let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
@@ -180,7 +197,30 @@ pub(super) async fn run(
     // So does one whose request schema gives the value the server assumes when it is
     // left out (harvest's `is_active: {default: true}`), where the record holds it.
     preset_from_request(rt, op, &shape, &mut data, &owned);
-    let missing = gaps(rt, &shape.schemas, &data, &owned);
+    // A nested item declaring the type's identity member gets an id of its own, when
+    // that identity is an id (never a name to invent).
+    let leaf = mb_mcm::leaf_member(field).to_owned();
+    if id_shaped(&leaf) {
+        for schema in &shape.schemas {
+            mint_items(rt, (t, schema), &mut data, &leaf, GAP_DEPTH);
+        }
+    }
+    let mut missing = gaps(rt, &shape.schemas, &data, &owned);
+    // And every other member nobody set, but a reference the request could have sent.
+    if let Value::Object(known) = &data {
+        let request_schema = request_schema(rt, op);
+        for (name, member) in &shape.members {
+            if !known.contains_key(name)
+                && !owned.contains(name)
+                && !missing.iter().any(|(m, _)| m == name)
+                && !unsent_reference(rt, request_schema.as_ref(), name, member)
+            {
+                missing.push((name.clone(), member.clone()));
+            }
+        }
+    }
+    // A member a read never shows (`writeOnly`) is the client's to send, never filled.
+    missing.retain(|(_, member)| !write_only(rt.bundle(), member));
     let mut usage = mb_llm::Usage::default();
     if !missing.is_empty()
         && let Value::Object(known) = &mut data
@@ -200,6 +240,7 @@ pub(super) async fn run(
         fill_into(known, filled.members);
     }
     lifecycle::initial(rt, t, &mut data, request);
+    initial_token(rt, t, &mut data);
 
     // Its derived members are answered from what state holds (its children, if any),
     // never stored; the record as stored is answered when the filled one does not render.
@@ -309,7 +350,51 @@ fn server_owned(
     for member in desc.derived.keys() {
         owned.push(member.split('.').next().unwrap_or(member).to_string());
     }
+    // The described concurrency token is minted ([`initial_token`]), never filled.
+    if let Some(member) = desc.concurrency.as_ref().and_then(|c| c.member.as_ref())
+        && !request.is_some_and(|r| mb_mcm::member_at(r, member).is_some())
+    {
+        owned.push(member.clone());
+    }
     owned
+}
+
+/// Sets the first value of type `t`'s described concurrency token on `record`, when the
+/// request sent none and a read declares the member: an integer's `1` (its `minimum`,
+/// if higher), else a value drawn as the member declares it, as a minted id is.
+fn initial_token(rt: &crate::MockRuntime, t: &str, record: &mut Value) {
+    let Some(member) = rt
+        .described()
+        .type_desc(t)
+        .and_then(|d| d.concurrency.as_ref()?.member.clone())
+    else {
+        return;
+    };
+    if mb_mcm::member_at(record, &member).is_some() {
+        return;
+    }
+    let bundle = rt.bundle();
+    let Some(schema) = read_schemas(rt, t)
+        .iter()
+        .find_map(|s| property_schema(bundle, s, &member))
+    else {
+        return;
+    };
+    let parts = whole_parts(bundle, &schema);
+    let integer = parts.iter().any(|p| scalar_types(p).contains(&"integer"));
+    let value = match integer {
+        true => {
+            let floor = parts
+                .iter()
+                .find_map(|p| p.get("minimum").and_then(Value::as_i64))
+                .unwrap_or(1);
+            Some(Value::from(floor.max(1)))
+        }
+        false => crate::call::header_ids::draw_id_as(rt, &schema),
+    };
+    if let Some(value) = value.filter(|v| fits(rt, &schema, v)) {
+        mb_mcm::set_member_at(record, &member, value);
+    }
 }
 
 /// What a create's record and answer declare.
@@ -785,24 +870,8 @@ fn preset_from_request(
     owned: &[String],
 ) {
     let bundle = rt.bundle();
-    let Some(body) = op.input.body.as_ref() else {
+    let Some(schema) = request_schema(rt, op) else {
         return;
-    };
-    let pointer = rt
-        .described()
-        .op(&op.id)
-        .and_then(|d| d.request.as_ref())
-        .and_then(|r| r.record.as_ref())
-        .map(|p| p.as_str().to_owned());
-    let schema = match pointer.as_deref() {
-        None | Some("") => body.clone(),
-        Some(at) => {
-            let steps = at.trim_start_matches('/').replace('/', ".");
-            match property_schema(bundle, body, &steps) {
-                Some(schema) => schema,
-                None => return,
-            }
-        }
     };
     let mut preset_copy = record.clone();
     let fits = |schema: &Value, value: &Value| fits(rt, schema, value);
@@ -821,6 +890,170 @@ fn preset_from_request(
     }
 }
 
+/// Reshapes the members of `record` (the request's) that do not fit what the reads of
+/// type `t` declare of them ([`shaped`]), but those in `owned`: a value naming a record the
+/// session holds (a reference where the record holds the object: Buildkite's
+/// `pipeline` slug, Lob's `to` address id) becomes that record, projected to the
+/// member's schema, and so does each item of an array of them; any other is removed,
+/// for fill to write. A member whose every schema it fits is kept as sent.
+async fn reshape(
+    state: &mut StateAccess<'_>,
+    session: &mb_state::SessionKey,
+    t: &str,
+    record: &mut Map<String, Value>,
+    owned: &[String],
+) {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let reads = read_shapes(rt, t);
+    let names: Vec<String> = record.keys().cloned().collect();
+    for name in names {
+        if owned.contains(&name) {
+            continue;
+        }
+        let schemas: Vec<(Value, bool)> = reads
+            .iter()
+            .filter_map(|(s, item)| Some((property_schema(bundle, s, &name)?, *item)))
+            .collect();
+        let fits_all = |value: &Value| {
+            schemas
+                .iter()
+                .all(|(s, item)| shaped(rt, (s, *item), value))
+        };
+        let Some(sent) = record.get(&name).cloned() else {
+            continue;
+        };
+        if schemas.is_empty() || fits_all(&sent) {
+            continue;
+        }
+        let Some((member, _)) = schemas.first() else {
+            continue;
+        };
+        // Only a reference where the read holds the record: a scalar for an object, an
+        // array of scalars for an array of objects. Any other mismatch (an enum's case, a
+        // format, a length) is the request's, and the gate refuses it.
+        if !references_object(bundle, member, &sent) {
+            continue;
+        }
+        let embedded = match &sent {
+            Value::Array(items) => {
+                let item = whole_parts(bundle, member)
+                    .iter()
+                    .find_map(|p| p.get("items").cloned());
+                let mut out = Vec::new();
+                for value in items {
+                    let one = match &item {
+                        Some(item) => embed(state, session, (&name, item), value).await,
+                        None => None,
+                    };
+                    match one {
+                        Some(one) => out.push(one),
+                        None => {
+                            out.clear();
+                            break;
+                        }
+                    }
+                }
+                (!out.is_empty() || items.is_empty()).then_some(Value::Array(out))
+            }
+            value => embed(state, session, (&name, member), value).await,
+        };
+        match embedded.filter(|e| fits_all(e)) {
+            Some(value) => {
+                record.insert(name, value);
+            }
+            None => {
+                record.remove(&name);
+            }
+        }
+    }
+}
+
+/// The record a request value under `name` names, as `schema` (an object's) holds it:
+/// a text or number that is the id of a record the session holds, of the type the
+/// member's schema is the record of, else of a type named for the member, projected to
+/// `schema`. `None` for a value that names none, or a schema of no object.
+async fn embed(
+    state: &mut StateAccess<'_>,
+    session: &mb_state::SessionKey,
+    (name, schema): (&str, &Value),
+    value: &Value,
+) -> Option<Value> {
+    let rt = state.rt;
+    let bundle = rt.bundle();
+    let id = match value {
+        Value::String(_) | Value::Number(_) => id_string(value)?,
+        _ => return None,
+    };
+    let object = whole_parts(bundle, schema).iter().any(|p| {
+        p.get("properties").is_some() || p.get("type").and_then(Value::as_str) == Some("object")
+    });
+    if !object {
+        return None;
+    }
+    let index = rt.index();
+    let def = crate::call::bundle_index::def_name(schema);
+    let mut types: Vec<String> = crate::call::entity_type(index, def, name)
+        .into_iter()
+        .collect();
+    for t in crate::call::relations::reference_types(Some(index), name) {
+        if !types.contains(&t) {
+            types.push(t);
+        }
+    }
+    for t in types.iter().take(MAX_EMBED_TYPES) {
+        if let Some(held) = records::held_by_key(state, session, t, &id).await {
+            return Some(crate::call::lists::projected(
+                bundle,
+                Some(schema),
+                &held.data,
+                0,
+            ));
+        }
+    }
+    None
+}
+
+/// Whether `value` is a reference where `schema` holds a record: a text or number where
+/// it holds an object, an array of them where it holds an array of objects.
+fn references_object(bundle: &mb_mcm::Bundle, schema: &Value, value: &Value) -> bool {
+    let scalar = |v: &Value| matches!(v, Value::String(_) | Value::Number(_));
+    match value {
+        Value::Array(items) => {
+            !items.is_empty()
+                && items.iter().all(scalar)
+                && whole_parts(bundle, schema)
+                    .iter()
+                    .filter_map(|p| p.get("items"))
+                    .any(|item| holds_object(bundle, item))
+        }
+        v => scalar(v) && holds_object(bundle, schema),
+    }
+}
+
+/// Whether every value of `schema` is an object.
+fn holds_object(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
+    whole_parts(bundle, schema).iter().any(|p| {
+        p.get("properties").is_some() || p.get("type").and_then(Value::as_str) == Some("object")
+    })
+}
+
+/// Whether `value`, a member's, is of the shape `schema` (a read's member schema; a
+/// list item's, `item`, projected first, as the list projects it) declares: it breaks
+/// nothing but what it lacks (`required`), which fill writes.
+fn shaped(rt: &crate::MockRuntime, (schema, item): (&Value, bool), value: &Value) -> bool {
+    let value = match item {
+        true => crate::call::lists::projected(rt.bundle(), Some(schema), value, 0),
+        false => value.clone(),
+    };
+    rt.engine
+        .schema_violations(rt.bundle(), schema, &value)
+        .is_some_and(|found| found.iter().all(|(_, keyword)| keyword == "required"))
+}
+
+/// The types [`embed`] looks a reference up in, at most.
+const MAX_EMBED_TYPES: usize = 8;
+
 /// Whether a value (the second) validates against a member schema (the first).
 type Fits<'a> = dyn Fn(&Value, &Value) -> bool + 'a;
 
@@ -829,6 +1062,149 @@ fn fits(rt: &crate::MockRuntime, schema: &Value, value: &Value) -> bool {
     rt.engine
         .schema_violations(rt.bundle(), schema, value)
         .is_some_and(|v| v.is_empty())
+}
+
+/// Mints an id ([`crate::call::header_ids::draw_id_as`]) for each array item `value`
+/// holds, as `schema` declares it, whose schema declares member `field` (the type's
+/// identity member: a line item's `id`) and that lacks it, at any depth (to `depth`);
+/// unique among the items of its array.
+fn mint_items(
+    rt: &crate::MockRuntime,
+    (t, schema): (&str, &Value),
+    value: &mut Value,
+    field: &str,
+    depth: usize,
+) {
+    if depth == 0 {
+        return;
+    }
+    let bundle = rt.bundle();
+    let parts = whole_parts(bundle, schema);
+    match value {
+        Value::Object(held) => {
+            for part in &parts {
+                let Some(Value::Object(properties)) = part.get("properties") else {
+                    continue;
+                };
+                for (name, member) in properties {
+                    if let Some(inner) = held.get_mut(name) {
+                        mint_items(rt, (t, member), inner, field, depth - 1);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in parts.iter().filter_map(|p| p.get("items")) {
+                // An item whose schema is another type's record is that record: its id
+                // is not this create's to mint.
+                let other = crate::call::bundle_index::def_name(item)
+                    .and_then(|def| rt.index().types_by_def.get(def))
+                    .is_some_and(|of| of != t);
+                let declared = property_schema(bundle, item, field).filter(|_| !other);
+                let mut given: Vec<Value> =
+                    items.iter().filter_map(|i| i.get(field).cloned()).collect();
+                for held in items.iter_mut() {
+                    if let (Some(declared), Value::Object(members)) = (&declared, &mut *held)
+                        && !members.contains_key(field)
+                        && let Some(id) = (0..MINT_ITEM_ATTEMPTS)
+                            .filter_map(|_| crate::call::header_ids::draw_id_as(rt, declared))
+                            .find(|id| !given.contains(id))
+                    {
+                        given.push(id.clone());
+                        members.insert(field.to_owned(), id);
+                    }
+                    mint_items(rt, (t, item), held, field, depth - 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether identity member `field` names an id (`id`, `uuid`, `line_item_id`, `gid`),
+/// which [`mint_items`] mints, not a name or a key a client chooses.
+fn id_shaped(field: &str) -> bool {
+    let lower = field.to_ascii_lowercase();
+    lower == "id"
+        || lower.ends_with("_id")
+        || field.ends_with("Id")
+        || lower.ends_with("uuid")
+        || lower == "gid"
+}
+
+/// Draws [`mint_items`] tries for an id no other item of its array holds.
+const MINT_ITEM_ATTEMPTS: usize = 8;
+
+/// The schema of the record `op`'s request holds: its body's, at the described
+/// `request.record`.
+fn request_schema(rt: &crate::MockRuntime, op: &Operation) -> Option<Value> {
+    let body = op.input.body.as_ref()?;
+    let pointer = rt
+        .described()
+        .op(&op.id)
+        .and_then(|d| d.request.as_ref())
+        .and_then(|r| r.record.as_ref())
+        .map(|p| p.as_str().to_owned());
+    match pointer.as_deref() {
+        None | Some("") => Some(body.clone()),
+        Some(at) => {
+            let steps = at.trim_start_matches('/').replace('/', ".");
+            property_schema(rt.bundle(), body, &steps)
+        }
+    }
+}
+
+/// Whether member `name` (of schema `member`) is a reference to another record the
+/// request could have sent and did not, which fill leaves absent (a deal's `org_id`,
+/// its `tag_ids`): a text or integer member (`null` allowed), or an array of them, that
+/// the request's schema declares, named as a reference (`<x>_id`, `<x>Id`, `<x>_ids`,
+/// `<x>Ids`) or for a type of the contract.
+fn unsent_reference(
+    rt: &crate::MockRuntime,
+    request: Option<&Value>,
+    name: &str,
+    member: &Value,
+) -> bool {
+    let bundle = rt.bundle();
+    let id_typed = |schema: &Value| {
+        whole_parts(bundle, schema).iter().any(|p| {
+            scalar_types(p)
+                .iter()
+                .any(|t| matches!(*t, "string" | "integer"))
+        })
+    };
+    let parts = whole_parts(bundle, member);
+    let many = parts.iter().filter_map(|p| p.get("items")).any(id_typed);
+    let referential = crate::call::reference_prefix(name).is_some()
+        || name
+            .strip_suffix("_ids")
+            .or_else(|| name.strip_suffix("Ids"))
+            .is_some_and(|p| !p.is_empty())
+        || crate::call::entity_type(rt.index(), None, name).is_some();
+    (id_typed(member) || many)
+        && request.is_some_and(|r| property_schema(bundle, r, name).is_some())
+        && referential
+}
+
+/// The types a schema part's `type` names but `null`: `"string"`, or the others of
+/// `["integer", "null"]`.
+fn scalar_types(part: &Value) -> Vec<&str> {
+    match part.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(types)) => types
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|t| *t != "null")
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `schema` marks its member `writeOnly`: what a read never shows.
+fn write_only(bundle: &mb_mcm::Bundle, schema: &Value) -> bool {
+    whole_parts(bundle, schema)
+        .iter()
+        .any(|p| p.get("writeOnly").and_then(Value::as_bool) == Some(true))
 }
 
 /// The value member schema `schema` decides: its `const`, else its one `enum` value,
@@ -908,5 +1284,33 @@ fn probe(status: u16) -> GeneratedResponse {
         patched: None,
         headers: Vec::new(),
         world_gaps: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_type_list_names_its_scalar_types_but_null() {
+        assert_eq!(
+            scalar_types(&serde_json::json!({"type": "string"})),
+            vec!["string"]
+        );
+        assert_eq!(
+            scalar_types(&serde_json::json!({"type": ["integer", "null"]})),
+            vec!["integer"]
+        );
+        assert!(scalar_types(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn only_an_id_like_identity_is_minted_for_items() {
+        for id in ["id", "uuid", "line_item_id", "lineItemId", "gid"] {
+            assert!(id_shaped(id), "{id}");
+        }
+        for name in ["name", "key", "slug", "email"] {
+            assert!(!id_shaped(name), "{name}");
+        }
     }
 }
