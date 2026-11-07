@@ -24,7 +24,7 @@
 //! value is not of the member's declared type ([`Expr::Unknown`], see [`retype`]), when
 //! its sides do not compare (`gt` on text that is no number or date-time), or, for an
 //! item the model answered, when the item does not hold the member; a stored record
-//! that does not hold it does not match. An item is kept unless the whole expression
+//! that does not hold it does not match, but for `ne`, which it holds (`null ne 31`). An item is kept unless the whole expression
 //! is `Some(false)`.
 
 use std::cmp::Ordering;
@@ -130,9 +130,10 @@ fn field_value(text: &str) -> Option<Expr> {
     for pair in text.split(',') {
         let (field, value) = pair.split_once(':')?;
         let (field, value) = (field.trim(), value.trim());
-        if field.is_empty() || value.is_empty() || all.len() >= MAX_TERMS {
+        if value.is_empty() || all.len() >= MAX_TERMS {
             return None;
         }
+        let field = member_path(field.to_string())?;
         all.push(Expr::cmp(field, Op::Eq, Value::String(value.to_string())));
     }
     Expr::all(all)
@@ -223,7 +224,24 @@ enum Tok {
     Word(String),
 }
 
-/// `text` as tokens; `None` for an unterminated quote.
+/// `path` when it names a (dotted) member: no keyword, and each step a letter, `_`,
+/// `$` or `@`, then letters, digits, `_`, `-`, `$` or `@` (not `-status`, `foo bar`).
+fn member_path(path: String) -> Option<String> {
+    let reserved = ["and", "or", "not", "true", "false", "null"];
+    if reserved.iter().any(|r| path.eq_ignore_ascii_case(r)) {
+        return None;
+    }
+    let valid = path.split('.').all(|step| {
+        let mut chars = step.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || matches!(c, '_' | '$' | '@'))
+            && chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '$' | '@'))
+    });
+    valid.then_some(path)
+}
+
+/// `text` as tokens; `None` for an unterminated quote or a bad escape.
 fn lex(text: &str, dialect: Dialect) -> Option<Vec<Tok>> {
     let quote = dialect.quote();
     let mut out = Vec::new();
@@ -256,6 +274,9 @@ fn lex(text: &str, dialect: Dialect) -> Option<Vec<Tok>> {
                             'r' => s.push('\r'),
                             'u' => {
                                 let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                                if hex.len() != 4 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    return None;
+                                }
                                 s.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
                             }
                             other => s.push(other),
@@ -449,12 +470,6 @@ impl Parser {
 
     /// Attribute `word` as a dotted member path.
     fn path(&self, word: &str) -> Option<String> {
-        let reserved = ["and", "or", "not", "true", "false", "null"];
-        if reserved.iter().any(|r| word.eq_ignore_ascii_case(r))
-            || word.starts_with(|c: char| c.is_ascii_digit())
-        {
-            return None;
-        }
         let path = match self.dialect {
             // `urn:...:User:name.givenName` is `name.givenName`.
             Dialect::Scim if word.to_ascii_lowercase().starts_with("urn:") => {
@@ -463,13 +478,7 @@ impl Parser {
             Dialect::Scim => word.to_string(),
             Dialect::Odata => word.replace('/', "."),
         };
-        let valid = path.split('.').all(|step| {
-            !step.is_empty()
-                && step
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '$' | '@'))
-        });
-        valid.then_some(path)
+        member_path(path)
     }
 
     fn value(&mut self) -> Option<Value> {
@@ -585,7 +594,12 @@ fn eval_cmp(c: &Cmp, item: &Value, answered: bool, fold: bool) -> Option<bool> {
         return Some(held.is_empty() == (c.op == Op::Eq));
     }
     if held.is_empty() {
-        return if answered { None } else { Some(false) };
+        return match (answered, c.op) {
+            (true, _) => None,
+            // A member not held is not equal to anything (`null ne 31`).
+            (false, Op::Ne) => Some(true),
+            (false, _) => Some(false),
+        };
     }
     // A member's array is any of its items, but for `contains`, which reads arrays.
     let mut each: Vec<&Value> = Vec::new();
@@ -764,6 +778,8 @@ mod tests {
             r#"userName eq "x"#,
             r#"userName like "x""#,
             r#"userName eq x"#,
+            r#"userName eq "\u12""#,
+            r#"userName eq "\u+1ab""#,
             r#"(userName eq "x""#,
             r#"userName eq "x" extra"#,
             "",
@@ -812,6 +828,22 @@ mod tests {
     }
 
     #[test]
+    fn parsing_stops_at_its_limits_without_panicking() {
+        let nested = |n: usize| format!("{}a eq 1{}", "(".repeat(n), ")".repeat(n));
+        assert!(odata(&nested(30)).is_some());
+        assert_eq!(odata(&nested(33)), None);
+        assert_eq!(scim(&format!("{}a eq 1", "not ".repeat(33))), None);
+        assert_eq!(odata(&"(".repeat(100_000)), None);
+        assert_eq!(scim(&"(".repeat(100_000)), None);
+        let terms = |n: usize| vec!["a eq 1"; n].join(" and ");
+        assert!(odata(&terms(256)).is_some());
+        assert_eq!(odata(&terms(257)), None);
+        let pairs = |n: usize| vec!["a:1"; n].join(",");
+        assert!(parse(FilterGrammar::FieldValue, &pairs(256)).is_some());
+        assert_eq!(parse(FilterGrammar::FieldValue, &pairs(257)), None);
+    }
+
+    #[test]
     fn field_value_is_equalities_that_all_hold() {
         assert_eq!(
             parse(FilterGrammar::FieldValue, "status:open, priority:high"),
@@ -824,7 +856,15 @@ mod tests {
             parse(FilterGrammar::FieldValue, "at:10:30"),
             Some(cmp("at", Op::Eq, json!("10:30")))
         );
-        for bad in ["status", "status:", ":open", "a:1,,b:2"] {
+        for bad in [
+            "status",
+            "status:",
+            ":open",
+            "a:1,,b:2",
+            "-status:open",
+            "foo bar:x",
+            "a..b:1",
+        ] {
             assert_eq!(parse(FilterGrammar::FieldValue, bad), None, "{bad}");
         }
     }
@@ -876,6 +916,10 @@ mod tests {
         // nothing.
         let e = odata("status eq 'open'").unwrap();
         assert_eq!(eval(&e, &json!({}), false, false), Some(false));
+        // But for `ne`, which a record lacking the member holds.
+        let ne = odata("status ne 'open'").unwrap();
+        assert_eq!(eval(&ne, &json!({}), false, false), Some(true));
+        assert_eq!(eval(&ne, &json!({}), true, false), None);
         assert_eq!(eval(&e, &json!({"status": null}), true, false), None);
         assert_eq!(
             eval(&e, &json!({"status": "done"}), true, false),

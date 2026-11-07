@@ -1268,7 +1268,8 @@ paths:
       parameters:
         - {name: filter, in: query, schema: {type: string}}
         - {name: $filter, in: query, schema: {type: string}}
-        - {name: q, in: query, schema: {type: string}}
+        # Repeatable, so a repeated value reaches the list as an array.
+        - {name: q, in: query, explode: true, schema: {type: array, items: {type: string}}}
         - {name: where, in: query, style: deepObject, explode: true, schema: {type: object}}
         - {name: "where[active]", in: query, schema: {type: boolean}}
         - {name: meta, in: query, style: deepObject, explode: true,
@@ -1483,14 +1484,15 @@ async fn a_filter_expression_that_does_not_parse_is_generated() {
 async fn a_held_record_lacking_an_expression_s_member_does_not_match() {
     let (capture, _guard) = Capture::install();
     let h = users(Vec::new()).await;
-    // `u4` holds no age: not below 100, and not `ne 31` either.
+    // `u4` holds no age: it is not below 100.
     assert_eq!(
         listed(&h, &[("$filter", "age lt 100")]).await,
         [json!("u1"), json!("u2"), json!("u3")]
     );
+    // `ne` holds of it: a member not held is not 31 (`null ne 31`).
     assert_eq!(
         listed(&h, &[("$filter", "age ne 31")]).await,
-        [json!("u2"), json!("u3")]
+        [json!("u2"), json!("u3"), json!("u4")]
     );
     // Under `not`, the comparison is false, so its negation holds.
     assert_eq!(
@@ -1538,4 +1540,77 @@ async fn the_model_s_items_lacking_an_expression_s_member_are_kept() {
         "{body}"
     );
     assert_eq!(capture.of("listUsers"), [Some("never_written".to_owned())]);
+}
+
+#[tokio::test]
+async fn eq_null_keeps_the_held_records_without_the_member() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    assert_eq!(
+        listed(&h, &[("$filter", "age eq null")]).await,
+        [json!("u4")]
+    );
+    assert_eq!(
+        listed(&h, &[("$filter", "age ne null and active eq true")]).await,
+        [json!("u1"), json!("u3")]
+    );
+    assert_eq!(capture.of("listUsers"), [None, None]);
+}
+
+#[tokio::test]
+async fn scim_folds_case_and_odata_does_not() {
+    let (capture, _guard) = Capture::install();
+    let h = users(Vec::new()).await;
+    assert_eq!(
+        listed(&h, &[("filter", r#"USERNAME EQ "ANNA""#)]).await,
+        [json!("u2")]
+    );
+    assert_eq!(
+        listed(&h, &[("$filter", "userName eq 'ANNA'")]).await,
+        Vec::<Value>::new()
+    );
+    assert_eq!(capture.of("listUsers"), [None, None]);
+}
+
+/// What does not parse, or is not one value, is generated rather than guessed: a
+/// repeated parameter, a field name that names no member, nesting past the limit, a
+/// long run of parentheses, and too many comparisons.
+#[tokio::test]
+async fn filters_past_the_grammar_s_limits_are_generated() {
+    let (capture, _guard) = Capture::install();
+    let deep_parens = format!("{}age eq 1{}", "(".repeat(33), ")".repeat(33));
+    let deep_nots = format!("{}age eq 1", "not ".repeat(33));
+    let many = vec!["age eq 1"; 257].join(" or ");
+    let cases: Vec<Vec<(&str, &str)>> = vec![
+        vec![("q", "active:true"), ("q", "age:40")],
+        vec![("q", "-status:open")],
+        vec![("q", "foo bar:x")],
+        vec![("$filter", deep_parens.as_str())],
+        vec![("$filter", deep_nots.as_str())],
+        vec![("$filter", many.as_str())],
+    ];
+    let generated = json!({"Resources": [user("u1", "ann", true, 31, "ann@acme.io", "r1")]});
+    let h = users(vec![generated; cases.len() + 1]).await;
+    let mut uris: Vec<String> = cases
+        .iter()
+        .map(|pairs| format!("/users?{}", query(pairs)))
+        .collect();
+    // A long run of parentheses, unescaped to fit a URI's limit (the parser's own test
+    // takes 100k).
+    uris.push(format!("/users?%24filter={}", "(".repeat(60_000)));
+    for uri in &uris {
+        let (source, body) = get(&h, uri).await;
+        assert_eq!(source, "llm", "{body}");
+    }
+    let reasons = capture.of("listUsers");
+    assert_eq!(reasons.len(), uris.len());
+    assert!(
+        reasons
+            .iter()
+            .all(|r| r.as_deref() == Some("unparsed_filter")),
+        "{reasons:?}"
+    );
+    let causes = capture.causes("listUsers");
+    assert_eq!(causes[0].as_deref(), Some("q"));
+    assert_eq!(causes[3].as_deref(), Some("$filter"));
 }

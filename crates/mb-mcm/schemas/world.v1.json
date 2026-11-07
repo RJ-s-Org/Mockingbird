@@ -542,8 +542,17 @@
                   "kind"
                 ],
                 "not": {
-                  "required": [
-                    "member_prefix"
+                  "anyOf": [
+                    {
+                      "required": [
+                        "grammar"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "member_prefix"
+                      ]
+                    }
                   ]
                 }
               },

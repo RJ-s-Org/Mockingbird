@@ -37,11 +37,12 @@
 //! `deep_object`, every key bracketed below it) into an expression of comparisons,
 //! each tested as above: `eq` by value, `gt`/`ge`/`lt`/`le` on numbers and RFC 3339
 //! date-times (other sides say nothing), `contains` as `contains` does. A missing
-//! member does not match a stored record and says nothing of an answered item, and a
-//! value that is not of its member's declared type says nothing; an item is left out
-//! only when the expression is false. SCIM's member names and text compare in any
-//! case. A value that does not parse ([`ListQuery::unparsed`]) narrows nothing; the
-//! executor's list falls back on it (`unparsed_filter`).
+//! member does not match a stored record (but for `ne`, which it does) and says
+//! nothing of an answered item, and a value that is not of its member's declared type
+//! says nothing; an item is left out only when the expression is false. SCIM's member
+//! names and text compare in any case. A value that does not parse, or a parameter
+//! given more than once ([`ListQuery::unparsed`]), narrows nothing; the executor's
+//! list falls back on it (`unparsed_filter`).
 //!
 //! Paging: the position is an offset into the matched, ordered items. A page number is
 //! 1-based unless its parameter's `minimum` is 0. The size is the request's size
@@ -439,12 +440,15 @@ impl Grammars {
                 Err(()) => None,
             }
         } else {
-            let Some(text) =
-                request_value(call, &f.param).and_then(|raw| texts(&raw).into_iter().next())
-            else {
-                return;
-            };
-            expr::parse(grammar, &text)
+            let values = request_value(call, &f.param)
+                .map(|raw| texts(&raw))
+                .unwrap_or_default();
+            match values.as_slice() {
+                [] => return,
+                [text] => expr::parse(grammar, text),
+                // A repeated parameter: which one counts is no part of the grammar.
+                _ => None,
+            }
         };
         let Some(mut e) = parsed else {
             self.unparsed.get_or_insert_with(|| f.param.clone());
