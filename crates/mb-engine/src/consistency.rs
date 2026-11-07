@@ -209,13 +209,8 @@ pub(crate) fn fixed_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
 /// The example `schema` gives, through `$ref`s: its `example`, else its first
 /// `examples`. Not of a boolean, whose example says nothing of which it is.
 pub(crate) fn example_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
+    let declared_boolean = declares_boolean(bundle, schema);
     let schema = deref(bundle, schema);
-    let boolean = |t: &Value| t == "boolean";
-    let declared_boolean = match schema.get("type") {
-        Some(Value::Array(types)) => types.iter().any(boolean),
-        Some(t) => boolean(t),
-        None => false,
-    };
     let example = schema.get("example").or_else(|| {
         schema
             .get("examples")
@@ -223,6 +218,16 @@ pub(crate) fn example_value(bundle: &Bundle, schema: &Value) -> Option<Value> {
             .and_then(|v| v.first())
     })?;
     (!declared_boolean && !example.is_boolean()).then(|| example.clone())
+}
+
+/// Whether `schema`, through `$ref`s, declares `boolean` among its types.
+pub(crate) fn declares_boolean(bundle: &Bundle, schema: &Value) -> bool {
+    let boolean = |t: &Value| t == "boolean";
+    match deref(bundle, schema).get("type") {
+        Some(Value::Array(types)) => types.iter().any(boolean),
+        Some(t) => boolean(t),
+        None => false,
+    }
 }
 
 /// The values `schema` allows, through `$ref`s, when it is an `enum`.

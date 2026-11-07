@@ -7,7 +7,8 @@
 //! [`run`] is the seam [`super::prepare`] calls once the call's target, refusals and
 //! tokens are settled. A classified call is logged at `info` with the field `exec` (its
 //! kind) when the executor answers it, and with `exec_fallback` (a [`Fallback`]) when it
-//! goes on to generation; executor answers are tagged `state`, as stored answers are.
+//! goes on to generation, a read's `render_failed` with `render_error` saying why; executor
+//! answers are tagged `state`, as stored answers are.
 //!
 //! An executor answer is final: a write is stored through [`commit`], which keeps only
 //! the side effects of a write (store, publish, webhooks, idempotency replay, cache),
@@ -198,7 +199,16 @@ async fn read(
         fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
         return Ran::Generate(None);
     };
-    match held_read(state, plan, call, stored, held.target_id, response_schema).await {
+    let read = held_read(
+        state,
+        plan,
+        call,
+        stored,
+        held.target_id,
+        response_schema,
+        true,
+    );
+    match read.await {
         HeldRead::Served(served) => {
             answered(rt, plan, kind);
             Ran::Answered(served)
@@ -207,8 +217,15 @@ async fn read(
             fell_back(rt, plan, kind, Fallback::Behind.as_str());
             Ran::Generate(Some(earlier))
         }
-        HeldRead::Unrendered(earlier) => {
-            fell_back(rt, plan, kind, Fallback::RenderFailed.as_str());
+        HeldRead::Unrendered(earlier, why) => {
+            tracing::info!(
+                mock = %rt.name,
+                operation = %plan.op.id,
+                exec = kind_name(kind),
+                exec_fallback = Fallback::RenderFailed.as_str(),
+                render_error = %why,
+                "not answered by the executor"
+            );
             Ran::Generate(earlier)
         }
     }
@@ -229,10 +246,19 @@ async fn unclassified(
     if !(matches!(plan.op.kind, OperationKind::Query) && plain(plan)) {
         return Ran::Generate(None);
     }
-    match held_read(state, plan, call, stored, held.target_id, response_schema).await {
+    let read = held_read(
+        state,
+        plan,
+        call,
+        stored,
+        held.target_id,
+        response_schema,
+        false,
+    );
+    match read.await {
         HeldRead::Served(served) => Ran::Answered(served),
         HeldRead::Behind(earlier) => Ran::Generate(Some(earlier)),
-        HeldRead::Unrendered(earlier) => Ran::Generate(earlier),
+        HeldRead::Unrendered(earlier, _) => Ran::Generate(earlier),
     }
 }
 
@@ -243,14 +269,18 @@ enum HeldRead {
     /// Writes it does not show yet are remembered: the read generates, with the
     /// rendered record kept for a catch-up that fails.
     Behind(Earlier),
-    /// It does not render into the answer, with what was recalled, when that was read.
-    Unrendered(Option<Earlier>),
+    /// It does not render into the answer, with what was recalled, when that was read,
+    /// and why ([`unrendered`]).
+    Unrendered(Option<Earlier>, String),
 }
 
 /// `stored` answered as the call's operation answers its record: with the members the
 /// description derives from its children when that answer suits the schema, else as
 /// stored, in the envelope the operation holds it in (with what the session's answers
-/// said of that envelope, [`envelopes`]).
+/// said of that envelope, [`envelopes`]). For the executor (`drawing`), the envelope's
+/// members that nothing kept and that their schema does not tell are `true` for a
+/// boolean, else the faker's ([`mb_engine::Engine::envelope_draws`]); today's path
+/// generates the read instead.
 async fn held_read(
     state: &mut StateAccess<'_>,
     plan: &CallPlan<'_>,
@@ -258,9 +288,24 @@ async fn held_read(
     stored: &StoredResource,
     target_id: Option<&str>,
     response_schema: Option<&Value>,
+    drawing: bool,
 ) -> HeldRead {
     let rt = state.rt;
     let op = plan.op;
+    // Drawn only once an answer without them does not stand.
+    let drawn = std::sync::OnceLock::new();
+    let drawn = || {
+        drawn.get_or_init(|| match drawing {
+            true => rt.engine.envelope_draws(&rt.bundle, op, response_schema),
+            false => Map::new(),
+        })
+    };
+    // What the session's answers said of the envelope, over the draws.
+    let over_drawn = |kept: Option<&Map<String, Value>>| {
+        let mut values = drawn().clone();
+        values.extend(kept.cloned().unwrap_or_default());
+        (!values.is_empty()).then_some(values)
+    };
     let derived = derived::filled(state, &plan.session, stored)
         .instrument(state_span())
         .await;
@@ -270,11 +315,23 @@ async fn held_read(
             .and_then(|filled| serve_held(rt, op, filled, kept, response_schema))
             .or_else(|| serve_held(rt, op, stored, kept, response_schema))
     };
+    // `kept` alone, else over the draws.
+    let held = |kept: Option<&Map<String, Value>>| {
+        held(kept).or_else(|| {
+            let values = over_drawn(kept).filter(|v| Some(v) != kept)?;
+            held(Some(&values))
+        })
+    };
+    // Why it does not render, for the executor's log line.
+    let why = |kept: Option<&Map<String, Value>>| match drawing {
+        true => unrendered(rt, op, stored, over_drawn(kept).as_ref(), response_schema),
+        false => String::new(),
+    };
     // What the schema alone tells of the envelope costs no read; what the session's
     // answers said of it is read only for an answer that stands.
     let (bare, enveloped) = (held(None), envelopes::applies(rt, op));
     if bare.is_none() && !enveloped {
-        return HeldRead::Unrendered(None);
+        return HeldRead::Unrendered(None, why(None));
     }
     let mut earlier = write_memory::recall(state, plan, call, target_id, true)
         .instrument(state_span())
@@ -291,12 +348,39 @@ async fn held_read(
         }
         false => None,
     };
-    match kept.and_then(|kept| held(Some(&kept))).or(bare) {
+    match kept.as_ref().and_then(|kept| held(Some(kept))).or(bare) {
         Some(mut served) => {
             write_memory::note_not_caught_up(&mut served, plan, Some(stored), &earlier);
             HeldRead::Served(Box::new(served))
         }
-        None => HeldRead::Unrendered(Some(earlier)),
+        None => HeldRead::Unrendered(Some(earlier), why(kept.as_ref())),
+    }
+}
+
+/// Why `stored` does not render into `op`'s answer, as logged (`render_error`): the
+/// first violation of the rendered answer (`<pointer> <keyword>`), or that its envelope
+/// requires a member nothing gives a value.
+fn unrendered(
+    rt: &crate::MockRuntime,
+    op: &mb_mcm::Operation,
+    stored: &StoredResource,
+    kept: Option<&Map<String, Value>>,
+    response_schema: Option<&Value>,
+) -> String {
+    let engine = &rt.engine;
+    let Some(answer) = engine.held_answer(&rt.bundle, op, &stored.data, kept, response_schema)
+    else {
+        return "envelope member unfilled".to_owned();
+    };
+    match engine.stored_violations(&rt.bundle, op, &answer, response_schema) {
+        Some(found) => found.into_iter().next().map_or_else(
+            || "no violation".to_owned(),
+            |(pointer, keyword)| match pointer.as_str() {
+                "" => format!("<root> {keyword}"),
+                at => format!("{at} {keyword}"),
+            },
+        ),
+        None => "no response schema".to_owned(),
     }
 }
 
