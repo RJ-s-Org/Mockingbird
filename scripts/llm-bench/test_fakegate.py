@@ -88,6 +88,22 @@ class ReuseTest(unittest.TestCase):
         self.assertTrue(all(contract and description for contract, description in entries.values()))
 
 
+class RunDirTest(unittest.TestCase):
+    def test_other_inputs_get_another_directory(self):
+        meta = {"binary": "b", "tree": "t", "authors": {"m": ["s1", "s2"]}, "agent_uncovered": [],
+                "inputs": {"s1": {}, "s2": {}}}
+        subset = dict(meta, authors={"m": ["s1"]}, inputs={"s1": {}})
+        self.assertEqual(fakegate.run_dir("/w", "abc", meta), fakegate.run_dir("/w", "abc", dict(meta)))
+        self.assertNotEqual(fakegate.run_dir("/w", "abc", meta), fakegate.run_dir("/w", "abc", subset))
+
+    def test_a_suite_with_no_rows_is_incomplete(self):
+        meta = {"authors": {"m": ["s1"]}, "inputs": {"s1": {}, "s2": {}}}
+        rows = {("agent", "s1", "c"): {}, ("none", "s1", "c"): {}}
+        self.assertEqual(fakegate.incomplete(rows, meta), [("none", "s2")])
+        rows[("none", "s2", "c")] = {}
+        self.assertEqual(fakegate.incomplete(rows, meta), [])
+
+
 class AuthorForTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

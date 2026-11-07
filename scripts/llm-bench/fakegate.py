@@ -32,6 +32,7 @@ the engine decides; the gate says nothing about checks that need a real model.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -210,11 +211,26 @@ def wait_listening(port, proc, timeout=15):
     return False
 
 
+def run_dir(work, name, meta):
+    """Results live in a directory named by the side and a hash of everything they depend
+    on, so a run with other inputs (another suite list, another checkout or cache) never
+    replaces results another gate is about to read."""
+    digest = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()[:12]
+    return os.path.join(work, f"run-{name}-{digest}")
+
+
+def incomplete(rows, meta):
+    """The (tier, suite) pairs a side should have run but has no rows for."""
+    have = {(t, s) for t, s, _ in rows}
+    want = [("agent", s) for ss in meta["authors"].values() for s in ss] + [("none", s) for s in meta["inputs"]]
+    return sorted(set(want) - have)
+
+
 def run_side(name, tree, binary, work, suites, models, jobs, cache):
-    """Every suite at both tiers on fake_llm.py; results under <work>/run-<name>, reused
-    when `side_meta` is unchanged. A lock keeps two gates from running the same side."""
-    out = os.path.join(work, f"run-{name}")
+    """Every suite at both tiers on fake_llm.py; results under `run_dir`, reused when the
+    run there finished. A lock keeps two gates from running the same side at once."""
     meta = side_meta(tree, binary, suites, models, cache)
+    out = run_dir(work, name, meta)
     with world_author.file_lock(out + ".lock"):
         done = os.path.join(out, "done")
         if reusable(done, meta):
@@ -324,7 +340,13 @@ def main():
     except SystemExit as e:
         print(f"fakegate: {e}", file=sys.stderr)
         return 2
-    report = compare(load(base_out), load(cand_out), a.noise)
+    base_rows, cand_rows = load(base_out), load(cand_out)
+    for side, rows, m, d in (("base", base_rows, meta, base_out), ("candidate", cand_rows, cmeta, cand_out)):
+        gaps = incomplete(rows, m)
+        if gaps:
+            print(f"fakegate: the {side}'s results under {d} have no rows for {gaps}; not comparing", file=sys.stderr)
+            return 2
+    report = compare(base_rows, cand_rows, a.noise)
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"base": base_sha, "candidate": name, "meta": cmeta,
