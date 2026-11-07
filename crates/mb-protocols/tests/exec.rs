@@ -626,7 +626,7 @@ async fn a_delete_of_a_soft_deleted_record_removes_it() {
     );
     let t = type_of(&h, "getFolder");
     let (status, _, body) = h
-        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .send("POST", "/folders", Some(json!({"name": "docs"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     for _ in 0..2 {
@@ -665,7 +665,7 @@ async fn a_generated_delete_of_a_soft_deleted_record_removes_it() {
     );
     let t = type_of(&h, "getFolder");
     let (status, _, body) = h
-        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .send("POST", "/folders", Some(json!({"name": "docs"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _, body) = h.send("DELETE", "/folders/f1", None, &[]).await;
