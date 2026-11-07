@@ -133,33 +133,60 @@ components:
 
 /// Something requests are sent to: a harness, or a rebuilt runtime's router.
 trait Sends {
-    async fn call(
+    async fn call_with(
         &self,
         method: &str,
         uri: &str,
         body: Option<Value>,
+        headers: &[(&str, &str)],
     ) -> (StatusCode, HeaderMap, Value);
-}
 
-impl Sends for DescribedHarness {
     async fn call(
         &self,
         method: &str,
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, HeaderMap, Value) {
-        self.send(method, uri, body, &[]).await
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Sends::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, HeaderMap, Value) {
+        self.call_with(method, uri, body, &[support::SEED]).await
+    }
+}
+
+impl Sends for DescribedHarness {
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
+        self.send(method, uri, body, headers).await
     }
 }
 
 impl Sends for axum::Router {
-    async fn call(
+    async fn call_with(
         &self,
         method: &str,
         uri: &str,
         body: Option<Value>,
+        headers: &[(&str, &str)],
     ) -> (StatusCode, HeaderMap, Value) {
         let mut req = axum::http::Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -218,7 +245,7 @@ async fn get(to: &impl Sends, uri: &str) -> (String, Value) {
 }
 
 async fn create(to: &impl Sends, uri: &str, body: Value) {
-    let (status, _, answer) = to.call("POST", uri, Some(body)).await;
+    let (status, _, answer) = to.seeded("POST", uri, Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{answer}");
 }
 

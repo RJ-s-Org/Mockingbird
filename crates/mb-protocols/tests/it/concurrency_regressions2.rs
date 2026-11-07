@@ -148,6 +148,21 @@ impl Harness {
         )
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut headers = headers.to_vec();
+        headers.push(crate::support::SEED);
+        self.send(method, uri, body, &headers).await
+    }
+
     fn calls(&self) -> usize {
         self.provider.requests().len()
     }
@@ -215,7 +230,7 @@ async fn an_etag_copied_from_a_list_after_a_mint_goes_through() {
         json!([n("b", "\"e1\"")]),
         answer(n("c", "\"e7\"")),
     ]);
-    h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     let (s, _, b) = h
         .send(
@@ -257,7 +272,7 @@ async fn a_read_only_member_the_client_tracks_is_a_token() {
         answer(c("c", 6)),
         refused,
     ]);
-    h.send("POST", "/carts", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/carts", Some(json!({"name": "a"})), &[])
         .await;
     let put = |name: &str, total: i64| json!({"id": "c1", "name": name, "total": total});
     let (s, _, b) = h.send("PUT", "/carts/c1", Some(put("b", 0)), &[]).await;

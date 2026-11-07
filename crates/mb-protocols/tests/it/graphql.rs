@@ -77,6 +77,14 @@ async fn post(base: &str, body: Value, headers: &[(&str, &str)]) -> Answer {
     answer(req.send().await.unwrap()).await
 }
 
+/// [`post`] of a create, seeded: a seeded create takes the generated path, which
+/// stores the record the model answered under the id it chose, as these tests expect.
+async fn seeded(base: &str, body: Value, headers: &[(&str, &str)]) -> Answer {
+    let mut headers = headers.to_vec();
+    headers.push(crate::support::SEED);
+    post(base, body, &headers).await
+}
+
 /// Sends only the head of a POST declaring a `len`-byte body and returns the
 /// answer's status and its lowercased head. The server refuses an oversized body from its
 /// `Content-Length` and closes the connection, so a client still uploading the
@@ -287,7 +295,7 @@ async fn aliases_after_a_mutation_reflect_state() {
     ]);
     let base = serve(runtime(Some(provider))).await;
     let session = [("x-mockingbird-session", "s1")];
-    let created = post(
+    let created = seeded(
         &base,
         json!({
             "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { id title: body body: title } }",
@@ -334,7 +342,7 @@ async fn swapped_aliases_on_a_stored_read_reflect_state() {
     ]);
     let base = serve(runtime(Some(provider))).await;
     let session = [("x-mockingbird-session", "s1")];
-    let created = post(
+    let created = seeded(
         &base,
         json!({
             "query": "mutation($in: CreateIssueInput!) { createIssue(input: $in) { id } }",
@@ -2029,7 +2037,7 @@ async fn batched_operations_run_in_order() {
         issue("i-1", "Something else"),
     ]);
     let base = serve(runtime(Some(provider))).await;
-    let r = post(
+    let r = seeded(
         &base,
         json!([
             {
@@ -2544,7 +2552,7 @@ async fn a_delete_by_id_leaves_its_payload_s_parent() {
     ]));
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
-    let created = post(
+    let created = seeded(
         &base,
         json!({"query": "mutation { productCreate(title: \"Tee\") { product { id title } } }"}),
         &session,
@@ -2705,7 +2713,7 @@ async fn an_update_writes_by_id_only_the_record_its_name_names() {
     ]));
     let base = serve(rt).await;
     let session = [("x-mockingbird-session", "s1")];
-    let created = post(
+    let created = seeded(
         &base,
         json!({"query": "mutation { createTeam(name: \"Core\", role: \"team\") { id name role } }"}),
         &session,
@@ -2754,7 +2762,7 @@ type Mutation {
     ]);
     let base = serve(sdl_runtime(SDL, Some(provider))).await;
     let session = [("x-mockingbird-session", "s1")];
-    let created = post(
+    let created = seeded(
         &base,
         json!({"query": "mutation { createTeam(name: \"Core\", role: \"team\") { id name role } }"}),
         &session,

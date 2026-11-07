@@ -460,6 +460,26 @@ impl Harness {
         self.call_in(None, method, uri, body).await
     }
 
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(None, method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    /// [`Self::seeded`] in `session`.
+    async fn seeded_in(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        self.call_with(session, method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
     async fn call_in(
         &self,
         session: Option<&str>,
@@ -467,7 +487,21 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        self.call_with(session, method, uri, body, &[]).await
+    }
+
+    async fn call_with(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -911,7 +945,7 @@ async fn a_type_the_session_wrote_is_looked_up_first() {
         ],
         |_| {},
     );
-    h.call("POST", "/t39s", Some(json!({}))).await;
+    h.seeded("POST", "/t39s", Some(json!({}))).await;
     h.call("POST", "/actions", Some(json!({"on": "value-4711"})))
         .await;
     let prompt = h.prompt(1);
@@ -1287,7 +1321,7 @@ async fn a_member_the_request_declares_can_still_hide() {
 #[tokio::test]
 async fn a_write_that_stored_its_record_tells_no_route() {
     let h = world(vec![note("note-4711"), json!([note("note-4711")])]);
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     h.call("GET", "/notes", None).await;
     let prompt = h.prompt(1);
@@ -1320,7 +1354,7 @@ async fn a_callers_answer_reaches_later_prompts() {
     h.call("GET", "/me", None).await;
     assert!(block(&h.prompt(0), "earlier_answers").is_none());
 
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(1);
     let shown = block(&prompt, "earlier_answers").unwrap();
@@ -1357,12 +1391,12 @@ async fn a_read_storing_nothing_lists_no_session() {
     );
 
     // The first write is told of the answer, and lists the session.
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     assert_eq!(h.store.sessions("default", "m").await.unwrap().len(), 1);
     let shown = block(&h.prompt(2), "earlier_answers").unwrap().to_owned();
     assert!(shown.contains("user-1"), "{shown}");
-    h.call("POST", "/notes", Some(json!({"title": "Another"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "Another"})))
         .await;
     let again = block(&h.prompt(3), "earlier_answers").unwrap().to_owned();
     assert!(again.contains("user-1"), "{again}");
@@ -1399,7 +1433,7 @@ async fn an_unlisted_session_keeps_its_deleted_markers() {
     );
     let (status, _) = h.call("GET", "/users/u-9", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let shown = block(&h.prompt(2), "earlier_answers").unwrap().to_owned();
     assert!(shown.contains("user-1"), "{shown}");
@@ -1513,7 +1547,7 @@ async fn earlier_answers_are_capped() {
     for route in ["/me", "/quota", "/team", "/plan", "/settings"] {
         h.call("GET", route, None).await;
     }
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(5);
     let shown = block(&prompt, "earlier_answers").unwrap();
@@ -1535,7 +1569,7 @@ async fn earlier_answers_are_scrubbed() {
         note("note-4711"),
     ]);
     h.call("GET", "/settings", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(1);
     let shown = block(&prompt, "earlier_answers").unwrap();
@@ -1555,7 +1589,7 @@ async fn earlier_answers_are_per_session_and_cleared_by_reset() {
     let h = world(vec![me(), note("note-4711"), note("note-4712")]);
     h.call("GET", "/me", None).await;
     let note_request = || Some(json!({"title": "A note"}));
-    h.call_in(Some("other"), "POST", "/notes", note_request())
+    h.seeded_in(Some("other"), "POST", "/notes", note_request())
         .await;
     assert!(
         block(&h.prompt(1), "earlier_answers").is_none(),
@@ -1563,7 +1597,7 @@ async fn earlier_answers_are_per_session_and_cleared_by_reset() {
         h.prompt(1)
     );
     h.state.reset(&session()).await.unwrap();
-    h.call("POST", "/notes", note_request()).await;
+    h.seeded("POST", "/notes", note_request()).await;
     assert!(
         block(&h.prompt(2), "earlier_answers").is_none(),
         "{}",
@@ -1601,7 +1635,7 @@ async fn other_routes_are_not_remembered() {
     h.call("GET", "/notes", None).await;
     h.call("GET", "/stats?day=today", None).await;
     h.call("GET", "/feed", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     assert!(
         block(&h.prompt(3), "earlier_answers").is_none(),
@@ -1630,14 +1664,14 @@ async fn a_write_to_the_route_replaces_or_forgets_its_answer() {
     ]);
     h.call("GET", "/me", None).await;
     h.call("PUT", "/me", Some(json!({"name": "Bo"}))).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(2);
     let shown = block(&prompt, "earlier_answers").unwrap();
     assert!(shown.contains("Bo") && !shown.contains("Ann"), "{prompt}");
 
     h.call("PATCH", "/me", Some(json!({"name": "Cy"}))).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(h.calls() - 1);
     assert!(block(&prompt, "earlier_answers").is_none(), "{prompt}");
@@ -1648,7 +1682,7 @@ async fn a_write_to_the_route_replaces_or_forgets_its_answer() {
 #[tokio::test]
 async fn nothing_remembered_leaves_the_prompt_as_it_was() {
     let h = world(vec![note("note-4711")]);
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(0);
     let now = prompt.lines().find(|l| l.starts_with("<now>")).unwrap();
@@ -1671,11 +1705,11 @@ async fn a_typical_answer_costs_few_tokens() {
     });
     let plain = world(vec![note("note-4711")]);
     plain
-        .call("POST", "/notes", Some(json!({"title": "A note"})))
+        .seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let h = world(vec![discord_me, note("note-4711")]);
     h.call("GET", "/quota", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let added = h.prompt(1).len() - plain.prompt(0).len();
     println!(
@@ -1820,7 +1854,7 @@ async fn an_answers_secrets_stay_out_of_prompts_and_memory() {
     ] {
         let h = world(vec![answer.clone(), note("note-4711")]);
         h.call(method, "/account", request).await;
-        h.call("POST", "/notes", Some(json!({"title": "A note"})))
+        h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
             .await;
         let prompt = h.prompt(1);
         let shown = block(&prompt, "earlier_answers").unwrap();
@@ -1855,7 +1889,7 @@ async fn a_credentials_pair_stays_out_of_earlier_answers() {
         note("note-4711"),
     ]);
     h.call("GET", "/account", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(1);
     let shown = block(&prompt, "earlier_answers").unwrap();
@@ -1936,7 +1970,7 @@ async fn an_undeclared_echo_stays_out_of_earlier_answers() {
         Some(json!({"credit_card": "hush", "ssn": "hush", "code": "hush"})),
     )
     .await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(1);
     let shown = block(&prompt, "earlier_answers").unwrap();
@@ -1957,7 +1991,7 @@ async fn a_credentials_own_identity_is_not_told() {
         ("/api_keys", json!({"key": "hush-key", "label": "kept"})),
     ] {
         let h = world(vec![json!({"ok": true}), json!([])]);
-        h.call("POST", route, Some(request)).await;
+        h.seeded("POST", route, Some(request)).await;
         h.call("GET", route, None).await;
         let prompt = h.prompt(1);
         let told = block(&prompt, "earlier_writes").unwrap();
@@ -2077,7 +2111,7 @@ async fn jiras_project_key_is_told() {
         })],
         |_| {},
     );
-    h.call(
+    h.seeded(
         "POST",
         "/rest/api/3/issue",
         Some(json!({"fields": {
@@ -2096,7 +2130,7 @@ async fn jiras_project_key_is_told() {
 async fn a_route_is_shown_its_own_answer() {
     let h = world(vec![me(), note("note-4711"), me()]);
     h.call("GET", "/me", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     h.call("GET", "/me", None).await;
     let prompt = h.prompt(2);
@@ -2111,7 +2145,7 @@ async fn a_route_is_shown_its_own_answer() {
 async fn earlier_answers_are_advisory() {
     let h = world(vec![me(), note("note-4711")]);
     h.call("GET", "/me", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(1);
     assert!(prompt.contains("may have changed"), "{prompt}");
@@ -2125,7 +2159,7 @@ async fn deleting_a_record_forgets_the_answer_about_it() {
     h.call("GET", "/me", None).await;
     h.call("GET", "/plan", None).await;
     h.call("DELETE", "/users/user-1", None).await;
-    h.call("POST", "/notes", Some(json!({"title": "A note"})))
+    h.seeded("POST", "/notes", Some(json!({"title": "A note"})))
         .await;
     let prompt = h.prompt(h.calls() - 1);
     let shown = block(&prompt, "earlier_answers").unwrap();
@@ -2332,7 +2366,7 @@ async fn a_create_is_offered_no_refusal() {
     );
     h.hold("captures", "cap-4711", capture()).await;
     let (status, body) = h
-        .call(
+        .seeded(
             "POST",
             "/refunds",
             Some(json!({"capture_id": "cap-4711", "amount": "10.00"})),
@@ -2414,7 +2448,7 @@ async fn a_create_under_a_shown_parent_can_be_refused_as_declared() {
     );
     h.hold("captures", "cap-4711", capture()).await;
     let (status, body) = h
-        .call(
+        .seeded(
             "POST",
             "/captures/cap-4711/refunds",
             Some(json!({"amount": "10.00"})),
@@ -2633,7 +2667,7 @@ async fn a_record_only_the_body_names_offers_a_create_no_refusal() {
     )
     .await;
     let (status, body) = h
-        .call(
+        .seeded(
             "POST",
             "/posts/p-100/comments",
             Some(json!({"text": "me too", "in_reply_to": "cmt-000123"})),
@@ -2646,7 +2680,7 @@ async fn a_record_only_the_body_names_offers_a_create_no_refusal() {
     assert!(!prompt.contains("refusal"), "{prompt}");
 
     let (status, body) = h
-        .call(
+        .seeded(
             "POST",
             "/posts/p-100/comments",
             Some(json!({"text": "me too"})),
@@ -2677,7 +2711,7 @@ async fn a_record_created_alongside_counts_when_also_named_by_value() {
         |_| {},
     );
     let (status, body) = h
-        .call(
+        .seeded(
             "POST",
             "/posts/p-100/comments",
             Some(json!({"text": "me too"})),
@@ -2685,7 +2719,7 @@ async fn a_record_created_alongside_counts_when_also_named_by_value() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, body) = h
-        .call(
+        .seeded(
             "POST",
             "/posts/p-100/comments",
             Some(json!({"text": "me too", "in_reply_to": "cmt-000201"})),

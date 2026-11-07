@@ -58,8 +58,13 @@ async fn call(
     );
     rt.recorder = Some(Arc::clone(&records) as Arc<dyn mb_protocols::RequestRecorder>);
     let mut req = Request::builder().method(method).uri(path);
-    // These tests are about the model's effects on an update: each update also sends a
-    // member no record declares, which the state-first executor leaves to the model.
+    // These tests are about the model's effects: each create is seeded
+    // ([`crate::support::SEED`]), which takes it past the state-first executor.
+    if method == "POST" {
+        req = req.header(crate::support::SEED.0, crate::support::SEED.1);
+    }
+    // And each update also sends a member no record declares, which the state-first
+    // executor leaves to the model.
     let body = match (method, body) {
         ("PUT" | "PATCH", Some(Value::Object(mut members))) => {
             members.insert("comment".into(), json!("from the client"));

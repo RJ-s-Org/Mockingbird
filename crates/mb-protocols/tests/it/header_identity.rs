@@ -312,10 +312,36 @@ async fn send(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, HeaderMap, Value) {
-    let req = Request::builder()
+    send_with(router, method, uri, body, &[]).await
+}
+
+/// [`send`] of a create, seeded: a seeded create takes the generated path,
+/// which stores the record the model answered under the id it chose, as these
+/// tests expect.
+async fn seeded(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, HeaderMap, Value) {
+    send_with(router, method, uri, body, &[crate::support::SEED]).await
+}
+
+async fn send_with(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Value) {
+    let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let req = req
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
@@ -348,7 +374,7 @@ fn source(headers: &HeaderMap) -> String {
 #[tokio::test]
 async fn an_id_header_names_the_stored_record() {
     let r = router(vec![json!({"lineIds": [5]}), json!({"lineIds": [6]})]);
-    let (status, headers, body) = send(
+    let (status, headers, body) = seeded(
         &r,
         "POST",
         "/tickets",
@@ -367,7 +393,7 @@ async fn an_id_header_names_the_stored_record() {
     assert_eq!(read["status"], "open");
     assert_eq!(read["id"].to_string(), id);
 
-    let (_, headers, _) = send(&r, "POST", "/tickets", Some(json!({"title": "Toner"}))).await;
+    let (_, headers, _) = seeded(&r, "POST", "/tickets", Some(json!({"title": "Toner"}))).await;
     let other = header(&headers, "resource-id");
     assert_ne!(other, id);
     let (_, _, read) = send(&r, "GET", &format!("/tickets/{other}"), None).await;
@@ -473,7 +499,8 @@ async fn a_body_id_is_served_in_the_id_header() {
         json!({"id": "n_1", "text": "first"}),
         json!({"text": "second"}),
     ]);
-    let (status, headers, body) = send(&r, "POST", "/notes", Some(json!({"text": "first"}))).await;
+    let (status, headers, body) =
+        seeded(&r, "POST", "/notes", Some(json!({"text": "first"}))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["id"], "n_1", "{body}");
     assert_eq!(header(&headers, "note-id"), "n_1");
@@ -481,7 +508,8 @@ async fn a_body_id_is_served_in_the_id_header() {
     assert_eq!(source(&headers), "state", "{read}");
     assert_eq!(read["text"], "first", "{read}");
 
-    let (status, headers, body) = send(&r, "POST", "/notes", Some(json!({"text": "second"}))).await;
+    let (status, headers, body) =
+        seeded(&r, "POST", "/notes", Some(json!({"text": "second"}))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let id = body["id"].as_str().unwrap_or_default().to_string();
     assert!(!id.is_empty(), "{body}");
@@ -676,7 +704,8 @@ async fn a_patterned_id_header_mints_a_matching_id() {
 #[tokio::test]
 async fn a_body_id_breaking_the_headers_format_is_not_served_there() {
     let r = router_for(CONSTRAINED, vec![json!({"id": "a_7", "title": "Logo"})]);
-    let (status, headers, body) = send(&r, "POST", "/assets", Some(json!({"title": "Logo"}))).await;
+    let (status, headers, body) =
+        seeded(&r, "POST", "/assets", Some(json!({"title": "Logo"}))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["id"], "a_7", "{body}");
     let served = header(&headers, "asset-id");

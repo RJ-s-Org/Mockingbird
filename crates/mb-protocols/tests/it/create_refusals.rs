@@ -5,6 +5,8 @@
 //! hold a value of its request under the same member, and is offered the declared
 //! statuses. Driven over HTTP with a scripted LLM, asserting the prompts it was sent
 //! and what the store holds.
+//!
+//! Step 6 deletes these tests: they check complete()'s create internals (seeded creates).
 #![cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
@@ -175,8 +177,10 @@ fn harness_on(store: Arc<dyn StateStore>, contract: &str, script: Vec<Value>) ->
 }
 
 impl Harness {
-    async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
-        self.post_with(uri, body, &[]).await
+    /// A create, seeded: a seeded create takes the generated path, which stores the
+    /// record the model answered under the id it chose, as these tests expect.
+    async fn seeded(&self, uri: &str, body: Value) -> (StatusCode, Value) {
+        self.post_with(uri, body, &[crate::support::SEED]).await
     }
 
     async fn post_with(
@@ -261,7 +265,7 @@ async fn a_create_with_a_taken_email_is_shown_its_holder_and_offered_the_409() {
         ],
     );
     let (status, _) = h
-        .post(
+        .seeded(
             "/contacts",
             json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
         )
@@ -270,7 +274,7 @@ async fn a_create_with_a_taken_email_is_shown_its_holder_and_offered_the_409() {
     assert!(!h.prompt(0).contains("refusal"), "{}", h.prompt(0));
 
     let (status, body) = h
-        .post(
+        .seeded(
             "/contacts",
             json!({"name": "J. Roe", "email": "jane.roe@example.com"}),
         )
@@ -321,13 +325,13 @@ async fn a_create_with_another_email_shows_nothing() {
             contact("ct-000102", "John Doe", "john.doe@example.com"),
         ],
     );
-    h.post(
+    h.seeded(
         "/contacts",
         json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
     )
     .await;
     let second = json!({"name": "John Doe", "email": "john.doe@example.com"});
-    let (status, _) = h.post("/contacts", second.clone()).await;
+    let (status, _) = h.seeded("/contacts", second.clone()).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
@@ -337,7 +341,7 @@ async fn a_create_with_another_email_shows_nothing() {
         CONTRACT,
         vec![contact("ct-000102", "John Doe", "john.doe@example.com")],
     );
-    fresh.post("/contacts", second).await;
+    fresh.seeded("/contacts", second).await;
     // The clock line says when each was sent, which may be another second.
     let timeless = |p: &str| {
         p.lines()
@@ -375,7 +379,7 @@ async fn a_common_value_shows_nothing() {
         ("Cy Fox", "cy@example.com"),
     ] {
         let (status, _) = h
-            .post(
+            .seeded(
                 "/contacts",
                 json!({"name": name, "email": email, "status": "active"}),
             )
@@ -406,8 +410,8 @@ async fn no_declared_conflict_offers_no_refusal() {
         ],
     );
     let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
-    h.post("/contacts", body.clone()).await;
-    let (status, _) = h.post("/contacts", body).await;
+    h.seeded("/contacts", body.clone()).await;
+    let (status, _) = h.seeded("/contacts", body).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
@@ -425,8 +429,8 @@ fn folder(id: &str, parent: &str) -> Value {
 async fn a_taken_name_counts_only_in_the_same_parent() {
     let h = harness(CONTRACT, vec![folder("fd-000001", "0"), refusal()]);
     let body = json!({"name": "Quarterly Reports", "parent": {"id": "0"}});
-    h.post("/folders", body.clone()).await;
-    let (status, out) = h.post("/folders", body).await;
+    h.seeded("/folders", body.clone()).await;
+    let (status, out) = h.seeded("/folders", body).await;
     let prompt = h.prompt(1);
     assert_eq!(status, StatusCode::CONFLICT, "{out} {prompt}");
     let same = block(&prompt, "same_values").unwrap_or_default();
@@ -440,13 +444,13 @@ async fn a_taken_name_counts_only_in_the_same_parent() {
         CONTRACT,
         vec![folder("fd-000001", "0"), folder("fd-000002", "77")],
     );
-    h.post(
+    h.seeded(
         "/folders",
         json!({"name": "Quarterly Reports", "parent": {"id": "0"}}),
     )
     .await;
     let (status, _) = h
-        .post(
+        .seeded(
             "/folders",
             json!({"name": "Quarterly Reports", "parent": {"id": "77"}}),
         )
@@ -466,13 +470,13 @@ async fn a_body_reference_to_another_parent_shows_nothing() {
     let mut second = contact("ct-000102", "Jane Roe", "jane.roe@example.com");
     second["org_id"] = json!("org-000002");
     let h = harness(CONTRACT, vec![stored, second]);
-    h.post(
+    h.seeded(
         "/contacts",
         json!({"name": "Jane Roe", "email": "jane.roe@example.com", "org_id": "org-000001"}),
     )
     .await;
     let (status, _) = h
-        .post(
+        .seeded(
             "/contacts",
             json!({"name": "Jane Roe", "email": "jane.roe@example.com", "org_id": "org-000002"}),
         )
@@ -496,8 +500,8 @@ async fn a_lone_plain_value_is_no_conflict() {
         let mut again = body.clone();
         again["id"] = json!("fd-000002");
         let h = harness(CONTRACT, vec![held, again]);
-        h.post("/folders", body.clone()).await;
-        let (status, _) = h.post("/folders", body.clone()).await;
+        h.seeded("/folders", body.clone()).await;
+        let (status, _) = h.seeded("/folders", body.clone()).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let prompt = h.prompt(1);
         assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
@@ -572,8 +576,8 @@ async fn a_hit_under_another_path_parent_shows_nothing() {
         ],
     );
     let body = json!({"email": "jane.roe@example.com"});
-    h.post("/orgs/acme/members", body.clone()).await;
-    let (status, _) = h.post("/orgs/globex/members", body).await;
+    h.seeded("/orgs/acme/members", body.clone()).await;
+    let (status, _) = h.seeded("/orgs/globex/members", body).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(!prompt.contains("mb-000001"), "{prompt}");
@@ -588,8 +592,8 @@ async fn a_hit_under_another_path_parent_shows_nothing() {
         ],
     );
     let body = json!({"email": "jane.roe@example.com"});
-    h.post("/orgs/acme/members", body.clone()).await;
-    let (status, _) = h.post("/orgs/acme/members", body).await;
+    h.seeded("/orgs/acme/members", body.clone()).await;
+    let (status, _) = h.seeded("/orgs/acme/members", body).await;
     let prompt = h.prompt(1);
     assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
     let same = block(&prompt, "same_values").unwrap_or_default();
@@ -603,8 +607,8 @@ async fn a_hit_under_another_path_parent_shows_nothing() {
         ],
     );
     let body = json!({"title": "Buy milk"});
-    h.post("/projects/A/tasks", body.clone()).await;
-    let (status, _) = h.post("/projects/B/tasks", body).await;
+    h.seeded("/projects/A/tasks", body.clone()).await;
+    let (status, _) = h.seeded("/projects/B/tasks", body).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(!prompt.contains("tk-000001"), "{prompt}");
@@ -640,16 +644,24 @@ async fn an_idempotent_retry_shows_nothing() {
             ],
         );
         let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
-        h.post_with("/contacts", body.clone(), &[(name, "key-000001")])
-            .await;
+        h.post_with(
+            "/contacts",
+            body.clone(),
+            &[(name, "key-000001"), crate::support::SEED],
+        )
+        .await;
         let (status, _) = h
-            .post_with("/contacts", body.clone(), &[(name, "key-000001")])
+            .post_with(
+                "/contacts",
+                body.clone(),
+                &[(name, "key-000001"), crate::support::SEED],
+            )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{name}");
         let prompt = h.prompt(1);
         assert!(!prompt.contains("refusal"), "{name}: {prompt}");
         // Without the key, the same create is offered the refusal.
-        let (status, _) = h.post("/contacts", body).await;
+        let (status, _) = h.seeded("/contacts", body).await;
         assert_eq!(status, StatusCode::CONFLICT, "{name}: {}", h.prompt(2));
     }
 }
@@ -672,8 +684,8 @@ async fn a_create_never_offered_a_refusal_is_shown_nothing() {
         ],
     );
     let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
-    h.post("/contacts", body.clone()).await;
-    let (status, _) = h.post("/contacts", body).await;
+    h.seeded("/contacts", body.clone()).await;
+    let (status, _) = h.seeded("/contacts", body).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(block(&prompt, "related_resources").is_none(), "{prompt}");
@@ -692,8 +704,8 @@ async fn a_plain_match_needs_a_refusal_naming_its_member() {
         let mut again = body.clone();
         again["id"] = json!("tk-000002");
         let h = harness(CONTRACT, vec![held, again]);
-        h.post("/tasks", body.clone()).await;
-        let (status, _) = h.post("/tasks", body.clone()).await;
+        h.seeded("/tasks", body.clone()).await;
+        let (status, _) = h.seeded("/tasks", body.clone()).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let prompt = h.prompt(1);
         assert!(!prompt.contains("tk-000001"), "{prompt}");
@@ -708,8 +720,8 @@ async fn a_plain_match_counts_when_a_refusal_names_its_member() {
     let label = json!({"id": "lb-000001", "displayTitle": "Urgent work", "board_id": "b1"});
     let h = harness(CONTRACT, vec![label, refusal()]);
     let body = json!({"displayTitle": "Urgent work", "board_id": "b1"});
-    h.post("/labels", body.clone()).await;
-    let (status, _) = h.post("/labels", body).await;
+    h.seeded("/labels", body.clone()).await;
+    let (status, _) = h.seeded("/labels", body).await;
     let prompt = h.prompt(1);
     assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
     let same = block(&prompt, "same_values").unwrap_or_default();
@@ -728,8 +740,8 @@ async fn a_top_level_create_skips_records_of_a_parent_path() {
         ],
     );
     let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
-    h.post("/groups/g1/contacts", body.clone()).await;
-    let (status, _) = h.post("/contacts", body).await;
+    h.seeded("/groups/g1/contacts", body.clone()).await;
+    let (status, _) = h.seeded("/contacts", body).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = h.prompt(1);
     assert!(!prompt.contains("ct-000101"), "{prompt}");
@@ -769,13 +781,13 @@ async fn a_sql_store_finds_what_a_create_repeats() {
                 folder("fd-000002", "77"),
             ],
         );
-        h.post(
+        h.seeded(
             "/contacts",
             json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
         )
         .await;
         let (status, _) = h
-            .post(
+            .seeded(
                 "/contacts",
                 json!({"name": "J. Roe", "email": "jane.roe@example.com"}),
             )
@@ -789,8 +801,8 @@ async fn a_sql_store_finds_what_a_create_repeats() {
         );
 
         let body = json!({"name": "Quarterly Reports", "parent": {"id": "0"}});
-        h.post("/folders", body.clone()).await;
-        let (status, _) = h.post("/folders", body).await;
+        h.seeded("/folders", body.clone()).await;
+        let (status, _) = h.seeded("/folders", body).await;
         let prompt = h.prompt(3);
         assert_eq!(status, StatusCode::CONFLICT, "{backend}: {prompt}");
         let same = block(&prompt, "same_values").unwrap_or_default();
@@ -799,7 +811,7 @@ async fn a_sql_store_finds_what_a_create_repeats() {
             "{backend}: {prompt}"
         );
         let (status, _) = h
-            .post(
+            .seeded(
                 "/folders",
                 json!({"name": "Quarterly Reports", "parent": {"id": "77"}}),
             )
@@ -820,8 +832,8 @@ async fn a_sql_store_finds_what_a_create_repeats() {
             ],
         );
         let body = json!({"email": "jane.roe@example.com"});
-        h.post("/orgs/acme/members", body.clone()).await;
-        let (status, _) = h.post("/orgs/globex/members", body).await;
+        h.seeded("/orgs/acme/members", body.clone()).await;
+        let (status, _) = h.seeded("/orgs/globex/members", body).await;
         assert_eq!(status, StatusCode::CREATED, "{backend}");
         let prompt = h.prompt(1);
         assert!(!prompt.contains("mb-000001"), "{backend}: {prompt}");
@@ -865,7 +877,7 @@ async fn a_shared_store_finds_a_record_another_node_stored() {
         .unwrap();
     let h = harness_on(ours, &flat_contract(), vec![refusal()]);
     let (status, _) = h
-        .post(
+        .seeded(
             "/contacts",
             json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
         )
@@ -887,7 +899,7 @@ async fn a_shared_store_finds_a_record_another_node_stored() {
         vec![folder("fd-000903", "0")],
     );
     let (status, _) = h
-        .post(
+        .seeded(
             "/folders",
             json!({"name": "Quarterly Reports", "parent": {"id": "0"}}),
         )
@@ -918,16 +930,16 @@ async fn a_top_level_create_skips_another_runtime_s_record_of_a_parent_path() {
         ],
     );
     let body = json!({"name": "Jane Roe", "email": "jane.roe@example.com"});
-    let (status, _) = a.post("/groups/g1/contacts", body.clone()).await;
+    let (status, _) = a.seeded("/groups/g1/contacts", body.clone()).await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, _) = b.post("/contacts", body.clone()).await;
+    let (status, _) = b.seeded("/contacts", body.clone()).await;
     let prompt = b.prompt(0);
     assert_eq!(status, StatusCode::CREATED, "{prompt}");
     assert!(!prompt.contains("ct-000101"), "{prompt}");
     assert!(!prompt.contains("same_values"), "{prompt}");
 
     // What B created at the top level, it knows is in no collection: a repeat counts.
-    let (status, _) = b.post("/contacts", body).await;
+    let (status, _) = b.seeded("/contacts", body).await;
     let prompt = b.prompt(1);
     assert_eq!(status, StatusCode::CONFLICT, "{prompt}");
     let same = block(&prompt, "same_values").unwrap_or_default();
@@ -952,7 +964,7 @@ async fn a_seeded_record_counts_on_every_store() {
             .unwrap();
         let h = harness_on(store, &flat_contract(), vec![refusal()]);
         let (status, _) = h
-            .post(
+            .seeded(
                 "/contacts",
                 json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
             )
@@ -1038,7 +1050,7 @@ async fn a_failed_listing_decides_nothing() {
             }],
         );
         let (status, _) = h
-            .post(
+            .seeded(
                 "/contacts",
                 json!({"name": "Jane Roe", "email": "jane.roe@example.com"}),
             )

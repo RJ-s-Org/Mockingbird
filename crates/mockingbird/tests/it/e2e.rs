@@ -70,8 +70,11 @@ async fn e2e_create_get_delete_with_wiremock_llm() {
     let base = serve(app).await;
     let http = reqwest::Client::new();
 
+    // The create is seeded: a seeded create takes the generated path, which stores the
+    // order the model answered under the id it chose (`O1`).
     let r = http
         .post(format!("{base}/orders"))
+        .header("x-mockingbird-seed", "1")
         .json(&json!({"customerId": "c1", "total": 10}))
         .send()
         .await

@@ -113,7 +113,28 @@ fn api_over(
 
 impl Api {
     async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -468,7 +489,7 @@ fn user(id: &str, email: &str) -> Value {
 /// Creates `u1` with `ana@example.com`, then deletes it.
 async fn created_then_deleted(api: &Api) {
     let (status, _) = api
-        .call("POST", "/users", Some(json!({"email": "ana@example.com"})))
+        .seeded("POST", "/users", Some(json!({"email": "ana@example.com"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, _) = api.call("DELETE", "/users/u1", None).await;
@@ -509,7 +530,7 @@ async fn a_recreated_user_is_found_by_email() {
     );
     created_then_deleted(&api).await;
     let (status, _) = api
-        .call("POST", "/users", Some(json!({"email": "ana@example.com"})))
+        .seeded("POST", "/users", Some(json!({"email": "ana@example.com"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/users-by-email?email=ana@example.com").await;
@@ -527,7 +548,7 @@ async fn a_recreated_user_is_found_by_email() {
     );
     created_then_deleted(&api).await;
     let (status, _) = api
-        .call("POST", "/users", Some(json!({"email": "ana@example.com"})))
+        .seeded("POST", "/users", Some(json!({"email": "ana@example.com"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/users-by-email?email=ana@example.com").await;
@@ -586,7 +607,7 @@ async fn a_capture_read_sees_its_refunds() {
         ],
     );
     let (status, _) = api
-        .call(
+        .seeded(
             "POST",
             "/captures/C1/refund",
             Some(json!({"amount": "1.00"})),
@@ -631,11 +652,11 @@ async fn a_second_refund_sees_the_first() {
     );
     let body = json!({"amount": "1.00"});
     let (status, _) = api
-        .call("POST", "/captures/C1/refund", Some(body.clone()))
+        .seeded("POST", "/captures/C1/refund", Some(body.clone()))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, _) = api
-        .call("POST", "/captures/C1/refund", Some(body.clone()))
+        .seeded("POST", "/captures/C1/refund", Some(body.clone()))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = api.prompt(1);
@@ -643,7 +664,7 @@ async fn a_second_refund_sees_the_first() {
         related_of(&prompt).iter().any(|l| l.contains("\"R1\"")),
         "{prompt}"
     );
-    let (status, _) = api.call("POST", "/captures/C2/refund", Some(body)).await;
+    let (status, _) = api.seeded("POST", "/captures/C2/refund", Some(body)).await;
     assert_eq!(status, StatusCode::CREATED);
     let prompt = api.prompt(2);
     assert!(!prompt.contains("\"R1\""), "{prompt}");
@@ -744,7 +765,7 @@ fn with(mut item: Value, member: &str, value: Value) -> Value {
 /// Creates ticket `t1` and updates its status to `to`.
 async fn created_then_updated(api: &Api, to: &str) {
     let (status, _) = api
-        .call("POST", "/tickets", Some(json!({"title": "T t1"})))
+        .seeded("POST", "/tickets", Some(json!({"title": "T t1"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, _) = api
@@ -906,7 +927,7 @@ async fn a_stored_record_of_another_parent_is_not_overlaid() {
         ],
     );
     let (status, _) = api
-        .call("POST", "/projects/p1/tasks", Some(json!({"title": "A"})))
+        .seeded("POST", "/projects/p1/tasks", Some(json!({"title": "A"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/projects/p2/tasks").await;
@@ -1025,7 +1046,7 @@ async fn an_alias_in_the_path_is_no_parent() {
         ],
     );
     let (status, _) = api
-        .call("POST", "/events", Some(json!({"kind": "login"})))
+        .seeded("POST", "/events", Some(json!({"kind": "login"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/users/me/events").await;
@@ -1045,7 +1066,7 @@ async fn a_member_of_two_lists_stays_in_both() {
         ],
     );
     let (status, _) = api
-        .call("POST", "/lists/A/members", Some(json!({"name": "Hal"})))
+        .seeded("POST", "/lists/A/members", Some(json!({"name": "Hal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/lists/B/members").await;
@@ -1107,7 +1128,7 @@ async fn all_of_parts_of_a_member_are_merged() {
             Ok(json!([{"id": "n1", "owner": {"id": "o1"}}]).to_string()),
         ],
     );
-    let (status, _) = api.call("POST", "/notes", Some(json!({}))).await;
+    let (status, _) = api.seeded("POST", "/notes", Some(json!({}))).await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/notes").await;
     assert_eq!(
@@ -1712,7 +1733,7 @@ fn stored_task(id: &str, title: &str, status: &str) -> Value {
 /// Creates `t1` and `t2` through the API.
 async fn two_tasks(api: &Api) {
     for task in [json!({"title": "A"}), json!({"title": "B"})] {
-        let (status, body) = api.call("POST", "/tasks", Some(task)).await;
+        let (status, body) = api.seeded("POST", "/tasks", Some(task)).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
     }
 }
@@ -1852,7 +1873,7 @@ async fn a_stored_rest_is_of_the_page_s_parent() {
     );
     for (project, title) in [("p1", "A"), ("p2", "B")] {
         let (status, _) = api
-            .call(
+            .seeded(
                 "POST",
                 &format!("/projects/{project}/tasks"),
                 Some(json!({"title": title})),
@@ -1862,7 +1883,7 @@ async fn a_stored_rest_is_of_the_page_s_parent() {
     }
     assert_eq!(api.get("/projects/p1/tasks?limit=1").await, first);
     let (status, _) = api
-        .call("POST", "/projects/p1/tasks", Some(json!({"title": "C"})))
+        .seeded("POST", "/projects/p1/tasks", Some(json!({"title": "C"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let body = api.get("/projects/p1/tasks?limit=1&cursor=").await;
@@ -2726,7 +2747,7 @@ async fn page_two_sees_a_delete_and_an_update_since_page_one() {
     let api = api_of(&editable_pages(), true, script);
     two_tasks(&api).await;
     let (status, _) = api
-        .call("POST", "/tasks", Some(json!({"title": "C"})))
+        .seeded("POST", "/tasks", Some(json!({"title": "C"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let first = api.get("/tasks?per_page=1&page=1").await;
@@ -2801,7 +2822,7 @@ async fn page_two_is_of_the_page_s_parent() {
     );
     for (project, title) in [("p1", "A"), ("p2", "B"), ("p1", "C")] {
         let (status, _) = api
-            .call(
+            .seeded(
                 "POST",
                 &format!("/projects/{project}/tasks"),
                 Some(json!({"title": title})),
@@ -3309,7 +3330,7 @@ async fn the_model_s_own_next_link_stays() {
     script.push(Ok(json!({"data": [stored_task("t2", "B", "open")], "_links": {"self": {"href": next}, "next": null}}).to_string()));
     let api = api_of(&stored_pages(HAL_TASKS), true, script);
     let (status, body) = api
-        .call("POST", "/tasks", Some(json!({"title": "A"})))
+        .seeded("POST", "/tasks", Some(json!({"title": "A"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(api.get("/tasks?limit=1").await, page);
@@ -3707,7 +3728,7 @@ components:
 async fn scoped_tasks(api: &Api, tasks: &[(&str, &str, &str)]) {
     for (_, title, org) in tasks {
         let (status, body) = api
-            .call(
+            .seeded(
                 "POST",
                 &format!("/tasks?org={org}"),
                 Some(json!({"title": title})),

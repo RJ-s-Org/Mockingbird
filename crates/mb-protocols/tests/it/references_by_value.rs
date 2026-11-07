@@ -381,6 +381,26 @@ impl Harness {
         self.call_in(None, method, uri, body).await
     }
 
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(&self, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        self.call_with(None, method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    /// [`Self::seeded`] in `session`.
+    async fn seeded_in(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        self.call_with(session, method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
     async fn call_in(
         &self,
         session: Option<&str>,
@@ -388,7 +408,21 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        self.call_with(session, method, uri, body, &[]).await
+    }
+
+    async fn call_with(
+        &self,
+        session: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -456,7 +490,7 @@ async fn an_id_inside_a_uri_shows_its_record() {
         json!({"id": TRACK, "name": "Song of the Mock"}),
         json!({"effects": [], "response": {"ok": true}}),
     ]);
-    h.call("POST", "/tracks", Some(json!({"name": "Song of the Mock"})))
+    h.seeded("POST", "/tracks", Some(json!({"name": "Song of the Mock"})))
         .await;
     let uri = format!("spotify:track:{TRACK}");
     let (status, _) = h
@@ -481,7 +515,7 @@ async fn a_short_id_in_an_object_named_after_its_type_shows_its_record() {
         json!({"id": "21", "name": "Done"}),
         json!({"effects": [], "response": {"ok": true}}),
     ]);
-    h.call("POST", "/transitions", Some(json!({"name": "Done"})))
+    h.seeded("POST", "/transitions", Some(json!({"name": "Done"})))
         .await;
     h.call("POST", "/moves", Some(json!({"transition": {"id": "21"}})))
         .await;
@@ -497,13 +531,13 @@ async fn a_unique_member_value_shows_its_record() {
         contact("ct-000101", "jane.roe@example.com"),
         json!({"effects": [], "response": {"id": "tk-000001", "subject": "Help", "requester_id": "ct-000101"}}),
     ]);
-    h.call(
+    h.seeded(
         "POST",
         "/contacts",
         Some(json!({"name": "Jane Roe", "email": "jane.roe@example.com"})),
     )
     .await;
-    h.call(
+    h.seeded(
         "POST",
         "/tickets",
         Some(json!({"subject": "Help", "email": "jane.roe@example.com"})),
@@ -522,13 +556,13 @@ async fn a_plain_member_value_is_no_reference() {
         json!({"id": "ct-000101", "name": "jane-roe-contact", "email": "jane.roe@example.com"}),
         json!({"id": "tk-000001", "subject": "Help"}),
     ]);
-    h.call(
+    h.seeded(
         "POST",
         "/contacts",
         Some(json!({"name": "jane-roe-contact", "email": "jane.roe@example.com"})),
     )
     .await;
-    h.call(
+    h.seeded(
         "POST",
         "/tickets",
         Some(json!({"subject": "Help", "name": "jane-roe-contact"})),
@@ -547,14 +581,14 @@ async fn an_ambiguous_value_shows_nothing() {
         json!({"id": "tk-000001", "subject": "Help"}),
     ]);
     for _ in 0..2 {
-        h.call(
+        h.seeded(
             "POST",
             "/contacts",
             Some(json!({"name": "Jane Roe", "email": "shared@example.com"})),
         )
         .await;
     }
-    h.call(
+    h.seeded(
         "POST",
         "/tickets",
         Some(json!({"subject": "Help", "email": "shared@example.com"})),
@@ -577,11 +611,11 @@ async fn short_and_trivial_values_show_nothing() {
         }),
         json!({"id": "tk-000001", "subject": "Help"}),
     ]);
-    h.call("POST", "/transitions", Some(json!({"name": "Done"})))
+    h.seeded("POST", "/transitions", Some(json!({"name": "Done"})))
         .await;
-    h.call("POST", "/contacts", Some(json!({"name": "Jane Roe"})))
+    h.seeded("POST", "/contacts", Some(json!({"name": "Jane Roe"})))
         .await;
-    h.call(
+    h.seeded(
         "POST",
         "/tickets",
         Some(json!({
@@ -612,14 +646,14 @@ async fn a_value_matched_record_is_not_rewritten_by_the_answer() {
             "requester": {"id": "ct-000101", "name": "Someone Else", "email": "jane.roe@example.com"},
         }}),
     ]);
-    h.call(
+    h.seeded(
         "POST",
         "/contacts",
         Some(json!({"name": "Jane Roe", "email": "jane.roe@example.com"})),
     )
     .await;
     let stored = h.held("contacts", "ct-000101").await;
-    h.call(
+    h.seeded(
         "POST",
         "/tickets",
         Some(json!({"subject": "Help", "email": "jane.roe@example.com"})),
@@ -643,7 +677,7 @@ fn ticket(id: &str, extra: Value) -> Value {
 }
 
 async fn create_contact(h: &Harness, session: Option<&str>) {
-    h.call_in(
+    h.seeded_in(
         session,
         "POST",
         "/contacts",
@@ -653,7 +687,7 @@ async fn create_contact(h: &Harness, session: Option<&str>) {
 }
 
 async fn create_ticket(h: &Harness, session: Option<&str>, body: Value) {
-    h.call_in(session, "POST", "/tickets", Some(body)).await;
+    h.seeded_in(session, "POST", "/tickets", Some(body)).await;
 }
 
 /// A common value (a time zone) a contact holds matches only a request member of the
@@ -787,7 +821,7 @@ async fn a_shared_store_matches_member_values_the_store_shows_unique() {
         "{}",
         h.prompt(2)
     );
-    h.call("POST", "/tracks", Some(json!({"name": "Song of the Mock"})))
+    h.seeded("POST", "/tracks", Some(json!({"name": "Song of the Mock"})))
         .await;
     h.call(
         "POST",
@@ -859,7 +893,7 @@ async fn an_updated_record_matches_its_new_value_only() {
         json!({"id": "tk-000001", "subject": "Help"}),
         ticket("tk-000002", json!({})),
     ]);
-    h.call(
+    h.seeded(
         "POST",
         "/contacts",
         Some(json!({"name": "Jane Roe", "email": "old.mail@example.com"})),

@@ -187,7 +187,7 @@ fn soft_spaces() -> Value {
 
 async fn create_space(h: &DescribedHarness, name: &str) {
     let (status, _, body) = h
-        .send("POST", "/spaces", Some(json!({"displayName": name})), &[])
+        .seeded("POST", "/spaces", Some(json!({"displayName": name})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
@@ -358,7 +358,7 @@ async fn a_range_paged_list_leaves_soft_deleted_records_out() {
     );
     for name in ["alpha", "beta", "gamma"] {
         let (status, _, _) = h
-            .send("POST", "/apps", Some(json!({"name": name})), &[])
+            .seeded("POST", "/apps", Some(json!({"name": name})), &[])
             .await;
         assert_eq!(status, StatusCode::CREATED);
     }
@@ -383,7 +383,7 @@ async fn a_boolean_soft_delete_state_is_stored_as_true() {
         vec![json!({"id": "n1", "title": "t", "is_deleted": false})],
     );
     let (status, _, _) = h
-        .send("POST", "/notes", Some(json!({"title": "t"})), &[])
+        .seeded("POST", "/notes", Some(json!({"title": "t"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED);
     delete(&h, "/notes/n1").await;
@@ -399,7 +399,7 @@ async fn a_create_starts_in_the_initial_state() {
     world["types"]["spaces"]["lifecycle"]["initial"] = json!("ACTIVE");
     let h = support::described(CONTRACT, world, vec![space("s1", "Docs", "PENDING")]);
     let (status, _, body) = h
-        .send("POST", "/spaces", Some(json!({"displayName": "Docs"})), &[])
+        .seeded("POST", "/spaces", Some(json!({"displayName": "Docs"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["state"], "ACTIVE", "{body}");
@@ -420,7 +420,7 @@ async fn a_soft_deleted_records_unique_values_are_free() {
     create_space(&h, "Docs").await;
     delete(&h, "/spaces/s1").await;
     let (status, _, body) = h
-        .send("POST", "/spaces", Some(json!({"displayName": "Docs"})), &[])
+        .seeded("POST", "/spaces", Some(json!({"displayName": "Docs"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert!(h.stored("spaces", "s2").await.is_some());
@@ -482,10 +482,25 @@ type Mutation {
 "#;
 
     async fn post(router: &axum::Router, query: &str) -> Value {
-        let req = axum::http::Request::builder()
+        post_with(router, query, &[]).await
+    }
+
+    /// [`post`] of a create, seeded: a seeded create takes the generated path, which
+    /// stores the record the model answered under the id it chose, as these tests
+    /// expect.
+    async fn seeded(router: &axum::Router, query: &str) -> Value {
+        post_with(router, query, &[crate::support::SEED]).await
+    }
+
+    async fn post_with(router: &axum::Router, query: &str, headers: &[(&str, &str)]) -> Value {
+        let mut req = axum::http::Request::builder()
             .method("POST")
             .uri("/graphql")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
             .body(axum::body::Body::from(json!({"query": query}).to_string()))
             .unwrap();
         crate::support::send_to(router, req).await.2
@@ -530,7 +545,7 @@ type Mutation {
         let rt = crate::support::with_effective(rt, world, false);
         let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
         for name in ["a", "b"] {
-            let made = post(
+            let made = seeded(
                 &router,
                 &format!("mutation {{ createWidget(name: \"{name}\") {{ id name state }} }}"),
             )

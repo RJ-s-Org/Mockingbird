@@ -77,7 +77,7 @@ async fn a_described_action_on_a_record_stored_incomplete_keeps_its_answer_and_c
         ],
     );
     let (status, _, body) = h
-        .send("POST", "/items", Some(json!({"name": "a"})), &[])
+        .seeded("POST", "/items", Some(json!({"name": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _, body) = h.send("POST", "/items/i1/star", None, &[]).await;

@@ -277,7 +277,7 @@ pub(super) async fn mint_created(
 
 /// One id for a record of type `t` keyed by `field` (see [`mint_created`]), noted in
 /// `given`; `None` when none could be drawn.
-async fn mint_one(
+pub(super) async fn mint_one(
     state: &mut StateAccess<'_>,
     session: &SessionKey,
     (t, field): (&str, &str),

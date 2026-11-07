@@ -129,8 +129,13 @@ async fn tier0_world_answers_as_no_world() {
         ("GET", "/things/t1", None),
     ];
     for (method, uri, body) in calls {
-        let (a_status, mut a_headers, a_body) = plain.send(method, uri, body.clone(), &[]).await;
-        let (b_status, mut b_headers, b_body) = tier0.send(method, uri, body, &[]).await;
+        // The create is seeded ([`support::SEED`]): it stores the scripted `t1`.
+        let seed: &[(&str, &str)] = match method {
+            "POST" => &[support::SEED],
+            _ => &[],
+        };
+        let (a_status, mut a_headers, a_body) = plain.send(method, uri, body.clone(), seed).await;
+        let (b_status, mut b_headers, b_body) = tier0.send(method, uri, body, seed).await;
         a_headers.remove("date");
         b_headers.remove("date");
         assert_eq!(a_status, b_status, "{method} {uri}");
@@ -188,7 +193,7 @@ async fn a_described_identity_clears_the_gap() {
     );
     assert_eq!(h.rt.world_revision(), 1);
     let (status, _, _) = h
-        .send("POST", "/widgets", Some(json!({"label": "a"})), &[])
+        .seeded("POST", "/widgets", Some(json!({"label": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(
@@ -261,7 +266,7 @@ async fn an_answer_from_state_is_marked() {
         vec![thing("t1", "a")],
         with_gaps(&[("getThing", &[GapCode::NoTarget])]),
     );
-    h.send("POST", "/things", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/things", Some(json!({"name": "a"})), &[])
         .await;
     let (status, headers, _) = h.send("GET", "/things/t1", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
@@ -285,9 +290,9 @@ async fn an_http_record_keeps_world_gap_next_to_effects() {
         ],
         with_gaps(&[("updateThing", &[GapCode::NoRecord])]),
     );
-    h.send("POST", "/things", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/things", Some(json!({"name": "a"})), &[])
         .await;
-    h.send("POST", "/things", Some(json!({"name": "b"})), &[])
+    h.seeded("POST", "/things", Some(json!({"name": "b"})), &[])
         .await;
     let (status, _, _) = h
         .send(

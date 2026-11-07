@@ -398,7 +398,10 @@ pub(super) fn entity_fits_from(
 /// The read a record of type `t` is checked by (see [`entity_fits`]) and the schema
 /// of the record in its answer when that is not the answer's own: the by-path read,
 /// else the list or singleton read; `None` when the type has neither.
-fn type_check<'r>(rt: &'r MockRuntime, t: &str) -> Option<(&'r Operation, Option<&'r Value>)> {
+pub(super) fn type_check<'r>(
+    rt: &'r MockRuntime,
+    t: &str,
+) -> Option<(&'r Operation, Option<&'r Value>)> {
     let index = rt.index();
     let (read, shape) = match index.detail_reads.get(t) {
         // A record its read answers in an envelope or an array suits its own schema.

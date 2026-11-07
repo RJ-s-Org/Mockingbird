@@ -281,10 +281,36 @@ async fn send(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, HeaderMap, Value) {
-    let req = Request::builder()
+    send_with(router, method, uri, body, &[]).await
+}
+
+/// [`send`] of a create, seeded: a seeded create takes the generated path,
+/// which stores the record the model answered under the id it chose, as these
+/// tests expect.
+async fn seeded(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, HeaderMap, Value) {
+    send_with(router, method, uri, body, &[crate::support::SEED]).await
+}
+
+async fn send_with(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Value) {
+    let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let req = req
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
@@ -325,7 +351,7 @@ async fn a_template_reads_the_same_by_id_and_by_alias() {
         Value::Null,
         json!({"ErrorCode": 0, "Message": "Deleted."}),
     ]);
-    let (status, _, body) = send(
+    let (status, _, body) = seeded(
         &r,
         "POST",
         "/templates",
@@ -370,14 +396,14 @@ async fn the_key_wins_over_another_records_alternate() {
         json!({"TemplateId": 12, "Name": "A", "Alias": "first"}),
         json!({"TemplateId": 13, "Name": "B", "Alias": "12"}),
     ]);
-    send(
+    seeded(
         &r,
         "POST",
         "/templates",
         Some(json!({"Name": "A", "Alias": "first"})),
     )
     .await;
-    send(
+    seeded(
         &r,
         "POST",
         "/templates",
@@ -397,7 +423,7 @@ async fn the_key_wins_over_another_records_alternate() {
 #[tokio::test]
 async fn a_described_slug_finds_the_record() {
     let r = router(vec![json!({"id": "prj_1", "name": "Site", "slug": "site"})]);
-    send(
+    seeded(
         &r,
         "POST",
         "/projects",
@@ -441,7 +467,7 @@ async fn an_edit_by_the_alternate_member_keeps_the_key() {
             json!({"TemplateId": 7001, "Name": "Welcome", "Alias": "welcome"}),
             answer,
         ]);
-        send(
+        seeded(
             &r,
             "POST",
             "/templates",
@@ -478,9 +504,9 @@ async fn a_mention_or_a_negation_is_no_alternate_key() {
         json!({"id": "o_1", "number": 5, "orderNumber": "A-1"}),
         json!({"id": "w_1", "name": "gizmo"}),
     ]);
-    send(&r, "POST", "/users", Some(json!({"username": "alice"}))).await;
-    send(&r, "POST", "/orders", Some(json!({"orderNumber": "A-1"}))).await;
-    send(&r, "POST", "/widgets", Some(json!({"name": "gizmo"}))).await;
+    seeded(&r, "POST", "/users", Some(json!({"username": "alice"}))).await;
+    seeded(&r, "POST", "/orders", Some(json!({"orderNumber": "A-1"}))).await;
+    seeded(&r, "POST", "/widgets", Some(json!({"name": "gizmo"}))).await;
     // Each held record reads from state by its id.
     for path in ["/users/u_1", "/orders/o_1", "/widgets/w_1"] {
         let (_, headers, read) = send(&r, "GET", path, None).await;
@@ -500,7 +526,7 @@ async fn an_either_or_without_the_identity_is_no_alternate_key() {
     let r = router(vec![
         json!({"id": "m_1", "user": "alice", "organization": "acme"}),
     ]);
-    send(
+    seeded(
         &r,
         "POST",
         "/memberships",
@@ -615,7 +641,7 @@ async fn a_slug_keyed_record_reads_by_its_own_id() {
         SPELLINGS,
         vec![json!({"slug": "pho", "recipeId": "r_9", "title": "Pho"})],
     );
-    send(
+    seeded(
         &r,
         "POST",
         "/recipes",
@@ -662,8 +688,8 @@ async fn other_spellings_offer_the_alternate_key() {
             json!({"id": 42, "name": "Inter"}),
         ],
     );
-    send(&r, "POST", "/spaces", Some(json!({"slug": "ops"}))).await;
-    send(&r, "POST", "/fonts", Some(json!({"name": "Inter"}))).await;
+    seeded(&r, "POST", "/spaces", Some(json!({"slug": "ops"}))).await;
+    seeded(&r, "POST", "/fonts", Some(json!({"name": "Inter"}))).await;
     for (path, member, want) in [
         ("/spaces/sp_1", "slug", json!("ops")),
         ("/spaces/ops", "id", json!("sp_1")),

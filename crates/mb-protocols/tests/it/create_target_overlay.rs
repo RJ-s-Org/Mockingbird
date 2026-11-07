@@ -119,11 +119,11 @@ async fn creates_under_one_parent_are_keyed_by_the_body_member() {
 async fn a_described_unique_key_refuses_a_repeat_from_state() {
     let h = support::described(CONTRACT, described(), vec![thing("alpha", "First")]);
     let (status, _, body) = h
-        .send("POST", "/things/p1", Some(thing("alpha", "First")), &[])
+        .seeded("POST", "/things/p1", Some(thing("alpha", "First")), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, _, body) = h
-        .send("POST", "/things/p1", Some(thing("alpha", "Again")), &[])
+        .seeded("POST", "/things/p1", Some(thing("alpha", "Again")), &[])
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(h.provider.requests().len(), 1);

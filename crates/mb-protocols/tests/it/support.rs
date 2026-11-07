@@ -20,6 +20,12 @@ use std::time::Duration;
 ))]
 use mb_protocols::{RequestRecord, RequestRecorder};
 
+/// The header a create sends to take the generated path (`X-Mockingbird-Seed`): a
+/// seeded call is not the state-first executor's, so the record the scripted model
+/// answered is stored under the id it chose. The tests written before creates were
+/// executed send it on their creates.
+pub const SEED: (&str, &str) = ("x-mockingbird-seed", "1");
+
 /// Polls `check` every `poll` until it returns `Ok`, and returns that value.
 ///
 /// Panics once `timeout` has passed, with the message of the last `Err`, so a
@@ -336,6 +342,24 @@ impl DescribedHarness {
             axum::body::Body::from(b.to_string())
         });
         send_to(&self.router, req.body(body).unwrap()).await
+    }
+
+    /// [`DescribedHarness::send`] of a create, seeded ([`SEED`]): it takes the
+    /// generated path, which stores the record the model answered under the id it chose.
+    pub async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        headers: &[(&str, &str)],
+    ) -> (
+        axum::http::StatusCode,
+        axum::http::HeaderMap,
+        serde_json::Value,
+    ) {
+        let mut headers = headers.to_vec();
+        headers.push(SEED);
+        self.send(method, uri, body, &headers).await
     }
 
     /// Every request record so far.

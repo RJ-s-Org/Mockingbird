@@ -542,7 +542,8 @@ fn mcp_drives_a_background_server() {
             json!({ "method": "POST", "path": "/orders/orders", "body": { "customerId": "c1", "total": 10 }, "session": "t" }),
         );
         assert_eq!(created["status"], 201, "{created}");
-        assert_eq!(created["headers"]["x-mockingbird-source"], "fallback");
+        // The state-first executor creates the order, with no LLM call.
+        assert_eq!(created["headers"]["x-mockingbird-source"], "state");
         let id = created["body"]["id"].as_str().unwrap().to_string();
         let got = mcp.tool(
             "call_mock",

@@ -244,6 +244,21 @@ impl Harness {
         )
     }
 
+    /// [`Self::send`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Value) {
+        let mut headers = headers.to_vec();
+        headers.push(crate::support::SEED);
+        self.send(method, uri, body, &headers).await
+    }
+
     fn calls(&self) -> usize {
         self.provider.requests().len()
     }
@@ -278,7 +293,7 @@ async fn a_constant_api_version_header_never_pairs_with_the_version() {
         answer(w("c", 2)),
         answer(w("d", 2)),
     ]);
-    h.send("POST", "/widgets", Some(json!({"name": "a"})), &[])
+    h.seeded("POST", "/widgets", Some(json!({"name": "a"})), &[])
         .await;
     let hdr = [("X-Api-Version", "1")];
     let (s, _, b) = h
@@ -309,7 +324,7 @@ async fn a_quoted_etag_holding_a_comma_is_one_tag() {
         answer(n("b", "\"x,y\"")),
         answer(n("c", "\"z\"")),
     ]);
-    h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     // The etag is the model's: each write sends a member no note declares, which the
     // state-first executor leaves to the model.
@@ -341,7 +356,7 @@ async fn a_quoted_etag_holding_a_comma_is_one_tag() {
 async fn if_match_never_pairs_with_an_integer_data_member() {
     let bk = |title: &str, pages: i64| json!({"id": "b1", "title": title, "pages": pages});
     let h = harness(vec![bk("a", 3), answer(bk("b", 3))]);
-    h.send("POST", "/books", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/books", Some(json!({"title": "a"})), &[])
         .await;
     let (s, _, b) = h
         .send(
@@ -398,7 +413,7 @@ async fn an_enveloped_answer_shows_the_minted_etag() {
         answer(d("b", "\"e1\"")),
         answer(d("c", "\"e9\"")),
     ]);
-    h.send("POST", "/docs", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/docs", Some(json!({"title": "a"})), &[])
         .await;
     let (s, hd, b) = h
         .send(

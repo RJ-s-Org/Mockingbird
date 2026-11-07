@@ -144,7 +144,7 @@ fn prompt(h: &DescribedHarness, n: usize) -> String {
 
 async fn create_folder(h: &DescribedHarness, name: &str, parent: &str) -> (StatusCode, Value) {
     let (status, _, body) = h
-        .send(
+        .seeded(
             "POST",
             "/folders",
             Some(json!({"displayName": name, "parent": parent})),
@@ -289,7 +289,7 @@ async fn a_described_token_advances_after_an_update() {
             json!({"id": "n1", "title": "b", "version": 1}),
         ],
     );
-    h.send("POST", "/notes", Some(json!({"title": "a"})), &[])
+    h.seeded("POST", "/notes", Some(json!({"title": "a"})), &[])
         .await;
     let (status, _, _) = h
         .send(
@@ -374,7 +374,7 @@ async fn an_idempotent_replay_answers_as_the_first() {
     );
     let key = [("Idempotency-Key", "k-1")];
     let (s1, _, b1) = h
-        .send(
+        .seeded(
             "POST",
             "/folders",
             Some(json!({"displayName": "Docs", "parent": "p1"})),
@@ -383,7 +383,7 @@ async fn an_idempotent_replay_answers_as_the_first() {
         .await;
     // A replay with another body still answers the first call's answer.
     let (s2, _, b2) = h
-        .send(
+        .seeded(
             "POST",
             "/folders",
             Some(json!({"displayName": "Other", "parent": "p1"})),
@@ -398,7 +398,7 @@ async fn an_idempotent_replay_answers_as_the_first() {
     assert_eq!(records[1].request["world_gap"], json!(["no_target"]));
     // Another key is a new request.
     let (s3, _, b3) = h
-        .send(
+        .seeded(
             "POST",
             "/folders",
             Some(json!({"displayName": "Other", "parent": "p1"})),
@@ -418,7 +418,7 @@ async fn a_new_key_with_a_taken_unique_set_is_refused() {
         vec![folder("f1", "Docs", "p1")],
     );
     let body = json!({"displayName": "Docs", "parent": "p1"});
-    h.send(
+    h.seeded(
         "POST",
         "/folders",
         Some(body.clone()),
@@ -426,7 +426,7 @@ async fn a_new_key_with_a_taken_unique_set_is_refused() {
     )
     .await;
     let (status, _, _) = h
-        .send(
+        .seeded(
             "POST",
             "/folders",
             Some(body),
@@ -440,7 +440,7 @@ async fn a_new_key_with_a_taken_unique_set_is_refused() {
 /// Two creates of template `tp1`, each with its own request reference.
 async fn create_template_twice(h: &DescribedHarness) {
     for token in ["t-1", "t-2"] {
-        h.send(
+        h.seeded(
             "POST",
             "/templates",
             Some(json!({"id": "tp1", "title": "First"})),
@@ -481,14 +481,14 @@ async fn a_replayed_refusal_is_refused_again() {
     );
     let body = json!({"displayName": "Docs", "parent": "p1"});
     let k2 = [("Idempotency-Key", "k-2")];
-    h.send(
+    h.seeded(
         "POST",
         "/folders",
         Some(body.clone()),
         &[("Idempotency-Key", "k-1")],
     )
     .await;
-    let (status, _, refused) = h.send("POST", "/folders", Some(body.clone()), &k2).await;
+    let (status, _, refused) = h.seeded("POST", "/folders", Some(body.clone()), &k2).await;
     assert_eq!(status, StatusCode::CONFLICT);
     // The name is free again, but a retry of the refused key is refused as before.
     let (status, _, _) = h
@@ -500,7 +500,7 @@ async fn a_replayed_refusal_is_refused_again() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, again) = h.send("POST", "/folders", Some(body), &k2).await;
+    let (status, _, again) = h.seeded("POST", "/folders", Some(body), &k2).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(refused, again);
     // The create's; the rename is the state-first executor's.
@@ -518,8 +518,8 @@ async fn an_undescribed_idempotency_key_behaves_as_today() {
     );
     let key = [("Idempotency-Key", "k-1")];
     let body = json!({"displayName": "Docs", "parent": "p1"});
-    h.send("POST", "/folders", Some(body.clone()), &key).await;
-    let (status, _, answer) = h.send("POST", "/folders", Some(body), &key).await;
+    h.seeded("POST", "/folders", Some(body.clone()), &key).await;
+    let (status, _, answer) = h.seeded("POST", "/folders", Some(body), &key).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(answer["id"], "f2");
     assert_eq!(calls(&h), 2);
@@ -534,10 +534,10 @@ async fn a_heuristic_idempotency_key_does_not_replay_under_tier0() {
     let body = json!({"displayName": "Docs", "parent": "p1"});
     for _ in 0..2 {
         let a = plain
-            .send("POST", "/folders", Some(body.clone()), &key)
+            .seeded("POST", "/folders", Some(body.clone()), &key)
             .await;
         let b = tier0
-            .send("POST", "/folders", Some(body.clone()), &key)
+            .seeded("POST", "/folders", Some(body.clone()), &key)
             .await;
         assert_eq!((a.0, &a.2), (b.0, &b.2));
     }
@@ -569,7 +569,7 @@ async fn a_root_create_and_a_scoped_one_with_the_same_values_are_accepted() {
     let (status, _) = create_folder(&h, "Docs", "p1").await;
     assert_eq!(status, StatusCode::CREATED);
     let send_root = || {
-        h.send(
+        h.seeded(
             "POST",
             "/folders",
             Some(json!({"displayName": "Docs"})),
@@ -640,7 +640,7 @@ async fn a_described_token_is_not_minted_past_its_schema() {
             json!({"types": {"pages": {"concurrency": {"member": member, "conflict": 409}}}}),
             vec![page("a"), page("b")],
         );
-        h.send("POST", "/pages", Some(json!({"title": "a"})), &[])
+        h.seeded("POST", "/pages", Some(json!({"title": "a"})), &[])
             .await;
         let (status, _, body) = h
             .send(
@@ -738,7 +738,7 @@ async fn create_alias(
     key: &[(&str, &str)],
 ) -> (StatusCode, Value) {
     let (status, _, body) = h
-        .send(
+        .seeded(
             "POST",
             "/aliases",
             Some(json!({"alias": name, "slug": name})),

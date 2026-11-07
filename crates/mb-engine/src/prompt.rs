@@ -749,6 +749,57 @@ null.\n\n",
     ]
 }
 
+/// The opening of a [`fill_messages`] prompt.
+const FILL_ROLE_STATEMENT: &str = "You fill in realistic synthetic values for members of a \
+record an API has just stored. Output only a single JSON object conforming to the schema, holding \
+only the members it declares. Never output real personal data. Keep free-text strings under 200 \
+characters unless the schema allows more.";
+
+/// Messages asking for the members of a record a create stored that nothing else
+/// decides ([`crate::Engine::fill`]): the operation, the request, the record as stored
+/// so far (`known`, for coherence) and `schema`, the record's schema restricted to the
+/// members asked for.
+pub(crate) fn fill_messages(
+    bundle: &Bundle,
+    op: &Operation,
+    schema: &Value,
+    call: &OperationCall,
+    known: &Map<String, Value>,
+    persona: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut system = String::new();
+    system.push_str(FILL_ROLE_STATEMENT);
+    system.push_str("\n\n");
+    binding_lines(&mut system, bundle, op, persona);
+    let _ = write!(system, "Response JSON Schema:\n{schema}");
+    let notes = request_notes(bundle, op, call, &[]);
+    let mut user = user_message(
+        call,
+        &GenerationContext::default(),
+        false,
+        None,
+        false,
+        false,
+        &notes,
+    );
+    let _ = writeln!(
+        user,
+        "The record as stored so far, which the values you write must agree with:\n<record>\n{}\n\
+</record>",
+        truncated(data(&Value::Object(known.clone())), MAX_BODY_BYTES)
+    );
+    vec![
+        ChatMessage {
+            role: Role::System,
+            content: system,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: user,
+        },
+    ]
+}
+
 /// Persona, API, operation, binding, summary and hint lines.
 fn binding_lines(s: &mut String, bundle: &Bundle, op: &Operation, persona: Option<&str>) {
     api_lines(s, bundle, persona);

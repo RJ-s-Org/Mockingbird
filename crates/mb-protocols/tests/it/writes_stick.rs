@@ -95,6 +95,29 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         // These tests are about how an update's answer settles: each update also sends
         // a member no record declares, which the state-first executor leaves to the
         // model.
@@ -106,6 +129,9 @@ impl Harness {
             (_, body) => body,
         };
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -897,7 +923,7 @@ components:
         |_| {},
     );
     let (status, _, made) = h
-        .call("POST", "/orgs/octo/teams", Some(json!({"slug": "core"})))
+        .seeded("POST", "/orgs/octo/teams", Some(json!({"slug": "core"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{made}");
     let (status, _, updated) = h
@@ -1676,10 +1702,10 @@ async fn an_update_of_a_record_a_create_referred_to_settles() {
     );
     let create = json!({"properties": {"email": "dana@example.com", "firstname": "Dana", "lastname": "Reyes"}});
     let (status, _, _) = h
-        .call("POST", "/crm/v3/objects/contacts", Some(create))
+        .seeded("POST", "/crm/v3/objects/contacts", Some(create))
         .await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, _, _) = h.call("POST", "/crm/v3/objects/deals", Some(deal)).await;
+    let (status, _, _) = h.seeded("POST", "/crm/v3/objects/deals", Some(deal)).await;
     assert_eq!(status, StatusCode::CREATED);
     let memory = h.store.list(&session(), MEMORY, 10).await.unwrap();
     assert!(
@@ -1741,9 +1767,9 @@ async fn a_record_a_create_referred_to_still_changes_by_effects_alone() {
     );
     let create = json!({"properties": {"email": "dana@example.com", "firstname": "Dana", "lastname": "Reyes"}});
     let (_, _, created) = h
-        .call("POST", "/crm/v3/objects/contacts", Some(create))
+        .seeded("POST", "/crm/v3/objects/contacts", Some(create))
         .await;
-    h.call("POST", "/crm/v3/objects/deals", Some(deal)).await;
+    h.seeded("POST", "/crm/v3/objects/deals", Some(deal)).await;
     let (_, source, read) = h.call("GET", CONTACT, None).await;
     assert_eq!(source, "llm", "{read}");
     assert_eq!(read, created, "{read}");
@@ -1878,7 +1904,7 @@ async fn deleted_item(mut script: Vec<Value>) -> Harness {
     script.insert(0, item("i1"));
     let h = deletes(script);
     let (status, _, _) = h
-        .call("POST", "/items", Some(json!({"title": "A title"})))
+        .seeded("POST", "/items", Some(json!({"title": "A title"})))
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let (status, source, read) = h.call("GET", "/items/i1", None).await;
@@ -2051,7 +2077,7 @@ async fn an_effect_does_not_restore_it() {
         }),
     ])
     .await;
-    h.call("POST", "/items", Some(json!({"title": "A title"})))
+    h.seeded("POST", "/items", Some(json!({"title": "A title"})))
         .await;
     h.call("PUT", "/items/i2", Some(json!({"title": "A title"})))
         .await;
@@ -2071,7 +2097,7 @@ async fn an_effect_does_not_restore_it() {
 async fn a_recreate_clears_the_marker() {
     let h = deleted_item(vec![item("i1"), item("i1")]).await;
     let (status, _, _) = h
-        .call(
+        .seeded(
             "POST",
             "/items",
             Some(json!({"id": "i1", "title": "A title"})),

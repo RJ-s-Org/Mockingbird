@@ -517,9 +517,11 @@ async fn a_webhook_payload_generates_with_the_profile_of_the_calling_tenant() {
     rt.webhooks = Some(Arc::new(dispatcher));
     let router = mb_protocols::http_rest::router(Arc::new(rt));
 
+    // The create is seeded (`crate::support::SEED`): it takes the generated path.
     let req = Request::post("/pets")
         .header("content-type", "application/json")
         .header("x-tenant", "acme")
+        .header(crate::support::SEED.0, crate::support::SEED.1)
         .body(Body::from(json!({"name": "Rex"}).to_string()))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();

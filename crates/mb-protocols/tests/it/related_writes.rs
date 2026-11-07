@@ -198,7 +198,33 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[]).await
+    }
+
+    /// [`Self::call`] of a create, seeded: a seeded create takes the generated path,
+    /// which stores the record the model answered under the id it chose, as these
+    /// tests expect.
+    async fn seeded(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Value) {
+        self.call_with(method, uri, body, &[crate::support::SEED])
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -268,13 +294,13 @@ async fn a_refund_naming_its_payment_brings_the_payments_read_up_to_date() {
             json!({"id": "pay_100001", "amount": 7, "amount_refunded": 40, "status": "partially_refunded"}),
         ),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
     let (_, source, _) = h.call("GET", "/payments/pay_100001", None).await;
     assert_eq!(source, "state");
 
     let (status, _, _) = h
-        .call(
+        .seeded(
             "POST",
             "/refunds",
             Some(json!({"payment_id": "pay_100001", "amount": 40})),
@@ -318,10 +344,10 @@ async fn a_refund_under_a_payment_is_shown_to_it_as_new() {
         json!({"id": "re_200001", "amount": 100}),
         payment("pay_100001", 100, "refunded"),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
     h.call("GET", "/payments/pay_100001", None).await;
-    let (status, _, _) = h.call("POST", "/payments/pay_100001/refunds", None).await;
+    let (status, _, _) = h.seeded("POST", "/payments/pay_100001/refunds", None).await;
     assert_eq!(status, StatusCode::CREATED);
 
     let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
@@ -357,11 +383,11 @@ async fn a_reply_brings_the_message_it_answers_up_to_date() {
             "response": {"id": "msg_100001", "text": "rewritten", "reply_count": 1},
         }),
     ]);
-    h.call("POST", "/messages", Some(json!({"text": "hello"})))
+    h.seeded("POST", "/messages", Some(json!({"text": "hello"})))
         .await;
     let (_, source, _) = h.call("GET", "/messages/msg_100001", None).await;
     assert_eq!(source, "state");
-    h.call(
+    h.seeded(
         "POST",
         "/messages",
         Some(json!({"text": "hi back", "thread": "msg_100001"})),
@@ -394,11 +420,11 @@ async fn an_unrelated_record_is_not_marked() {
         payment("pay_100002", 0, "captured"),
         json!({"id": "re_200001", "amount": 40, "payment_id": "pay_100001"}),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
-    h.call(
+    h.seeded(
         "POST",
         "/refunds",
         Some(json!({"payment_id": "pay_100001", "amount": 40})),
@@ -426,9 +452,9 @@ async fn an_applied_effect_on_the_referenced_record_costs_no_call() {
             "response": {"id": "re_200001", "amount": 40, "payment_id": "pay_100001"},
         }),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
-    h.call(
+    h.seeded(
         "POST",
         "/refunds",
         Some(json!({"payment_id": "pay_100001", "amount": 40})),
@@ -533,9 +559,9 @@ async fn probe_a_catch_up_does_not_rewrite_the_amount() {
         json!({"id": "re_200001", "amount": 40, "payment_id": "pay_100001"}),
         json!({"id": "pay_100001", "amount": 7, "amount_refunded": 40, "status": "weird"}),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
-    h.call(
+    h.seeded(
         "POST",
         "/refunds",
         Some(json!({"payment_id": "pay_100001", "amount": 40})),
@@ -559,9 +585,9 @@ async fn probe_a_message_naming_a_payment_does_not_rewrite_it() {
         json!({"id": "msg_100002", "text": "x", "reply_count": 0, "thread": "pay_100001"}),
         json!({"id": "pay_100001", "amount": 999, "amount_refunded": 0, "status": "captured"}),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
-    h.call(
+    h.seeded(
         "POST",
         "/messages",
         Some(json!({"text": "x", "thread": "pay_100001"})),
@@ -582,9 +608,9 @@ async fn probe_a_number_in_the_answer_marks_nothing() {
         json!({"id": "msg_100002", "text": "x", "reply_count": 100001}),
         json!({"id": "100001", "amount": 1, "amount_refunded": 0, "status": "changed"}),
     ]);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
-    h.call("POST", "/messages", Some(json!({"text": "x"})))
+    h.seeded("POST", "/messages", Some(json!({"text": "x"})))
         .await;
     let (_, source, read) = h.call("GET", "/payments/100001", None).await;
     assert_eq!(source, "state");
@@ -603,10 +629,10 @@ async fn probe_a_create_heavy_flow_costs_one_call_per_affected_read() {
         script.push(payment("pay_100001", i + 1, "partially_refunded"));
     }
     let h = related(script);
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
     for _ in 0..5 {
-        h.call(
+        h.seeded(
             "POST",
             "/refunds",
             Some(json!({"payment_id": "pay_100001", "amount": 1})),
@@ -709,12 +735,12 @@ components:
 
 /// A payment and then a refund naming it, so the payment's memory only refers to it.
 async fn referenced_payment(h: &Harness, status: &str) {
-    h.call("POST", "/payments", Some(json!({"amount": 100})))
+    h.seeded("POST", "/payments", Some(json!({"amount": 100})))
         .await;
     let (_, source, read) = h.call("GET", "/payments/pay_100001", None).await;
     assert_eq!(source, "state", "{read}");
     assert_eq!(read["status"], status);
-    h.call(
+    h.seeded(
         "POST",
         "/refunds",
         Some(json!({"payment_id": "pay_100001", "amount": 40})),

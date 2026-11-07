@@ -121,6 +121,14 @@ async fn send(h: &DescribedHarness, method: &str, uri: &str, body: Option<Value>
     answer
 }
 
+/// [`send`] of a create, seeded: a seeded create takes the generated path, which stores
+/// the record the model answered under the id it chose, as these tests expect.
+async fn seeded(h: &DescribedHarness, method: &str, uri: &str, body: Option<Value>) -> Value {
+    let (status, _, answer) = h.seeded(method, uri, body, &[]).await;
+    assert!(status.is_success(), "{method} {uri}: {status} {answer}");
+    answer
+}
+
 async fn get(h: &DescribedHarness, uri: &str) -> (String, Value) {
     let (status, headers, body) = h.send("GET", uri, None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{uri}: {body}");
@@ -147,10 +155,10 @@ async fn a_count_follows_children_created_and_deleted() {
         ],
     );
     // A record created in the session with no child yet counts none.
-    let created = send(&h, "POST", "/orders", Some(json!({}))).await;
+    let created = seeded(&h, "POST", "/orders", Some(json!({}))).await;
     assert_eq!(created["line_count"], json!(0), "{created}");
-    send(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
-    send(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
     let (source, body) = get(&h, "/orders/o1").await;
     assert_eq!(source, "state", "{body}");
     assert_eq!(body["line_count"], json!(2), "{body}");
@@ -174,9 +182,9 @@ async fn a_sum_filters_by_state() {
             line("l3", 2.25, "1.00", "posted"),
         ],
     );
-    send(&h, "POST", "/orders", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders", Some(json!({}))).await;
     for _ in 0..3 {
-        send(
+        seeded(
             &h,
             "POST",
             "/orders/o1/lines",
@@ -200,9 +208,9 @@ async fn a_sum_into_a_string_member_keeps_the_children_scale() {
             line("l2", 1.0, "1.25", "posted"),
         ],
     );
-    send(&h, "POST", "/orders", Some(json!({}))).await;
-    send(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
-    send(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
+    seeded(&h, "POST", "/orders/o1/lines", Some(json!({}))).await;
     let (_, body) = get(&h, "/orders/o1").await;
     assert_eq!(body["total"], json!("13.75"), "{body}");
 }
@@ -402,6 +410,6 @@ async fn a_create_whose_schema_refuses_the_derived_value_keeps_the_models() {
         world(),
         vec![json!({"id": "o1", "line_count": -5})],
     );
-    let created = send(&h, "POST", "/orders", Some(json!({}))).await;
+    let created = seeded(&h, "POST", "/orders", Some(json!({}))).await;
     assert_eq!(created["line_count"], json!(-5), "{created}");
 }

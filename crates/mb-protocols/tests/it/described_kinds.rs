@@ -172,7 +172,7 @@ async fn an_action_described_as_delete_removes_the_record() {
         ],
     );
     let (status, _, body) = h
-        .send("POST", "/workspaces", Some(json!({"name": "a"})), &[])
+        .seeded("POST", "/workspaces", Some(json!({"name": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("GET", "/workspaces/w1", None, &[]).await;
@@ -226,7 +226,7 @@ async fn a_body_target_reads_from_state() {
 /// scripted answer is its record.
 async fn create_folder(h: &DescribedHarness) {
     let (status, _, body) = h
-        .send(
+        .seeded(
             "POST",
             "/folders",
             Some(json!({"name": "a", "parent": "p1"})),
@@ -324,7 +324,7 @@ async fn changes_apply_request_members_to_the_target() {
 /// is its record.
 async fn create_thing(h: &DescribedHarness) {
     let (status, _, body) = h
-        .send(
+        .seeded(
             "POST",
             "/things",
             Some(json!({"title": "a", "note": "n"})),
@@ -405,7 +405,7 @@ async fn a_replace_drops_members_it_does_not_send() {
 /// scripted answer is its record.
 async fn create_gadget(h: &DescribedHarness) {
     let (status, _, body) = h
-        .send(
+        .seeded(
             "POST",
             "/gadgets",
             Some(json!({"title": "a", "note": "n"})),
@@ -562,12 +562,25 @@ type Mutation {
 "#;
 
     async fn post(router: &axum::Router, body: Value) -> Value {
-        let req = axum::http::Request::builder()
+        post_with(router, body, &[]).await
+    }
+
+    /// [`post`] of a create, seeded: a seeded create takes the generated path, which
+    /// stores the record the model answered under the id it chose, as these tests
+    /// expect.
+    async fn seeded(router: &axum::Router, body: Value) -> Value {
+        post_with(router, body, &[crate::support::SEED]).await
+    }
+
+    async fn post_with(router: &axum::Router, body: Value, headers: &[(&str, &str)]) -> Value {
+        let mut req = axum::http::Request::builder()
             .method("POST")
             .uri("/graphql")
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body.to_string()))
-            .unwrap();
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req.body(axum::body::Body::from(body.to_string())).unwrap();
         crate::support::send_to(router, req).await.2
     }
 
@@ -604,7 +617,7 @@ type Mutation {
         );
         let rt = crate::support::with_effective(rt, world, false);
         let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
-        let created = post(
+        let created = seeded(
             &router,
             json!({"query": "mutation { createWidget(name: \"a\") { id name } }"}),
         )

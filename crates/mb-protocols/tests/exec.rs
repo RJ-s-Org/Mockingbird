@@ -119,6 +119,11 @@ fn source(headers: &HeaderMap) -> &str {
         .unwrap_or_default()
 }
 
+/// A create's seed: a seeded create takes the generated path, which stores the record
+/// the model answered under the id it chose, as the tests written before creates were
+/// executed expect.
+const SEEDED: &[(&str, &str)] = &[("x-mockingbird-seed", "1")];
+
 fn exec(fallback: Option<&str>) -> ExecLine {
     ExecLine {
         operation: "getWidget".into(),
@@ -131,9 +136,10 @@ fn exec(fallback: Option<&str>) -> ExecLine {
 #[tokio::test]
 async fn a_held_record_is_read_by_the_executor() {
     let (capture, _guard) = Capture::install();
+    // The one answer is the create's fill of `size`.
     let h = support::harness(
         CONTRACT,
-        vec![json!({"id": "w1", "name": "a", "size": 3})],
+        vec![json!({"size": 3})],
         &HarnessOptions::default(),
         |rt| rt,
     );
@@ -141,10 +147,11 @@ async fn a_held_record_is_read_by_the_executor() {
         .send("POST", "/widgets", Some(json!({"name": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    let (status, headers, body) = h.send("GET", "/widgets/w1", None, &[]).await;
+    let id = body["id"].as_str().unwrap().to_owned();
+    let (status, headers, body) = h.send("GET", &format!("/widgets/{id}"), None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "state", "{body}");
-    assert_eq!(body, json!({"id": "w1", "name": "a", "size": 3}));
+    assert_eq!(body, json!({"id": id, "name": "a", "size": 3}));
     assert_eq!(capture.of("getWidget"), vec![exec(None)]);
     assert_eq!(h.provider.requests().len(), 1, "the read made no LLM call");
 }
@@ -194,8 +201,9 @@ async fn a_record_that_does_not_render_generates() {
         &HarnessOptions::default(),
         |rt| rt,
     );
+    // A seeded create takes the generated path, which stores the model's short record.
     let (status, _, body) = h
-        .send("POST", "/widgets", Some(json!({"name": "a"})), &[])
+        .send("POST", "/widgets", Some(json!({"name": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("GET", "/widgets/w1", None, &[]).await;
@@ -222,7 +230,7 @@ async fn consistency_off_falls_back_and_still_reads_the_held_record() {
         },
     );
     let (status, _, body) = h
-        .send("POST", "/widgets", Some(json!({"name": "a"})), &[])
+        .send("POST", "/widgets", Some(json!({"name": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("GET", "/widgets/w1", None, &[]).await;
@@ -313,7 +321,7 @@ async fn an_enveloped_record_is_read_with_the_envelope_drawn_by_the_faker() {
             rt
         });
         let (status, _, body) = h
-            .send("POST", "/deals", Some(json!({"title": "a"})), &[])
+            .send("POST", "/deals", Some(json!({"title": "a"})), SEEDED)
             .await;
         assert_eq!(status, StatusCode::OK, "{members}: {body}");
         let (status, headers, body) = h.send("GET", "/deals/7", None, &[]).await;
@@ -364,7 +372,7 @@ async fn a_free_boolean_in_the_envelope_is_true() {
             |rt| rt,
         );
         let (status, _, body) = h
-            .send("POST", "/deals", Some(json!({"title": "a"})), &[])
+            .send("POST", "/deals", Some(json!({"title": "a"})), SEEDED)
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let (status, headers, body) = h.send("GET", "/deals/7", None, &[]).await;
@@ -405,7 +413,7 @@ async fn what_a_read_said_of_its_envelope_goes_over_a_draw() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/deals", Some(json!({"title": "a"})), &[])
+        .send("POST", "/deals", Some(json!({"title": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let seeded = [("x-mockingbird-seed", "1")];
@@ -520,7 +528,7 @@ async fn a_delete_removes_the_held_record_with_no_llm_call() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/notes", Some(json!({"text": "hi"})), &[])
+        .send("POST", "/notes", Some(json!({"text": "hi"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("DELETE", "/notes/n1", None, &[]).await;
@@ -561,7 +569,7 @@ async fn a_delete_answering_the_record_answers_it_as_held() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/tags", Some(json!({"label": "red"})), &[])
+        .send("POST", "/tags", Some(json!({"label": "red"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("DELETE", "/tags/t1", None, &[]).await;
@@ -588,7 +596,7 @@ async fn a_soft_delete_keeps_the_record_in_its_deleted_state() {
     let t = type_of(&h, "getFolder");
     assert_eq!(t, "folders", "the world above names this type");
     let (status, _, body) = h
-        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .send("POST", "/folders", Some(json!({"name": "docs"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("DELETE", "/folders/f1", None, &[]).await;
@@ -637,7 +645,7 @@ async fn an_executed_write_settles_what_write_memory_kept_for_its_record() {
         |rt| support::with_effective(rt, world, false),
     );
     let (status, _, body) = h
-        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .send("POST", "/folders", Some(json!({"name": "docs"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     // An action answering nothing: write memory keeps its request for the folder.
@@ -754,7 +762,7 @@ async fn a_box(world: serde_json::Value) -> support::DescribedHarness {
         |rt| support::with_effective(rt, world, false),
     );
     let (status, _, body) = h
-        .send("POST", "/boxes", Some(json!({"label": "red"})), &[])
+        .send("POST", "/boxes", Some(json!({"label": "red"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     h
@@ -818,7 +826,7 @@ async fn an_acknowledgement_s_boolean_members_say_the_write_succeeded() {
         |rt| support::with_effective(rt, world, false),
     );
     let (status, _, body) = h
-        .send("POST", "/boxes", Some(json!({"label": "red"})), &[])
+        .send("POST", "/boxes", Some(json!({"label": "red"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("DELETE", "/boxes/b1/gone", None, &[]).await;
@@ -898,7 +906,7 @@ async fn a_repeated_idempotency_key_replays_an_executed_delete() {
         |rt| support::with_effective(rt, world, false),
     );
     let (status, _, body) = h
-        .send("POST", "/notes", Some(json!({"text": "hi"})), &[])
+        .send("POST", "/notes", Some(json!({"text": "hi"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let key = [("idempotency-key", "k-1")];
@@ -955,7 +963,7 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
         |rt| rt,
     );
     let (status, _, body) = h
-        .send("POST", "/deals", Some(json!({"title": "big"})), &[])
+        .send("POST", "/deals", Some(json!({"title": "big"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, headers, body) = h.send("DELETE", "/deals/7", None, &[]).await;
@@ -1103,10 +1111,122 @@ fn action_line(operation: &str, fallback: Option<&str>) -> ExecLine {
     }
 }
 
-/// Creates item `i1` (the LLM's first answer).
+/// Widgets answer their create as their record; docs acknowledge theirs with
+/// `{ok, id, rev}`; boards answer only a `Location`; gizmos answer a record their read
+/// does not hold (`name` an integer); reports are accepted (`202`) as an operation
+/// holding them; batches are created in bulk.
+const CREATES: &str = r##"
+openapi: 3.0.0
+info: {title: Creates, version: "1"}
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      requestBody: {content: {application/json: {schema: {type: object, properties: {id: {type: string}, name: {type: string}, size: {type: integer}, color: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}}
+  /widgets/{id}:
+    get:
+      operationId: getWidget
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Widget"}}}}, "404": {description: missing}}
+  /docs:
+    post:
+      operationId: createDoc
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}, body: {type: string}}}}}}
+      responses:
+        "201":
+          description: written
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, id, rev]
+                properties: {ok: {type: boolean}, id: {type: string}, rev: {type: string, pattern: "^[0-9]+-[0-9a-f]{8}$"}}
+  /docs/{id}:
+    get:
+      operationId: getDoc
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Doc"}}}}}
+  /boards:
+    post:
+      operationId: createBoard
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, headers: {Location: {schema: {type: string}}}}}
+  /boards/{boardId}:
+    get:
+      operationId: getBoard
+      parameters: [{name: boardId, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Board"}}}}}
+  /gizmos:
+    post:
+      operationId: createGizmo
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses:
+        "201":
+          description: created
+          content: {application/json: {schema: {type: object, required: [id, name], properties: {id: {type: string}, name: {type: integer}}}}}
+  /gizmos/{id}:
+    get:
+      operationId: getGizmo
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Gizmo"}}}}}
+  /reports:
+    post:
+      operationId: createReport
+      requestBody: {content: {application/json: {schema: {type: object, properties: {title: {type: string}}}}}}
+      responses: {"202": {description: accepted, content: {application/json: {schema: {$ref: "#/components/schemas/ReportJob"}}}}}
+  /reports/{id}:
+    get:
+      operationId: getReport
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Report"}}}}}
+  /batches:
+    post:
+      operationId: createBatch
+      requestBody: {content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {type: object}}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Widget"}}}}}}}}
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [id, name, size]
+      properties: {id: {type: string}, name: {type: string}, size: {type: integer}, color: {type: string}}
+    Doc:
+      type: object
+      required: [id, title, body]
+      properties: {id: {type: string}, title: {type: string}, body: {type: string}}
+    Board:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Gizmo:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Report:
+      type: object
+      required: [id, title]
+      properties: {id: {type: string}, title: {type: string}}
+    ReportJob:
+      type: object
+      required: [name, done]
+      properties: {name: {type: string}, done: {type: boolean}, response: {$ref: "#/components/schemas/Report"}}
+"##;
+
+fn create_line(op: &str, fallback: Option<&str>) -> ExecLine {
+    ExecLine {
+        operation: op.into(),
+        exec: "create".into(),
+        exec_fallback: fallback.map(str::to_owned),
+        render_error: None,
+    }
+}
+
+/// Creates item `i1` (the LLM's first answer), seeded: the create takes the generated
+/// path, which stores the record under the id the model chose.
 async fn create_i1(h: &support::DescribedHarness) {
     let (status, _, body) = h
-        .send("POST", "/items", Some(json!({"name": "a"})), &[])
+        .send("POST", "/items", Some(json!({"name": "a"})), SEEDED)
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
@@ -1294,7 +1414,7 @@ async fn an_action_whose_record_does_not_render_falls_back() {
 #[tokio::test]
 async fn with_no_llm_answer_an_action_still_changes_state() {
     let (capture, _guard) = Capture::install();
-    // No answers: the create is the faker's.
+    // No answers: the executor creates the item, the faker filling what it needs.
     let h = actions(vec![]);
     let (status, _, made) = h
         .send("POST", "/items", Some(json!({"name": "a"})), &[])
@@ -1305,12 +1425,12 @@ async fn with_no_llm_answer_an_action_still_changes_state() {
         .send("POST", &format!("/items/{id}/archive"), None, &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    // The faker's create is remembered for the LLM to catch up on, so the action is
-    // behind it and generates; the faker's answer still archives the stored item.
-    assert_eq!(source(&headers), "fallback", "{body}");
+    // The executed create leaves nothing for the LLM to catch up on: the action is
+    // executed too.
+    assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(
         capture.of("archiveItem"),
-        vec![action_line("archiveItem", Some("behind"))]
+        vec![action_line("archiveItem", None)]
     );
     assert_eq!(body["status"], json!("ARCHIVED"));
     assert_eq!(body["id"], json!(id));
@@ -1341,10 +1461,23 @@ type Mutation {
 "#;
 
     async fn post(router: &axum::Router, query: &str) -> Value {
-        let req = axum::http::Request::builder()
+        post_with(router, query, &[]).await
+    }
+
+    /// [`post`] of a create, seeded (see [`super::SEEDED`]).
+    async fn seeded(router: &axum::Router, query: &str) -> Value {
+        post_with(router, query, super::SEEDED).await
+    }
+
+    async fn post_with(router: &axum::Router, query: &str, headers: &[(&str, &str)]) -> Value {
+        let mut req = axum::http::Request::builder()
             .method("POST")
             .uri("/graphql")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let req = req
             .body(axum::body::Body::from(json!({"query": query}).to_string()))
             .unwrap();
         super::support::send_to(router, req).await.2
@@ -1382,7 +1515,7 @@ type Mutation {
         );
         let rt = super::support::with_effective(rt, world, false);
         let router = mb_protocols::graphql::try_router(Arc::new(rt)).unwrap();
-        let made = post(
+        let made = seeded(
             &router,
             "mutation { createWidget(name: \"a\") { id name starred } }",
         )
@@ -1470,17 +1603,18 @@ async fn a_path_less_rpc_read_names_its_target_by_a_body_member() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["widget"]["id"].as_str().unwrap().to_owned();
     let (status, headers, body) = h
         .send(
             "POST",
             "/api/widgets.info",
-            Some(json!({"widget": "W1"})),
+            Some(json!({"widget": id})),
             &[],
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "state", "{body}");
-    assert_eq!(body["widget"], json!({"id": "W1", "name": "a"}));
+    assert_eq!(body["widget"], json!({"id": id, "name": "a"}));
     assert_eq!(
         capture.of("widgetsInfo"),
         vec![ExecLine {
@@ -1490,5 +1624,620 @@ async fn a_path_less_rpc_read_names_its_target_by_a_body_member() {
             render_error: None,
         }]
     );
-    assert_eq!(h.provider.requests().len(), 1, "the read made no LLM call");
+    assert!(
+        h.provider.requests().is_empty(),
+        "neither the executed create nor the read made an LLM call"
+    );
+}
+
+#[tokio::test]
+async fn a_create_stores_and_answers_the_request_s_record_with_a_minted_id() {
+    let (capture, _guard) = Capture::install();
+    // The fill's answer: a value for what the request left out that a read requires
+    // (`size`); an optional member (`color`), an id and a name it never takes.
+    let h = support::harness(
+        CREATES,
+        vec![json!({"id": "w-model", "size": 3, "color": "teal", "name": "not sent"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, headers, body) = h
+        .send("POST", "/widgets", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert_ne!(id, "w-model", "the id is minted, never filled");
+    assert_eq!(
+        body,
+        json!({"id": id, "name": "a", "size": 3}),
+        "the request's values stand; fill writes only what it left out"
+    );
+    assert_eq!(
+        capture.of("createWidget"),
+        vec![create_line("createWidget", None)]
+    );
+    let t = type_of(&h, "getWidget");
+    assert_eq!(
+        h.stored(&t, &id).await,
+        Some(body.clone()),
+        "stored is answered"
+    );
+    // One LLM call (the fill), whose prompt shows the record so far.
+    let requests = h.provider.requests();
+    assert_eq!(requests.len(), 1);
+    let prompt = &requests[0].messages[1].content;
+    assert!(prompt.contains("<record>"), "{prompt}");
+    // A later read is the executor's, from state.
+    let (status, headers, read) = h.send("GET", &format!("/widgets/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source(&headers), "state");
+    assert_eq!(read, body);
+    assert_eq!(capture.of("getWidget"), vec![exec(None)]);
+    assert_eq!(h.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_create_naming_every_member_makes_no_llm_call() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"name": "a", "size": 2, "color": "red"});
+    let (status, _, body) = h.send("POST", "/widgets", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["size"], json!(2));
+    assert!(h.provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn two_creates_mint_two_ids_and_a_client_chosen_id_is_kept() {
+    let (_capture, _guard) = Capture::install();
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| rt);
+    let sent = json!({"name": "a", "size": 2, "color": "red"});
+    let (_, _, first) = h.send("POST", "/widgets", Some(sent.clone()), &[]).await;
+    let (_, _, second) = h.send("POST", "/widgets", Some(sent), &[]).await;
+    assert_ne!(first["id"], second["id"]);
+    let chosen = json!({"id": "mine", "name": "b", "size": 1, "color": "red"});
+    let (status, _, body) = h.send("POST", "/widgets", Some(chosen.clone()), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body, chosen);
+    assert_eq!(
+        h.stored(&type_of(&h, "getWidget"), "mine").await,
+        Some(chosen)
+    );
+}
+
+#[tokio::test]
+async fn with_no_llm_answer_the_faker_fills_and_state_still_holds() {
+    let (capture, _guard) = Capture::install();
+    // The provider fails every call: fill falls back to the faker.
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| rt);
+    let (status, headers, body) = h
+        .send("POST", "/widgets", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["name"], json!("a"));
+    assert!(body["size"].is_i64(), "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    let (_, _, read) = h.send("GET", &format!("/widgets/{id}"), None, &[]).await;
+    assert_eq!(read, body);
+    assert_eq!(
+        capture.of("createWidget"),
+        vec![create_line("createWidget", None)]
+    );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_is_drawn_from_its_schema_with_the_record_s_id() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        CREATES,
+        vec![json!({"body": "filled"})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, headers, ack) = h
+        .send("POST", "/docs", Some(json!({"title": "t"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{ack}");
+    assert_eq!(source(&headers), "state", "{ack}");
+    assert_eq!(ack["ok"], json!(true), "the write succeeded: {ack}");
+    assert!(ack["rev"].is_string(), "{ack}");
+    let id = ack["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        capture.of("createDoc"),
+        vec![create_line("createDoc", None)]
+    );
+    let stored = h.stored(&type_of(&h, "getDoc"), &id).await;
+    assert_eq!(
+        stored,
+        Some(json!({"id": id, "title": "t", "body": "filled"})),
+        "the record, not the acknowledgement, is stored"
+    );
+    let (status, headers, read) = h.send("GET", &format!("/docs/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source(&headers), "state");
+    assert_eq!(Some(read), stored);
+}
+
+#[tokio::test]
+async fn a_location_create_names_the_one_id_it_stores_under() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| rt);
+    let (status, headers, body) = h
+        .send("POST", "/boards", Some(json!({"name": "plan"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let location = headers
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let id = location.rsplit('/').next().unwrap().to_owned();
+    assert_eq!(
+        capture.of("createBoard"),
+        vec![create_line("createBoard", None)]
+    );
+    assert_eq!(
+        h.stored(&type_of(&h, "getBoard"), &id).await,
+        Some(json!({"id": id, "name": "plan"}))
+    );
+    let (status, headers, read) = h.send("GET", &format!("/boards/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state");
+    assert_eq!(read, json!({"id": id, "name": "plan"}));
+}
+
+#[tokio::test]
+async fn a_created_record_starts_in_its_initial_state_which_fill_never_writes() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"types": {"folders": {"lifecycle": {
+        "member": "state", "states": ["ACTIVE", "DELETED"], "initial": "ACTIVE"
+    }}}});
+    let h = support::harness(DELETES, vec![], &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, world, false)
+    });
+    let (status, _, body) = h
+        .send("POST", "/folders", Some(json!({"name": "docs"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], json!("ACTIVE"));
+    assert!(h.provider.requests().is_empty(), "nothing was left to fill");
+    let id = body["id"].as_str().unwrap();
+    assert_eq!(h.stored("folders", id).await, Some(body.clone()));
+}
+
+#[tokio::test]
+async fn a_held_id_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| rt);
+    let chosen = json!({"id": "mine", "name": "b", "size": 1, "color": "red"});
+    h.send("POST", "/widgets", Some(chosen.clone()), &[]).await;
+    h.send("POST", "/widgets", Some(chosen), &[]).await;
+    assert_eq!(
+        capture.of("createWidget"),
+        vec![
+            create_line("createWidget", None),
+            create_line("createWidget", Some("held"))
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_answer_the_record_does_not_fit_is_the_faker_s_with_the_record_s_id() {
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| rt);
+    let (status, headers, body) = h
+        .send("POST", "/gizmos", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    // The answer's `name` is an integer: the faker's, beside the record's id.
+    assert!(body["name"].is_i64(), "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.stored(&type_of(&h, "getGizmo"), &id).await,
+        Some(json!({"id": id, "name": "a"})),
+        "the record is stored as sent"
+    );
+    assert_eq!(
+        capture.of("createGizmo"),
+        vec![create_line("createGizmo", None)]
+    );
+}
+
+#[tokio::test]
+async fn a_bulk_create_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"createBatch": {
+        "kind": "create", "type": "widgets",
+        "request": {"records": "/items"}, "answer": {"records": "/items"}
+    }}});
+    let h = support::harness(
+        CREATES,
+        vec![json!({"items": [{"id": "w1", "name": "a", "size": 1}]})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, true),
+    );
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/batches",
+            Some(json!({"items": [{"name": "a", "size": 1}]})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        capture.of("createBatch"),
+        vec![create_line("createBatch", Some("bulk"))]
+    );
+}
+
+#[tokio::test]
+async fn an_accepted_create_is_stored_at_once_and_its_operation_reads_as_done() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({"operations": {"createReport": {
+        "answer": {"long_running": {"done": "done", "result": "response"}}
+    }}});
+    let h = support::harness(CREATES, vec![], &HarnessOptions::default(), |rt| {
+        support::with_effective(rt, world, false)
+    });
+    let (status, headers, body) = h
+        .send("POST", "/reports", Some(json!({"title": "q3"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["done"], json!(true), "{body}");
+    let id = body["response"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(body["response"], json!({"id": id, "title": "q3"}));
+    assert_eq!(
+        capture.of("createReport"),
+        vec![create_line("createReport", None)]
+    );
+    let (status, headers, read) = h.send("GET", &format!("/reports/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read, json!({"id": id, "title": "q3"}));
+    assert!(h.provider.requests().is_empty());
+}
+
+/// Sites are listed by status and offset pages, read, updated and deleted; racks are
+/// created and listed under their site; things answer their create with fewer members
+/// than their read and their list require.
+const JOURNEY: &str = r##"
+openapi: 3.0.0
+info: {title: Journey, version: "1"}
+paths:
+  /sites:
+    get:
+      operationId: listSites
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, default: 0}}
+        - {name: status, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, next, previous, results]
+                properties:
+                  count: {type: integer}
+                  next: {type: string, format: uri, nullable: true}
+                  previous: {type: string, format: uri, nullable: true}
+                  results: {type: array, items: {$ref: "#/components/schemas/Site"}}
+    post:
+      operationId: createSite
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, status: {type: string}, region: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Site"}}}}}
+  /sites/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: getSite
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Site"}}}}
+        "404": {description: missing, content: {application/json: {schema: {type: object, properties: {message: {type: string}}}}}}
+    patch:
+      operationId: updateSite
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}, status: {type: string}}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Site"}}}}}
+    delete:
+      operationId: deleteSite
+      responses: {"204": {description: deleted}}
+  /sites/{siteId}/racks:
+    parameters: [{name: siteId, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listRacks
+      responses:
+        "200":
+          description: ok
+          content: {application/json: {schema: {type: object, required: [racks], properties: {racks: {type: array, items: {$ref: "#/components/schemas/Rack"}}}}}}
+    post:
+      operationId: createRack
+      requestBody: {content: {application/json: {schema: {type: object, properties: {label: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Rack"}}}}}
+  /sites/{siteId}/racks/{rackId}:
+    parameters:
+      - {name: siteId, in: path, required: true, schema: {type: string}}
+      - {name: rackId, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getRack
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Rack"}}}}}
+  /things:
+    get:
+      operationId: listThings
+      responses: {"200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/ThingSummary"}}}}}}
+    post:
+      operationId: createThing
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/NewThing"}}}}}
+  /things/{id}:
+    get:
+      operationId: getThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Thing"}}}}}
+components:
+  schemas:
+    Site:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [active, planned, retired]}
+        region: {type: string}
+    Rack:
+      type: object
+      required: [id, label, site]
+      properties: {id: {type: string}, label: {type: string}, site: {type: string}}
+    NewThing:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Thing:
+      type: object
+      required: [id, name, size]
+      properties: {id: {type: string}, name: {type: string}, size: {type: integer}}
+    ThingSummary:
+      type: object
+      required: [id, color]
+      properties: {id: {type: string}, color: {type: string}}
+"##;
+
+fn journey_world() -> serde_json::Value {
+    json!({
+        "types": {"racks": {"parent": {"type": "sites", "member": "site", "path_param": "siteId"}}},
+        "operations": {"listSites": {
+            "filters": [{"param": "status", "member": "status", "kind": "eq"}],
+            "paging": {"style": "offset", "request": "offset", "size": "limit"}
+        }}
+    })
+}
+
+fn line(op: &str, kind: &str, fallback: Option<&str>) -> ExecLine {
+    ExecLine {
+        operation: op.into(),
+        exec: kind.into(),
+        exec_fallback: fallback.map(str::to_owned),
+        render_error: None,
+    }
+}
+
+/// The `id`s of `items`.
+fn ids(items: &serde_json::Value) -> Vec<serde_json::Value> {
+    items
+        .as_array()
+        .map(|items| items.iter().map(|i| i["id"].clone()).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_created_record_is_read_listed_updated_and_deleted_by_its_minted_id() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(JOURNEY, journey_world(), Vec::new());
+    let mut created = Vec::new();
+    for (name, status) in [("a", "active"), ("b", "planned"), ("c", "active")] {
+        let sent = json!({"name": name, "status": status, "region": "eu"});
+        let (status, headers, body) = h.send("POST", "/sites", Some(sent), &[]).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(source(&headers), "state", "{body}");
+        created.push(body);
+    }
+    let id = |at: usize| created[at]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        created[0],
+        json!({"id": id(0), "name": "a", "status": "active", "region": "eu"})
+    );
+    assert_ne!(id(0), id(1));
+    // Read.
+    let (status, headers, read) = h.send("GET", &format!("/sites/{}", id(0)), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read, created[0]);
+    // Listed, filtered and paged.
+    let (_, headers, list) = h.send("GET", "/sites?status=active", None, &[]).await;
+    assert_eq!(source(&headers), "state", "{list}");
+    assert_eq!(
+        ids(&list["results"]),
+        [json!(id(0)), json!(id(2))],
+        "{list}"
+    );
+    let (_, _, page) = h.send("GET", "/sites?limit=1&offset=1", None, &[]).await;
+    assert_eq!(page["count"], json!(3), "{page}");
+    assert_eq!(ids(&page["results"]), [json!(id(1))], "{page}");
+    // Updated.
+    let (status, headers, updated) = h
+        .send(
+            "PATCH",
+            &format!("/sites/{}", id(0)),
+            Some(json!({"name": "a2"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(source(&headers), "state", "{updated}");
+    assert_eq!(updated["name"], json!("a2"));
+    let (_, _, read) = h.send("GET", &format!("/sites/{}", id(0)), None, &[]).await;
+    assert_eq!(read, updated);
+    // Deleted.
+    let (status, _, _) = h
+        .send("DELETE", &format!("/sites/{}", id(0)), None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, gone) = h.send("GET", &format!("/sites/{}", id(0)), None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{gone}");
+    let (_, _, list) = h.send("GET", "/sites", None, &[]).await;
+    assert_eq!(ids(&list["results"]), [json!(id(1)), json!(id(2))]);
+    assert!(h.provider.requests().is_empty(), "no LLM call");
+    assert_eq!(
+        capture.of("createSite"),
+        vec![line("createSite", "create", None); 3]
+    );
+    assert_eq!(
+        capture.of("updateSite"),
+        vec![line("updateSite", "update", None)]
+    );
+    assert_eq!(
+        capture.of("deleteSite"),
+        vec![line("deleteSite", "delete", None)]
+    );
+    assert_eq!(
+        capture.of("listSites"),
+        vec![line("listSites", "list", None); 3]
+    );
+    assert_eq!(
+        capture.of("getSite"),
+        vec![line("getSite", "read", None); 2],
+        "the read of the deleted site is refused before the executor"
+    );
+}
+
+#[tokio::test]
+async fn a_record_created_under_its_parent_is_listed_there_only() {
+    let (capture, _guard) = Capture::install();
+    let h = support::described(JOURNEY, journey_world(), Vec::new());
+    let (status, headers, rack) = h
+        .send("POST", "/sites/s1/racks", Some(json!({"label": "r1"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{rack}");
+    assert_eq!(source(&headers), "state", "{rack}");
+    let id = rack["id"].as_str().unwrap().to_owned();
+    assert_eq!(rack, json!({"id": id, "label": "r1", "site": "s1"}));
+    let (_, headers, listed) = h.send("GET", "/sites/s1/racks", None, &[]).await;
+    assert_eq!(source(&headers), "state", "{listed}");
+    assert_eq!(listed, json!({"racks": [rack.clone()]}));
+    let (_, _, other) = h.send("GET", "/sites/s2/racks", None, &[]).await;
+    assert_eq!(other, json!({"racks": []}));
+    let (status, headers, read) = h
+        .send("GET", &format!("/sites/s1/racks/{id}"), None, &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(read, rack);
+    assert_eq!(
+        capture.of("createRack"),
+        vec![line("createRack", "create", None)]
+    );
+    assert_eq!(
+        capture.of("listRacks"),
+        vec![line("listRacks", "list", None); 2]
+    );
+    assert!(h.provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_create_fills_what_its_reads_require_so_they_are_answered_from_state() {
+    let (capture, _guard) = Capture::install();
+    // The fill's answer: the members the read (`size`) and the list (`color`) require,
+    // which neither the request nor the create's answer holds.
+    let h = support::described(
+        JOURNEY,
+        json!({}),
+        vec![json!({"size": 4, "color": "teal"})],
+    );
+    let (status, headers, body) = h
+        .send("POST", "/things", Some(json!({"name": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    assert_eq!(body, json!({"id": id, "name": "a"}));
+    let prompt = &h.provider.requests()[0].messages[0].content;
+    assert!(
+        prompt.contains("size") && prompt.contains("color"),
+        "{prompt}"
+    );
+    let (status, headers, read) = h.send("GET", &format!("/things/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    let stored = json!({"id": id, "name": "a", "size": 4, "color": "teal"});
+    assert_eq!(read, stored, "the record as stored");
+    assert_eq!(capture.of("getThing"), vec![line("getThing", "read", None)]);
+    let (_, headers, listed) = h.send("GET", "/things", None, &[]).await;
+    assert_eq!(source(&headers), "state", "{listed}");
+    assert_eq!(listed, json!([{"id": id, "color": "teal"}]));
+    assert_eq!(h.provider.requests().len(), 1, "reads make no LLM call");
+}
+
+/// Tickets are created with some of their `fields`; their read requires a `status`
+/// among them.
+const NESTED: &str = r##"
+openapi: 3.0.0
+info: {title: Nested, version: "1"}
+paths:
+  /tickets:
+    post:
+      operationId: createTicket
+      requestBody: {content: {application/json: {schema: {type: object, properties: {fields: {type: object, properties: {summary: {type: string}}}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {type: object, required: [id], properties: {id: {type: string}}}}}}}
+  /tickets/{id}:
+    get:
+      operationId: getTicket
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Ticket"}}}}}
+components:
+  schemas:
+    Ticket:
+      type: object
+      required: [id, fields]
+      properties:
+        id: {type: string}
+        fields:
+          type: object
+          required: [summary, status]
+          properties: {summary: {type: string}, status: {type: string}, notes: {type: string}}
+"##;
+
+#[tokio::test]
+async fn a_create_fills_what_an_object_member_it_sent_lacks() {
+    let (capture, _guard) = Capture::install();
+    // The fill's answer: the `status` the read requires inside `fields`, and a
+    // `summary` it never takes (the request sent one).
+    let h = support::harness(
+        NESTED,
+        vec![json!({"fields": {"status": "open", "summary": "not sent"}})],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let sent = json!({"fields": {"summary": "printer jam"}});
+    let (status, headers, body) = h.send("POST", "/tickets", Some(sent), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    let id = body["id"].as_str().unwrap().to_owned();
+    let (status, headers, read) = h.send("GET", &format!("/tickets/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(source(&headers), "state", "{read}");
+    assert_eq!(
+        read,
+        json!({"id": id, "fields": {"summary": "printer jam", "status": "open"}})
+    );
+    assert_eq!(
+        capture.of("getTicket"),
+        vec![line("getTicket", "read", None)]
+    );
+    assert_eq!(h.provider.requests().len(), 1, "the fill's one call");
 }

@@ -339,7 +339,32 @@ async fn send(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, HeaderMap, Value) {
+    send_with(router, method, uri, body, &[]).await
+}
+
+/// [`send`] of a create, seeded: a seeded create takes the generated path,
+/// which stores the record the model answered under the id it chose, as these
+/// tests expect.
+async fn seeded(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, HeaderMap, Value) {
+    send_with(router, method, uri, body, &[crate::support::SEED]).await
+}
+
+async fn send_with(
+    router: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, &str)],
+) -> (StatusCode, HeaderMap, Value) {
     let mut req = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
     if body.is_some() {
         req = req.header("content-type", "application/json");
     }
@@ -361,7 +386,7 @@ async fn a_record_one_item_deep_in_an_envelope_is_stored() {
     let answer = json!({"success": true, "result": [{"id": "z1", "name": "a"}]});
     let h = support::described(CONTRACT, world, vec![answer.clone()]);
     let (status, _, body) = h
-        .send("POST", "/zones", Some(json!({"name": "a"})), &[])
+        .seeded("POST", "/zones", Some(json!({"name": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
@@ -560,7 +585,7 @@ async fn a_long_running_create_stores_its_result() {
         json!({"name": "operations/1", "done": false, "response": {"id": "r7", "title": "a"}});
     let h = support::described(CONTRACT, world, vec![answer]);
     let (status, _, body) = h
-        .send("POST", "/reports", Some(json!({"title": "a"})), &[])
+        .seeded("POST", "/reports", Some(json!({"title": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["done"], json!(true), "{body}");
@@ -637,7 +662,7 @@ async fn a_minted_id_the_header_schema_refuses_is_not_placed() {
     let world = json!({"types": {"tickets": {"identity": {"pattern": "tickets/{id}"}}}});
     let h = support::described(CONTRACT, world, vec![Value::Null]);
     let (status, headers, _) = h
-        .send("POST", "/tickets", Some(json!({"subject": "a"})), &[])
+        .seeded("POST", "/tickets", Some(json!({"subject": "a"})), &[])
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let placed = header(&headers, "ticket-id");
@@ -653,7 +678,7 @@ fn template(id: &str, alias: &str, handle: &str) -> Value {
 async fn an_alternate_member_reaches_the_same_record() {
     let world = json!({"types": {"templates": {"identity": {"alternates": ["Alias"]}}}});
     let h = support::described(CONTRACT, world, vec![template("t1", "welcome", "h1")]);
-    h.send("POST", "/templates", Some(json!({"Alias": "welcome"})), &[])
+    h.seeded("POST", "/templates", Some(json!({"Alias": "welcome"})), &[])
         .await;
     let (_, by_alias_headers, by_alias) = h.send("GET", "/templates/welcome", None, &[]).await;
     let (_, by_id_headers, by_id) = h.send("GET", "/templates/t1", None, &[]).await;
@@ -686,9 +711,9 @@ async fn the_identity_member_is_tried_before_an_alternate() {
         world,
         vec![template("x", "a1", "h1"), template("t2", "x", "h2")],
     );
-    h.send("POST", "/templates", Some(json!({"Alias": "a1"})), &[])
+    h.seeded("POST", "/templates", Some(json!({"Alias": "a1"})), &[])
         .await;
-    h.send("POST", "/templates", Some(json!({"Alias": "x"})), &[])
+    h.seeded("POST", "/templates", Some(json!({"Alias": "x"})), &[])
         .await;
     let (_, headers, body) = h.send("GET", "/templates/x", None, &[]).await;
     assert_eq!(source(&headers), "state");
@@ -700,7 +725,7 @@ async fn a_create_whose_request_wraps_the_record_stores_the_inner_record() {
     let world = json!({"operations": {"createConversation": {"request": {"record": "/data"}}}});
     let h = support::described(CONTRACT, world, vec![json!({"threadIds": [1]})]);
     let (_, headers, _) = h
-        .send(
+        .seeded(
             "POST",
             "/conversations",
             Some(json!({"data": {"subject": "a"}})),
@@ -714,7 +739,7 @@ async fn a_create_whose_request_wraps_the_record_stores_the_inner_record() {
     // With no world, the whole body is the request's record, as today.
     let h = plain(vec![json!({"threadIds": [1]})]);
     let (_, headers, _) = h
-        .send(
+        .seeded(
             "POST",
             "/conversations",
             Some(json!({"data": {"subject": "a"}})),
@@ -740,7 +765,7 @@ async fn a_create_that_stores_nothing_is_marked_no_record_once() {
         .into_iter()
         .collect(),
     );
-    h.send("POST", "/threads", Some(json!({"subject": "a"})), &[])
+    h.seeded("POST", "/threads", Some(json!({"subject": "a"})), &[])
         .await;
     assert_eq!(gaps(&h, 0), json!(["no_record"]));
     // With no static gap, the create that stored nothing is marked by itself.
@@ -752,7 +777,7 @@ async fn a_create_that_stores_nothing_is_marked_no_record_once() {
             .into_iter()
             .collect(),
     );
-    h.send("POST", "/threads", Some(json!({"subject": "a"})), &[])
+    h.seeded("POST", "/threads", Some(json!({"subject": "a"})), &[])
         .await;
     assert_eq!(gaps(&h, 0), json!(["no_record"]));
 }
@@ -824,7 +849,7 @@ async fn a_revision_that_changes_the_identity_member_still_reaches_earlier_recor
         0,
         vec![json!({"id": "f1", "displayName": "a", "slug": "docs"})],
     );
-    send(
+    seeded(
         &before,
         "POST",
         "/folders",
@@ -846,7 +871,7 @@ async fn a_revision_that_changes_the_identity_member_still_reaches_earlier_recor
     let (status, _, body) = send(&after, "GET", "/folders/docs", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(stored(&store, "f1").await, None);
-    send(
+    seeded(
         &after,
         "POST",
         "/folders",
@@ -866,7 +891,7 @@ async fn a_revision_that_adds_a_pattern_still_reaches_bare_keyed_records() {
         0,
         vec![json!({"id": "7", "displayName": "a"})],
     );
-    send(
+    seeded(
         &before,
         "POST",
         "/folders",
@@ -906,7 +931,7 @@ async fn a_described_alternate_adds_to_the_detected_members() {
     let draft = || vec![json!({"DraftId": "d1", "Alias": "welcome", "Handle": "hi"})];
     let world = json!({"types": {"drafts": {"identity": {"alternates": ["Handle"]}}}});
     let h = support::described(CONTRACT, world, draft());
-    h.send(
+    h.seeded(
         "POST",
         "/drafts",
         Some(json!({"Alias": "welcome", "Handle": "hi"})),
@@ -920,7 +945,7 @@ async fn a_described_alternate_adds_to_the_detected_members() {
     }
     // With no world (and under tier 0) only the detected `Alias` reaches it.
     for h in [plain(draft()), tier0(draft())] {
-        h.send(
+        h.seeded(
             "POST",
             "/drafts",
             Some(json!({"Alias": "welcome", "Handle": "hi"})),
@@ -1036,7 +1061,7 @@ async fn a_nested_route_reaches_a_patterned_parent_by_its_bare_id() {
         let folder = json!({"id": stored_as, "displayName": "Quarterly-Plans"});
         let h = support::described(CONTRACT, patterned(), vec![folder, json!([])]);
         let (status, _, body) = h
-            .send(
+            .seeded(
                 "POST",
                 "/folders",
                 Some(json!({"displayName": "Quarterly-Plans"})),
@@ -1072,7 +1097,7 @@ async fn a_nested_route_reaches_its_parent_by_a_described_alternate() {
     let mut shown = Vec::new();
     for h in [&described, &plain] {
         let request = json!({"title": "Annual-Budget", "code": "RM"});
-        h.send("POST", "/projects", Some(request), &[]).await;
+        h.seeded("POST", "/projects", Some(request), &[]).await;
         let (status, _, body) = h.send("GET", "/projects/RM/files", None, &[]).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         shown.push(prompt(h, 1).contains("Annual-Budget"));
@@ -1228,7 +1253,7 @@ async fn email_naming(layouts: &[Value], named: &str, then: Vec<Value>) -> Descr
     script.extend(then);
     let h = support::described(LAYOUTS, world, script);
     for l in layouts {
-        h.send(
+        h.seeded(
             "POST",
             "/templates",
             Some(json!({"Alias": l["Alias"]})),
@@ -1239,7 +1264,7 @@ async fn email_naming(layouts: &[Value], named: &str, then: Vec<Value>) -> Descr
     let (_, headers, body) = h.send("GET", "/templates/tpl-100001", None, &[]).await;
     assert_eq!(source(&headers), "state", "{body}");
     let (status, _, body) = h
-        .send(
+        .seeded(
             "POST",
             "/email",
             Some(json!({"LayoutTemplate": named, "Subject": "hi"})),
