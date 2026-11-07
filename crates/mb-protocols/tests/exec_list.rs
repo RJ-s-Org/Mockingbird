@@ -930,6 +930,95 @@ async fn a_next_url_with_no_described_parameter_cuts_the_page_to_its_size() {
     assert!(h.provider.requests().is_empty());
 }
 
+/// SendGrid's templates: the list answers a lean schema of the record the read answers
+/// in full, under an envelope member named for neither.
+const TEMPLATES: &str = r##"
+openapi: 3.0.0
+info: {title: Templates, version: "1"}
+paths:
+  /v3/templates:
+    get:
+      operationId: listTemplates
+      parameters:
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1}}
+        - {name: page_token, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result]
+                properties:
+                  result: {type: array, items: {$ref: "#/components/schemas/TemplateLean"}}
+    post:
+      operationId: createTemplate
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"201": {description: created, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+  /v3/templates/{template_id}:
+    get:
+      operationId: getTemplate
+      parameters: [{name: template_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Template"}}}}}
+components:
+  schemas:
+    TemplateLean:
+      type: object
+      required: [id, name]
+      properties: {id: {type: string}, name: {type: string}}
+    Template:
+      type: object
+      required: [id, name, versions]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        versions: {type: array, items: {type: object, properties: {id: {type: string}}}}
+"##;
+
+/// A path's only list of its type answers every held record of it, whatever schema
+/// name its items go by.
+#[tokio::test]
+async fn the_only_unscoped_list_of_a_described_type_lists_its_records() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"templates": {"identity": {"member": "id"}}},
+        "operations": {"listTemplates": {"type": "templates", "kind": "list", "answer": {"records": "/result"}}}
+    });
+    let h = support::described(TEMPLATES, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("t{i}"), "name": format!("template {i}"), "versions": []}))
+        .collect();
+    h.hold("templates", &held).await;
+    let (source, page) = get(&h, "/v3/templates").await;
+    assert_eq!(capture.of("listTemplates"), [None]);
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page["result"]), [json!("t1"), json!("t2")]);
+}
+
+/// A token paging naming its request parameter and no place answering it still cuts
+/// the page to the size asked, as an undescribed one does.
+#[tokio::test]
+async fn a_token_paging_naming_only_its_parameter_cuts_the_page_to_its_size() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"templates": {"identity": {"member": "id"}}},
+        "operations": {"listTemplates": {
+            "type": "templates", "kind": "list", "answer": {"records": "/result"},
+            "paging": {"style": "cursor", "request": "page_token", "size": "page_size"}
+        }}
+    });
+    let h = support::described(TEMPLATES, world, Vec::new());
+    let held: Vec<Value> = (1..=2)
+        .map(|i| json!({"id": format!("t{i}"), "name": format!("template {i}"), "versions": []}))
+        .collect();
+    h.hold("templates", &held).await;
+    let (source, page) = get(&h, "/v3/templates?page_size=1").await;
+    assert_eq!(capture.of("listTemplates"), [None]);
+    assert_eq!(source, "state", "{page}");
+    assert_eq!(ids(&page["result"]), [json!("t1")], "{page}");
+}
+
 /// Heroku's apps: paged by the `Range` request header, a `206` with a `Next-Range`
 /// while more remain.
 const APPS: &str = r##"

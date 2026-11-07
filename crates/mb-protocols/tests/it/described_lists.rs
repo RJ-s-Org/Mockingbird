@@ -286,8 +286,9 @@ async fn a_described_page_follows_a_numeric_filter() {
 
 #[tokio::test]
 async fn a_described_cut_with_no_token_place_keeps_its_filters() {
-    // A cursor paging that names no answer member nor header has no place for a token:
-    // the page is served whole, but narrowed as described.
+    // A cursor paging that names no answer member nor header has no described place for
+    // a token: the page is narrowed as described and cut to the size asked, as an
+    // undescribed one is.
     let amounts = (1..=5)
         .map(|i| json!({"id": format!("c{i}"), "amount": i}))
         .collect();
@@ -297,7 +298,7 @@ async fn a_described_cut_with_no_token_place_keeps_its_filters() {
     });
     let h = holding(desc, amounts).await;
     let body = get(&h, "/contacts?atLeast=2&rows=2").await;
-    assert_eq!(ids(&body), ["c2", "c3", "c4", "c5"]);
+    assert_eq!(ids(&body), ["c2", "c3"]);
     assert_eq!(h.provider.requests().len(), 0);
 }
 

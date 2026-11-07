@@ -107,6 +107,17 @@ impl PageAsk {
         matches!(self.style, PagingStyle::Page | PagingStyle::Offset)
     }
 
+    /// Whether the description says where a token goes and comes back, or the position
+    /// is a page number or an offset: a token paging naming its `request` parameter and
+    /// its `response` member or header. One naming only one side (a `next_url` the
+    /// client only follows, a `request` with nothing answering it) leaves the place to
+    /// the heuristics, and its page is cut to the size asked as an undescribed one is.
+    pub(super) fn places(&self) -> bool {
+        self.counts()
+            || (self.request.is_some()
+                && (self.response.is_some() || self.response_header.is_some()))
+    }
+
     /// The position's value at the first item.
     pub(super) fn first(&self) -> usize {
         match self.style {

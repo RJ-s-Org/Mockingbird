@@ -180,8 +180,7 @@ async fn answer(
         return Err("undescribed_param");
     }
     let unscoped = call.path_params.is_empty()
-        && !(rt.index().unscoped_lists.get(t) == Some(&1)
-            && rt.index().unscoped_paths.get(path).map(String::as_str) == Some(t))
+        && !only_unscoped(rt, path, t)
         && q.as_ref().is_none_or(|q| q.scope.is_none());
     if unscoped {
         return Err("unscoped_list");
@@ -284,6 +283,35 @@ async fn answer(
     }
     cursors::after_answer(state, plan, &served).await;
     Ok(served)
+}
+
+/// Whether the list at `path`, of items of type `t`, is the type's one list with no path
+/// parameter: the only one the description gives type `t`, and, where the contract's
+/// schemas name its items' type (`BundleIndex::unscoped_lists`), the only one of that
+/// type too. A list answering a lean schema of the record (SendGrid's
+/// `TemplateLean` under `result`) is one the schemas may not name.
+fn only_unscoped(rt: &MockRuntime, path: &str, t: &str) -> bool {
+    let index = rt.index();
+    let alone = index
+        .unscoped_paths
+        .get(path)
+        .is_none_or(|indexed| index.unscoped_lists.get(indexed) == Some(&1));
+    let described = rt
+        .bundle()
+        .operations
+        .iter()
+        .filter(|op| {
+            let kind = rt
+                .described()
+                .op(&op.id)
+                .and_then(|d| d.kind)
+                .or_else(|| OpKind::of(op));
+            kind == Some(OpKind::List)
+                && matches!(&op.binding, Binding::Http { path, .. } if !path.contains('{'))
+                && item_type(rt, op) == Some(t)
+        })
+        .count();
+    alone && described == 1
 }
 
 /// Whether stored `r`, of type `t`, names the parent the call's path names: its type's

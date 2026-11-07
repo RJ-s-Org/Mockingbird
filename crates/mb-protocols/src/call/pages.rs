@@ -939,13 +939,12 @@ fn token_slots(
 }
 
 /// The place the world describes for the next page's token of list `op`: `Some(None)`
-/// when it describes the list's paging with no place (a page number, or no response
-/// member or header), `None` when it does not describe the paging, or describes a token
-/// paging but not the parameter the token comes back in (a `next_url` paging whose
-/// client only follows the URL), which is then guessed as with no description. A
-/// described `response_header` carries the token in that header, a described
-/// `response` member carries it in the body (the next page's URL for a `next_url`
-/// paging).
+/// for a page number or an offset, `None` when it does not describe the paging, or
+/// describes one side of a token's place only ([`list_query::PageAsk::places`]: a
+/// `next_url` paging whose client only follows the URL, a `request` with nothing
+/// answering it), which is then guessed as with no description. A described
+/// `response_header` carries the token in that header, a described `response` member
+/// carries it in the body (the next page's URL for a `next_url` paging).
 fn described_slot(
     rt: &MockRuntime,
     (op, call, page_url): (&Operation, &OperationCall, Option<&str>),
@@ -953,6 +952,9 @@ fn described_slot(
     let ask = list_query::of(rt, op, call)?.page?;
     if ask.counts() {
         return Some(None);
+    }
+    if !ask.places() {
+        return None;
     }
     let param = ask.request.clone()?;
     if let Some(header) = ask.response_header {
