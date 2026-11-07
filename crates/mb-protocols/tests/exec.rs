@@ -967,7 +967,7 @@ async fn an_envelope_member_holds_the_record_s_id_as_the_record_holds_it() {
 /// Items with a lifecycle, acted on by actions answering the item (`archiveItem`),
 /// nothing (`starItem`), an acknowledgement (`renameItem`), the item in an envelope
 /// (`pinItem`, and `boostItem` whose envelope requires what the mock does not hold),
-/// and one the description says nothing of (`pingItem`).
+/// and two the description sets nothing for (`pingItem`, and `nudgeItem` answering nothing).
 const ACTIONS: &str = r##"
 openapi: 3.0.0
 info: {title: Actions, version: "1"}
@@ -1038,6 +1038,12 @@ paths:
     post:
       operationId: pingItem
       responses: {"200": {description: pinged, content: {application/json: {schema: {$ref: "#/components/schemas/Item"}}}}}
+  /items/{id}/nudge:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: nudgeItem
+      requestBody: {content: {application/json: {schema: {type: object, properties: {name: {type: string}}}}}}
+      responses: {"204": {description: nudged}}
 components:
   schemas:
     Item:
@@ -1219,6 +1225,40 @@ async fn an_action_the_description_sets_nothing_for_falls_back() {
 }
 
 #[tokio::test]
+async fn an_action_on_a_target_behind_remembered_writes_falls_back() {
+    let (capture, _guard) = Capture::install();
+    let h = actions(vec![
+        item_i1(),
+        json!({"effects": []}),
+        json!({"id": "i1", "name": "renamed", "status": "ARCHIVED"}),
+    ]);
+    create_i1(&h).await;
+    // An action answering nothing: write memory keeps its request for the item, which
+    // the stored copy does not show.
+    let (status, _, body) = h
+        .send(
+            "POST",
+            "/items/i1/nudge",
+            Some(json!({"name": "renamed"})),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, headers, body) = h.send("POST", "/items/i1/archive", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(source(&headers), "state", "{body}");
+    assert_eq!(
+        capture.of("archiveItem"),
+        vec![action_line("archiveItem", Some("behind"))]
+    );
+    // The earlier write is not lost: the read after shows it.
+    let (status, _, body) = h.send("GET", "/items/i1", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("renamed"), "{body}");
+    assert_eq!(body["status"], json!("ARCHIVED"), "{body}");
+}
+
+#[tokio::test]
 async fn an_action_on_an_unheld_target_falls_back() {
     let (capture, _guard) = Capture::install();
     let h = actions(vec![json!({"id": "i9", "name": "x", "status": "ARCHIVED"})]);
@@ -1252,7 +1292,7 @@ async fn an_action_whose_record_does_not_render_falls_back() {
 
 #[tokio::test]
 async fn with_no_llm_answer_an_action_still_changes_state() {
-    let (_capture, _guard) = Capture::install();
+    let (capture, _guard) = Capture::install();
     // No answers: the create is the faker's.
     let h = actions(vec![]);
     let (status, _, made) = h
@@ -1264,7 +1304,13 @@ async fn with_no_llm_answer_an_action_still_changes_state() {
         .send("POST", &format!("/items/{id}/archive"), None, &[])
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(source(&headers), "state", "{body}");
+    // The faker's create is remembered for the LLM to catch up on, so the action is
+    // behind it and generates; the faker's answer still archives the stored item.
+    assert_eq!(source(&headers), "fallback", "{body}");
+    assert_eq!(
+        capture.of("archiveItem"),
+        vec![action_line("archiveItem", Some("behind"))]
+    );
     assert_eq!(body["status"], json!("ARCHIVED"));
     assert_eq!(body["id"], json!(id));
     assert_eq!(h.stored("items", &id).await, Some(body));

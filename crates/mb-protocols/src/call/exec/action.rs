@@ -1,13 +1,16 @@
 //! Actions (step 5 of the plan): an action whose description sets members of its
 //! target (a `transition`, `changes`) sets them on the held target, stores it, and
-//! answers it, with no LLM call. Any other action generates.
+//! answers it, with no LLM call. Any other action generates, as does one on a target
+//! behind writes that write memory keeps for it.
 
 use mb_mcm::world::OpKind;
 use serde_json::Value;
 use tracing::Instrument;
 
 use super::{Fallback, Held, Ran, Write, answered, commit, fell_back, render};
-use crate::call::{CallPlan, OperationCall, StateAccess, derived, state_span, transitions};
+use crate::call::{
+    CallPlan, OperationCall, StateAccess, derived, state_span, transitions, write_memory,
+};
 
 /// Whether the executor takes these calls.
 pub(super) const EXECUTES: bool = true;
@@ -35,6 +38,17 @@ pub(super) async fn run(
         fell_back(rt, plan, kind, Fallback::NotHeld.as_str());
         return Ran::Generate(None);
     };
+    // Writes the stored copy does not show yet (an acknowledged create, an action that
+    // answered nothing, a create referring to the target) are remembered: the action
+    // generates and is told them, as a read behind them is, since committing would
+    // settle that memory with what it held never stored.
+    let earlier = write_memory::recall(state, plan, call, Some(id), true)
+        .instrument(state_span())
+        .await;
+    if !earlier.shown.is_empty() {
+        fell_back(rt, plan, kind, Fallback::Behind.as_str());
+        return Ran::Generate(Some(earlier));
+    }
     let mut changed = stored.clone();
     transitions::apply(rt, op, call.body.as_ref(), &mut changed.data);
     let derived = derived::filled(state, &plan.session, &changed)
