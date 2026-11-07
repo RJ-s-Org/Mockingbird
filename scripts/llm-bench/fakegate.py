@@ -17,9 +17,11 @@ every LLM call, so a run costs no spend:
 
 A branch or sha is checked out in its own worktree under `--work` and built there
 (`cargo build --release -p mockingbird-cli`, into one target directory under `--work`
-shared by its builds, one build at a time). A path to an executable is taken as the candidate binary and run
-with the base checkout's suites. The base's results are kept under `--work` by commit
-and reused, so gating several candidates against one main costs one base run.
+shared by its builds, one build at a time). A path to an executable is taken as the
+candidate binary and run with the base checkout's suites. Each side's results are kept
+under `--work` and reused while its binary, checkout, contracts and descriptions are
+unchanged, so gating several candidates against one main costs one base run. A check
+the base passed that the candidate did not run counts as lost.
 
 The report lists, for each tier, the pass counts and every check that went from pass to
 fail (LOST) or from fail to pass (gained). The fake's answers are deterministic but the
@@ -37,6 +39,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -109,11 +112,14 @@ def compare(base, cand, noise=1):
     for tier in TIERS:
         b = {k: v for k, v in base.items() if k[0] == tier}
         c = {k: v for k, v in cand.items() if k[0] == tier}
-        lost = sorted(k for k, v in c.items() if not v.get("ok") and b.get(k, {}).get("ok"))
+        # A check the base passed that the candidate did not run at all is lost too.
+        lost = sorted(k for k, v in b.items() if v.get("ok") and not c.get(k, {}).get("ok"))
+        missing = [k for k in lost if k not in c]
         gained = sorted(k for k, v in c.items() if v.get("ok") and not b.get(k, {}).get("ok"))
         net = len(gained) - len(lost)
         report[tier] = {"base": sum(1 for v in b.values() if v.get("ok")), "cand": sum(1 for v in c.values() if v.get("ok")),
-                        "checks": len(c), "lost": lost, "gained": gained, "net": net, "fails": net < -noise}
+                        "checks": len(c), "lost": lost, "missing": missing, "gained": gained, "net": net,
+                        "fails": net < -noise}
     return report
 
 
@@ -157,68 +163,121 @@ def build(sha, work):
 
 def checkout(sha, work):
     tree = os.path.join(work, f"src-{sha[:12]}")
-    if not os.path.isdir(tree):
-        git("worktree", "add", "--detach", "-q", tree, sha)
+    with world_author.file_lock(os.path.join(work, "worktree.lock")):
+        if not os.path.isdir(tree):
+            git("worktree", "prune")
+            git("worktree", "add", "--detach", "-q", tree, sha)
     return tree
 
 
-def run_side(name, tree, binary, work, suites, models, jobs, cache):
-    """Every suite at both tiers on fake_llm.py; results under <work>/run-<name>."""
-    out = os.path.join(work, f"run-{name}")
-    groups, uncovered = {}, []
+def side_meta(tree, binary, suites, models, cache):
+    """What a side's results depend on: the binary, the checkout whose suites ran, and for
+    each suite its contracts and the description each took. Results are reused only when
+    all of it is the same."""
+    groups, uncovered, inputs = {}, [], {}
     for s in suites:
-        model = author_for(suite_contracts(tree, s), cache, models)
+        contracts = suite_contracts(tree, s)
+        model = author_for(contracts, cache, models)
         if model:
             groups.setdefault(model, []).append(s)
         else:
             uncovered.append(s)
-    meta = {"authors": groups, "agent_uncovered": uncovered, "cache": cache}
-    done = os.path.join(out, "done")
-    if os.path.exists(done):
+        aid = world_author.author_id("claude", model) if model else None
+        inputs[s] = {os.path.relpath(c, tree): [world_author.sha256_file(c),
+                     world_author.sha256_file(world_author.cache_path(cache, aid, world_author.sha256_file(c))) if aid else None]
+                     for c in contracts}
+    return {"binary": world_author.sha256_file(binary), "tree": git("rev-parse", "HEAD", cwd=tree),
+            "authors": groups, "agent_uncovered": uncovered, "inputs": inputs}
+
+
+def reusable(done, meta):
+    try:
         with open(done) as f:
-            if json.load(f) == meta:
-                return out, meta
+            return json.load(f) == meta
+    except (OSError, ValueError):
+        return False
+
+
+def wait_listening(port, proc, timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.1)
+    return False
+
+
+def run_side(name, tree, binary, work, suites, models, jobs, cache):
+    """Every suite at both tiers on fake_llm.py; results under <work>/run-<name>, reused
+    when `side_meta` is unchanged. A lock keeps two gates from running the same side."""
+    out = os.path.join(work, f"run-{name}")
+    meta = side_meta(tree, binary, suites, models, cache)
+    with world_author.file_lock(out + ".lock"):
+        done = os.path.join(out, "done")
+        if reusable(done, meta):
+            return out, meta
+        return run_fresh(out, done, meta, name, tree, binary, suites, jobs, cache), meta
+
+
+def run_fresh(out, done, meta, name, tree, binary, suites, jobs, cache):
+    groups = meta["authors"]
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
     port = free_port()
     fake = subprocess.Popen([sys.executable, os.path.join(tree, "scripts", "llm-bench", "fake_llm.py"), "--port", str(port)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not wait_listening(port, fake):
+        fake.kill()
+        raise SystemExit(f"{name}: fake_llm.py did not start on port {port}")
     env = dict(os.environ, OPENROUTER_API_KEY="bench-dummy")
     common = [sys.executable, "scripts/llm-bench/server_suites.py", "--model", "bench/fake-llm",
               "--proxy-base", f"http://127.0.0.1:{port}", "--repeat", "1", "--jobs", str(jobs), "--suites-parallel",
               "--binary", binary, "--no-provider-check", "--provider-pins="]
-    procs = []
+    procs, logs = [], []
     try:
         for model, ss in groups.items():
             d = os.path.join(out, "agent", model)
             os.makedirs(d)
             cmd = common + ["--out", d, "--world", "agent", "--world-cache", cache, "--world-cache-only",
                             "--author-model", model] + [f"--suite={s}" for s in ss]
-            procs.append(subprocess.Popen(cmd, cwd=tree, env=env, stdout=open(os.path.join(d, "run.log"), "w"),
-                                          stderr=subprocess.STDOUT))
+            logs.append(open(os.path.join(d, "run.log"), "w"))
+            procs.append(subprocess.Popen(cmd, cwd=tree, env=env, stdout=logs[-1], stderr=subprocess.STDOUT))
         d = os.path.join(out, "none")
         os.makedirs(d)
         cmd = common + ["--out", d, "--world", "none"] + [f"--suite={s}" for s in suites]
-        procs.append(subprocess.Popen(cmd, cwd=tree, env=env, stdout=open(os.path.join(d, "run.log"), "w"),
-                                      stderr=subprocess.STDOUT))
+        logs.append(open(os.path.join(d, "run.log"), "w"))
+        procs.append(subprocess.Popen(cmd, cwd=tree, env=env, stdout=logs[-1], stderr=subprocess.STDOUT))
         codes = [p.wait() for p in procs]
+        alive = fake.poll() is None
     finally:
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
         fake.terminate()
         fake.wait()
+        for f in logs:
+            f.close()
     if any(codes):
         raise SystemExit(f"{name}: a suite run failed (logs under {out})")
+    if not alive:
+        raise SystemExit(f"{name}: fake_llm.py stopped during the run, so its results are not kept")
     with open(done, "w") as f:
         json.dump(meta, f)
-    return out, meta
+    return out
 
 
-def print_report(report, cand_name, base_sha, meta, noise):
-    print(f"fake-LLM gate: {cand_name} vs base {base_sha[:12]} (noise ±{noise})")
+def print_report(report, cand_name, base_sha, meta, bmeta, noise):
+    print(f"fake-LLM gate: {cand_name} (tree {meta['tree'][:12]}) vs base {base_sha[:12]} (noise ±{noise})")
     print(f"agent tier authors: {meta['authors']}; not on the agent tier (no cached descriptions): {meta['agent_uncovered']}")
+    if (bmeta["authors"], bmeta["agent_uncovered"]) != (meta["authors"], meta["agent_uncovered"]):
+        print(f"WARNING: the base took other descriptions: {bmeta['authors']}; uncovered {bmeta['agent_uncovered']}")
     for tier, r in report.items():
         print(f"\n[{tier}] {r['base']} -> {r['cand']} of {r['checks']}  (+{len(r['gained'])} / -{len(r['lost'])}, net {r['net']:+d})")
         for k in r["lost"]:
-            print(f"  LOST   {k[1]}: {k[2]}")
+            print(f"  LOST   {k[1]}: {k[2]}{'  (not run by the candidate)' if k in r['missing'] else ''}")
         for k in r["gained"]:
             print(f"  gained {k[1]}: {k[2]}")
     bad = [t for t, r in report.items() if r["fails"]]
@@ -246,6 +305,7 @@ def main():
     try:
         git("fetch", "-q", "origin", check=False)
         base_sha = resolve(a.base)
+        print(f"fakegate: base {a.base} = {base_sha[:12]}", file=sys.stderr)
         base_tree = checkout(base_sha, work)
         suites = a.suite or all_suites(base_tree)
         models = [m for m in a.author_models.split(",") if m]
@@ -257,6 +317,8 @@ def main():
             tree = base_tree
         else:
             sha = resolve(a.candidate)
+            print(f"fakegate: candidate {a.candidate} = {sha[:12]} (a branch resolves to origin/<branch> first)",
+                  file=sys.stderr)
             name, tree, binary = sha[:12], checkout(sha, work), build(sha, work)
         cand_out, cmeta = run_side(name, tree, binary, work, suites, models, a.jobs, cache)
     except SystemExit as e:
@@ -266,9 +328,10 @@ def main():
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"base": base_sha, "candidate": name, "meta": cmeta,
-                       "tiers": {t: dict(r, lost=[list(k) for k in r["lost"]], gained=[list(k) for k in r["gained"]])
+                       "tiers": {t: dict(r, lost=[list(k) for k in r["lost"]], gained=[list(k) for k in r["gained"]],
+                                         missing=[list(k) for k in r["missing"]])
                                  for t, r in report.items()}}, f, indent=1)
-    return print_report(report, name, base_sha, cmeta, a.noise)
+    return print_report(report, name, base_sha, cmeta, meta, a.noise)
 
 
 if __name__ == "__main__":

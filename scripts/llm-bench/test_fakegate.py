@@ -44,6 +44,50 @@ class CompareTest(unittest.TestCase):
         self.assertEqual(r["agent"]["lost"], [])
 
 
+    def test_a_passing_check_the_candidate_did_not_run_is_lost(self):
+        base = rows("agent", a=True, b=True)
+        cand = rows("agent", a=True)
+        r = fakegate.compare(base, cand, noise=0)
+        self.assertEqual(r["agent"]["lost"], [("agent", "journeys_x", "b")])
+        self.assertEqual(r["agent"]["missing"], [("agent", "journeys_x", "b")])
+        self.assertTrue(r["agent"]["fails"])
+
+
+class LoadTest(unittest.TestCase):
+    def test_rows_are_keyed_by_tier_from_every_model_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            for sub, case in (("agent/sonnet", "a"), ("agent/opus", "b"), ("none", "a")):
+                os.makedirs(os.path.join(d, sub))
+                with open(os.path.join(d, sub, "server.jsonl"), "w") as f:
+                    f.write(json.dumps({"suite": "s", "case": case, "ok": True}) + "\nnot json\n")
+            self.assertEqual(sorted(fakegate.load(d)), [("agent", "s", "a"), ("agent", "s", "b"), ("none", "s", "a")])
+
+
+class ReuseTest(unittest.TestCase):
+    def test_results_are_reused_only_for_the_same_inputs(self):
+        meta = {"binary": "b1", "tree": "t1", "authors": {}, "agent_uncovered": [], "inputs": {}}
+        with tempfile.TemporaryDirectory() as d:
+            done = os.path.join(d, "done")
+            self.assertFalse(fakegate.reusable(done, meta))
+            with open(done, "w") as f:
+                json.dump(meta, f)
+            self.assertTrue(fakegate.reusable(done, meta))
+            self.assertFalse(fakegate.reusable(done, dict(meta, tree="t2")))
+            self.assertFalse(fakegate.reusable(done, dict(meta, binary="b2")))
+
+    def test_side_meta_names_the_checkout_and_each_description(self):
+        """A binary gated again after the base moved runs with another tree, so its old
+        results are not reused."""
+        cache = os.path.join(fakegate.REPO, world_author.DEFAULT_CACHE)
+        binary = os.path.join(fakegate.HERE, "fake_llm.py")
+        meta = fakegate.side_meta(fakegate.REPO, binary, ["journeys_blind11"], list(fakegate.DEFAULT_MODELS), cache)
+        self.assertEqual(meta["tree"], fakegate.git("rev-parse", "HEAD"))
+        self.assertEqual(meta["binary"], world_author.sha256_file(binary))
+        entries = meta["inputs"]["journeys_blind11"]
+        self.assertEqual(len(entries), 5)
+        self.assertTrue(all(contract and description for contract, description in entries.values()))
+
+
 class AuthorForTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
