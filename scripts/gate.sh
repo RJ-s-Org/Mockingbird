@@ -11,7 +11,8 @@
 #   - `cargo fmt --all --check` (it takes seconds)
 #   - clippy, nextest and doctests for each crate with a changed file (any file under
 #     its directory, not only .rs) and the workspace crates that depend on it directly;
-#     files the CLI embeds or its tests read (plugins/, docs/, examples/, install.sh)
+#     files the CLI embeds or its tests read (plugins/, docs/, examples/, .github/, deploy/,
+#     install.sh)
 #     count as changes to mockingbird-cli
 #   - the console's typecheck, lint and tests when crates/mb-console/web changed
 #   - the bench's Python tests when scripts/llm-bench changed, after building the
@@ -58,7 +59,7 @@ dirs = {p["name"]: os.path.dirname(p["manifest_path"])[len(root):] + "/" for p i
 files = [f for f in os.environ["CHANGED"].splitlines() if f]
 hit = {n for n, d in dirs.items() if any(f.startswith(d) for f in files)}
 # Files outside crates/ that the CLI embeds or its tests read.
-if any(f.startswith(("plugins/", "docs/", "examples/")) or f == "install.sh" for f in files):
+if any(f.startswith(("plugins/", "docs/", "examples/", ".github/", "deploy/")) or f == "install.sh" for f in files):
     hit.add("mockingbird-cli")
 names = set(dirs)
 deps = {p["name"]: {d["name"] for d in p["dependencies"]} & names for p in m["packages"]}

@@ -72,7 +72,7 @@ jobs:
           out ext "$(has '^(crates/mb-ext/|scripts/semver-check\.sh$)')"
           out toolchain "$(has '^(Cargo\.toml|rust-toolchain\.toml)$')"
           # The image, auth, the stores and the CLI; engine and protocol changes reach e2e on main.
-          out image "$(has '^(Dockerfile|\.dockerignore$|deploy/|fixtures/|Cargo\.lock$|crates/(mb-auth|mb-admin|mb-state|mb-store|mockingbird)/|crates/mb-console/web/e2e-)')"
+          out image "$(has '^(Dockerfile|\.dockerignore$|deploy/|fixtures/|Cargo\.lock$|crates/(mb-auth|mb-admin|mb-state|mb-store|mockingbird)/|crates/mb-console/web/(e2e-|playwright\.rauthy\.config\.ts$))')"
 
   check:
     needs: changes
