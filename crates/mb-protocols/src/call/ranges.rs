@@ -25,7 +25,9 @@
 //! answer gave it.
 //!
 //! An LLM and `consistency: on` only, as [`deleted::applies`] says, for a plain call: a
-//! scenario's or a forced status's answer is left as it is.
+//! scenario's or a forced status's answer is left as it is. A list the state-first
+//! executor answers (`exec/list.rs`) is ordered and cut alike by [`serve`], from its own
+//! items, which are the session's records already, with or without an LLM.
 
 use std::cmp::Ordering;
 
@@ -224,6 +226,57 @@ pub(super) async fn apply(
         }
         pool.push(item);
     }
+    cut(bundle, plan, (&slot, &range), pool, generated);
+}
+
+/// Orders and cuts the executor's list answer `served` to what `call`'s `Range` header
+/// asks, from its own items, which are the session's records the list keeps (see the
+/// module's documentation): its status the slot's `206` when more remain. A call with
+/// no such header, or an answer whose items do not declare the field, is left as it is.
+pub(super) fn serve(
+    bundle: &mb_mcm::Bundle,
+    (plan, call): (&CallPlan<'_>, &OperationCall),
+    served: &mut GeneratedResponse,
+) {
+    let Some((slot, range)) = requested(plan.op, call) else {
+        return;
+    };
+    if served.status != slot.full && served.status != slot.partial {
+        return;
+    }
+    let Some(pool) = served.body.as_ref().and_then(list_items).cloned() else {
+        return;
+    };
+    let Some(schema) = plan.op.success_output().and_then(|o| o.schema.as_ref()) else {
+        return;
+    };
+    let mut held = None;
+    let declared = served
+        .body
+        .as_ref()
+        .and_then(|body| lists::list_parts(bundle, schema, body, &mut held))
+        .is_some_and(|(_, item_parts)| {
+            lists::declared_names(&item_parts).contains(&range.field.as_str())
+        });
+    if declared {
+        cut(bundle, plan, (&slot, &range), pool, served);
+    }
+}
+
+/// `generated` as the page of `pool` that `range` asks for: ordered by its field and
+/// bounded, at most its `max`, with the slot's `206` when more remain, else its full
+/// status. Left as it is when no item holds the field, or the page would not validate.
+fn cut(
+    bundle: &mb_mcm::Bundle,
+    plan: &CallPlan<'_>,
+    (slot, range): (&pages::HeaderSlot, &Range),
+    mut pool: Vec<Value>,
+    generated: &mut GeneratedResponse,
+) {
+    let op = plan.op;
+    let Some(body) = generated.body.as_ref() else {
+        return;
+    };
     let key = range.field.as_str();
     let ranged = |item: &Value| item.get(key).and_then(scalar_text).is_some();
     if !pool.iter().any(ranged) {

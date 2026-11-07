@@ -199,8 +199,13 @@ async fn record_then_replay_answers_without_an_llm() {
         .await
         .unwrap();
     assert_eq!(replayed, recorded);
-    // listOrders was never recorded: the faker answers.
-    let listed = http.get(ports.data_url("/orders")).send().await.unwrap();
+    // listOrders was never recorded: the faker answers. (A plain list is the session's
+    // records, from state; a parameter the description does not name generates it.)
+    let listed = http
+        .get(ports.data_url("/orders?trace=1"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(listed.status(), 200);
     assert_eq!(llm.received_requests().await.unwrap().len(), llm_calls);
 

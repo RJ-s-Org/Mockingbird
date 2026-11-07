@@ -343,6 +343,32 @@ impl DescribedHarness {
         self.recorded.0.lock().unwrap().clone()
     }
 
+    /// Stores `records` of type `t` in the default session, in order, each under its
+    /// `id`: what earlier writes left there.
+    pub async fn hold(&self, t: &str, records: &[serde_json::Value]) {
+        self.hold_by(t, "id", records).await;
+    }
+
+    /// [`DescribedHarness::hold`], each record under its member `key` (text or a number).
+    pub async fn hold_by(&self, t: &str, key: &str, records: &[serde_json::Value]) {
+        let session = mb_state::SessionKey {
+            workspace: self.rt.workspace.clone(),
+            mock: self.rt.name.clone(),
+            session: "default".into(),
+        };
+        for record in records {
+            let resource = mb_state::StoredResource {
+                resource_type: t.to_string(),
+                id: match &record[key] {
+                    serde_json::Value::String(id) => id.clone(),
+                    other => other.to_string(),
+                },
+                data: record.clone(),
+            };
+            self.rt.state.upsert(&session, resource).await.unwrap();
+        }
+    }
+
     /// The record of type `t` stored under `id` in the default session.
     pub async fn stored(&self, t: &str, id: &str) -> Option<serde_json::Value> {
         let session = mb_state::SessionKey {

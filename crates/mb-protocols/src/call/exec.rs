@@ -112,7 +112,10 @@ pub(super) fn classify(
     } else if !desc
         .and_then(|d| d.r#type.as_deref())
         .or(op.resource_type.as_deref())
-        .is_some_and(|t| identified(rt, op, t))
+        .is_some_and(|t| match kind {
+            OpKind::List => op.identity.is_some() || list::identified(rt, op, kind),
+            _ => identified(rt, op, t),
+        })
     {
         Some(Fallback::NoIdentity)
     } else if !matches!(kind, OpKind::Create | OpKind::List) && target_id(op, call).is_none() {
@@ -140,6 +143,22 @@ fn identified(rt: &crate::MockRuntime, op: &mb_mcm::Operation, t: &str) -> bool 
             .get(t)
             .and_then(|i| rt.bundle().operations.get(*i))
             .is_some_and(|read| read.identity.is_some())
+}
+
+/// Whether the executor answers some list of records of type `t`: a list whose items
+/// have an identity ([`list::identified`]).
+pub(super) fn lists(rt: &crate::MockRuntime, t: &str) -> bool {
+    list::EXECUTES
+        && rt.bundle().operations.iter().any(|op| {
+            let kind = rt
+                .described()
+                .op(&op.id)
+                .and_then(|d| d.kind)
+                .or_else(|| OpKind::of(op));
+            kind == Some(OpKind::List)
+                && list::identified(rt, op, OpKind::List)
+                && list::item_type(rt, op) == Some(t)
+        })
 }
 
 /// Whether the executor takes calls of `kind`.

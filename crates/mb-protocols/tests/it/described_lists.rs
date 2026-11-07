@@ -4,6 +4,10 @@
 //! parameter, size and token place; described filters the name-matched ones; a scope
 //! is checked as well; an order sorts what a list keeps. The parameter names here are
 //! ones the heuristics do not find, so a test shows the description at work.
+//!
+//! A list the description classifies is answered from the session's records by the
+//! state-first executor; a test of the model's own answer sends a parameter the
+//! description does not name (`trace`), which sends the list to the model.
 #![cfg(test)]
 #![cfg(feature = "http-rest")]
 
@@ -164,6 +168,13 @@ fn harness(desc: Value, script: Vec<Value>) -> DescribedHarness {
     support::described(CONTACTS, world("listContacts", desc), script)
 }
 
+/// A harness over `desc` whose session holds `contacts`, which earlier writes left.
+async fn holding(desc: Value, contacts: Vec<Value>) -> DescribedHarness {
+    let h = harness(desc, Vec::new());
+    h.hold("contacts", &contacts).await;
+    h
+}
+
 async fn get(h: &DescribedHarness, uri: &str) -> Value {
     let (status, _, body) = h.send("GET", uri, None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{uri}: {body}");
@@ -180,17 +191,17 @@ fn cursor_paging() -> Value {
 
 #[tokio::test]
 async fn a_described_page_number_reaches_the_second_page() {
-    let h = harness(page_paging(), vec![list(numbered(5))]);
+    let h = holding(page_paging(), numbered(5)).await;
     let first = get(&h, "/contacts?sheet=1&rows=2").await;
     assert_eq!(ids(&first), ["c1", "c2"]);
     let second = get(&h, "/contacts?sheet=2&rows=2").await;
     assert_eq!(ids(&second), ["c3", "c4"]);
-    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 #[tokio::test]
 async fn a_described_cursor_pages_through_and_ends() {
-    let h = harness(cursor_paging(), vec![list(numbered(5))]);
+    let h = holding(cursor_paging(), numbered(5)).await;
     let first = get(&h, "/contacts?rows=2").await;
     assert_eq!(ids(&first), ["c1", "c2"]);
     let token = first["continuation"].as_str().unwrap().to_string();
@@ -204,15 +215,16 @@ async fn a_described_cursor_pages_through_and_ends() {
             .is_none_or(|t| t.is_null() || t == ""),
         "{last}"
     );
-    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 #[tokio::test]
 async fn a_header_cursor_is_served_in_its_header() {
-    let h = harness(
+    let h = holding(
         json!({"paging": {"style": "header_cursor", "request": "cursor", "response_header": "X-Next-Cursor", "size": "rows"}}),
-        vec![list(numbered(5))],
-    );
+        numbered(5),
+    )
+    .await;
     let (_, headers, first) = h.send("GET", "/contacts?rows=2", None, &[]).await;
     assert_eq!(ids(&first), ["c1", "c2"]);
     let token = headers["x-next-cursor"].to_str().unwrap().to_string();
@@ -237,15 +249,16 @@ async fn a_header_cursor_is_served_in_its_header() {
         headers.get("x-next-cursor").is_none_or(|v| v.is_empty()),
         "{headers:?}"
     );
-    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 #[tokio::test]
 async fn a_header_cursor_list_on_one_page_carries_no_next() {
-    let h = harness(
+    let h = holding(
         json!({"paging": {"style": "header_cursor", "request": "cursor", "response_header": "X-Next-Cursor", "size": "rows"}}),
-        vec![list(numbered(2))],
-    );
+        numbered(2),
+    )
+    .await;
     let (_, headers, only) = h.send("GET", "/contacts?rows=5", None, &[]).await;
     assert_eq!(ids(&only), ["c1", "c2"]);
     assert!(
@@ -256,51 +269,49 @@ async fn a_header_cursor_list_on_one_page_carries_no_next() {
 
 #[tokio::test]
 async fn a_described_page_follows_a_numeric_filter() {
-    let amounts = list(
-        (1..=6)
-            .map(|i| json!({"id": format!("c{i}"), "amount": i}))
-            .collect(),
-    );
+    let amounts = (1..=6)
+        .map(|i| json!({"id": format!("c{i}"), "amount": i}))
+        .collect();
     let desc = json!({
         "filters": [{"param": "atLeast", "member": "amount", "kind": "gte"}],
         "paging": {"style": "page", "request": "sheet", "size": "rows"},
     });
-    let h = harness(desc, vec![amounts]);
+    let h = holding(desc, amounts).await;
     let first = get(&h, "/contacts?atLeast=3&rows=2").await;
     assert_eq!(ids(&first), ["c3", "c4"]);
     let second = get(&h, "/contacts?atLeast=3&rows=2&sheet=2").await;
     assert_eq!(ids(&second), ["c5", "c6"]);
-    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 #[tokio::test]
 async fn a_described_cut_with_no_token_place_keeps_its_filters() {
     // A cursor paging that names no answer member nor header has no place for a token:
     // the page is served whole, but narrowed as described.
-    let amounts = list(
-        (1..=5)
-            .map(|i| json!({"id": format!("c{i}"), "amount": i}))
-            .collect(),
-    );
+    let amounts = (1..=5)
+        .map(|i| json!({"id": format!("c{i}"), "amount": i}))
+        .collect();
     let desc = json!({
         "filters": [{"param": "atLeast", "member": "amount", "kind": "gte"}],
         "paging": {"style": "cursor", "request": "from", "size": "rows"},
     });
-    let h = harness(desc, vec![amounts]);
+    let h = holding(desc, amounts).await;
     let body = get(&h, "/contacts?atLeast=2&rows=2").await;
     assert_eq!(ids(&body), ["c2", "c3", "c4", "c5"]);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 #[tokio::test]
 async fn a_nested_member_filter_narrows() {
-    let h = harness(
+    let h = holding(
         json!({"filters": [{"param": "email", "member": "billing_address.email", "kind": "eq"}]}),
-        vec![list(vec![
+        vec![
             contact("c1", "z@x.io", "a@x.io"),
             contact("c2", "a@x.io", "b@x.io"),
             contact("c3", "y@x.io", "a@x.io"),
-        ])],
-    );
+        ],
+    )
+    .await;
     let body = get(&h, "/contacts?email=a@x.io").await;
     assert_eq!(ids(&body), ["c1", "c3"]);
 }
@@ -319,7 +330,7 @@ async fn a_described_filter_keeps_an_answered_item_lacking_the_member() {
             json!({"id": "c4", "billing_address": {"email": null}}),
         ])],
     );
-    let body = get(&h, "/contacts?email=a@x.io").await;
+    let body = get(&h, "/contacts?email=a@x.io&trace=1").await;
     assert_eq!(ids(&body), ["c1", "c2", "c4"]);
 }
 
@@ -334,44 +345,47 @@ async fn a_described_bound_keeps_an_answered_item_lacking_the_member() {
             json!({"id": "c3", "amount": 5}),
         ])],
     );
-    let body = get(&h, "/contacts?atLeast=3").await;
+    let body = get(&h, "/contacts?atLeast=3&trace=1").await;
     assert_eq!(ids(&body), ["c2", "c3"]);
 }
 
 #[tokio::test]
 async fn a_contains_filter_matches_an_array_of_objects() {
-    let h = harness(
+    let h = holding(
         json!({"filters": [{"param": "tag", "member": "tags", "kind": "contains"}]}),
-        vec![list(vec![
+        vec![
             json!({"id": "c1", "tags": [{"tag": "urgent"}]}),
             json!({"id": "c2", "tags": [{"tag": "later"}]}),
             json!({"id": "c3", "tags": [{"tag": "later"}, {"tag": "urgent"}]}),
-        ])],
-    );
+        ],
+    )
+    .await;
     let body = get(&h, "/contacts?tag=urgent").await;
     assert_eq!(ids(&body), ["c1", "c3"]);
 }
 
 #[tokio::test]
 async fn scope_keeps_only_the_parents_records() {
-    let h = harness(
+    let h = holding(
         json!({"scope": {"param": "folder", "member": "parent"}}),
-        vec![list(vec![
+        vec![
             json!({"id": "c1", "parent": "f1"}),
             json!({"id": "c2", "parent": "f2"}),
             json!({"id": "c3", "parent": "f1"}),
-        ])],
-    );
+        ],
+    )
+    .await;
     let body = get(&h, "/contacts?folder=f1").await;
     assert_eq!(ids(&body), ["c1", "c3"]);
 }
 
 #[tokio::test]
 async fn order_descending_sorts_newest_first() {
-    let h = harness(
+    let h = holding(
         json!({"order": {"member": "createdAt", "descending": true}}),
-        vec![list(numbered(3))],
-    );
+        numbered(3),
+    )
+    .await;
     let body = get(&h, "/contacts").await;
     assert_eq!(ids(&body), ["c3", "c2", "c1"]);
 }
@@ -387,23 +401,21 @@ async fn an_unknown_page_token_falls_back_to_generation() {
 
 #[tokio::test]
 async fn a_mistyped_filter_value_narrows_nothing() {
-    let amounts = || {
-        list(vec![
+    let h = holding(
+        json!({"filters": [{"param": "minAmount", "member": "amount", "kind": "gte"}]}),
+        vec![
             json!({"id": "c1", "amount": 3}),
             json!({"id": "c2", "amount": 7}),
-        ])
-    };
-    let h = harness(
-        json!({"filters": [{"param": "minAmount", "member": "amount", "kind": "gte"}]}),
-        vec![amounts(), amounts()],
-    );
+        ],
+    )
+    .await;
     assert_eq!(ids(&get(&h, "/contacts?minAmount=abc").await), ["c1", "c2"]);
     assert_eq!(ids(&get(&h, "/contacts?minAmount=5").await), ["c2"]);
 }
 
 #[tokio::test]
 async fn a_page_past_the_end_is_empty_with_no_next() {
-    let h = harness(page_paging(), vec![list(numbered(3))]);
+    let h = holding(page_paging(), numbered(3)).await;
     assert_eq!(
         ids(&get(&h, "/contacts?sheet=1&rows=2").await),
         ["c1", "c2"]
@@ -412,14 +424,19 @@ async fn a_page_past_the_end_is_empty_with_no_next() {
     let past = get(&h, "/contacts?sheet=3&rows=2").await;
     assert_eq!(past["contacts"], json!([]));
     assert!(past.get("continuation").is_none(), "{past}");
-    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.provider.requests().len(), 0);
 }
 
 /// Four contacts, three of them `a@x.io` at the top level, made one hour apart.
-fn mixed() -> Value {
+fn mixed_contacts() -> Vec<Value> {
     let mut items = numbered(4);
     items[1]["email"] = json!("b@x.io");
-    list(items)
+    items
+}
+
+/// [`mixed_contacts`] as the model lists them.
+fn mixed() -> Value {
+    list(mixed_contacts())
 }
 
 #[tokio::test]
@@ -428,7 +445,7 @@ async fn a_described_paging_alone_keeps_name_matched_filters() {
     let body = get(&plain, "/contacts?email=a@x.io&rows=2").await;
     // No world: the name-matched `email` filter narrows, and `rows` is no page size.
     assert_eq!(ids(&body), ["c1", "c3", "c4"]);
-    let h = harness(page_paging(), vec![mixed()]);
+    let h = holding(page_paging(), mixed_contacts()).await;
     let body = get(&h, "/contacts?email=a@x.io&rows=2").await;
     assert_eq!(ids(&body), ["c1", "c3"]);
     let next = get(&h, "/contacts?email=a@x.io&rows=2&sheet=2").await;
@@ -440,10 +457,11 @@ async fn a_described_order_alone_keeps_filters_and_paging() {
     let plain = support::harness(CONTACTS, vec![mixed()], &HarnessOptions::default(), |rt| rt);
     let body = get(&plain, "/contacts?email=a@x.io&limit=2").await;
     assert_eq!(ids(&body), ["c1", "c3"]);
-    let h = harness(
+    let h = holding(
         json!({"order": {"member": "createdAt", "descending": true}}),
-        vec![mixed()],
-    );
+        mixed_contacts(),
+    )
+    .await;
     let body = get(&h, "/contacts?email=a@x.io&limit=2").await;
     // The same filter and page size, over the items newest first.
     assert_eq!(ids(&body), ["c4", "c3"]);
@@ -451,10 +469,11 @@ async fn a_described_order_alone_keeps_filters_and_paging() {
 
 #[tokio::test]
 async fn empty_described_filters_keep_name_matching() {
-    let h = harness(
+    let h = holding(
         json!({"filters": [], "order": {"member": "createdAt", "descending": true}}),
-        vec![mixed()],
-    );
+        mixed_contacts(),
+    )
+    .await;
     let body = get(&h, "/contacts?email=a@x.io").await;
     assert_eq!(ids(&body), ["c4", "c3", "c1"]);
 }
@@ -482,12 +501,6 @@ async fn held_records_a_list_adds_follow_the_described_query() {
             held("h1", "a@x.io", 2),
             held("h2", "b@x.io", 1),
             held("h3", "a@x.io", 1),
-            list(vec![json!({
-                "id": "g1",
-                "billing_address": {"email": "a@x.io"},
-                "parent": "f1",
-                "createdAt": "2024-01-01T00:00:00Z",
-            })]),
         ],
     );
     for (id, billing, hour) in [
@@ -501,12 +514,11 @@ async fn held_records_a_list_adds_follow_the_described_query() {
         assert_eq!(status, StatusCode::CREATED);
     }
     let uri = |sheet: u32| format!("/contacts?folder=f1&email=a@x.io&rows=1&sheet={sheet}");
-    assert_eq!(ids(&get(&h, &uri(1)).await), ["g1"]);
     // The held records the query asks for, in the described order; not `h2`.
-    assert_eq!(ids(&get(&h, &uri(2)).await), ["h3"]);
-    assert_eq!(ids(&get(&h, &uri(3)).await), ["h1"]);
-    assert_eq!(get(&h, &uri(4)).await["contacts"], json!([]));
-    assert_eq!(h.provider.requests().len(), 4);
+    assert_eq!(ids(&get(&h, &uri(1)).await), ["h3"]);
+    assert_eq!(ids(&get(&h, &uri(2)).await), ["h1"]);
+    assert_eq!(get(&h, &uri(3)).await["contacts"], json!([]));
+    assert_eq!(h.provider.requests().len(), 3);
 }
 
 #[tokio::test]

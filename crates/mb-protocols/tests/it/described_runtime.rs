@@ -99,12 +99,13 @@ fn with_gaps(gaps: &[(&str, &[GapCode])]) -> HashMap<String, Vec<GapCode>> {
         .collect()
 }
 
+/// Every call but a list, which the state-first executor answers from the session's
+/// records when the world describes its type's identity (`tests/exec.rs`).
 #[tokio::test]
 async fn tier0_world_answers_as_no_world() {
     let script = || {
         vec![
             thing("t1", "a"),
-            json!([thing("t1", "a"), thing("t2", "b")]),
             thing("t1", "c"),
             thing("t1", "d"),
             thing("t1", "e"),
@@ -119,10 +120,9 @@ async fn tier0_world_answers_as_no_world() {
     assert!(tier0.rt.world().is_some());
     assert!(plain.rt.world().is_none());
     assert_eq!(**tier0.rt.bundle(), **plain.rt.bundle());
-    let calls: [(&str, &str, Option<Value>); 7] = [
+    let calls: [(&str, &str, Option<Value>); 6] = [
         ("POST", "/things", Some(json!({"name": "a"}))),
         ("GET", "/things/t1", None),
-        ("GET", "/things", None),
         ("PATCH", "/things/t1", Some(json!({"name": "c"}))),
         ("GET", "/things/t1", None),
         ("DELETE", "/things/t1", None),
