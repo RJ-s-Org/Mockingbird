@@ -561,8 +561,17 @@
                   "grammar"
                 ],
                 "not": {
-                  "required": [
-                    "member"
+                  "anyOf": [
+                    {
+                      "required": [
+                        "kind"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "member"
+                      ]
+                    }
                   ]
                 }
               }
