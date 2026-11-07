@@ -15,7 +15,7 @@
 //! never through [`super::complete`]'s reconciliation of a generated answer.
 
 use mb_engine::GeneratedResponse;
-use mb_engine::consistency::{declared_members, property_schema};
+use mb_engine::consistency::property_schema;
 use mb_mcm::world::OpKind;
 use mb_mcm::{Effect, OperationKind};
 use mb_state::StoredResource;
@@ -538,11 +538,12 @@ pub(super) fn bodiless(op: &mb_mcm::Operation) -> Option<GeneratedResponse> {
 /// `record` (of the call's target type) as the call's operation answers a write of it
 /// (spec §4): no body when its success response declares none; the record in the
 /// envelope the operation holds it in; the record itself when the schema declares every
-/// member it holds; else (an acknowledgement such as `{ok, id, rev}`) the faker's
-/// answer with each member the record holds under the same name, and
-/// the operation's identity member, taking the record's value. `None` when the schema
-/// declares members of which the record holds none, or nothing rendered validates.
-/// Tagged `state`.
+/// member it holds; else an acknowledgement (`{ok, id, rev}`, `{deleted: true}`,
+/// `{success, data: {id}}`): the faker's answer, deterministic per seed and call, with
+/// each member the record holds under the same name (at the top, or in an envelope
+/// member one level down) and the operation's identity member taking the record's
+/// value, and its boolean members `true`, as the write succeeded. `None` only when
+/// nothing rendered validates. Tagged `state`.
 pub(super) fn render(
     rt: &crate::MockRuntime,
     plan: &CallPlan<'_>,
@@ -582,9 +583,6 @@ pub(super) fn render(
     {
         shown.insert(field.to_owned(), Value::String(id.to_owned()));
     }
-    if shown.is_empty() && declared_members(bundle, schema).is_some_and(|m| !m.is_empty()) {
-        return None;
-    }
     // An answer declaring every member of the record is the record.
     let whole = record
         .as_object()
@@ -596,6 +594,9 @@ pub(super) fn render(
     {
         return Some(answer);
     }
+    // An acknowledgement: the faker's answer, deterministic per seed and call, with the
+    // record's members laid over it, at the top or one envelope member down
+    // (`{success, data: {id}}`).
     let status = match variant.status {
         mb_mcm::StatusSelector::Code(code) => code,
         _ => 200,
@@ -605,10 +606,36 @@ pub(super) fn render(
         ..mb_engine::GenerationContext::default()
     };
     let faked = rt.engine.fallback(bundle, op, variant, status, call, &ctx);
-    let Some(Value::Object(mut answer)) = faked.body else {
-        return None;
+    let serve = |answer: Value| rt.engine.serve_stored(bundle, op, &answer, response_schema);
+    let mut answer = match faked.body? {
+        // A successful write's acknowledgement says so: a boolean answer is `true`.
+        Value::Bool(_) => return serve(Value::Bool(true)),
+        Value::Object(answer) => answer,
+        other => return serve(other),
     };
+    for (name, value) in answer.iter_mut() {
+        if shown.contains_key(name) {
+            continue;
+        }
+        if let (Value::Object(inner), Some(inner_schema), Some(members)) = (
+            value,
+            property_schema(bundle, schema, name),
+            record.as_object(),
+        ) {
+            for (member, held) in members {
+                if property_schema(bundle, &inner_schema, member).is_some() {
+                    inner.insert(member.clone(), held.clone());
+                }
+            }
+        }
+    }
     answer.extend(shown);
-    rt.engine
-        .serve_stored(bundle, op, &Value::Object(answer), response_schema)
+    // Its boolean members say the write succeeded; failing that, as drawn and held.
+    let mut affirmed = answer.clone();
+    for value in affirmed.values_mut() {
+        if value.is_boolean() {
+            *value = Value::Bool(true);
+        }
+    }
+    serve(Value::Object(affirmed)).or_else(|| serve(Value::Object(answer)))
 }

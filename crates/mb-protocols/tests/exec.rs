@@ -705,12 +705,28 @@ paths:
         "200":
           description: binned
           content: {application/json: {schema: {type: object, required: [message], properties: {message: {type: string}}}}}
+  /boxes/{id}/gone:
+    delete:
+      operationId: removeBox
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: removed
+          content: {application/json: {schema: {type: object, required: [id, deleted], properties: {id: {type: string}, deleted: {type: boolean, enum: [true]}}}}}
+  /boxes/{id}/wrapped:
+    delete:
+      operationId: trashBox
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: trashed
+          content: {application/json: {schema: {type: object, required: [success, data], properties: {success: {type: boolean}, data: {type: object, required: [id], properties: {id: {type: string}}}}}}}
 components:
   schemas:
     Box:
       type: object
       required: [id, label]
-      properties: {id: {type: string}, label: {type: string}}
+      properties: {id: {type: string}, label: {type: string}, deleted: {type: boolean}}
 "##;
 
 /// The `Box` type, its create made and served from state.
@@ -753,20 +769,57 @@ async fn an_acknowledgement_takes_the_record_s_members_and_the_faker_s_for_the_r
 }
 
 #[tokio::test]
-async fn an_answer_sharing_nothing_with_the_record_falls_back() {
+async fn an_answer_sharing_nothing_with_the_record_is_the_faker_s_acknowledgement() {
     let (capture, _guard) = Capture::install();
     let world = json!({"operations": {"binBox": {"kind": "delete", "type": "boxes"}}});
     let h = a_box(world).await;
-    h.send("DELETE", "/boxes/b1/said", None, &[]).await;
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1/said", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert!(body["message"].is_string(), "{body}");
+    assert_eq!(h.provider.requests().len(), 1);
+    assert_eq!(h.stored("boxes", "b1").await, None, "the delete stands");
     assert_eq!(
         capture.of("binBox"),
         vec![ExecLine {
             operation: "binBox".into(),
             exec: "delete".into(),
-            exec_fallback: Some("render_failed".into()),
+            exec_fallback: None,
             render_error: None,
         }]
     );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_s_boolean_members_say_the_write_succeeded() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"removeBox": {"kind": "delete", "type": "boxes"}}});
+    let h = support::harness(
+        ANSWERS,
+        // The record says `deleted: false`, which the acknowledgement does not repeat.
+        vec![json!({"id": "b1", "label": "red", "deleted": false})],
+        &HarnessOptions::default(),
+        |rt| support::with_effective(rt, world, false),
+    );
+    let (status, _, body) = h
+        .send("POST", "/boxes", Some(json!({"label": "red"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1/gone", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!({"id": "b1", "deleted": true}));
+}
+
+#[tokio::test]
+async fn an_acknowledgement_holds_the_record_s_members_one_envelope_member_down() {
+    let (_capture, _guard) = Capture::install();
+    let world = json!({"operations": {"trashBox": {"kind": "delete", "type": "boxes"}}});
+    let h = a_box(world).await;
+    let (status, headers, body) = h.send("DELETE", "/boxes/b1/wrapped", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, json!({"success": true, "data": {"id": "b1"}}));
 }
 
 #[tokio::test]
