@@ -28,6 +28,7 @@ struct ExecLine {
     operation: String,
     exec: String,
     exec_fallback: Option<String>,
+    render_error: Option<String>,
 }
 
 impl Visit for ExecLine {
@@ -40,8 +41,10 @@ impl Visit for ExecLine {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "operation" {
-            self.operation = format!("{value:?}");
+        match field.name() {
+            "operation" => self.operation = format!("{value:?}"),
+            "render_error" => self.render_error = Some(format!("{value:?}")),
+            _ => {}
         }
     }
 }
@@ -121,6 +124,7 @@ fn exec(fallback: Option<&str>) -> ExecLine {
         operation: "getWidget".into(),
         exec: "read".into(),
         exec_fallback: fallback.map(str::to_owned),
+        render_error: None,
     }
 }
 
@@ -197,7 +201,12 @@ async fn a_record_that_does_not_render_generates() {
     let (status, headers, body) = h.send("GET", "/widgets/w1", None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "llm", "{body}");
-    assert_eq!(capture.of("getWidget"), vec![exec(Some("render_failed"))]);
+    // The stored record lacks a member the read requires: logged with why.
+    let failed = ExecLine {
+        render_error: Some("/size required".into()),
+        ..exec(Some("render_failed"))
+    };
+    assert_eq!(capture.of("getWidget"), vec![failed]);
 }
 
 #[tokio::test]
@@ -220,6 +229,208 @@ async fn consistency_off_falls_back_and_still_reads_the_held_record() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(source(&headers), "state", "{body}");
     assert_eq!(capture.of("getWidget"), vec![exec(Some("consistency_off"))]);
+}
+
+/// A create and a read of a deal answering `{<envelope's members>, data: Deal}`, the
+/// envelope's other members as `envelope` gives them, and a list saying deals are
+/// `Deal`s.
+fn enveloped_contract(envelope: &str) -> String {
+    format!(
+        r##"
+openapi: 3.0.0
+info: {{title: Envelopes, version: "1"}}
+paths:
+  /deals:
+    get:
+      operationId: getDeals
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{type: object, properties: {{data: {{type: array, items: {{$ref: "#/components/schemas/Deal"}}}}}}}}}}}}}}}}
+    post:
+      operationId: addDeal
+      requestBody: {{content: {{application/json: {{schema: {{type: object, properties: {{title: {{type: string}}}}}}}}}}}}
+      responses: {{"200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/DealResponse"}}}}}}}}}}
+  /deals/{{id}}:
+    get:
+      operationId: getDeal
+      parameters: [{{name: id, in: path, required: true, schema: {{type: integer}}}}]
+      responses:
+        "200": {{description: ok, content: {{application/json: {{schema: {{$ref: "#/components/schemas/DealResponse"}}}}}}}}
+        "404": {{description: missing, content: {{application/json: {{schema: {{type: object, properties: {{error: {{type: string}}}}}}}}}}}}
+components:
+  schemas:
+    Deal:
+      type: object
+      required: [id, title]
+      properties: {{id: {{type: integer}}, title: {{type: string}}}}
+    Envelope:
+{envelope}
+    DealResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [data]
+          properties: {{data: {{$ref: "#/components/schemas/Deal"}}}}
+"##
+    )
+}
+
+/// The envelopes of the bench's reads that fell back with `render_failed`: members
+/// beside the record that nothing kept and that their schema does not fix, none a
+/// boolean.
+const ENVELOPES: [(&str, &str); 2] = [
+    // Zoho Books' `{code, message, invoice}`: a free integer and string.
+    (
+        "code, message",
+        r#"      type: object
+      required: [code, message]
+      properties: {code: {type: integer}, message: {type: string}}"#,
+    ),
+    // Cloudflare's `{success, errors, messages, result}`: `messages` is a free array.
+    (
+        "success, errors, messages",
+        r#"      type: object
+      required: [success, errors, messages]
+      properties:
+        success: {type: boolean, enum: [true]}
+        errors: {type: array, maxItems: 0, items: {type: object}}
+        messages: {type: array, items: {type: object, required: [code, message], properties: {code: {type: integer, minimum: 1000}, message: {type: string}}}}"#,
+    ),
+];
+
+#[tokio::test]
+async fn an_enveloped_record_is_read_with_the_envelope_drawn_by_the_faker() {
+    for (members, envelope) in ENVELOPES {
+        let (capture, _guard) = Capture::install();
+        let contract = enveloped_contract(envelope);
+        let created = match members {
+            "code, message" => {
+                json!({"code": 0, "message": "Created", "data": {"id": 7, "title": "a"}})
+            }
+            _ => {
+                json!({"success": true, "errors": [], "messages": [], "data": {"id": 7, "title": "a"}})
+            }
+        };
+        let h = support::harness(&contract, vec![created], &HarnessOptions::default(), |rt| {
+            rt
+        });
+        let (status, _, body) = h
+            .send("POST", "/deals", Some(json!({"title": "a"})), &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{members}: {body}");
+        let (status, headers, body) = h.send("GET", "/deals/7", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{members}");
+        assert_eq!(source(&headers), "state", "{members}: {body}");
+        assert_eq!(body["data"], json!({"id": 7, "title": "a"}), "{members}");
+        for member in members.split(", ") {
+            assert!(body.get(member).is_some(), "{members}: {body}");
+        }
+        let read = ExecLine {
+            operation: "getDeal".into(),
+            exec: "read".into(),
+            exec_fallback: None,
+            render_error: None,
+        };
+        assert_eq!(capture.of("getDeal"), vec![read], "{members}");
+        assert_eq!(
+            h.provider.requests().len(),
+            1,
+            "{members}: the read made no LLM call"
+        );
+        // A second read answers the envelope the same.
+        let (_, _, again) = h.send("GET", "/deals/7", None, &[]).await;
+        assert_eq!(again, body, "{members}");
+    }
+}
+
+/// Pipedrive's `{success, data}`: a boolean nothing tells is `true` in a success, never
+/// a random draw. What the schema tells (a `default`) goes first.
+#[tokio::test]
+async fn a_free_boolean_in_the_envelope_is_true() {
+    let deal = json!({"id": 7, "title": "a"});
+    let free = r#"      type: object
+      required: [success]
+      properties: {success: {type: boolean}}"#;
+    for (envelope, success) in [
+        (free.to_owned(), true),
+        (
+            free.replace("{type: boolean}", "{type: boolean, default: false}"),
+            false,
+        ),
+    ] {
+        let (capture, _guard) = Capture::install();
+        let h = support::harness(
+            &enveloped_contract(&envelope),
+            vec![json!({"success": true, "data": deal})],
+            &HarnessOptions::default(),
+            |rt| rt,
+        );
+        let (status, _, body) = h
+            .send("POST", "/deals", Some(json!({"title": "a"})), &[])
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, headers, body) = h.send("GET", "/deals/7", None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(source(&headers), "state", "{body}");
+        assert_eq!(body, json!({"success": success, "data": deal}));
+        let read = ExecLine {
+            operation: "getDeal".into(),
+            exec: "read".into(),
+            exec_fallback: None,
+            render_error: None,
+        };
+        assert_eq!(capture.of("getDeal"), vec![read]);
+        assert_eq!(h.provider.requests().len(), 1, "the read made no LLM call");
+    }
+}
+
+/// What the session's answers said of the read's envelope goes over what the executor
+/// draws: a read on today's path (seeded) is generated with `success: false` and
+/// `code: 5`, which are kept, and a `note` too long to keep. The executor's read then
+/// answers the kept members from state and draws only the `note`.
+#[tokio::test]
+async fn what_a_read_said_of_its_envelope_goes_over_a_draw() {
+    let deal = json!({"id": 7, "title": "a"});
+    let long = "x".repeat(300);
+    let said = json!({"success": false, "code": 5, "note": long, "data": deal});
+    let envelope = r#"      type: object
+      required: [success, code, note]
+      properties: {success: {type: boolean}, code: {type: integer}, note: {type: string}}"#;
+    let (capture, _guard) = Capture::install();
+    let h = support::harness(
+        &enveloped_contract(envelope),
+        vec![
+            json!({"success": true, "code": 0, "note": "made", "data": deal}),
+            said.clone(),
+        ],
+        &HarnessOptions::default(),
+        |rt| rt,
+    );
+    let (status, _, body) = h
+        .send("POST", "/deals", Some(json!({"title": "a"})), &[])
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded = [("x-mockingbird-seed", "1")];
+    let (status, headers, body) = h.send("GET", "/deals/7", None, &seeded).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source(&headers), "llm", "{body}");
+    assert_eq!(body, said);
+    assert_eq!(h.provider.requests().len(), 2);
+
+    let (status, headers, body) = h.send("GET", "/deals/7", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body["success"], false, "{body}");
+    assert_eq!(body["code"], 5, "{body}");
+    assert_eq!(body["data"], deal, "{body}");
+    // Not kept, so drawn.
+    assert!(body["note"].is_string() && body["note"] != long, "{body}");
+    let read = ExecLine {
+        operation: "getDeal".into(),
+        exec: "read".into(),
+        exec_fallback: None,
+        render_error: None,
+    };
+    assert_eq!(capture.of("getDeal").last(), Some(&read));
+    assert_eq!(h.provider.requests().len(), 2, "the read made no LLM call");
 }
 
 /// Notes are deleted answering nothing; tags answering the deleted record; folders are
@@ -327,7 +538,8 @@ async fn a_delete_removes_the_held_record_with_no_llm_call() {
         lines.contains(&ExecLine {
             operation: "deleteNote".into(),
             exec: "delete".into(),
-            exec_fallback: None
+            exec_fallback: None,
+            render_error: None,
         }),
         "{lines:?}"
     );
@@ -400,7 +612,8 @@ async fn a_delete_of_an_unheld_record_falls_back() {
         lines.contains(&ExecLine {
             operation: "deleteNote".into(),
             exec: "delete".into(),
-            exec_fallback: Some("not_held".into())
+            exec_fallback: Some("not_held".into()),
+            render_error: None,
         }),
         "{lines:?}"
     );
@@ -550,7 +763,8 @@ async fn an_answer_sharing_nothing_with_the_record_falls_back() {
         vec![ExecLine {
             operation: "binBox".into(),
             exec: "delete".into(),
-            exec_fallback: Some("render_failed".into())
+            exec_fallback: Some("render_failed".into()),
+            render_error: None,
         }]
     );
 }

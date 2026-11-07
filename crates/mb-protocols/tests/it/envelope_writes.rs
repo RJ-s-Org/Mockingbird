@@ -169,30 +169,27 @@ components:
 "##;
 
 /// A `PUT` with nothing held, answered in the envelope its `allOf` extends from a
-/// base whose `result` is a placeholder, stores the record it holds. The read is
-/// told it, and once it said its own envelope, serves it from state.
+/// base whose `result` is a placeholder, stores the record it holds. The read serves
+/// it from state.
 #[tokio::test]
 async fn a_put_answered_in_an_extended_envelope_stores_its_record() {
     let envelope = |result: Value| json!({"success": true, "messages": [], "result": result});
     let record = json!({"id": "g1", "name": "replaced", "size": 3});
-    let h = harness(
-        BASED,
-        vec![envelope(record.clone()), envelope(record.clone())],
-    );
+    let h = harness(BASED, vec![envelope(record.clone())]);
     let sent = json!({"name": "replaced", "size": 3});
     let (status, put) = h.call("PUT", "/gadgets/g1", Some(sent)).await;
     assert_eq!(status, StatusCode::OK, "{put}");
-    assert_eq!(h.held("gadgets", "g1").await, Some(record));
+    assert_eq!(h.held("gadgets", "g1").await, Some(record.clone()));
     // The read's own envelope (a free `success`, `messages`) is not the write's to
-    // say: it is generated once, knowing the record.
+    // say: the state-first executor answers `success: true` and draws `messages`.
     let (status, read) = h.call("GET", "/gadgets/g1", None).await;
     assert_eq!(status, StatusCode::OK, "{read}");
-    assert!(h.last_prompt().contains("replaced"), "{}", h.last_prompt());
+    assert_eq!(read["result"], record, "{read}");
+    assert_eq!(read["success"], true, "{read}");
     let (status, again) = h.call("GET", "/gadgets/g1", None).await;
     assert_eq!(status, StatusCode::OK, "{again}");
-    assert_eq!(h.calls(), 2, "the second read is served from state");
-    assert_eq!(again["result"]["name"], "replaced", "{again}");
-    assert_eq!(again["result"]["size"], 3, "{again}");
+    assert_eq!(again, read);
+    assert_eq!(h.calls(), 1, "the reads are served from state");
 }
 
 /// Writes answering an object the contract declares nothing of.

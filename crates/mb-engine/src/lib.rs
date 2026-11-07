@@ -1427,15 +1427,80 @@ impl Engine {
             let value = kept
                 .and_then(|k| k.get(&name))
                 .cloned()
-                .or_else(|| consistency::fixed_value(bundle, &member_schema))
-                .or_else(|| {
-                    let example = consistency::example_value(bundle, &member_schema)?;
-                    let validator = self.schema_validator(bundle, &member_schema).ok()?;
-                    validator.is_valid(&example).then_some(example)
-                })?;
+                .or_else(|| self.told_value(bundle, &member_schema))?;
             envelope.insert(name, value);
         }
         Some(())
+    }
+
+    /// The value an envelope member's schema tells, as [`Engine::fill_envelope`] takes
+    /// it: the one it fixes (a `const`, a one-value `enum`, a `default`), else its
+    /// example when that suits it and is not a boolean's.
+    fn told_value(&self, bundle: &Bundle, member_schema: &Value) -> Option<Value> {
+        consistency::fixed_value(bundle, member_schema).or_else(|| {
+            let example = consistency::example_value(bundle, member_schema)?;
+            let validator = self.schema_validator(bundle, member_schema).ok()?;
+            validator.is_valid(&example).then_some(example)
+        })
+    }
+
+    /// Values for the members `op`'s answer envelope (its success schema, the narrowed
+    /// `response_schema` when given) requires beside its record whose schema tells no
+    /// value (see [`Engine::fill_envelope`]): envelope metadata that is not the
+    /// record's, which the state-first executor renders from the faker
+    /// (`docs/superpowers/specs/2026-11-06-state-first-engine-design.md`, §4). A
+    /// boolean is `true`, as the answer it is in is a success (a random one could say
+    /// `success: false`); any other is drawn
+    /// from the engine's seed (`0` without one) mixed with the contract, the operation
+    /// and the member, so every read of the operation answers them the same. Empty
+    /// when the answer holds its record in no envelope.
+    #[must_use]
+    pub fn envelope_draws(
+        &self,
+        bundle: &Bundle,
+        op: &Operation,
+        response_schema: Option<&Value>,
+    ) -> Map<String, Value> {
+        let mut drawn = Map::new();
+        let (Some(member), Some(schema)) = (
+            op.identity.as_ref().and_then(|i| i.envelope_member()),
+            response_schema.or_else(|| op.success_output()?.schema.as_ref()),
+        ) else {
+            return drawn;
+        };
+        for name in consistency::required_members(bundle, schema) {
+            if name == member {
+                continue;
+            }
+            let Some(member_schema) = consistency::property_schema(bundle, schema, &name) else {
+                continue;
+            };
+            if self.told_value(bundle, &member_schema).is_some() {
+                continue;
+            }
+            // The answer is a success: a boolean beside its record says so.
+            if consistency::declares_boolean(bundle, &member_schema) {
+                drawn.insert(name, Value::Bool(true));
+                continue;
+            }
+            let validator = self.schema_validator(bundle, &member_schema).ok();
+            let mut draws = seed::Draws::seeded(
+                self.faker_seed.unwrap_or_default(),
+                &[&bundle.source_digest, &op.id, "envelope", &name],
+                &[],
+            );
+            let (value, valid) = self.fake_checked(
+                bundle,
+                &member_schema,
+                validator.as_deref(),
+                &FakerHints::default(),
+                &mut draws,
+            );
+            if valid {
+                drawn.insert(name, value);
+            }
+        }
+        drawn
     }
 
     /// A `404` for a resource the session does not hold: the operation's
@@ -5313,5 +5378,39 @@ components:
         assert_eq!(held(&bundle, None), None);
         let bundle = enveloped("count", "count: {type: integer, examples: [not-a-number]}");
         assert_eq!(held(&bundle, None), None);
+    }
+
+    #[test]
+    fn envelope_draws_are_the_members_nothing_tells_and_the_same_each_time() {
+        let bundle = enveloped(
+            "status, code, message",
+            "status: {type: string, enum: [success]}, code: {type: integer, minimum: 1}, \
+             message: {type: string, examples: [Done]}",
+        );
+        let op = bundle.operation("getDeal").unwrap();
+        let engine = Engine::new(None, EngineConfig::default());
+        let drawn = engine.envelope_draws(&bundle, op, None);
+        // What the schema tells is not drawn.
+        assert_eq!(drawn.keys().collect::<Vec<_>>(), ["code"]);
+        assert!(drawn["code"].as_i64().is_some_and(|c| c >= 1), "{drawn:?}");
+        assert_eq!(engine.envelope_draws(&bundle, op, None), drawn);
+        let answer = engine
+            .held_answer(&bundle, op, &json!({"id": 7}), Some(&drawn), None)
+            .unwrap();
+        assert!(
+            engine.serve_stored(&bundle, op, &answer, None).is_some(),
+            "{answer}"
+        );
+        // A boolean nothing tells is `true`: the answer is a success.
+        let bundle = enveloped("ok", "ok: {type: boolean}");
+        let op = bundle.operation("getDeal").unwrap();
+        assert_eq!(
+            engine.envelope_draws(&bundle, op, None),
+            json!({"ok": true}).as_object().unwrap().clone()
+        );
+        // No envelope: nothing.
+        let bundle = enveloped("data", "");
+        let op = bundle.operation("getDeal").unwrap();
+        assert!(engine.envelope_draws(&bundle, op, None).is_empty());
     }
 }

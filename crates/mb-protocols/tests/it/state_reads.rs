@@ -51,7 +51,29 @@ impl Harness {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, String, Value) {
+        self.send(method, uri, body, &[]).await
+    }
+
+    /// A read on today's path: a seed (`X-Mockingbird-Seed`) takes it past the
+    /// state-first executor, which answers an envelope's free members itself (a boolean
+    /// `true`, any other from the faker, `tests/exec.rs`). Today's path generates such a read and keeps what it
+    /// said.
+    async fn read(&self, uri: &str) -> (StatusCode, String, Value) {
+        self.send("GET", uri, None, &[("x-mockingbird-seed", "1")])
+            .await
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String, Value) {
         let mut req = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
         if body.is_some() {
             req = req.header("content-type", "application/json");
         }
@@ -243,7 +265,7 @@ async fn a_free_member_nothing_said_is_not_guessed() {
     let (status, _, listed) = h.call("GET", "/v1/deals", None).await;
     assert_eq!(status, StatusCode::OK, "{listed}");
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_ne!(source, "state", "{read}");
     assert_eq!(h.calls(), 2);
@@ -261,12 +283,12 @@ async fn a_read_answers_the_envelope_it_answered_before() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_ne!(source, "state", "{read}");
     assert_eq!(h.calls(), 2);
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(
         (status, source.as_str()),
         (StatusCode::OK, "state"),
@@ -304,14 +326,14 @@ async fn a_patch_inside_the_record_still_remembers_the_envelope() {
         .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(
         (status, source.as_str()),
         (StatusCode::OK, "patched"),
         "{read}"
     );
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(
         (status, source.as_str()),
         (StatusCode::OK, "state"),
@@ -345,14 +367,14 @@ async fn a_patched_sibling_is_not_remembered() {
         .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(
         (status, source.as_str()),
         (StatusCode::OK, "patched"),
         "{read}"
     );
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(status, StatusCode::OK, "{read}");
     // The read's own answer may come back from the cache, never from state.
     assert_ne!(source, "state", "{read}");
@@ -381,13 +403,13 @@ async fn a_string_stays_with_the_operation_that_answered_it() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_ne!(source, "state", "{read}");
     assert_ne!(read["message"], "Deal created", "{read}");
     assert_eq!(h.calls(), 2);
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(
         (status, source.as_str()),
         (StatusCode::OK, "state"),
@@ -419,11 +441,11 @@ async fn an_envelope_with_no_record_is_not_remembered() {
         .call("POST", "/v1/deals", Some(json!({"title": "Big deal"})))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    let (status, _, missed) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, _, missed) = h.read("/v1/deals/7").await;
     assert_eq!(status, StatusCode::OK, "{missed}");
     assert_eq!(missed["success"], false, "{missed}");
 
-    let (status, source, read) = h.call("GET", "/v1/deals/7", None).await;
+    let (status, source, read) = h.read("/v1/deals/7").await;
     assert_eq!(status, StatusCode::OK, "{read}");
     assert!(
         source != "state" || read["success"] == true,
@@ -458,11 +480,11 @@ async fn only_what_the_read_enumerates_is_shared_across_operations() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     // `code` is required and only the create said it: the read is generated.
-    let (status, source, read) = h.call("GET", "/v2/event-types/42", None).await;
+    let (status, source, read) = h.read("/v2/event-types/42").await;
     assert_eq!(status, StatusCode::OK, "{read}");
     assert_ne!(source, "state", "{read}");
     assert_eq!(h.calls(), 2);
-    let (_, source, read) = h.call("GET", "/v2/event-types/42", None).await;
+    let (_, source, read) = h.read("/v2/event-types/42").await;
     assert_eq!(source, "state", "{read}");
     assert_eq!(read["code"], 200, "{read}");
     assert!(read.get("created").is_none(), "{read}");

@@ -2,8 +2,11 @@
 //!
 //! A read whose answer holds its record in an envelope (Cal.com's `{status, data}`,
 //! Pipedrive's `{success, data}`) is served from state with the envelope's other
-//! required members filled in (see [`mb_engine::Engine::held_answer`]), and generated
-//! when nothing says what one of them is. What the schema fixes is not always what the
+//! required members filled in (see [`mb_engine::Engine::held_answer`]). When nothing
+//! says what one of them is, the state-first executor's read answers it `true` for a
+//! boolean (the answer is a success) and the faker's value for any other
+//! ([`mb_engine::Engine::envelope_draws`]), and any other read is generated. What is
+//! kept goes over those. What the schema fixes is not always what the
 //! API says: Pipedrive's `success` is a plain boolean. So a 2xx answer that held a
 //! record (an object) in an envelope keeps what the envelope's other required members
 //! said, per session, under the envelope's shape ([`shape`]: the record's type, its
@@ -18,8 +21,9 @@
 //!   create's `status: "success"` is what a Cal.com read says too, as its `status`
 //!   enumerates it. A number or a free boolean (a create's `code: 201`, `total`,
 //!   `created: true`, Pipedrive's `success`) and a free string (`message: "Deal
-//!   created"`) stay with the operation that answered them, so a Pipedrive read is
-//!   generated the first time in a session and answered from state after.
+//!   created"`) stay with the operation that answered them, so a Pipedrive read
+//!   off the executor is generated the first time in a session and answered from state
+//!   after.
 //!
 //! Nothing is kept of an answer holding no record (`{success: false, data: null}`) or
 //! of a faker stand-in, which say nothing of what the API answers around a record, nor
