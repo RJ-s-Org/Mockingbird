@@ -12,7 +12,8 @@
 //! - `scope` is checked as well as everything else (a held record also stays in its
 //!   route's collection). A `prefix` scope keeps a record whose member is a path
 //!   directly under the requested one (`/a/b` under `/a`, any one-step path under a
-//!   blank or `/` root), at any depth when its `recursive` parameter is `true`.
+//!   blank or `/` root), at any depth when its `recursive` parameter is `true`; a
+//!   member value holding no upper-case letter is compared with the path in lower case.
 //! - A parameter names a path or query parameter, else a request body member: a
 //!   pointer (`/ActiveList/Pagination/PageNumber`), or a name the body declares and the
 //!   path and query do not ([`body_pointer`]). `ignores` names parameters that ask
@@ -770,8 +771,17 @@ fn in_scope(q: &ListQuery, item: &Value) -> bool {
 }
 
 /// Whether `/`-separated `path` is below `dir` (the root when blank or `/`): directly,
-/// or at any depth with `deep`.
+/// or at any depth with `deep`. A `path` holding no upper-case letter (Dropbox's
+/// `path_lower`) is a lower-cased path: `dir` is compared in lower case too.
 fn under(path: &str, dir: &str, deep: bool) -> bool {
+    let lowered;
+    let dir = match path.chars().any(char::is_uppercase) {
+        true => dir,
+        false => {
+            lowered = dir.to_lowercase();
+            lowered.as_str()
+        }
+    };
     let dir = dir.trim_end_matches('/');
     let Some(rest) = path.strip_prefix(dir).and_then(|r| r.strip_prefix('/')) else {
         return false;

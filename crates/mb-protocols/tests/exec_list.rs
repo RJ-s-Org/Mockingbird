@@ -1820,7 +1820,12 @@ async fn a_prefix_scope_lists_the_records_under_the_requested_path() {
         listed(json!({"path": ""})).await,
         [json!("other"), json!("top")]
     );
-    assert_eq!(capture.of("listFolder"), [None, None, None]);
+    // A path member holding no upper-case letter is a lower-cased path.
+    assert_eq!(
+        listed(json!({"path": "/Reports"})).await,
+        [json!("a"), json!("b")]
+    );
+    assert_eq!(capture.of("listFolder"), [None, None, None, None]);
 }
 
 /// eBay's `GetMyeBaySelling`, a SOAP list paged by members of its request.
@@ -1993,5 +1998,125 @@ async fn a_soap_list_pages_by_its_request_members() {
     assert_eq!(
         capture.causes("GetMyeBaySelling"),
         [Some("ActiveList/Sort".to_owned())]
+    );
+}
+
+/// A query parameter the description `ignores` asks nothing of the list: it is read
+/// past, not generated (`brief`, at no default, would be otherwise).
+#[tokio::test]
+async fn an_ignored_query_parameter_asks_nothing() {
+    let (capture, _guard) = Capture::install();
+    let mut world = sites_world();
+    world["operations"]["listSites"]["ignores"] = json!(["brief"]);
+    let h = support::described(SITES, world, Vec::new());
+    h.hold("sites", &[site(1, "active"), site(2, "planned")])
+        .await;
+    let (source, body) = get(&h, "/api/dcim/sites/?brief=true&status=active").await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(ids(&body["results"]), [json!(1)]);
+    assert_eq!(capture.of("listSites"), [None]);
+}
+
+/// A shelf of books over gRPC: a list whose request message holds its filter.
+#[cfg(feature = "grpc")]
+const SHELF: &str = r#"
+syntax = "proto3";
+package shelf;
+service Shelf {
+  rpc GetBook(GetBookRequest) returns (Book) {}
+  rpc ListBooks(ListBooksRequest) returns (ListBooksResponse) {}
+}
+message GetBookRequest { string id = 1; }
+message ListBooksRequest { string genre = 1; string order_by = 2; }
+message ListBooksResponse { repeated Book books = 1; }
+message Book { string id = 1; string title = 2; string genre = 3; }
+"#;
+
+/// A gRPC list is answered from state as a `POST` list is, its request message read
+/// as a body; a member the description does not name falls back.
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn a_grpc_list_is_answered_from_state() {
+    use mb_protocols::grpc::{DynamicCodec, GrpcMock, GrpcServer};
+    use prost_reflect::{DescriptorPool, DynamicMessage};
+    use tonic::codegen::http::uri::PathAndQuery;
+
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {"book": {"identity": {"member": "id"}}},
+        "operations": {"Shelf.ListBooks": {
+            "kind": "list",
+            "type": "book",
+            "filters": [{"param": "genre", "member": "genre", "kind": "eq"}]
+        }}
+    });
+    let generated = json!({"books": []});
+    let h = support::described(SHELF, world, vec![generated]);
+    let book =
+        |id: &str, genre: &str| json!({"id": id, "title": format!("book {id}"), "genre": genre});
+    h.hold(
+        "book",
+        &[
+            book("b1", "scifi"),
+            book("b2", "classic"),
+            book("b3", "scifi"),
+        ],
+    )
+    .await;
+    let server = GrpcServer::new();
+    server
+        .publish(vec![Arc::new(GrpcMock::new(Arc::clone(&h.rt)).unwrap())])
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = server.router();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let Some(mb_mcm::ProtocolPayload::Grpc {
+        file_descriptor_set,
+    }) = &h.rt.bundle().protocol_payload
+    else {
+        panic!("no descriptors")
+    };
+    let pool = DescriptorPool::decode(file_descriptor_set.as_slice()).unwrap();
+    let mut grpc = tonic::client::Grpc::new(channel);
+    let mut list = async |ask: Value| {
+        grpc.ready().await.unwrap();
+        let input = pool.get_message_by_name("shelf.ListBooksRequest").unwrap();
+        let output = pool.get_message_by_name("shelf.ListBooksResponse").unwrap();
+        let message = DynamicMessage::deserialize(input.clone(), ask).unwrap();
+        let answer = grpc
+            .unary(
+                tonic::Request::new(message),
+                PathAndQuery::from_static("/shelf.Shelf/ListBooks"),
+                DynamicCodec::new(input, output),
+            )
+            .await
+            .unwrap();
+        let source = answer
+            .metadata()
+            .get("x-mockingbird-source")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        (source, serde_json::to_value(answer.into_inner()).unwrap())
+    };
+    let (source, body) = list(json!({"genre": "scifi"})).await;
+    assert_eq!(source, "state", "{body}");
+    assert_eq!(ids(&body["books"]), [json!("b1"), json!("b3")]);
+    let (source, _) = list(json!({"order_by": "title"})).await;
+    assert_ne!(source, "state");
+    assert_eq!(
+        capture.of("Shelf.ListBooks"),
+        [None, Some("undescribed_param".to_owned())]
+    );
+    assert_eq!(
+        capture.causes("Shelf.ListBooks"),
+        [Some("orderBy".to_owned())]
     );
 }

@@ -1525,7 +1525,7 @@ paths:
       - {name: incident_update_id, in: path, required: true, schema: {type: string}}
     get:
       operationId: getIncidentUpdate
-      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/IncidentUpdate"}}}}}
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/IncidentUpdate"}}}}, "404": {description: missing}}
     patch:
       operationId: patchIncidentUpdate
       requestBody:
@@ -1539,6 +1539,11 @@ paths:
     delete:
       operationId: deleteIncidentUpdate
       responses: {"204": {description: deleted}}
+  /incident_updates/{incident_update_id}:
+    get:
+      operationId: getUpdate
+      parameters: [{name: incident_update_id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/IncidentUpdate"}}}}}
 components:
   schemas:
     IncidentUpdate:
@@ -1574,7 +1579,8 @@ async fn an_embedded_child_is_read_edited_and_removed_in_its_parent() {
         "operations": {
             "getIncidentUpdate": {"kind": "read", "type": "incident_updates"},
             "patchIncidentUpdate": {"kind": "update", "type": "incident_updates", "request": {"record": "/incident_update"}},
-            "deleteIncidentUpdate": {"kind": "delete", "type": "incident_updates"}
+            "deleteIncidentUpdate": {"kind": "delete", "type": "incident_updates"},
+            "getUpdate": {"kind": "read", "type": "incident_updates"}
         }
     });
     let h = support::described(INCIDENTS, world, Vec::new());
@@ -1617,6 +1623,11 @@ async fn an_embedded_child_is_read_edited_and_removed_in_its_parent() {
         held["incident_updates"],
         json!([update("u1", "investigating", "Looking at EU cards.")])
     );
+    // It is known deleted: a read of it is the declared 404, not the model's.
+    let (status, _, body) = h
+        .send("GET", "/incidents/i1/incident_updates/u2", None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     let kinds = |op: &str| -> Vec<(String, Option<String>)> {
         capture
             .of(op)
@@ -1628,4 +1639,44 @@ async fn an_embedded_child_is_read_edited_and_removed_in_its_parent() {
     assert_eq!(kinds("patchIncidentUpdate"), [("update".to_owned(), None)]);
     assert_eq!(kinds("deleteIncidentUpdate"), [("delete".to_owned(), None)]);
     assert!(h.provider.requests().is_empty());
+}
+
+/// With no path parameter naming the parent, the one held parent holding the id holds
+/// the record; when two hold it, which one is meant is a guess, and the call generates.
+#[tokio::test]
+async fn an_embedded_child_is_found_in_the_one_held_parent_holding_it() {
+    let (capture, _guard) = Capture::install();
+    let world = json!({
+        "types": {
+            "incidents": {"identity": {"member": "id"}},
+            "incident_updates": {
+                "identity": {"member": "id"},
+                "parent": {"type": "incidents", "member": "incident_id", "embedded": "incident_updates"}
+            }
+        },
+        "operations": {"getUpdate": {"kind": "read", "type": "incident_updates"}}
+    });
+    let generated = json!({"id": "u1", "status": "resolved", "body": "drawn"});
+    let h = support::described(INCIDENTS, world, vec![generated.clone()]);
+    let update = |id: &str, incident: &str| json!({"id": id, "incident_id": incident, "status": "investigating", "body": format!("{id} of {incident}")});
+    h.hold(
+        "incidents",
+        &[
+            json!({"id": "i1", "name": "one", "incident_updates": [update("u1", "i1")]}),
+            json!({"id": "i2", "name": "two", "incident_updates": [update("u1", "i2"), update("u3", "i2")]}),
+        ],
+    )
+    .await;
+    let (status, headers, body) = h.send("GET", "/incident_updates/u3", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(source(&headers), "state", "{body}");
+    assert_eq!(body, update("u3", "i2"));
+    let (_, headers, body) = h.send("GET", "/incident_updates/u1", None, &[]).await;
+    assert_ne!(source(&headers), "state", "{body}");
+    let reasons: Vec<Option<String>> = capture
+        .of("getUpdate")
+        .into_iter()
+        .map(|l| l.exec_fallback)
+        .collect();
+    assert_eq!(reasons, [None, Some("not_held".to_owned())]);
 }

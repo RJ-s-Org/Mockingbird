@@ -1479,6 +1479,14 @@ impl<'a> Ctx<'a> {
             if !self.check_filter_shape(f, &p) {
                 continue;
             }
+            if f.grammar == Some(FilterGrammar::DeepObject) && f.param.starts_with('/') {
+                self.refuse(
+                    &p.join("param"),
+                    RefusalCode::Invalid,
+                    "a `deep_object` filter reads bracketed query keys: its `param` is a query parameter, not a body pointer".to_string(),
+                );
+                continue;
+            }
             let param = match f.grammar {
                 // A deepObject root may be declared whole (`filter`) or as its
                 // bracketed keys (`filter[status]`).
@@ -1558,11 +1566,46 @@ impl<'a> Ctx<'a> {
             });
         }
 
+        // A parameter the list reads cannot also be one that asks nothing, nor can one
+        // named for an item member (which filters it by name).
+        let read: Vec<&String> = d
+            .filters
+            .iter()
+            .map(|f| &f.param)
+            .chain(
+                d.scope
+                    .iter()
+                    .flat_map(|s| std::iter::once(&s.param).chain(&s.recursive)),
+            )
+            .chain(
+                d.paging
+                    .iter()
+                    .flat_map(|p| p.request.iter().chain(&p.size)),
+            )
+            .collect();
         out.ignores = d
             .ignores
             .iter()
             .enumerate()
-            .filter(|(i, q)| self.check_param(op, q, &path.join("ignores").join(*i)))
+            .filter(|(i, q)| {
+                let p = path.join("ignores").join(*i);
+                let problem = if read.contains(q) {
+                    Some(format!("`{q}` is a parameter the list reads"))
+                } else if !q.starts_with('/')
+                    && record.is_some_and(|r| dotted_member(self.bundle, r, q).is_some())
+                {
+                    Some(format!("`{q}` names a member of the list's items"))
+                } else {
+                    None
+                };
+                match problem {
+                    Some(message) => {
+                        self.refuse(&p, RefusalCode::Invalid, message);
+                        false
+                    }
+                    None => self.check_param(op, q, &p),
+                }
+            })
             .map(|(_, q)| q.clone())
             .collect();
 
@@ -1772,9 +1815,8 @@ fn declares_path_param(b: &Bundle, op: &Operation, name: &str) -> bool {
     has_property(b, op.input.path.as_ref(), |k| k == name)
 }
 
-/// A path or query parameter, or a top-level request body member (RPC-style
-/// and non-HTTP operations take their parameters in the body).
-/// A declared path, query or top-level body parameter `name`, or, for a pointer
+/// A declared path, query or top-level body parameter `name` (RPC-style and
+/// non-HTTP operations take their parameters in the body), or, for a pointer
 /// (`/a/b`), a member of the request body.
 fn declares_param(b: &Bundle, op: &Operation, name: &str) -> bool {
     if name.starts_with('/') {
@@ -2574,7 +2616,8 @@ mod tests {
                 "ListFolders": {
                     "scope": {"param": "/path", "member": "parent", "kind": "prefix", "recursive": "/nope"},
                     "paging": {"style": "page", "request": "/page/number", "size": "/page/size"},
-                    "ignores": ["showDeleted", "/page", "/version"]
+                    "ignores": ["showDeleted", "/page", "/version", "/page/number", "displayName"],
+                    "filters": [{"param": "/path", "grammar": "deep_object"}]
                 },
                 "GetFolder": {"scope": {"param": "name", "member": "parent", "recursive": "name"}}
             }
@@ -2598,12 +2641,24 @@ mod tests {
                     RefusalCode::Unresolved
                 ),
                 (
+                    "/operations/ListFolders/filters/0/param".to_owned(),
+                    RefusalCode::Invalid
+                ),
+                (
                     "/operations/ListFolders/paging/size".to_owned(),
                     RefusalCode::Unresolved
                 ),
                 (
                     "/operations/ListFolders/ignores/2".to_owned(),
                     RefusalCode::Unresolved
+                ),
+                (
+                    "/operations/ListFolders/ignores/3".to_owned(),
+                    RefusalCode::Invalid
+                ),
+                (
+                    "/operations/ListFolders/ignores/4".to_owned(),
+                    RefusalCode::Invalid
                 ),
             ]
         );
